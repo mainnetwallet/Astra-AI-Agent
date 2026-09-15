@@ -22,6 +22,10 @@ from astra.core.orchestrator import Orchestrator
 from astra.ai.provider import (ClaudeProvider, OpenAICompatibleProvider,
                               OfflineProvider)
 from astra.ai.router import AgentRouter
+from astra.ai.registry import build_providers, ProviderRegistry
+from astra.ai.models import ModelRegistry
+from astra.ai.discovery import ModelDiscovery
+from astra.agents import SPECIALISTS, AgentManager
 from astra.memory.memory import MemorySystem, ExperienceStore
 from astra.tools.registry import ToolRegistry
 from astra.tools import builtins
@@ -85,29 +89,38 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     registry.register_plugin_tools(plugins)
 
     # AI providers + router
-    # Precedence for a working provider: Anthropic key → OpenAI-compatible
-    # (OpenAI/OpenRouter/Ollama/local via AI_BASE_URL + AI_API_KEY) → offline.
-    # AI_PROVIDER env can force a subset, e.g. "openai" (visibility only —
-    # the router still tries what is configured).
-    providers = []
-    _key = _first_environ("ANTHROPIC_API_KEY")
-    if _key:
-        providers.append(ClaudeProvider(config=config, api_key=_key, events=events))
-    if config.get("AI_BASE_URL") or _first_environ("AI_API_KEY"):
-        providers.append(OpenAICompatibleProvider(config=config, events=events))
-    providers.append(OfflineProvider(config))
-    router = AgentRouter(providers=providers, config=config)
+    # Provider adapters (Gemini/Groq/Mistral/…/Bedrock) are built by the
+    # ProviderRegistry from configured credential pools; the legacy Anthropic
+    # and OpenAI-compatible providers still join when configured. AgentRouter
+    # routes across all of them — it is the routing core, never a provider.
+    provider_registry = build_providers(config, events=events)
+    providers = provider_registry.all()
+    model_registry = ModelRegistry(config)
+    router = AgentRouter(providers=providers, config=config, store=store,
+                         preference=config.get("AI_ROUTING_PREFERENCE", "balanced"),
+                         registry=model_registry)
+    router.attach_events(events)
+    discovery = ModelDiscovery(model_registry,
+                               adapter_by_name={p.name: p for p in providers
+                                                if getattr(p, "name", "") != "offline"})
+    env_models = getattr(config, "get", lambda _k, d="": d)("ASTRA_STARTUP_DISCOVERY", "")
+    if env_models == "1":
+        discovery.refresh(force=False)   # best-effort, never blocks boot
 
     planner = Planner(router=router,
                       tools=[t["name"] for t in registry.list()],
                       config=config)
     executor = Executor(registry, tasks=tasks, events=events,
                         experiences=experiences)
+    # specialist agents (Agent manager): deterministic selection steers
+    # routing hints and plan decoration; the Orchestrator persists the pick.
+    agent_manager = AgentManager()
+    agent_manager.register_many(SPECIALISTS)
     orchestrator = Orchestrator(
         store, config=config, tasks=tasks, registry=registry,
         planner=planner, executor=executor, router=router, memory=memory,
         experiences=experiences, events=events, policy=policy,
-        plugins=plugins)
+        plugins=plugins, agents=agent_manager)
     # crash recovery: executions stranded mid-flight by a previous shutdown
     # are marked FAILED so they no longer read as "running".
     orchestrator.recover_stale()
@@ -131,6 +144,8 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
         "router": router, "planner": planner, "executor": executor,
         "orchestrator": orchestrator, "workflows": workflows,
         "scheduler": scheduler, "agent": agent,
+        "model_registry": model_registry, "provider_registry": provider_registry,
+        "discovery": discovery, "agent_manager": agent_manager,
     }
 
 

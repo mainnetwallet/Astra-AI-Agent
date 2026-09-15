@@ -30,9 +30,24 @@ CREATE TABLE IF NOT EXISTS astra_executions (
     plan        TEXT DEFAULT '[]',
     results     TEXT DEFAULT '{}',
     pending_step TEXT DEFAULT '',   -- JSON step dict when WAITING_USER
+    selected_agent TEXT DEFAULT '',
+    selected_provider TEXT DEFAULT '',
+    selected_model TEXT DEFAULT '',
     error       TEXT DEFAULT '',
     created_at  TEXT DEFAULT '',
     started_at  TEXT DEFAULT '',
+    completed_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS execution_steps (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT NOT NULL,
+    step_id      TEXT DEFAULT '',
+    tool         TEXT DEFAULT '',
+    description  TEXT DEFAULT '',
+    status       TEXT DEFAULT 'pending',
+    result       TEXT DEFAULT '{}',
+    error        TEXT DEFAULT '',
+    started_at   TEXT DEFAULT '',
     completed_at TEXT DEFAULT ''
 );
 """
@@ -48,7 +63,8 @@ def _now() -> str:
 class Orchestrator:
     def __init__(self, store, config=None, tasks=None, registry=None,
                  planner=None, executor=None, router=None, memory=None,
-                 experiences=None, events=None, policy=None, plugins=None):
+                 experiences=None, events=None, policy=None, plugins=None,
+                 agents=None):
         self.store = store
         self.config = config
         self.tasks = tasks
@@ -60,10 +76,19 @@ class Orchestrator:
         self.experiences = experiences
         self.events = events
         self.policy = policy
+        self.agents = agents                 # AgentManager (specialist selection)
         self._plugins = list(plugins or [])
         self._pending: dict[str, dict] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._tool_times: dict[str, list] = {}   # execution_id -> [started_at]
         self._install_schema()
+
+    _EXEC_COLUMN_HEALS = (
+        ("pending_step", "TEXT DEFAULT ''"),
+        ("selected_agent", "TEXT DEFAULT ''"),
+        ("selected_provider", "TEXT DEFAULT ''"),
+        ("selected_model", "TEXT DEFAULT ''"),
+    )
 
     def _install_schema(self) -> None:
         """Self-installing table + column self-heal for older databases."""
@@ -71,9 +96,14 @@ class Orchestrator:
             self.store.install(EXEC_SCHEMA)
             return
         cols = {r["name"] for r in self.store.fetch("PRAGMA table_info(astra_executions)")}
-        if "pending_step" not in cols:
-            self.store.exec("ALTER TABLE astra_executions "
-                            "ADD COLUMN pending_step TEXT DEFAULT ''")
+        for name, ddl in self._EXEC_COLUMN_HEALS:
+            if name not in cols:
+                try:
+                    self.store.exec(f"ALTER TABLE astra_executions ADD COLUMN {name} {ddl}")
+                except Exception:
+                    pass
+        if not self.store.table_exists("execution_steps"):
+            self.store.install(EXEC_SCHEMA)
 
     # -- lifecycle -----------------------------------------------------------
     def submit(self, goal: str, sync: bool = False) -> dict:
@@ -112,6 +142,15 @@ class Orchestrator:
         run_ctx = ExecutionContext(execution_id, goal)
         results = json.loads(row.get("results") or "{}")   # keep succeeded steps
 
+        # specialist selection + routing hints (Agent manager)
+        task_type = "simple_chat"
+        selected_agent = ""
+        if self.agents:
+            from astra.ai.router import classify
+            task_type = classify(goal)
+            agent = self.agents.select(goal, task_type)
+            selected_agent = agent.name
+
         if replan:
             # dynamic replanning: feed the failure back and drop the dead step
             if self.events:
@@ -126,10 +165,18 @@ class Orchestrator:
         else:
             if self.events:
                 self.events.emit("agent.planning", agent="orchestrator",
-                                 execution=execution_id, goal=goal)
+                                 execution=execution_id, goal=goal,
+                                 specialist=selected_agent or None,
+                                 task_type=task_type)
             plan = self.planner.plan(goal)
+            if self.agents:
+                plan = self.agents.decorate(goal, plan, task_type)
         self._set(row, "PLANNING", started=not row.get("started_at"),
                   pending_step="")
+        if selected_agent and (row.get("selected_agent") or "") != selected_agent:
+            self.store.exec(
+                "UPDATE astra_executions SET selected_agent = ? WHERE id = ?",
+                (selected_agent, row["id"]))
         self._store_plan(execution_id, plan)
         run_ctx.steps = plan
 
@@ -156,6 +203,10 @@ class Orchestrator:
                     max_retries=max(0, int(step.get("retries", 0))),
                     metadata={"execution_id": execution_id, "step_id": step["id"]})
             self._set(row, "EXECUTING")
+            self._record_step(execution_id, step, "running")
+            sep = self._tool_times.get(execution_id)
+            if sep:
+                sep[0] = _now()
             if self.events:
                 self.events.emit("task.started", agent="orchestrator",
                                  execution=execution_id, tool=step["tool"],
@@ -164,6 +215,16 @@ class Orchestrator:
             out = self.executor.execute(step, self._tool_ctx(), run_ctx)
             results[step["id"]] = out
             run_ctx.results[step["id"]] = out
+            self._record_step(execution_id, step,
+                              "ok" if out.get("ok") else
+                              ("wait" if out.get("decision") == "ask" else "failed"),
+                              result=out)
+            if self.router and out.get("response") and not row.get("selected_provider"):
+                self.store.exec(
+                    "UPDATE astra_executions SET selected_provider = ?, "
+                    "selected_model = ? WHERE execution_id = ?",
+                    (self.router.last_route()["provider"],
+                     self.router.last_route()["model"], execution_id))
             if out.get("decision") == "ask":
                 self._pending[execution_id] = step
                 self._set(row, STATES_WAIT, pending_step=json.dumps(step))
@@ -256,16 +317,23 @@ class Orchestrator:
         if not row:
             return {"execution_id": execution_id, "status": "unknown",
                     "goal": "", "plan": [], "results": {}, "steps": 0,
-                    "pending": False}
+                    "pending": False, "steps_detail": []}
+        steps_detail = self.store.fetch(
+            "SELECT * FROM execution_steps WHERE execution_id = ? "
+            "ORDER BY id", (execution_id,))
         return {"execution_id": execution_id, "goal": row["goal"],
                 "status": row["status"], "error": row.get("error", ""),
                 "plan": json.loads(row.get("plan") or "[]"),
                 "results": json.loads(row.get("results") or "{}"),
+                "selected_agent": row.get("selected_agent", ""),
+                "selected_provider": row.get("selected_provider", ""),
+                "selected_model": row.get("selected_model", ""),
                 "steps": len(json.loads(row.get("plan") or "[]")),
                 "pending": execution_id in self._pending,
                 "pending_step": (json.loads(row.get("pending_step")) if row.get("pending_step") else None),
                 "created_at": row.get("created_at", ""),
-                "completed_at": row.get("completed_at", "")}
+                "completed_at": row.get("completed_at", ""),
+                "steps_detail": steps_detail,}
 
     def recent(self, limit: int = 20) -> list[dict]:
         rows = self.store.fetch(
@@ -313,6 +381,40 @@ class Orchestrator:
         self.store.exec(
             "UPDATE astra_executions SET results = ?, error = ? WHERE execution_id = ?",
             (json.dumps(results, ensure_ascii=False), error[:500], execution_id))
+
+    def _record_step(self, execution_id: str, step: dict, status: str,
+                     result: dict | None = None) -> None:
+        """Persist one row into execution_steps (per-step execution trail)."""
+        try:
+            started = _now() if status == "running" else ""
+            if result is None:
+                # running marker: no result yet
+                self.store.insert(
+                    "execution_steps", execution_id=execution_id,
+                    step_id=step.get("id", ""), tool=step.get("tool", ""),
+                    description=step.get("description", ""), status=status,
+                    result="{}", error="", started_at=started, completed_at="")
+                self._tool_times[execution_id] = [started]
+                return
+            status_s = "completed" if status == "ok" else status
+            error = result.get("error") or ""
+            completed = _now()
+            started = (self._tool_times.get(execution_id) or [""])[0]
+            out = {}
+            if result.get("output") is not None:
+                out["output"] = result.get("output")
+            if result.get("summary"):
+                out["summary"] = result["summary"]
+            if result.get("decision") == "ask":
+                out["pending"] = True
+            self.store.insert(
+                "execution_steps", execution_id=execution_id,
+                step_id=step.get("id", ""), tool=step.get("tool", ""),
+                description=step.get("description", ""), status=status_s,
+                result=json.dumps(out, ensure_ascii=False)[:4000], error=error,
+                started_at=started, completed_at=completed)
+        except Exception:
+            pass   # step trail is advisory; never break the run on it
 
     def _find_root_task(self, execution_id: str) -> dict | None:
         """Reuse the plan task for this execution instead of duplicating it on

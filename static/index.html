@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Astra AI Agent</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">🚀 Astra<span class="accent"> AI Agent</span></div>
+  <nav class="tabs" id="nav"><!-- manifest-driven tabs injected by astra.js --></nav>
+  <div class="status" id="netstatus" title="local server">●</div>
+</header>
+
+<main id="view" class="view">
+
+  <!-- ======== DASHBOARD (core) — plugin blocks injected into #dash-blocks ======== -->
+  <section id="tab-dashboard" class="tabview active">
+    <div id="dash-blocks" class="dash-blocks"></div>
+  </section>
+
+  <!-- plugin tabviews are created dynamically by astra.js -->
+
+  <!-- ======== ASSISTANT (core) ======== -->
+  <section id="tab-assistant" class="tabview">
+    <div class="panel chat-panel">
+      <div id="chat-log" class="chat-log"></div>
+      <div class="chips" id="chips"></div>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" placeholder="Ami ja korte chai..." autocomplete="off">
+        <button type="submit" class="btn primary">➤</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ======== BACKUP (core) ======== -->
+  <section id="tab-backup" class="tabview">
+    <div class="panel">
+      <h3>💾 Backup &amp; restore</h3>
+      <p class="muted">Shob data (sob plugin er shathe export hoy) ek JSON file e
+        export korte parben, ba age-er backup import korben.</p>
+      <div class="row">
+        <button class="btn primary" id="btn-export">⬇️ Export JSON</button>
+        <button class="btn" id="btn-import">⬆️ Import JSON</button>
+        <input type="file" id="import-file" accept="application/json" hidden>
+      </div>
+      <div id="backup-info" class="hint"></div>
+    </div>
+  </section>
+
+</main>
+
+<script src="/static/js/astra.js"></script>
+</body>
+</html>

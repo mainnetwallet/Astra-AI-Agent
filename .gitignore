@@ -1,0 +1,11 @@
+data/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.db
+*.db-shm
+*.db-wal
+/tmp/
+/tmp
+.DS_Store

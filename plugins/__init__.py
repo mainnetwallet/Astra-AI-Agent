@@ -1,0 +1,1 @@
+"""Plugin package for Astra. Each file = one domain feature."""

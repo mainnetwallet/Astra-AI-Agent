@@ -81,8 +81,10 @@ class Agent:
                 lines.append(f"⚠️ {desc}: {out.get('error') or 'failed'}")
         if report.get("pending"):
             body = "\n".join(lines) or "Approval lagbe."
-            return {"reply": ("Ekta permission-gated step approve korte hobe. "
-                              "Live tab e 'Approve' press korun.\n" + body),
+            step = report.get("pending_step") or {}
+            tool = (step.get("description") or step.get("tool") or "")
+            return {"reply": (f"Approve lagbe: **{tool}** — Live tab e 'Approve' "
+                              f"ba 'Reject' press korun.\n" + body),
                     "action": "live", "data": report, "ok": False}
         if real:
             status = "COMPLETED" if report.get("status") == "COMPLETED" else \

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS astra_executions (
     status      TEXT NOT NULL,      -- final state
     plan        TEXT DEFAULT '[]',
     results     TEXT DEFAULT '{}',
+    pending_step TEXT DEFAULT '',   -- JSON step dict when WAITING_USER
     error       TEXT DEFAULT '',
     created_at  TEXT DEFAULT '',
     started_at  TEXT DEFAULT '',
@@ -62,8 +63,17 @@ class Orchestrator:
         self._plugins = list(plugins or [])
         self._pending: dict[str, dict] = {}
         self._threads: dict[str, threading.Thread] = {}
-        if not store.table_exists("astra_executions"):
-            store.install(EXEC_SCHEMA)
+        self._install_schema()
+
+    def _install_schema(self) -> None:
+        """Self-installing table + column self-heal for older databases."""
+        if not self.store.table_exists("astra_executions"):
+            self.store.install(EXEC_SCHEMA)
+            return
+        cols = {r["name"] for r in self.store.fetch("PRAGMA table_info(astra_executions)")}
+        if "pending_step" not in cols:
+            self.store.exec("ALTER TABLE astra_executions "
+                            "ADD COLUMN pending_step TEXT DEFAULT ''")
 
     # -- lifecycle -----------------------------------------------------------
     def submit(self, goal: str, sync: bool = False) -> dict:
@@ -71,7 +81,8 @@ class Orchestrator:
         eid = "exec-" + uuid.uuid4().hex[:8]
         self.store.insert("astra_executions", execution_id=eid, goal=goal,
                           status="IDLE", plan="[]", results="{}",
-                          error="", created_at=_now(), started_at="", completed_at="")
+                          pending_step="", error="",
+                          created_at=_now(), started_at="", completed_at="")
         if self.events:
             self.events.emit("agent.started", agent="orchestrator",
                              execution=eid, goal=goal)
@@ -82,34 +93,63 @@ class Orchestrator:
         t.start()
         return {"execution_id": eid, "status": "started", "async": True}
 
-    def run(self, execution_id: str) -> dict:
-        """The execution loop. Safe to call directly (tests)."""
+    MAX_REPLANS = 1      # dynamic replanning attempts per execution
+
+    def run(self, execution_id: str, replan: int = 0,
+            replan_for: str = "") -> dict:
+        """The execution loop. Safe to call directly (tests).
+
+        Idempotent by design: results already persisted are skipped, so
+        resume()/replan() continue rather than redo finished steps. When a
+        step fails and an alternative plan is possible, the loop replans the
+        remaining goal (bounded by MAX_REPLANS) instead of giving up.
+        """
         row = self._row(execution_id)
         if not row:
             return {"execution_id": execution_id, "status": "FAILED",
                     "error": "unknown execution"}
         goal = row["goal"]
         run_ctx = ExecutionContext(execution_id, goal)
-        self._set(row, "PLANNING", started=True)
-        if self.events:
-            self.events.emit("agent.planning", agent="orchestrator",
-                             execution=execution_id, goal=goal)
-        plan = self.planner.plan(goal)
+        results = json.loads(row.get("results") or "{}")   # keep succeeded steps
+
+        if replan:
+            # dynamic replanning: feed the failure back and drop the dead step
+            if self.events:
+                self.events.emit("agent.planning", agent="orchestrator",
+                                 execution=execution_id, goal=goal,
+                                 replan=True, error=replan_for)
+            plan = self.planner.plan(goal, ctx={"replan_for": replan_for})
+            plan = [s for s in plan
+                    if not (s["id"] in results and results[s["id"]].get("ok"))]
+            if not plan:
+                plan = [self.planner._answer(goal)]
+        else:
+            if self.events:
+                self.events.emit("agent.planning", agent="orchestrator",
+                                 execution=execution_id, goal=goal)
+            plan = self.planner.plan(goal)
+        self._set(row, "PLANNING", started=not row.get("started_at"),
+                  pending_step="")
         self._store_plan(execution_id, plan)
         run_ctx.steps = plan
 
-        root_task = None
-        if self.tasks:
+        root_task = self._find_root_task(execution_id)
+        if self.tasks and not root_task:
             root_task = self.tasks.create(
                 goal=goal, type="plan", max_retries=0,
                 metadata={"execution_id": execution_id})
 
-        results, report_error = {}, ""
+        report_error = ""
         for step in plan:
             if execution_id in self._pending:
                 break
-            step_task = None
-            if self.tasks and root_task:
+            # idempotency: never redo a step that already succeeded
+            prev = results.get(step["id"])
+            if prev and prev.get("ok"):
+                run_ctx.results[step["id"]] = prev
+                continue
+            step_task = self._find_step_task(execution_id, step["id"])
+            if self.tasks and not step_task and root_task:
                 step_task = self.tasks.create(
                     goal=f"{step['tool']}: {step['description']}",
                     parent_task_id=root_task["id"], type="step",
@@ -126,18 +166,23 @@ class Orchestrator:
             run_ctx.results[step["id"]] = out
             if out.get("decision") == "ask":
                 self._pending[execution_id] = step
-                self._set(row, STATES_WAIT)
+                self._set(row, STATES_WAIT, pending_step=json.dumps(step))
                 report_error = f"step {step['id']} needs confirmation: {out.get('error', '')}"
                 break
             if not out.get("ok"):
                 report_error = f"step {step['id']} failed: {out.get('error', 'no result')}"
                 if step_task:
                     self.tasks.mark(step_task["id"], "failed")
+                # dynamic replanning: recover from the dead end (bounded)
+                if replan < self.MAX_REPLANS:
+                    return self.run(execution_id, replan + 1,
+                                    replan_for=report_error)
             elif step_task:
                 self.tasks.mark(step_task["id"], "done", result=out.get("output") or {})
         final = (STATES_WAIT if execution_id in self._pending else
                  ("FAILED" if report_error else "COMPLETED"))
-        self._set(row, final, completed=final in STATES_COMPLETE, error=report_error)
+        self._set(row, final, completed=final in STATES_COMPLETE,
+                  error=report_error, pending_step="")
         self._store_results(execution_id, results, report_error)
         if self.events:
             self.events.emit(
@@ -153,18 +198,43 @@ class Orchestrator:
 
     def resume(self, execution_id: str, allow: bool = True) -> dict:
         """Approve (or deny) a pending confirmation; continue the run."""
-        step = self._pending.pop(execution_id, None)
         row = self._row(execution_id)
-        if not step or not row:
+        if not row or row["status"] != STATES_WAIT:
             return {"execution_id": execution_id, "status": "not waiting"}
-        if not allow or row["status"] != STATES_WAIT:
-            self._set(row, "CANCELLED", completed=True)
+        # recover the step from memory, else from the persisted pending_step
+        step = self._pending.pop(execution_id, None) or \
+            json.loads(row.get("pending_step") or "{}")
+        if not step:
+            return {"execution_id": execution_id, "status": "not waiting"}
+        if not allow:
+            self._set(row, "CANCELLED", completed=True, pending_step="")
             return {"execution_id": execution_id, "status": "CANCELLED"}
         if self.registry:
-            self.registry.confirm(step["tool"], True)
-        # re-run from the stored plan; already-done steps are no-ops because
-        # the executor runs the same plan again (confirmation now granted)
+            self.registry.confirm(step.get("tool", ""), True)
+        # continue: run() skips already-succeeded steps (idempotent)
         return self.run(execution_id)
+
+    def recover_stale(self) -> list[str]:
+        """Crash recovery: executions stranded mid-flight by a restart are
+        terminal-failed so they no longer appear 'running'. Returns ids."""
+        stale = self.store.fetch(
+            "SELECT execution_id, status FROM astra_executions "
+            "WHERE status IN ('IDLE', 'PLANNING', 'EXECUTING', 'WAITING_USER')")
+        ids = []
+        for r in stale:
+            ids.append(r["execution_id"])
+            self.store.exec(
+                "UPDATE astra_executions SET status = 'FAILED', "
+                "error = 'interrupted by restart (recovery)', "
+                "completed_at = ? WHERE execution_id = ?",
+                (_now(), r["execution_id"]))
+            if self.events:
+                self.events.emit("agent.failed", agent="orchestrator",
+                                 execution=r["execution_id"], status="FAILED",
+                                 error="interrupted by restart (recovery)")
+        self._pending = {k: v for k, v in self._pending.items()
+                         if k not in ids}
+        return ids
 
     def cancel(self, execution_id: str) -> dict:
         row = self._row(execution_id)
@@ -193,6 +263,7 @@ class Orchestrator:
                 "results": json.loads(row.get("results") or "{}"),
                 "steps": len(json.loads(row.get("plan") or "[]")),
                 "pending": execution_id in self._pending,
+                "pending_step": (json.loads(row.get("pending_step")) if row.get("pending_step") else None),
                 "created_at": row.get("created_at", ""),
                 "completed_at": row.get("completed_at", "")}
 
@@ -217,7 +288,8 @@ class Orchestrator:
             (execution_id,))
 
     def _set(self, row, status: str, started: bool = False,
-             completed: bool = False, error: str = "") -> None:
+             completed: bool = False, error: str = "",
+             pending_step: str | None = None) -> None:
         now = _now()
         sets, args = ["status = ?"], [status]
         if started:
@@ -226,6 +298,8 @@ class Orchestrator:
             sets.append("completed_at = ?"); args.append(now)
         if error:
             sets.append("error = ?"); args.append(error[:500])
+        if pending_step is not None:
+            sets.append("pending_step = ?"); args.append(pending_step)
         args.append(row["id"])
         self.store.exec(f"UPDATE astra_executions SET {', '.join(sets)} WHERE id = ?",
                         tuple(args))
@@ -239,6 +313,35 @@ class Orchestrator:
         self.store.exec(
             "UPDATE astra_executions SET results = ?, error = ? WHERE execution_id = ?",
             (json.dumps(results, ensure_ascii=False), error[:500], execution_id))
+
+    def _find_root_task(self, execution_id: str) -> dict | None:
+        """Reuse the plan task for this execution instead of duplicating it on
+        resume()/replan(). TaskEngine.list() can't filter on metadata JSON, so
+        scan the small working set in Python."""
+        if not self.tasks:
+            return None
+        for t in self.tasks.list(type="plan", limit=200):
+            meta = t.get("metadata") or "{}"
+            try:
+                m = json.loads(meta) if isinstance(meta, str) else meta
+            except Exception:
+                continue
+            if m.get("execution_id") == execution_id:
+                return t
+        return None
+
+    def _find_step_task(self, execution_id: str, step_id: str) -> dict | None:
+        if not self.tasks:
+            return None
+        for t in self.tasks.list(type="step", limit=200):
+            meta = t.get("metadata") or "{}"
+            try:
+                m = json.loads(meta) if isinstance(meta, str) else meta
+            except Exception:
+                continue
+            if m.get("execution_id") == execution_id and m.get("step_id") == step_id:
+                return t
+        return None
 
     def _tool_ctx(self):
         from astra.core.context import ToolContext

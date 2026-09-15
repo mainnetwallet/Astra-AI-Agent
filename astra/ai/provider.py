@@ -46,34 +46,73 @@ def _flatten(messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _read_sse(resp) -> list[dict]:
+    """Parse Server-Sent Events from an HTTP response into JSON dicts.
+
+    Handles both Anthropic format (event: .../data: ...) and OpenAI format
+    (data: {...} / data: [DONE]). Lines without 'data:' prefix are ignored.
+    Empty data lines and [DONE] sentinel terminate the stream gracefully.
+    """
+    import io
+    results = []
+    buf = ""
+    raw = resp.read()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            buf = ""
+            continue
+        if line.startswith("data:"):
+            payload = line[len("data:"):].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                results.append(json.loads(payload))
+            except json.JSONDecodeError:
+                pass
+    return results
+
+
 class ClaudeProvider(AIProvider):
     name = "anthropic"
     base_url = "https://api.anthropic.com/v1/messages"
 
-    def __init__(self, config=None, api_key: str | None = None, model: str | None = None):
+    def __init__(self, config=None, api_key: str | None = None,
+                 model: str | None = None, events=None, base_url: str | None = None):
         super().__init__(config)
         self.api_key = api_key or (config.get("ANTHROPIC_API_KEY") if config else None)
         self.models = [model or (config.get("ANTHROPIC_MODEL") if config else None)
                        or "claude-haiku-4-5-20251001"]
+        self.base_url = base_url or self.base_url  # allow proxies / tests / gateway
         self.capabilities = ["chat", "stream"]
+        self.events = events
 
-    def chat(self, messages: list[dict], model: str | None = None,
-             max_tokens: int = 500) -> str:
-        if not self.api_key:
-            raise ProviderError("ANTHROPIC_API_KEY not set")
+    def _build_body(self, messages, model, max_tokens) -> dict:
         system = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
         user = _flatten([m for m in messages if m.get("role") != "system"])
-        body = json.dumps({
+        return {
             "model": model or self.models[0],
             "max_tokens": max_tokens,
             "system": system or "You are Astra AI Agent, keep answers short, "
                                "use Banglish when the user writes Banglish.",
             "messages": [{"role": "user", "content": user[:12000]}],
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            self.base_url, data=body, headers={
-                "x-api-key": self.api_key, "anthropic-version": "2023-06-01",
-                "content-type": "application/json"})
+        }
+
+    def _request_headers(self) -> dict:
+        return {
+            "x-api-key": self.api_key, "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+
+    def chat(self, messages: list[dict], model: str | None = None,
+             max_tokens: int = 500) -> str:
+        if not self.api_key:
+            raise ProviderError("ANTHROPIC_API_KEY not set")
+        body = json.dumps(self._build_body(messages, model, max_tokens)).encode()
+        req = urllib.request.Request(self.base_url, data=body,
+                                    headers=self._request_headers())
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -82,8 +121,125 @@ class ClaudeProvider(AIProvider):
         blocks = data.get("content", [])
         return "".join(b.get("text", "") for b in blocks).strip() or "(no reply)"
 
+    def stream(self, messages: list[dict], model: str | None = None,
+               max_tokens: int = 500):
+        """Real Anthropic streaming via SSE — yields token-sized text chunks."""
+        if not self.api_key:
+            raise ProviderError("ANTHROPIC_API_KEY not set")
+        if self.events:
+            self.events.emit("ai.started", agent="provider",
+                             provider=self.name, model=model or self.models[0])
+        body = json.dumps({**self._build_body(messages, model, max_tokens),
+                           "stream": True}).encode()
+        req = urllib.request.Request(self.base_url, data=body,
+                                    headers=self._request_headers())
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                full = ""
+                for chunk in _read_sse(resp):
+                    text = chunk.get("delta", {}).get("text", "")
+                    if text:
+                        full += text
+                        yield text
+            if self.events:
+                self.events.emit("ai.completed", agent="provider",
+                                 provider=self.name, length=len(full))
+        except Exception as e:
+            if self.events:
+                self.events.emit("ai.failed", agent="provider",
+                                 provider=self.name, error=str(e))
+            raise ProviderError(f"anthropic unavailable: {type(e).__name__}") from e
+
     def health_check(self) -> bool:
         return bool(self.api_key)
+
+
+class OpenAICompatibleProvider(AIProvider):
+    """Works with OpenAI, OpenRouter, Ollama, LM Studio, DeepSeek, or any
+    OpenAI-compatible endpoint. Uses AI_BASE_URL / AI_MODEL / AI_API_KEY.
+
+    Zero external dependencies — pure stdlib urllib with SSE parsing.
+    """
+    name = "openai"
+    base_url = "https://api.openai.com/v1"
+
+    def __init__(self, config=None, events=None):
+        super().__init__(config)
+        self.base_url = (config.get("AI_BASE_URL") if config else None) or self.base_url
+        self.api_key = (config.get("AI_API_KEY") if config else None) or ""
+        self.models = [(config.get("AI_MODEL") if config else None) or "gpt-4o-mini"]
+        self.name = (config.get("AI_PROVIDER_LABEL") if config else None) or "openai"
+        self.capabilities = ["chat", "stream"]
+        self.events = events
+
+    def _headers(self) -> dict:
+        h = {"content-type": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def chat(self, messages: list[dict], model: str | None = None,
+             max_tokens: int = 500) -> str:
+        body = json.dumps({
+            "model": model or self.models[0],
+            "max_tokens": max_tokens,
+            "messages": messages,
+        }).encode()
+        req = urllib.request.Request(f"{self.base_url}/chat/completions",
+                                    data=body, headers=self._headers())
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            raise ProviderError(f"{self.name} unavailable: {type(e).__name__}") from e
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "") or "(no reply)"
+
+    def stream(self, messages: list[dict], model: str | None = None,
+               max_tokens: int = 500):
+        """Real streaming via OpenAI-compatible SSE."""
+        if self.events:
+            self.events.emit("ai.started", agent="provider",
+                             provider=self.name, model=model or self.models[0])
+        body = json.dumps({
+            "model": model or self.models[0],
+            "max_tokens": max_tokens,
+            "messages": messages,
+            "stream": True,
+        }).encode()
+        req = urllib.request.Request(f"{self.base_url}/chat/completions",
+                                    data=body, headers=self._headers())
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                full = ""
+                for chunk in _read_sse(resp):
+                    choices = chunk.get("choices", [])
+                    delta = choices[0].get("delta", {}) if choices else {}
+                    text = delta.get("content", "")
+                    if text:
+                        full += text
+                        yield text
+            if self.events:
+                self.events.emit("ai.completed", agent="provider",
+                                 provider=self.name, length=len(full))
+        except Exception as e:
+            if self.events:
+                self.events.emit("ai.failed", agent="provider",
+                                 provider=self.name, error=str(e))
+            raise ProviderError(f"{self.name} unavailable: {type(e).__name__}") from e
+
+    def health_check(self) -> bool:
+        return bool(self.api_key)
+
+    def list_models(self) -> list[str]:
+        """Best-effort model list (GET /models); graceful fallback."""
+        req = urllib.request.Request(f"{self.base_url}/models",
+                                    headers=self._headers())
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+        except Exception:
+            return list(self.models)
 
 
 class OfflineProvider(AIProvider):

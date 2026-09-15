@@ -225,13 +225,26 @@ class AstraHandler(BaseHTTPRequestHandler):
                 content = (body.get("content") or "").strip()
                 if not content:
                     return _json_err(self, "content required")
-                m = server.memory().save(content, body.get("category", "note"),
-                                         body.get("tags", ""), source="api")
+                try:
+                    _imp = float(body.get("importance", 0.5))
+                except (TypeError, ValueError):
+                    _imp = 0.5
+                m = server.memory().save(
+                    content, body.get("category", "note"),
+                    body.get("tags", ""), source="api",
+                    layer=body.get("layer", "long"), importance=_imp)
                 return _json_ok(self, {"ok": True, "data": m}, 201)
             if path == ["api", "memory", "search"] and method == "GET":
                 qq = q.get("query", "")
+                try:
+                    _min_imp = float(q.get("min_importance")) if q.get("min_importance") else None
+                except (TypeError, ValueError):
+                    _min_imp = None
                 return _json_ok(self, {"ok": True,
-                                       "data": server.memory().search(qq, k=int(q.get("k", 5)))})
+                                       "data": server.memory().search(
+                                           qq, k=int(q.get("k", 5)),
+                                           layer=q.get("layer") or None,
+                                           min_importance=_min_imp)})
             if len(path) == 3 and path[0] == "api" and path[1] == "memory" and method == "DELETE":
                 server.memory().forget(path[2])
                 return _json_ok(self, {"ok": True})

@@ -20,14 +20,34 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
-EVENT_KINDS = ("agent.started", "agent.completed", "agent.failed",
-               "task.created", "task.started", "task.completed", "task.failed",
-               "tool.started", "tool.completed", "tool.failed",
-               "browser.opened", "transaction.prepared", "transaction.submitted",
-               "transaction.confirmed",
-               "plugin.loaded", "plugin.failed", "plugin.disabled",
-               "memory.saved", "workflow.started", "workflow.completed",
-               "provider.selected", "provider.failed", "scheduler.tick")
+# Kinds actually emitted by the current codebase, plus the EventBus contract
+# kinds for upcoming modules (browser, web3, plugin manager, AI providers).
+EVENT_KINDS = (
+    # agent execution loop
+    "agent.started", "agent.thinking", "agent.planning",
+    "agent.completed", "agent.failed",
+    "agent.step.started", "agent.step.completed", "agent.step.failed",
+    # generic task engine (status map mirrors TaskEngine.mark(); task.started
+    # is also emitted by the orchestrator and the workflow engine)
+    "task.created", "task.started", "task.pending", "task.ready", "task.running",
+    "task.done", "task.completed", "task.failed", "task.cancelled", "task.skipped",
+    # tool registry
+    "tool.started", "tool.completed", "tool.failed",
+    # AI providers
+    "ai.started", "ai.token", "ai.completed", "ai.failed",
+    # memory + experiences + workflows + scheduler
+    "memory.saved", "memory.recalled", "experience.learned",
+    "workflow.started", "workflow.completed", "workflow.failed",
+    "scheduler.tick",
+    # browser agent
+    "browser.opened", "browser.navigation", "browser.action", "browser.error",
+    # web3
+    "web3.transaction.prepared", "web3.transaction.submitted",
+    "web3.transaction.confirmed", "web3.transaction.failed",
+    # plugins / providers (contract for future modules)
+    "plugin.loaded", "plugin.failed", "plugin.disabled",
+    "provider.selected", "provider.failed",
+)
 
 
 def _now() -> str:
@@ -48,6 +68,10 @@ class EventBus:
 
     def emit(self, kind: str, agent: str = "", **data) -> dict:
         """Persist + broadcast one event. Returns the stored record."""
+        if kind not in EVENT_KINDS:
+            # allow unknown kinds but log a warning — don't silently drop
+            import warnings
+            warnings.warn(f"unknown event kind: {kind!r}", UserWarning, stacklevel=2)
         from json import dumps
         with self._lock:
             rid = self.store.insert(

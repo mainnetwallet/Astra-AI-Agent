@@ -43,9 +43,13 @@ class Store:
     def exec(self, sql: str, args: tuple = ()) -> int:
         """Run a write/DDL statement. Returns lastrowid (or 0)."""
         with self._lock:
-            cur = self._conn.execute(sql, args)
-            self._conn.commit()
-            return cur.lastrowid or 0
+            try:
+                cur = self._conn.execute(sql, args)
+                self._conn.commit()
+                return cur.lastrowid or 0
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def fetch(self, sql: str, args: tuple = ()) -> list[dict]:
         """Run a query returning zero or more rows."""
@@ -84,6 +88,25 @@ class Store:
         from .core.store_migrations import migrate
         return migrate(self, target_version)
 
+    # -- context manager ------------------------------------------------------
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     # -- lifecycle -----------------------------------------------------------
     def close(self) -> None:
-        self._conn.close()
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def __del__(self) -> None:
+        """Safety net: close the connection if the owner forgot to. Debug loop
+        safety only — the app and tests close explicitly where practical."""
+        try:
+            self._conn.close()
+        except Exception:
+            pass

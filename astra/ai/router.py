@@ -27,6 +27,11 @@ class AgentRouter:
         self._cost_est: dict[str, float] = {}   # rough token cost estimate usd
         self._down: set[str] = set()
         self._last: dict = {}
+        # providers passed at construction also need stats slots (add() only
+        # initialises providers added later)
+        for p in self.providers:
+            self._latency.setdefault(p.name, [])
+            self._errors.setdefault(p.name, 0)
 
     def add(self, provider) -> None:
         self.providers.append(provider)

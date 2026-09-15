@@ -1,7 +1,9 @@
 """Tests for the Personal-OS core subsystems (EventBus, TaskEngine, ToolRegistry,
 Memory, Experience, Workflow, Scheduler, Planner, Orchestrator, Provider,
 Config, Context/State/Timeutil, bootstrap)."""
-import json, os, time, unittest
+import io, json, os, time, unittest
+import http.server
+import threading
 from datetime import datetime, timedelta
 from helpers import make_stack, Store
 
@@ -103,9 +105,40 @@ class TestToolRegistry(unittest.TestCase):
         ctx = self.stack["orchestrator"]._tool_ctx()
         out = self.reg.execute("search_web", {"query": "python test"}, ctx)
         self.assertIn("ok", out)
+        # graceful: must never raise — returns a structured result either way
+        self.assertIn("results", out["result"])
+        self.assertIn("query", out["result"])
+
+    def test_execute_search_web_offline_graceful_on_network_failure(self):
+        """search_web must not raise when the network is down — it returns a
+        structured offline result (Section 4: offline-graceful)."""
+        import urllib.error
+        import urllib.request
+        from unittest import mock
+        ctx = self.stack["orchestrator"]._tool_ctx()
+        with mock.patch.object(urllib.request, "urlopen",
+                               side_effect=urllib.error.URLError("offline")):
+            out = self.reg.execute("search_web", {"query": "flip", "n": 3}, ctx)
+        self.assertTrue(out.get("ok"))            # the tool itself succeeded
+        res = out["result"]
+        self.assertTrue(res.get("offline"))       # structured offline flag
+        self.assertEqual(res.get("results"), [])
+        self.assertEqual(res.get("count"), 0)
+        self.assertEqual(res.get("query"), "flip")
+        self.assertIn("network_unavailable", res.get("error", ""))
+
+    def test_stats_recorded_on_success(self):
+        """Successful executions are counted in tool stats (Section 7)."""
+        out = self.reg.execute("get_health", {}, None)
+        self.assertTrue(out["ok"])
+        st = self.reg.stats("get_health")
+        self.assertEqual(st["calls"], 1)
+        self.assertEqual(st["errors"], 0)
+        self.assertGreaterEqual(st["total_ms"], 0)
+        self.assertEqual(out["duration_ms"], st["total_ms"])
 
     def test_stats(self):
-        # Stats are only incremented on error/ask paths (not successful runs)
+        # stats() reflects both successes and failures
         self.reg._note("test_tool", errored=False, ms=50)
         self.reg._note("test_tool", errored=True, ms=100)
         st = self.reg.stats("test_tool")
@@ -442,6 +475,581 @@ class TestWebSystem(unittest.TestCase):
     def test_events_returns_list(self):
         r = self._get("/api/events")
         self.assertIsInstance(r["data"], list)
+
+
+# ── Orchestrator recovery + idempotency (Sections 14–15) ─────────────────────
+class TestOrchestratorRecovery(unittest.TestCase):
+    def setUp(self):
+        self.stack = make_stack()
+        self.orch = self.stack["orchestrator"]
+        self.store = self.stack["store"]
+
+    def test_recover_stale_marks_running_as_failed(self):
+        """Stranded PLANNING/EXECUTING/WAITING_USER executions are terminal-
+        failed on restart (Section 14 + 51)."""
+        # simulate an execution that was mid-flight when 'the process died'
+        eid = "exec-deadbeef"
+        self.store.exec(
+            "INSERT INTO astra_executions (execution_id, goal, status) "
+            "VALUES (?, 'delegated research', 'EXECUTING')", (eid,))
+        recovered = self.orch.recover_stale()
+        self.assertIn(eid, recovered)
+        row = self.orch._row(eid)
+        self.assertEqual(row["status"], "FAILED")
+        self.assertIn("restart", row["error"])
+
+    def test_recover_stale_keeps_completed(self):
+        """Completed executions must never be touched by recovery."""
+        r = self.orch.submit("get_health", sync=True)
+        recovered = self.orch.recover_stale()
+        self.assertNotIn(r["execution_id"], recovered)
+        row = self.orch._row(r["execution_id"])
+        self.assertEqual(row["status"], "COMPLETED")
+
+    def test_resume_skips_completed_steps(self):
+        """Resume is idempotent: already-successful steps aren't re-executed."""
+        report = self.orch.submit("plan my day", sync=True)
+        results = report["results"]
+        done = {k for k, v in results.items() if v.get("ok")}
+        self.assertGreater(len(done), 0)
+        # simulate: run stuck at WAITING_USER on an already-succeeded step,
+        # which is exactly what a crash between save and user-approve leaves
+        step = report["plan"][0]
+        self.store.exec(
+            "UPDATE astra_executions SET status = 'WAITING_USER' "
+            "WHERE execution_id = ?", (report["execution_id"],))
+        self.store.exec(
+            "UPDATE astra_executions SET pending_step = ? "
+            "WHERE execution_id = ?",
+            (json.dumps(step), report["execution_id"]))
+        r2 = self.orch.resume(report["execution_id"], allow=True)
+        self.assertEqual(r2["status"], "COMPLETED")
+        # no step got a second result entry (no re-execution)
+        self.assertEqual(len(r2["results"]), len(results))
+        # and every step is still ok
+        self.assertTrue(all(v.get("ok") for v in r2["results"].values()))
+
+
+# ── Store lifecycle (Section 5) ──────────────────────────────────────────────
+class TestStoreLifecycle(unittest.TestCase):
+    def test_context_manager_closes(self):
+        """Store used as a context manager auto-closes on __exit__."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with Store(":memory:") as s:
+                s.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+                s.exec("INSERT INTO t DEFAULT VALUES")
+                rows = s.fetch("SELECT * FROM t")
+                self.assertEqual(len(rows), 1)
+            # connection should now be closed; further use must raise
+            with self.assertRaises(Exception):
+                s.fetch("SELECT * FROM t")
+
+    def test_rollback_on_exec_error(self):
+        """A failed exec() is rolled back — the database stays consistent."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with Store(":memory:") as s:
+                s.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT UNIQUE)")
+                s.exec("INSERT INTO t (val) VALUES ('a')")
+                # this INSERT violates UNIQUE and must fail
+                with self.assertRaises(Exception):
+                    s.exec("INSERT INTO t (val) VALUES ('a')")
+                # the previous valid row must still be there
+                rows = s.fetch("SELECT * FROM t")
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["val"], "a")
+
+    def test_close_is_idempotent(self):
+        """Calling close() twice does not raise."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            s = Store(":memory:")
+            s.close()
+            s.close()   # must not raise
+
+
+# ── EventBus kind validation (Section 3) ─────────────────────────────────────
+class TestEventBusValidation(unittest.TestCase):
+    def test_known_kind_no_warning(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            s = make_stack()
+            s["events"].emit("agent.started", agent="t")   # must not warn
+
+    def test_unknown_kind_warns(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            ev = make_stack()["events"]
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                ev.emit("nonexistent.event", agent="test")
+                self.assertTrue(any("unknown event kind" in str(x.message)
+                                    for x in w))
+
+    def test_unknown_kind_still_persisted(self):
+        """Unknown kinds are stored (permissive, but warned)."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ev = make_stack()["events"]
+            rec = ev.emit("future.magic", agent="x", val=1)
+            self.assertEqual(rec["kind"], "future.magic")
+            hist = ev.history(limit=10)
+            self.assertTrue(any(e["kind"] == "future.magic" for e in hist))
+
+
+# ── AI Providers + Router (Phase 4) ───────────────────────────────────────────
+class TestPhase4Providers(unittest.TestCase):
+    def make_events(self):
+        return make_stack()["events"]
+
+    # -- _read_sse (SSE parser shared by both providers) -----------------------
+    def test_sse_parser_anthropic_format(self):
+        from astra.ai import provider as P
+        fake = io.BytesIO(b"event: content_block_delta\n"
+                          b'data: {"type":"content_block_delta","delta":{"text":"Hel"}}\n\n'
+                          b"event: message_stop\n"
+                          b'data: {"type":"message_stop"}\n\n')
+        chunks = P._read_sse(fake)
+        self.assertEqual([c["type"] for c in chunks],
+                         ["content_block_delta", "message_stop"])
+        self.assertEqual(chunks[0]["delta"]["text"], "Hel")
+
+    def test_sse_parser_openai_format_with_done(self):
+        from astra.ai import provider as P
+        payload = (b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+                   b"data: [DONE]\n\n"
+                   b'data: {"choices":[{"delta":{"content":"IGNORED"}}]}\n\n')
+        chunks = P._read_sse(io.BytesIO(payload))
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["choices"][0]["delta"]["content"], "hi")
+
+    def test_sse_parser_ignores_garbage(self):
+        from astra.ai import provider as P
+        payload = b"keep-alive: x\nnot-data at all\n\n" \
+                  b"data: {not valid json}\n\n" \
+                  b"data: {\"ok\":true}\n\n"
+        chunks = P._read_sse(io.BytesIO(payload))
+        self.assertEqual(chunks, [{"ok": True}])
+
+    # -- OpenAICompatibleProvider chat() + stream() against a fake HTTP server -
+    def _serve(self, handler):
+        srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        port = srv.server_address[1]
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        return srv, port
+
+    def test_openai_chat_parses_reply(self):
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.dumps(
+                    {"choices": [{"message": {"content": "hello from openai"}}]}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *a): pass
+        srv, port = self._serve(H)
+        try:
+            from astra.ai.provider import OpenAICompatibleProvider
+            p = OpenAICompatibleProvider(config={
+                "AI_BASE_URL": f"http://127.0.0.1:{port}/v1",
+                "AI_API_KEY": "sk-test",
+            })
+            self.assertEqual(p.chat([{"role": "user", "content": "hi"}]),
+                             "hello from openai")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_openai_stream_yields_tokens_and_emits_events(self):
+        body = (b'data: {"choices":[{"delta":{"content":"A"}}]}\n\n'
+                b'data: {"choices":[{"delta":{"content":"B"}}]}\n\n'
+                b"data: [DONE]\n\n")
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *a): pass
+        srv, port = self._serve(H)
+        try:
+            from astra.ai.provider import OpenAICompatibleProvider
+            events = self.make_events()
+            p = OpenAICompatibleProvider(config={
+                "AI_BASE_URL": f"http://127.0.0.1:{port}/v1",
+                "AI_API_KEY": "sk-test",
+            }, events=events)
+            out = list(p.stream([{"role": "user", "content": "hi"}]))
+            self.assertEqual(out, ["A", "B"])
+            kinds = [e["kind"] for e in events.history(limit=20)]
+            self.assertIn("ai.started", kinds)
+            self.assertIn("ai.completed", kinds)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_claude_stream_parses_anthropic_delta(self):
+        body = (b'data: {"type":"content_block_delta","delta":{"text":"ki"}}\n\n'
+                b'data: {"type":"content_block_delta","delta":{"text":"korbo"}}\n\n'
+                b'data: {"type":"message_stop"}\n\n')
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *a): pass
+        srv, port = self._serve(H)
+        try:
+            from astra.ai.provider import ClaudeProvider
+            events = self.make_events()
+            p = ClaudeProvider(api_key="sk-test", events=events,
+                               base_url=f"http://127.0.0.1:{port}/v1/messages")
+            out = list(p.stream([{"role": "user", "content": "hi"}]))
+            self.assertEqual(out, ["ki", "korbo"])
+            kinds = [e["kind"] for e in events.history(limit=20)]
+            self.assertIn("ai.completed", kinds)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_provider_network_error_emits_ai_failed(self):
+        from astra.ai.provider import OpenAICompatibleProvider
+        from astra.core.exceptions import ProviderError
+        events = self.make_events()
+        p = OpenAICompatibleProvider(config={
+            "AI_BASE_URL": "http://127.0.0.1:1",  # unreachable port
+            "AI_API_KEY": "sk-test",
+        }, events=events)
+        with self.assertRaises(ProviderError):
+            list(p.stream([{"role": "user", "content": "hi"}]))
+        kinds = [e["kind"] for e in events.history(limit=20)]
+        self.assertIn("ai.failed", kinds)
+
+
+class TestPhase4Router(unittest.TestCase):
+    def test_router_falls_back_to_second_provider(self):
+        from astra.ai.provider import AIProvider
+        from astra.ai.router import AgentRouter
+        from astra.core.exceptions import ProviderError
+
+        class Bad(AIProvider):
+            name = "bad"
+            models = ["m"]
+            def chat(self, messages, model=None, max_tokens=500):
+                raise ProviderError("down")
+            def health_check(self): return True
+
+        class Good(AIProvider):
+            name = "good"
+            models = ["m"]
+            def chat(self, messages, model=None, max_tokens=500):
+                return "works"
+
+        r = AgentRouter(providers=[Bad(), Good()], max_retries=0)
+        name, model, reply = r.route([{"role": "user", "content": "hi"}])
+        self.assertEqual(name, "good")
+        self.assertEqual(reply, "works")
+
+    def test_router_marks_unhealthy_provider_down(self):
+        from astra.ai.provider import AIProvider, OfflineProvider
+        from astra.ai.router import AgentRouter
+
+        class AlwaysDown(AIProvider):
+            name = "dead"
+            models = ["m"]
+            def chat(self, messages, model=None, max_tokens=500):
+                return "never reached"
+            def health_check(self): return False
+
+        r = AgentRouter(providers=[AlwaysDown(), OfflineProvider({})], max_retries=0)
+        name, model, reply = r.route([{"role": "user", "content": "hi"}])
+        self.assertIsNone(name)
+        self.assertIn("dead", r.stats()["down"])
+
+    def test_router_stats_track_latency_and_calls(self):
+        from astra.ai.provider import AIProvider
+        from astra.ai.router import AgentRouter
+
+        class Fast(AIProvider):
+            name = "fast"
+            models = ["m0"]
+            def chat(self, messages, model=None, max_tokens=500):
+                return "yo"
+
+        r = AgentRouter(providers=[Fast()], max_retries=0, backoff_s=0.01)
+        r.route([{"role": "user", "content": "x"}])
+        h = r.health()["fast"]
+        self.assertEqual(h["calls"], 1)
+        self.assertGreater(len(h["models"]), 0)
+
+
+
+
+# ── Memory 2.0 (Phase 5) ──────────────────────────────────────────────────────
+class TestMemory2(unittest.TestCase):
+    def setUp(self):
+        self.stack = make_stack()
+        self.mem = self.stack["memory"]
+
+    def test_save_with_layer_and_importance(self):
+        m = self.mem.save("notcoin listing 30 oct", layer="episodic",
+                          importance=0.9, confidence=1.0)
+        row = self.mem.get(m["id"])
+        self.assertEqual(row["layer"], "episodic")
+        self.assertAlmostEqual(row["importance"], 0.9)
+        self.assertAlmostEqual(row["confidence"], 1.0)
+        self.assertFalse(m.get("deduplicated"))
+
+    def test_rejects_bad_layer(self):
+        m = self.mem.save("fallback note", layer="not-a-layer")
+        row = self.mem.get(m["id"])
+        self.assertEqual(row["layer"], "long")
+
+    def test_exact_duplicate_deduplicated_on_save(self):
+        a = self.mem.save("hamster kombat claim reminder")
+        b = self.mem.save("hamster kombat claim reminder", importance=0.95)
+        self.assertTrue(b.get("deduplicated"))
+        self.assertEqual(a["id"], b["id"])
+        # same row, importance merged up to the max
+        self.assertGreaterEqual(self.mem.get(a["id"])["importance"], 0.95)
+
+    def test_search_ranks_high_importance_first(self):
+        self.mem.save("test query low value", importance=0.1)
+        self.mem.save("test query important item", importance=1.0)
+        top = self.mem.search("test query", k=2)
+        self.assertEqual(top[0]["importance"], 1.0)
+        # ranks: important one first, low second
+
+    def test_search_layer_and_min_importance_filter(self):
+        self.mem.save("layer filter note", layer="short", importance=0.9)
+        self.mem.save("layer filter note", layer="working", importance=0.1)
+        only_short = self.mem.search("layer filter", layer="short")
+        self.assertEqual(len(only_short), 1)
+        self.assertEqual(only_short[0]["layer"], "short")
+        important = self.mem.search("layer filter", min_importance=0.5)
+        self.assertTrue(all(r["importance"] >= 0.5 for r in important))
+
+    def test_touch_updates_recency_and_count(self):
+        m = self.mem.save("touched memory fact")
+        self.mem.touch(m["id"])
+        row = self.mem.get(m["id"])
+        self.assertEqual(row["access_count"], 1)
+        self.assertTrue(row["last_accessed"])
+
+    def test_recall_search_touches_memories(self):
+        m = self.mem.save("recalled memory item")
+        self.mem.search("recalled memory", k=5)
+        self.assertEqual(self.mem.get(m["id"])["access_count"], 1)
+
+    def test_deduplicate_collapses_legacy_duplicates(self):
+        # legacy-style rows: same exact content inserted directly via SQL
+        now = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        a = self.stack["store"].insert("astra_memories", content="dup content here",
+                                       category="note", tags="", source="chat",
+                                       created_at=now)
+        b = self.stack["store"].insert("astra_memories", content="dup content here",
+                                       category="note", tags="", source="chat",
+                                       created_at=now)
+        removed = self.mem.deduplicate()
+        self.assertGreaterEqual(removed, 1)
+        self.assertIsNone(self.mem.get(a))   # older one gone
+        self.assertIsNotNone(self.mem.get(b))  # newest kept
+
+    def test_stats_by_layer(self):
+        self.mem.save("a working scratch", layer="working")
+        self.mem.save("a longterm note", layer="long")
+        st = self.mem.stats()
+        self.assertEqual(st["total"], 2)
+        self.assertEqual(st["by_layer"]["working"], 1)
+        self.assertEqual(st["by_layer"]["long"], 1)
+
+    def test_old_schema_db_self_heals_columns(self):
+        from helpers import Store as HStore
+        store = HStore(":memory:")
+        # install the OLD schema (no memory-2.0 columns)
+        store.install("""
+            CREATE TABLE astra_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                category TEXT DEFAULT 'note',
+                tags TEXT DEFAULT '',
+                source TEXT DEFAULT 'chat',
+                created_at TEXT DEFAULT ''
+            )""")
+        store.insert("astra_memories", content="old style row", category="note",
+                     tags="", source="chat", created_at="2020-01-01 00:00:00")
+        events = make_stack()["events"]
+        from astra.memory.memory import MemorySystem
+        mem = MemorySystem(store, events)
+        # columns were added in place; save + recall still work
+        m = mem.save("modern row works", importance=0.8)
+        row = mem.get(m["id"])
+        self.assertEqual(row["importance"], 0.8)
+        self.assertGreaterEqual(mem.search("modern")[0]["importance"], 0.8)
+
+
+# -- Phase 6: ToolRegistry 2.0 ---------------------------------------------
+from astra.core.exceptions import ValidationError as _VE
+from astra.tools.schemas import Tool as _Tool
+
+
+class TestRegistryTimeout(unittest.TestCase):
+    def setUp(self):
+        self.reg = make_stack()["registry"]
+
+    def test_timeout_fires(self):
+        def slow(args, ctx=None):
+            time.sleep(10)
+        self.reg.register(_Tool("slowtool", slow, timeout=0.1))
+        with self.assertRaises(Exception) as cm:
+            self.reg.execute("slowtool")
+        self.assertIn("timed out", str(cm.exception).lower())
+
+    def test_fast_tool_no_timeout(self):
+        def fast(args, ctx=None):
+            return {"done": True}
+        self.reg.register(_Tool("fasttool", fast, timeout=5.0))
+        res = self.reg.execute("fasttool")
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["result"]["done"])
+
+
+class TestRegistryRetry(unittest.TestCase):
+    def setUp(self):
+        self.reg = make_stack()["registry"]
+        self.call_count = 0
+
+    def test_retry_succeeds_on_third_attempt(self):
+        def flaky(args, ctx=None):
+            self.call_count += 1
+            if self.call_count < 3:
+                from astra.core.exceptions import AstraError
+                raise AstraError("transient failure")
+            return {"ok": True}
+        self.reg.register(_Tool("flakytool", flaky, retries=3,
+                                retry_backoff_s=0.01))
+        res = self.reg.execute("flakytool")
+        self.assertTrue(res["ok"])
+        self.assertEqual(self.call_count, 3)
+
+    def test_exhausted_retries_raises(self):
+        def always_fail(args, ctx=None):
+            self.call_count += 1
+            from astra.core.exceptions import AstraError
+            raise AstraError("permanent failure")
+        self.reg.register(_Tool("failtool", always_fail, retries=2,
+                                retry_backoff_s=0.01))
+        with self.assertRaises(Exception) as cm:
+            self.reg.execute("failtool")
+        self.assertEqual(self.call_count, 3)  # 1 original + 2 retries
+        self.assertIn("permanent failure", str(cm.exception))
+
+    def test_validation_error_not_retried(self):
+        def bad_args(args, ctx=None):
+            return {}
+        self.reg.register(_Tool("stricttool", bad_args, retries=3,
+                                input={"x": {"required": True,
+                                             "type": "string"}},
+                                strict=True, retry_backoff_s=0.01))
+        with self.assertRaises(_VE):
+            self.reg.execute("stricttool", {"y": "wrong"})
+
+
+class TestRegistryRateLimit(unittest.TestCase):
+    def setUp(self):
+        self.reg = make_stack()["registry"]
+
+    def test_rate_limit_enforced(self):
+        def instant(args, ctx=None):
+            return {"t": time.perf_counter()}
+        # 60 RPM = 1 call/sec, so the second call must wait ~0.5s
+        self.reg.register(_Tool("ratelimit", instant, rate_limit_per_min=60))
+        r1 = self.reg.execute("ratelimit")
+        r2 = self.reg.execute("ratelimit")
+        elapsed = r2["result"]["t"] - r1["result"]["t"]
+        self.assertGreaterEqual(elapsed, 0.3)
+
+
+class TestRegistryStrictArgs(unittest.TestCase):
+    def setUp(self):
+        self.reg = make_stack()["registry"]
+
+    def test_strict_rejects_unknown_args(self):
+        def dummy(args, ctx=None):
+            return {"ok": True}
+        self.reg.register(_Tool("strictdummy", dummy,
+                                input={"x": {"type": "string"}},
+                                strict=True))
+        with self.assertRaises(_VE) as cm:
+            self.reg.execute("strictdummy", {"x": "ok", "extra_arg": 123})
+        self.assertIn("unknown argument", str(cm.exception))
+
+    def test_non_strict_allows_unknown_args(self):
+        def dummy(args, ctx=None):
+            return {"ok": True}
+        self.reg.register(_Tool("loosedummy", dummy,
+                                input={"x": {"type": "string"}},
+                                strict=False))
+        res = self.reg.execute("loosedummy", {"x": "ok", "extra": 123})
+        self.assertTrue(res["ok"])
+
+
+class TestRegistryStats(unittest.TestCase):
+    def setUp(self):
+        self.reg = make_stack()["registry"]
+
+    def test_stats_tracking(self):
+        def work(args, ctx=None):
+            time.sleep(0.02)   # ensure measurable duration
+            return {"v": 1}
+        self.reg.register(_Tool("worktool", work))
+        self.reg.execute("worktool")
+        self.reg.execute("worktool")
+        st = self.reg.stats("worktool")
+        self.assertEqual(st["calls"], 2)
+        self.assertEqual(st["errors"], 0)
+        self.assertGreater(st["total_ms"], 0)
+        self.assertGreater(st["average_duration"], 0)
+        self.assertNotEqual(st["last_called"], "")
+
+    def test_error_stats(self):
+        def boom(args, ctx=None):
+            from astra.core.exceptions import AstraError
+            raise AstraError("kaboom")
+        self.reg.register(_Tool("boomtool", boom, retries=0))
+        with self.assertRaises(Exception):
+            self.reg.execute("boomtool")
+        st = self.reg.stats("boomtool")
+        self.assertEqual(st["calls"], 1)
+        self.assertEqual(st["errors"], 1)
+
+    def test_stats_all(self):
+        def a(args, ctx=None):
+            return {}
+        def b(args, ctx=None):
+            return {}
+        self.reg.register(_Tool("stata", a))
+        self.reg.register(_Tool("statb", b))
+        self.reg.execute("stata")
+        self.reg.execute("statb")
+        all_stats = self.reg.stats()
+        self.assertIn("stata", all_stats)
+        self.assertIn("statb", all_stats)
+
 
 
 if __name__ == "__main__":

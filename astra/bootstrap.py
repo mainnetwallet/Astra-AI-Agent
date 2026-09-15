@@ -19,7 +19,8 @@ from astra.core.tasks import TaskEngine
 from astra.core.planner import Planner
 from astra.core.executor import Executor
 from astra.core.orchestrator import Orchestrator
-from astra.ai.provider import ClaudeProvider, OfflineProvider
+from astra.ai.provider import (ClaudeProvider, OpenAICompatibleProvider,
+                              OfflineProvider)
 from astra.ai.router import AgentRouter
 from astra.memory.memory import MemorySystem, ExperienceStore
 from astra.tools.registry import ToolRegistry
@@ -84,10 +85,16 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     registry.register_plugin_tools(plugins)
 
     # AI providers + router
+    # Precedence for a working provider: Anthropic key → OpenAI-compatible
+    # (OpenAI/OpenRouter/Ollama/local via AI_BASE_URL + AI_API_KEY) → offline.
+    # AI_PROVIDER env can force a subset, e.g. "openai" (visibility only —
+    # the router still tries what is configured).
     providers = []
     _key = _first_environ("ANTHROPIC_API_KEY")
     if _key:
-        providers.append(ClaudeProvider(config=config, api_key=_key))
+        providers.append(ClaudeProvider(config=config, api_key=_key, events=events))
+    if config.get("AI_BASE_URL") or _first_environ("AI_API_KEY"):
+        providers.append(OpenAICompatibleProvider(config=config, events=events))
     providers.append(OfflineProvider(config))
     router = AgentRouter(providers=providers, config=config)
 
@@ -101,6 +108,9 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
         planner=planner, executor=executor, router=router, memory=memory,
         experiences=experiences, events=events, policy=policy,
         plugins=plugins)
+    # crash recovery: executions stranded mid-flight by a previous shutdown
+    # are marked FAILED so they no longer read as "running".
+    orchestrator.recover_stale()
 
     # workflows + scheduler
     workflows = WorkflowEngine(store, registry, events)

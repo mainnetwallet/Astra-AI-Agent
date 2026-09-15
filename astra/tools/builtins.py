@@ -21,12 +21,21 @@ from astra.tools.schemas import Tool
 # ── memory tools ────────────────────────────────────────────────────────────────
 
 def remember(args: dict, ctx=None) -> dict:
-    """Store a memory for later recall."""
+    """Store a memory for later recall. Supports importance / layer via the
+    memory system when one is wired; falls back to a direct insert."""
     content = args.get("content", "").strip()
     if not content:
         raise ValidationError("content required")
     category = args.get("category", "note")
     tags = args.get("tags", "")
+    layer = args.get("layer", "long")
+    importance = float(args.get("importance", 0.5))
+    mem = getattr(ctx, "memory", None) if ctx else None
+    if mem is not None:
+        r = mem.save(content, category=category, tags=tags, source="tools",
+                     layer=layer, importance=importance)
+        return {"id": r["id"], "category": category, "layer": r.get("layer"),
+                "deduplicated": r.get("deduplicated", False)}
     mid = ctx.store.insert(
         "astra_memories", content=content, category=category,
         tags=tags, source="tools",
@@ -37,15 +46,20 @@ def remember(args: dict, ctx=None) -> dict:
 
 
 def recall(args: dict, ctx=None) -> dict:
-    """Search long-term memory by keywords."""
+    """Search long-term memory by keywords. Uses the memory system's ranked
+    recall (importance/confidence weighted) when available."""
     q = args.get("query", "").strip()
     k = int(args.get("k", 5))
     if not q:
         raise ValidationError("query required")
+    mem = getattr(ctx, "memory", None) if ctx else None
+    if mem is not None:
+        rows = mem.search(q, k=k)
+        return {"results": rows, "count": len(rows)}
     tokens = [t.lower() for t in q.split() if len(t) >= 2]
     if not tokens:
         return {"results": [], "count": 0}
-    # build a LIKE-based scoring query (offline-friendly, no embeddings)
+    # fallback: LIKE-based scoring query (offline-friendly, no embeddings)
     cond = " OR ".join("lower(content) LIKE ?" for _ in tokens)
     LIKE = [f"%{t}%" for t in tokens]
     rows = ctx.store.fetch(
@@ -101,7 +115,8 @@ def search_web(args: dict, ctx=None) -> dict:
         with urllib.request.urlopen(req, timeout=8) as resp:
             html = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
-        raise AstraError(f"search_web failed: {type(e).__name__}")
+        return {"ok": False, "offline": True, "results": [], "count": 0,
+                "query": query, "error": f"network_unavailable: {type(e).__name__}"}
     # parse result links
     results = []
     for m in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.S):

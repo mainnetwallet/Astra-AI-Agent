@@ -1,229 +1,294 @@
 # Astra AI Agent 🚀
 
-A **general-purpose, plugin-based local AI assistant** — with the **Airdrop
-Manager** as its first plugin.
+A **general-purpose, plugin-based local AI assistant** built for personal
+automation — with the **Airdrop Manager** as its first plugin.
 
-The design is deliberately *not* airdrop-only: the core (`astra/`) is a
-generic agent shell (storage, chat router, web server, UI) and every feature
-lives in a **plugin**. Want a future feature — token price tracking, a
-calendar, notes, trading alerts — you (or I) write *one new plugin file* and
-drop it in. The core never changes.
-
-Everything runs on your own machine. Zero cloud, zero `pip install`, zero
-dependencies beyond Python 3's standard library. Works on Android/Termux.
-
-```
-┌─────────────────────────────────────────────┐
-│  Astra AI Agent (core)                     │
-│  ┌─────────┐ ┌──────┐ ┌──────┐ ┌─────────┐ │
-│  │ Store   │ │Agent │ │ Web  │ │  UI     │ │
-│  │ (SQLite)│ │(chat)│ │(HTTP)│ │(SPA)    │ │
-│  └─────────┘ └──────┘ └──────┘ └─────────┘ │
-│          ▲           plugin registry        │
-│  ┌───────────────────┐                       │
-│  │  Plugin: Airdrops │  ← the first plugin   │
-│  └───────────────────┘                       │
-│  (future plugins plug in here)               │
-└─────────────────────────────────────────────┘
-```
+Astra is a **Personal AI OS**: a generic core (orchestrator, planner, tool
+registry, memory, workflows, scheduler) with domain-specific features living
+in **plugins**. Want token tracking, a calendar, trading alerts, notes? Write
+one plugin file, drop it in, and restart. The core never changes.
 
 ---
 
-## 1. What Astra does today (with the Airdrops plugin)
-
-| Tab | What it does |
-|---|---|
-| 📊 Dashboard | One shared dashboard; the Airdrops plugin contributes KPI cards (total/active, 7d deadlines, pending tasks, wallets) + upcoming & overdue deadline lists |
-| 📦 Airdrops | Full CRUD — name, project, status dropdown (new/active/farming/claimable/done/dropped), deadline, network, reward, est. value, link, phase; per-airdrop task strip |
-| ✅ Tasks | Add social/onchain/wallet tasks per airdrop, tick done / untick |
-| 👛 Wallets | Add labelled addresses (EVM `0x…`, TON `0:…` / `UQ…`, TRON `41…`, SOL base58) with a live format check |
-| 🤖 Assistant | Natural-language chat in Banglish or English (`add airdrop Hamster deadline 30 oct reward token`, `deadlines this week`, `progress`, `add wallet 0x…`) |
-| 💾 Backup | Export everything (all plugins) to one JSON file; import it back later, dedupe-safe |
-
-### Chat example
+## Architecture
 
 ```
-you:  add airdrop Notcoin deadline 30 oct reward points value 500 network TON
-astra: ✅ Airdrop 'Notcoin' added (id #2).
-       • Network: TON
-       • Deadline: 2026-10-30 (in Xd)
-       • Est. value: 500
-you:  add task "join telegram" to Notcoin
-you:  deadlines this week
+┌──────────────────────────────────────────────────────────────────────┐
+│  Astra AI Agent — Personal OS                                       │
+│                                                                      │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────────┐ │
+│  │ Orchestrator│  │  Planner   │  │   Memory   │  │   Workflows    │ │
+│  │ (exec loop) │  │ (NL→steps) │  │ (long+short│  │  (DAG engine)  │ │
+│  └────────────┘  └────────────┘  │  term)     │  └────────────────┘ │
+│                                   └────────────┘                     │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────────┐ │
+│  │Tool Registry│  │   Agent    │  │   Config   │  │   Scheduler    │ │
+│  │  + policy   │  │  (brain)   │  │(.env/json) │  │  (cron-like)   │ │
+│  └────────────┘  └────────────┘  └────────────┘  └────────────────┘ │
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │  Plugin System 2.0                                            │  │
+│  │  plugins/airdrop/  — AirdropManager (tasks, wallets, deadlines)│  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │  Web UI (SPA) — Dashboard / Assistant / Live / Airdrop tabs    │  │
+│  │  HTTP API — REST + SSE streaming                               │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  Store: SQLite (zero deps, single file)                              │
+│  AI: Anthropic Claude (HTTP) or Offline mode                         │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-Dates understand ISO (`2026-12-31`), `DD/MM/YYYY`, `31 dec`, `tomorrow`,
-`next week`, and Banglish (`kal`, `agami kal`).
+### Key subsystems
 
-When `ANTHROPIC_API_KEY` is set, anything no plugin understands goes to a real
-Claude answer. Every structured command runs 100% locally, offline.
+| Subsystem | What it does |
+|-----------|-------------|
+| `Orchestrator` | UNDERSTAND → PLAN → SELECT TOOL → EXECUTE → OBSERVE → VERIFY → LEARN → CONTINUE |
+| `Planner` | NL goal → ordered tool steps (offline regex first, LLM fallback) |
+| `ToolRegistry` | 13+ builtin tools, policy gating, audit trail |
+| `MemorySystem` | Short-term (deque) + long-term (keyword-scored SQLite) recall |
+| `ExperienceStore` | Pattern library: learn from past successes/failures |
+| `WorkflowEngine` | Define multi-step workflows, run on demand or via scheduler |
+| `SchedulerManager` | daily/weekly/interval/oneshot/deadline — no external cron needed |
+| `EventBus` | Persisted events + SSE streaming to the Live tab |
+| `TaskEngine` | Generic DAG tasks with priorities, dependencies, status tracking |
+| `Config` | env var → config.json → .env → default (zero setup needed) |
 
 ---
 
-## 3. Technologies used
+## Quick Start
 
-| Layer | Tech | Why |
-|---|---|---|
-| Language | **Python 3.9+** stdlib only | Runs anywhere Python exists — Termux, servers, laptops. No pip. |
-| Storage | `sqlite3` | Zero-config, single file, ACID, in stdlib. Plugins each get their own tables. |
-| HTTP | `http.server.ThreadingHTTPServer` | No Flask/uvicorn; threaded so plugin work never blocks the UI. |
-| Agent brain | Rule-based NL parser (`re`) inside plugins | Instant, deterministic, offline; each plugin owns its domain's grammar. |
-| AI upgrade | Anthropic Messages API via `urllib` | Optional. Only free-form chat leaves the machine (when a key is set). |
-| Frontend | Vanilla HTML/CSS/JS — **manifest-driven** | `GET /api/manifest` lists tabs; plugins register their own JS + dashboard blocks. No bundler. |
-| Tests | `unittest` | 49 tests + 30 live HTTP smoke checks, all green. |
-
-**Zero external dependencies.** No `requirements.txt`, no `pip install`.
-
----
-
-## 4. How to install
-
-- Python **3.9+** (tested through 3.14) and a web browser. That's it.
+### One-line setup
 
 ```bash
-# put the folder anywhere — copy or unpack
-cd astra-agent
-# nothing to install; the app is ready
+# Linux / Termux
+bash <(curl -s https://raw.githubusercontent.com/.../setup.sh)
+
+# Or clone and run manually
+git clone https://github.com/mainnetwallet/Astra-AI-Agent.git
+cd Astra-AI-Agent
+bash setup.sh
 ```
 
-On Android/Termux the same folder works under a PROot/Linux distro (`python3 run.py`).
-
----
-
-## 5. How to start
+### Start the agent
 
 ```bash
-python3 run.py
+bash start.sh
+# Open http://localhost:8787 in your browser
 ```
 
-The dashboard opens at `http://localhost:8787/`. Ctrl+C stops it.
+That's it. No `pip install`. No database. Python 3.9+ only.
 
-### Environment variables (all optional)
+---
 
-| Env var | Default | What it does |
-|---|---|---|
-| `PORT` | `8787` | Listen port |
-| `BIND` | `0.0.0.0` | Set `BIND=127.0.0.1` for local-only access |
-| `DATA_DIR` | `./data` | Where `astra.db` (SQLite) is stored |
-| `ANTHROPIC_API_KEY` | *(none)* | Enables AI Q&A chat |
-| `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Model for free-form Q&A |
-| `NO_BROWSER` | `1` | Set `1` to not auto-open a browser |
+## Platform Commands
 
-Example:
+### Linux (Debian/Ubuntu)
+
 ```bash
-PORT=9000 BIND=127.0.0.1 DATA_DIR=/sdcard/astra python3 run.py
+# Install Python (if missing)
+sudo apt update && sudo apt install -y python3
+
+# Setup + Start
+cd Astra-AI-Agent
+bash setup.sh
+bash start.sh
 ```
 
-### Adding a future feature (the point of the plugin system)
+### Termux (Android)
 
-1. Create `plugins/<name>.py` that subclasses `astra.core.Plugin`
-   (`slug`, `title`, `icon`, `SCHEMA`, `process()`, `routes()`, `summary()`,
-   `export()`, `import_data()`).
-2. End it with `Plugin = YourPluginClass`.
-3. Add `"plugins.<name>"` to `PLUGIN_MODULES` in `run.py`.
+```bash
+# Install Python
+pkg update && pkg install -y python
 
-No other file changes. The tab, dashboard block, chat intents and API routes
-all appear automatically.
-
----
-
-## 6. Environment variables required
-
-**None.** It works with zero configuration out of the box.
-
----
-
-## 7. Test results
-
-```
-$ python3 -m unittest discover -s tests
-.........................
-----------------------------------------------------------------------
-Ran 49 tests in 0.611s
-
-OK
+# Setup + Start
+cd Astra-AI-Agent
+bash setup.sh
+bash start.sh
+# Open http://localhost:8787 in your phone browser
 ```
 
-| Module | Tests | What is covered |
-|---|---|---|
-| `tests/test_store.py` | 6 | Generic SQLite store: insert/fetch, param querying (injection-safe), lastrowid, idempotent schema install |
-| `tests/test_airdrop_plugin.py` | 33 | `parse_date` (ISO/DD-MM/words/Banglish), all storage accessors, deadlines, task lifecycle, wallet validate edge cases, export/import roundtrip, NL chat (add/delete airdrop, tasks, wallets, progress, help, offline fallback) |
-| `tests/test_web.py` | 10 | Manifest (name = "Astra AI Agent", plugins + tabs), static serving, full airdrop CRUD over HTTP, task flow + aggregated dashboard, wallet validate/add/reject, chat via API, export/import, 404 |
+### Windows (PowerShell)
 
-Live end-to-end smoke test (real HTTP, boots exactly like `run.py`):
+```powershell
+# Open PowerShell, navigate to project folder
+cd Astra-AI-Agent
 
+# Setup (creates config, checks Python)
+.\setup.ps1
+
+# Start
+.\start.ps1
+# Open http://localhost:8787 in your browser
 ```
-$ python3 smoke_test.py
-  ✅  index.html served (Astra shell)      ✅  manifest 200 + name
-  ✅  airdrop plugin js served             ✅  dashboard empty airdrops card
-  ✅  create airdrop 201                   ✅  import dedupes
-  ... all 30 checks ...
-========================================
-  ALL CHECKS PASSED ✅
-========================================
+
+### Windows (double-click)
+
+1. Double-click `setup.bat` first (one-time setup)
+2. Double-click `start.bat` to launch
+3. Open http://localhost:8787
+
+### macOS
+
+```bash
+brew install python3
+cd Astra-AI-Agent
+bash setup.sh
+bash start.sh
 ```
 
 ---
 
-## 8. Known limitations
+## Environment Variables
 
-1. **No OS push notifications** for deadlines — they're visible on the
-   dashboard; a cron/Tasker job can hit `GET /api/dashboard` to alert you.
-2. **No login/password** — the server binds `0.0.0.0` by default. For privacy
-   use `BIND=127.0.0.1` or a firewall (see Security).
-3. **Single user** — no accounts or multi-user support.
-4. **No blockchain lookups** — wallets are labelled references; balances are
-   not fetched.
-5. **Research helper is an optional, offline-graceful URL title/meta fetch** —
-   not a chain verifier and not a full project audit.
-6. **Date parsing is English/Banglish-centric** — Bangla calendar (১৪XX) isn't
-   handled.
-7. **No automated claiming** — Astra tracks and organises work; on-chain
-   actions are never automated.
+All prefixed with `ASTRA_`. Set in `.env` file, `config.json`, or shell env.
 
----
-
-## 9. Security considerations
-
-1. **Local-first** — all data stays in `data/astra.db`. Nothing is transmitted
-   unless you export the JSON yourself.
-2. **Binding** — default `0.0.0.0` exposes the UI to your LAN. Use
-   `BIND=127.0.0.1` for local-only.
-3. **Never store keys** — only public addresses are saved. A private key or
-   seed phrase is *always* a scam request; Astra will never ask for one.
-4. **External calls only for free-form chat** — and only when you set
-   `ANTHROPIC_API_KEY`. Structured commands never leave the machine.
-5. **SQL-injection safe** — every query uses bound parameters; the store has
-   no string-interpolation helpers.
-6. **XSS-safe UI** — all rendered text goes through `esc()` in `astra.js`;
-   plugin JS files shipped with the app follow the same rule.
-7. **One plugin can't break the chat** — `astra/agent.py` wraps every
-   plugin's `process()` in a try/except, so a failing plugin is skipped, not
-   fatal.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 8787 | HTTP server port |
+| `HOST` | 0.0.0.0 | Bind address |
+| `ANTHROPIC_API_KEY` | *(none)* | Claude API key — leave empty for offline mode |
+| `AI_PROVIDER` | anthropic | `anthropic` or `offline` |
+| `AI_MODEL` | *(auto)* | Override model (e.g. `claude-sonnet-4-20250514`) |
+| `LOG_LEVEL` | info | `debug`, `info`, `warning`, `error` |
+| `DATA_DIR` | ./data | SQLite + config storage path |
+| `NO_BROWSER` | false | Don't auto-open browser on start |
+| `ACTIVE_PLUGINS` | airdrop | Comma-separated plugin slugs |
 
 ---
 
-## 10. Next recommended development steps
+## Web UI Tabs
 
-1. **Deadline push reminders** — background thread → `notify-send` (desktop)
-   or a Telegram bot message when a deadline crosses `today + N`.
-2. **Telegram bot plugin** — a `plugins/telegram.py` exposing the same chat
-   agent over a Telegram bot token.
-3. **Auth plugin** — a small `plugins/auth.py` adding browser basic-auth to
-   the dashboard.
-4. **Balance checker plugin** — call public RPCs (`eth_getBalance`, TON HTTP
-   API) and show balances beside each wallet.
-5. **Profitability tracker plugin** — estimated vs actual claim value, monthly
-   P&L summary.
-6. **New-domain plugins** to prove the platform: Notes, airdrop calendar,
-   referral/community tracking.
-7. **PWA** — service worker + installable home-screen entry for phones.
-8. **CSV/Spreadsheet export** for people who prefer Excel.
-9. **Deeper LLM tool use** — give the agent a web-search tool so free-form
-   questions can research projects and report in chat.
-10. **Backup to cloud** — optional encrypted export to a service you choose.
+| Tab | What it shows |
+|-----|-------------|
+| **Dashboard** | Overview cards — airdrops, tasks, wallets, deadlines |
+| **Assistant** | Chat interface — natural language commands |
+| **Live** | Real-time SSE event stream, system health, tool activity |
+| **Airdrop** | Create/edit/delete airdrops, manage tasks & wallets |
 
 ---
 
-*Built by Astra AI Agent — local-first, plugin-based, zero-dependency,
-privacy-respecting. 🚀*
+## API Endpoints (selected)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | System health (DB, plugins, AI, scheduler) |
+| GET | `/api/manifest` | Plugin + tab manifest for SPA |
+| GET | `/api/tools` | All registered tools |
+| POST | `/api/agents` | Submit a goal (`{"goal": "...", "sync": true}`) |
+| GET | `/api/executions` | Execution history |
+| POST | `/api/tasks` | Create a task |
+| POST | `/api/memory` | Save to memory |
+| GET | `/api/memory/search?query=...` | Search memory |
+| POST | `/api/workflows` | Define a workflow |
+| POST | `/api/schedules` | Create a schedule |
+| GET | `/api/events/stream` | SSE event stream |
+| POST | `/api/chat` | Natural language chat |
+| GET | `/api/dashboard` | Dashboard cards |
+
+---
+
+## Plugin System
+
+Astra ships with one plugin: **Airdrop Manager** (`plugins/airdrop/`).
+
+### Built-in tools (13)
+
+`search_web` · `remember` · `recall` · `get_health` · `create_task` · `list_tasks` · `read_file` · `write_file` · `search_files` · `wallet_balances` · `fetch_url` · `answer` · `wallet_validate`
+
+### Adding a new plugin
+
+Create `plugins/myplugin/__init__.py` with a class inheriting `Plugin`:
+
+```python
+from astra.core.plugins import Plugin
+
+class MyPlugin(Plugin):
+    slug = "myplugin"
+    title = "My Plugin"
+    version = "0.1.0"
+
+    def startup(self): ...
+    def shutdown(self): ...
+    def tools(self):
+        return [{"name": "my_tool", "fn": self.my_tool}]
+```
+
+Drop it in `plugins/`, add `"myplugin"` to `ACTIVE_PLUGINS`, restart.
+
+---
+
+## Testing
+
+```bash
+# Unit tests (102 tests)
+python3 -m unittest discover -s tests -q
+
+# Smoke test (44 checks — full HTTP integration)
+python3 smoke_test.py
+```
+
+All tests use in-memory SQLite — no side effects, no cleanup needed.
+
+---
+
+## Database
+
+Single SQLite file at `DATA_DIR/astra.db`. Tables auto-created on first boot:
+
+- `events` — audit trail + Live stream
+- `astra_tasks` — generic task engine (DAG)
+- `schedules` — scheduler definitions
+- `astra_sched_seen` — deadline dedup
+- Airdrop plugin tables: `airdrops`, `airdrop_tasks`, `wallets`
+
+No migrations needed — `user_version` tracked, schema evolves forward.
+
+---
+
+## Known Limitations
+
+1. **Offline mode**: Without `ANTHROPIC_API_KEY`, the agent uses regex intent
+   matching only — no AI reasoning for complex multi-step goals.
+2. **No browser automation**: Browser tools are stubs (no Playwright/Selenium
+   dependency). Research via `fetch_url` (HTTP fetch) only.
+3. **Single-user**: No authentication. Only expose on localhost or trusted network.
+4. **No persistence of orchestrator state**: In-flight async executions are
+   in-memory only; restart loses running state.
+5. **Workflow scheduler runs in-process**: No external cron daemon. If the
+   process dies, scheduled runs are missed until restart.
+6. **No real wallet balance queries**: `wallet_balances` returns placeholder
+   data until a Web3 provider (Alchemy/Infura) is configured in a plugin.
+7. **Mobile UI**: Functional but not pixel-perfect on all screen sizes.
+
+---
+
+## Project Structure
+
+```
+astra-agent/
+├── astra/                  # Generic core (never contains domain logic)
+│   ├── core/               # orchestrator, planner, tasks, events, config...
+│   ├── ai/                 # provider abstraction, agent router
+│   ├── tools/              # tool registry, schemas, builtins
+│   ├── memory/             # memory + experience store
+│   ├── web.py              # HTTP server + API + SSE
+│   └── bootstrap.py        # wires everything together
+├── plugins/
+│   └── airdrop/            # AirdropManager plugin (first domain feature)
+├── static/                 # SPA frontend (HTML/CSS/JS, zero build step)
+├── tests/                  # 102 unit tests
+├── smoke_test.py           # 44-check integration test
+├── run.py                  # Entry point
+├── setup.sh / .ps1 / .bat  # Platform setup scripts
+├── start.sh / .ps1 / .bat  # Platform start scripts
+└── config.json             # (auto-created, gitignored)
+```
+
+---
+
+## License
+
+MIT

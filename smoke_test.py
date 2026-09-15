@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""One-shot smoke test for Astra AI Agent: boots the real server, exercises
-every major endpoint over HTTP, prints results, shuts down. Exit 0 = green.
-Boots exactly the way run.py does (Store + Registry + plugins)."""
+"""One-shot smoke test for Astra AI Agent: boots the real server the same way
+run.py does (astra.bootstrap.build), exercises every major endpoint over HTTP
+(core + plugin), prints results, shuts down. Exit 0 = green."""
 import sys, os, threading, time, json, urllib.request, urllib.error
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.getcwd())
 
 from astra.store import Store
-from astra.agent import Agent
+from astra.bootstrap import build
 from astra.web import AstraServer
-from astra.core import Registry
-import plugins.airdrop
 
 PORT = 9876
 failures = 0
@@ -52,16 +50,64 @@ def check(label, cond):
 
 
 def main():
-    print("Boot Astra server... ", end="", flush=True)
-    store = Store(":memory:")
-    reg = Registry()
-    reg.add(plugins.airdrop.Plugin)
-    plugin_objs = reg.load(store)
-    agent = Agent(plugin_objs)
-    httpd = AstraServer(("127.0.0.1", PORT), store, agent, plugin_objs)
+    print("Boot Astra server (full stack)... ", end="", flush=True)
+    stack = build(store=Store(":memory:"), with_scheduler=True)
+    store = stack["store"]; agent = stack["agent"]
+    plugin_objs = stack["plugins"]
+    httpd = AstraServer(("127.0.0.1", PORT), store, agent, plugin_objs, stack=stack)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     time.sleep(0.3)
     print("OK\n")
+
+    # 0. core system endpoints (new in the Personal-OS upgrade)
+    s, body = get("/api/health")
+    check("health 200 + ok", s == 200 and body["data"]["ok"] is True
+          and "database" in body["data"]["checks"])
+    s, body = get("/api/plugins")
+    check("plugins listing has airdrop", "airdrop" in
+          [p["slug"] for p in body["data"]])
+    s, body = get("/api/tools")
+    check("tool registry 13 builtins", len(body["data"]["tools"]) >= 13
+          and "search_web" in [t["name"] for t in body["data"]["tools"]])
+    s, body = get("/api/providers")
+    check("providers has offline", "offline" in body["data"]["providers"])
+    s, body = get("/api/events")
+    check("events endpoint returns list", isinstance(body["data"], list))
+
+    # task engine (generic, not plugin tasks)
+    s, body = send("POST", "/api/tasks", {"goal": "daily check", "type": "research"})
+    check("task engine create", s == 201 and body["data"]["id"] > 0)
+    s, body = get("/api/tasks")
+    check("task engine list", any(t["type"] == "research" for t in body["data"]))
+
+    # memory
+    s, body = send("POST", "/api/memory",
+                   {"content": "hamster eligibility tier 1", "category": "note"})
+    check("memory save", s == 201 and body["data"]["id"] > 0)
+    s, body = get("/api/memory/search?query=eligibility&k=1")
+    check("memory search recall", body["data"] and "eligibility" in body["data"][0]["content"])
+
+    # orchestrator (goal -> execution)
+    s, body = send("POST", "/api/agents", {"goal": "amasader kaler kaj ki",
+                                           "sync": True})
+    check("agent goal submit", body["data"]["status"] in ("COMPLETED", "FAILED"))
+    s, body = get("/api/executions")
+    check("executions history", len(body["data"]) >= 1)
+
+    # workflows
+    s, body = send("POST", "/api/workflows",
+                   {"name": "daily check", "steps": [{"tool": "get_health", "name": "h"}]})
+    check("workflow define", s == 201 and body["data"]["id"] > 0)
+    wf_id = body["data"]["id"]
+    s, body = send("POST", f"/api/workflows/{wf_id}/run", {"params": {}})
+    check("workflow run completes", body["data"]["status"] == "completed")
+
+    # scheduler
+    s, body = send("POST", "/api/schedules",
+                   {"name": "morning", "kind": "daily", "value": "09:15"})
+    check("schedule add", s == 201 and body["data"]["enabled"] == 1)
+    s, body = send("PATCH", f"/api/schedules/{body['data']['id']}", {"enabled": False})
+    check("schedule disable", body["data"]["enabled"] == 0)
 
     # 1. static + manifest
     with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/") as r:
@@ -80,7 +126,7 @@ def main():
           [p["slug"] for p in m["data"]["plugins"]])
     tabs = [t["tab"] for t in m["data"]["tabs"]]
     check("manifest has core tabs", "assistant" in tabs and "backup" in tabs
-          and "dashboard" in tabs and "airdrop" in tabs)
+          and "dashboard" in tabs and "live" in tabs and "airdrop" in tabs)
 
     # 2. dashboard (empty)
     s, body = get("/api/dashboard")

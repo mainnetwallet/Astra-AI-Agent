@@ -9,3 +9,5 @@ __pycache__/
 /tmp/
 /tmp
 .DS_Store
+.env
+config.json

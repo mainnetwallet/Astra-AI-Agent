@@ -69,6 +69,21 @@ class Store:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,))
         return r is not None
 
+    # -- versioning / migrations ---------------------------------------------
+    def user_version(self) -> int:
+        r = self.fetchone("PRAGMA user_version")
+        return int((r.get("user_version") if r else 0) or 0)
+
+    def set_user_version(self, version: int) -> None:
+        with self._lock:
+            self._conn.execute(f"PRAGMA user_version = {int(version)}")
+            self._conn.commit()
+
+    def migrate(self, target_version: int | None = None) -> int:
+        """Run pending schema migrations. Returns the new user_version."""
+        from .core.store_migrations import migrate
+        return migrate(self, target_version)
+
     # -- lifecycle -----------------------------------------------------------
     def close(self) -> None:
         self._conn.close()

@@ -22,6 +22,28 @@
 
   <!-- plugin tabviews are created dynamically by astra.js -->
 
+  <!-- ======== LIVE (core) — agent activity, execution state, events ======== -->
+  <section id="tab-live" class="tabview">
+    <div class="panel">
+      <div class="panel-head"><h3>⚡ Agent Live</h3>
+        <span class="badge" id="live-state">IDLE</span></div>
+      <div class="grid2">
+        <div>
+          <h4>🧠 Current execution</h4>
+          <div id="live-exec" class="hint muted">No active execution</div>
+        </div>
+        <div>
+          <h4>🩺 Health</h4>
+          <div id="live-health" class="hint muted">…</div>
+        </div>
+      </div>
+      <h4>🛠️ Tools</h4>
+      <div id="live-tools" class="tools-legend"></div>
+      <h4>📡 Activity feed</h4>
+      <div id="live-feed" class="live-feed"><div class="muted">listening…</div></div>
+    </div>
+  </section>
+
   <!-- ======== ASSISTANT (core) ======== -->
   <section id="tab-assistant" class="tabview">
     <div class="panel chat-panel">

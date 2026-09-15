@@ -170,6 +170,106 @@ $("#import-file").addEventListener("change", async (e) => {
   loaders.dashboard();
 });
 
+/* ------------------------------ LIVE (core tab) ------------------------------ */
+loaders.live = async function () {
+  if (!Astra.plugins._liveLoaded) {
+    Astra.plugins._liveLoaded = true;
+    healthTick();
+    setInterval(healthTick, 15_000);
+    toolsTick();
+    setInterval(toolsTick, 30_000);
+    executionsTick();
+    setInterval(executionsTick, 10_000);
+    if (window.EventSource) openSse();
+    else setInterval(eventsPoll, 3000);   // fallback for older browsers
+  }
+};
+
+async function healthTick() {
+  const r = await api("/api/health");
+  if (!r.ok) return;
+  const h = r.data;
+  const provs = Object.entries(h.checks.providers || {}).map(([n, p]) =>
+    `${n}:${p.healthy ? "ok" : "local"}`).join(" | ") || "—";
+  const plugins = (h.checks.plugins || []).map((p) =>
+    `${p.slug}${p.ok ? "✓" : "✗"}`).join(" ");
+  $("#live-health").innerHTML =
+    `<div>DB <b>${esc(h.checks.database || "?")}</b> · schema ${esc(h.checks.schema_objects ?? "?")}</div>` +
+    `<div>Plugins: ${esc(plugins)}</div>` +
+    `<div>AI: ${esc(provs)}</div>` +
+    (h.checks.scheduler ? `<div>Scheduler: ${esc(h.checks.scheduler.enabled + " of " + h.checks.scheduler.schedules + " active")}</div>` : "");
+}
+
+async function toolsTick() {
+  const r = await api("/api/tools");
+  if (!r.ok) return;
+  const tools = r.data.tools || [];
+  $("#live-tools").innerHTML = tools.length ? tools.map(renderTool).join("") :
+    `<span class="muted">no tools</span>`;
+}
+function renderTool(t) {
+  const risk = t.risk || "read";
+  const badge = { read: "🔒", low_risk_write: "✏️", browser_action: "🌐",
+    financial_action: "💰", system_action: "⚙️", admin: "🛡️" }[risk] || "🔧";
+  return `<span class="tool-chip" title="${esc(t.description || "")} (${esc(risk)})">${badge} ${esc(t.name)}</span>`;
+}
+
+async function executionsTick() {
+  const r = await api("/api/agents");
+  if (!r.ok) return;
+  const rec = r.data.recent || [];
+  const last = rec[0];
+  $("#live-state").textContent = last ? last.status || "IDLE" : "IDLE";
+  if (!last) { $("#live-exec").textContent = "No active execution"; return; }
+  const steps = (last.steps || 0);
+  $("#live-exec").innerHTML =
+    `<div><b>${esc(last.goal || "")}</b> — ${esc(last.status)}</div>` +
+    `<div class="muted">${steps} step(s) · exec ${esc(last.execution_id || "")}</div>` +
+    (rec.length > 1 ? `<div class="muted">last ${rec.length} runs below ↓</div>` : "");
+}
+
+async function eventsPoll() {
+  if (!Astra.plugins._liveLoaded) return;
+  const r = await api("/api/events?limit=30");
+  if (!r.ok) return;
+  renderEvents((r.data || []).slice(-10));
+}
+
+function openSse() {
+  const es = new EventSource("/api/events/stream");
+  es.onmessage = (ev) => {
+    let e = {};
+    try { e = JSON.parse(ev.data); } catch (_) { return; }
+    feedLine(e);
+  };
+  es.onerror = () => { /* browser auto-reconnects */ };
+}
+
+function feedLine(e) {
+  const feed = $("#live-feed");
+  const div = document.createElement("div");
+  div.className = "feed-line";
+  const when = (e.created_at || "").split(" ")[1] || "";
+  const badge = { "task.started": "▶️", "task.completed": "✅",
+    "tool.executed": "🔧", "agent.completed": "🏁", "agent.failed": "❌",
+    "memory.saved": "🧠", "workflow.completed": "📋", "scheduler.tick": "⏰",
+    "task.created": "📌", "execution.started": "🧠" }
+    [e.kind] || "•";
+  div.innerHTML = `${badge} <code>${esc(when)}</code> <b>${esc(e.kind)}</b> ` +
+    `${esc(e.agent || "")} ${feedText(e.data)}`;
+  feed.prepend(div);
+  while (feed.children.length > 60) feed.removeChild(feed.lastChild);
+}
+function feedText(d) {
+  if (!d) return "";
+  const pick = ["goal", "tool", "step", "title", "name", "description", "status", "workflow"];
+  for (const k of pick) if (d[k] && typeof d[k] === "string") return "· " + esc(d[k]);
+  try { return "· " + esc(JSON.stringify(d)); } catch (_) { return ""; }
+}
+function renderEvents(rows) {
+  rows.forEach(feedLine);
+}
+
 /* ---------------------------------- boot ------------------------------------ */
 async function boot() {
   const r = await api("/api/manifest");

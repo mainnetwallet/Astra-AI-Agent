@@ -21,3 +21,10 @@ def make_agent():
 def make_plugin():
     store = Store(":memory:")
     return AirdropPlugin(store)
+
+
+def make_stack(**kw):
+    """Full stack (orchestrator, tools, memory, workflows, scheduler, …) on a
+    fresh in-memory store — the same wiring run.py uses."""
+    from astra.bootstrap import build
+    return build(store=Store(":memory:"), **kw)

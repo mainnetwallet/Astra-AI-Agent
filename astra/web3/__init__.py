@@ -1,0 +1,1 @@
+"""Astra web3 package — read-only chain/RPC/wallet abstractions."""

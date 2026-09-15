@@ -1,0 +1,1 @@
+"""Astra AI package — provider abstraction + router with fallback."""

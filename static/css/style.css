@@ -142,3 +142,10 @@ a[class*="hl-"] { pointer-events: none; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
 .chip { background: var(--panel2); border: 1px solid var(--line); color: var(--accent2); border-radius: 999px; padding: 5px 11px; cursor: pointer; font-size: 12px; }
 .chip:hover { border-color: var(--accent); }
+
+/* live tab */
+.badge { background: var(--panel2); border: 1px solid var(--line); padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.tools-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.tool-chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 11px; white-space: nowrap; }
+.live-feed { max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.feed-line { border-bottom: 1px solid var(--line); padding: 4px 0; word-break: break-word; }

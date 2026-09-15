@@ -26,6 +26,7 @@ from astra.ai.registry import build_providers, ProviderRegistry
 from astra.ai.models import ModelRegistry
 from astra.ai.discovery import ModelDiscovery
 from astra.agents import SPECIALISTS, AgentManager
+from astra.browser import BrowserManager, register_browser_tools
 from astra.memory.memory import MemorySystem, ExperienceStore
 from astra.tools.registry import ToolRegistry
 from astra.tools import builtins
@@ -78,7 +79,8 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     # core subsystems
     events = EventBus(store)
     policy = Policy(granted=config.getlist("GRANTED_PERMISSIONS",
-                                           default=["read", "low_risk_write"]))
+                                           default=["read", "low_risk_write",
+                                                    "browser_action"]))
     memory = MemorySystem(store, events)
     experiences = ExperienceStore(store, events)
     tasks = TaskEngine(store, events)
@@ -86,6 +88,8 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     # tools
     registry = ToolRegistry(policy=policy, events=events, config=config)
     builtins.register_builtins(registry)
+    browser_manager = BrowserManager(config=config, events=events)
+    register_browser_tools(registry, browser_manager)
     registry.register_plugin_tools(plugins)
 
     # AI providers + router
@@ -146,6 +150,7 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
         "scheduler": scheduler, "agent": agent,
         "model_registry": model_registry, "provider_registry": provider_registry,
         "discovery": discovery, "agent_manager": agent_manager,
+        "browser_manager": browser_manager,
     }
 
 

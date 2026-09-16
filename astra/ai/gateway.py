@@ -525,20 +525,46 @@ def _build_connection(cls, config=None):
 
 
 class AstraAIGateway:
-    """Automatic-fallback gateway over the four connections.
+    """Multi-provider, multi-model intelligent-routing gateway.
 
-    A request enters the gateway once and is attempted on Gemini, then Groq,
-    then Cloudflare, then Bedrock — the first successful reply wins; the same
-    messages/context continue with every subsequent attempt (no restart).
+    Astra AI Gateway has exactly four connections (Gemini, Groq, Cloudflare,
+    Bedrock), each of which may expose multiple models (§1). For every
+    request the Gateway:
+
+        1. classifies the request (simple/general/reasoning/coding/
+           long_context/structured_output/tool_use/vision) — locally,
+           deterministically, without spending a model call on it (§10);
+        2. filters the full provider+model catalog down to targets that are
+           actually suitable (capability/context) and not in cooldown (§2,
+           §6, §8);
+        3. prefers the last successful target when it's still suitable and
+           healthy, otherwise ranks the rest by capability fit, health,
+           latency and configured priority (§3, §5, §9, §15);
+        4. attempts targets in that order — a model-level failure only
+           deprioritizes that (provider, model) pair, never the whole
+           connection (§6/§7) — until one succeeds or every suitable target
+           has been tried (bounded; no infinite retries).
+
+    A caller may still request a *specific* model explicitly (`model=...`);
+    that bypasses the intelligent selection entirely and falls back only
+    across connections that actually serve it, in configured order (§17) —
+    exactly the original, simpler fallback behavior this class always had.
+
+    See astra/ai/gateway_routing.py for the actual classification/
+    scoring/health/persistence logic — this class only owns HTTP execution
+    and the attempt loop.
     """
 
-    def __init__(self, connections: list | None = None, config=None):
+    def __init__(self, connections: list | None = None, config=None,
+                store=None, events=None):
         self.name = "astra_ai_gateway"
         self.config = config
+        self.events = events
         self.connections = []
         self.last_connection = ""     # name of the most recent successful call
         self.last_model = ""
         self.last_attempts = 0
+        self.last_category = ""       # classification of the most recent request
         if connections is not None:
             self.connections = list(connections)
         elif config is not None:
@@ -546,6 +572,13 @@ class AstraAIGateway:
                 conn = _build_connection(cls, config)
                 if conn is not None:
                     self.connections.append(conn)
+        from astra.ai.gateway_routing import (GatewayRoutingState,
+                                              build_gateway_catalog)
+        self.routing_state = GatewayRoutingState(store)
+        self._catalog = build_gateway_catalog(self.connections)
+
+    def attach_events(self, events) -> None:
+        self.events = events
 
     # -- capability -----------------------------------------------------------
     @property
@@ -568,13 +601,15 @@ class AstraAIGateway:
                 continue
         return bool(self.connections)
 
-    # -- the four-provider fallback ------------------------------------------
+    # -- explicit-model fallback (§17: user-requested model is respected) ----
     def _try_connections(self, fn, *, model, messages, max_tokens):
         """Run `fn` over the connections in order; first success wins.
 
-        Tracks which connection/model served the request (`last_connection`,
-        `last_model`) and how many connections were attempted before success
-        (`last_attempts`) so callers can report the real serving path.
+        Used only when the caller names a specific model. Tracks which
+        connection/model served the request (`last_connection`,
+        `last_model`) and how many connections were attempted before
+        success (`last_attempts`) so callers can report the real serving
+        path.
         """
         last_error = ""
         attempts = 0
@@ -604,30 +639,175 @@ class AstraAIGateway:
         raise ProviderError(
             f"Astra AI Gateway: all four services failed —— {last_error}")
 
+    # -- intelligent multi-provider/multi-model selection (§2/§15) -----------
+    def _classification_inputs(self, messages) -> tuple[str, int, bool]:
+        """Classification text comes ONLY from user-role content — a
+        system/instruction message (e.g. GATEWAY_UNDERSTANDING_SYSTEM_PROMPT
+        below, or any caller's own system prompt) is Gateway/Provider
+        control text, not the user's actual request, and must never leak
+        into category detection (a system prompt that merely *mentions*
+        "structured"/"code" must not force a structured_output/coding hard
+        capability filter). `context_tokens`, by contrast, sums every
+        message — the full context genuinely has to fit the model."""
+        texts, vision, chars = [], False, 0
+        for m in messages or []:
+            if not isinstance(m, dict):
+                continue
+            content = m.get("content", "")
+            is_user = m.get("role", "user") == "user"
+            if isinstance(content, str):
+                chars += len(content)
+                if is_user:
+                    texts.append(content)
+            elif isinstance(content, list):
+                # multi-part content (e.g. text + image blocks) — a list
+                # content shape is the one clear, non-guessy vision signal
+                # available at this layer without inventing capabilities.
+                vision = True
+                for block in content:
+                    if isinstance(block, dict) and isinstance(block.get("text"), str):
+                        chars += len(block["text"])
+                        if is_user:
+                            texts.append(block["text"])
+        text = " ".join(texts)
+        context_tokens = chars // 4
+        return text, context_tokens, vision
+
+    def _select_order(self, messages, max_tokens):
+        from astra.ai.gateway_routing import (classify_gateway_request,
+                                              eligible_targets, rank_targets,
+                                              prefer_last_successful)
+        text, context_tokens, vision = self._classification_inputs(messages)
+        category = classify_gateway_request(text, vision=vision,
+                                            context_tokens=context_tokens)
+        self.last_category = category
+        targets = eligible_targets(self._catalog, self.routing_state,
+                                   category=category,
+                                   context_tokens=context_tokens)
+        ranked = rank_targets(targets, category=category)
+        ranked = prefer_last_successful(ranked, self.routing_state.last_successful())
+        return category, ranked
+
+    def _emit(self, kind: str, **data) -> None:
+        if self.events:
+            try:
+                self.events.emit(kind, agent="gateway", **data)
+            except Exception:
+                pass
+
     def chat(self, messages, model=None, max_tokens=500) -> str:
-        return self._try_connections(
-            lambda c, m: c.chat(messages, model=m, max_tokens=max_tokens),
-            model=model, messages=messages, max_tokens=max_tokens)
+        if model:
+            return self._try_connections(
+                lambda c, m: c.chat(messages, model=m, max_tokens=max_tokens),
+                model=model, messages=messages, max_tokens=max_tokens)
+
+        category, ranked = self._select_order(messages, max_tokens)
+        self._emit("astra_gateway.request", category=category,
+                   candidates=len(ranked))
+        if not ranked:
+            self.last_connection = ""
+            self.last_model = ""
+            self.last_attempts = 0
+            raise ProviderError(
+                f"Astra AI Gateway: no suitable provider+model available "
+                f"for this request (category={category})")
+
+        last_error = ""
+        attempts = 0
+        for conn, target_model, health in ranked:
+            attempts += 1
+            self.last_attempts = attempts
+            start = time.perf_counter()
+            try:
+                result = conn.chat(messages, model=target_model.model_id,
+                                   max_tokens=max_tokens)
+            except (ProviderError, TimeoutError) as e:
+                last_error = getattr(e, "message", None) or str(e)
+                self.routing_state.record_failure(target_model.provider,
+                                                  target_model.model_id)
+                self._emit("astra_gateway.error", provider=target_model.provider,
+                          model=target_model.model_id, reason=last_error)
+                continue
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+                self.routing_state.record_failure(target_model.provider,
+                                                  target_model.model_id)
+                self._emit("astra_gateway.error", provider=target_model.provider,
+                          model=target_model.model_id, reason=last_error)
+                continue
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self.routing_state.record_success(target_model.provider,
+                                              target_model.model_id, latency_ms)
+            self.last_connection = conn.name
+            self.last_model = target_model.model_id
+            self._emit("astra_gateway.success", provider=target_model.provider,
+                      model=target_model.model_id, latency_ms=round(latency_ms, 1))
+            return result
+        self.last_connection = ""
+        self.last_model = ""
+        raise ProviderError(
+            f"Astra AI Gateway: all suitable targets failed —— {last_error}")
 
     def stream(self, messages, model=None, max_tokens=500):
-        # Generator fallback: first connection's stream that starts wins.
-        for conn in self.connections:
-            try:
-                call_model = model
-                if call_model and (conn.models or []) and \
-                        call_model not in conn.models:
+        if model:
+            # Generator fallback: first connection's stream that starts wins
+            # (unchanged explicit-model path — §17).
+            for conn in self.connections:
+                try:
+                    call_model = model
+                    if call_model and (conn.models or []) and \
+                            call_model not in conn.models:
+                        continue
+                    for chunk in conn.stream(messages, model=call_model,
+                                             max_tokens=max_tokens):
+                        yield chunk
+                    return
+                except (ProviderError, TimeoutError):
                     continue
-                for chunk in conn.stream(messages, model=call_model,
+                except Exception:
+                    continue
+            return
+
+        category, ranked = self._select_order(messages, max_tokens)
+        self._emit("astra_gateway.request", category=category,
+                   candidates=len(ranked))
+        for conn, target_model, health in ranked:
+            start = time.perf_counter()
+            try:
+                for chunk in conn.stream(messages, model=target_model.model_id,
                                          max_tokens=max_tokens):
                     yield chunk
-                return
-            except (ProviderError, TimeoutError):
+            except (ProviderError, TimeoutError) as e:
+                self.routing_state.record_failure(target_model.provider,
+                                                  target_model.model_id)
+                self._emit("astra_gateway.error", provider=target_model.provider,
+                          model=target_model.model_id,
+                          reason=getattr(e, "message", None) or str(e))
                 continue
-            except Exception:
+            except Exception as e:
+                self.routing_state.record_failure(target_model.provider,
+                                                  target_model.model_id)
+                self._emit("astra_gateway.error", provider=target_model.provider,
+                          model=target_model.model_id,
+                          reason=f"{type(e).__name__}: {e}")
                 continue
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self.routing_state.record_success(target_model.provider,
+                                              target_model.model_id, latency_ms)
+            self.last_connection = conn.name
+            self.last_model = target_model.model_id
+            self._emit("astra_gateway.success", provider=target_model.provider,
+                      model=target_model.model_id, latency_ms=round(latency_ms, 1))
+            return
+        self.last_connection = ""
+        self.last_model = ""
 
     # -- health (reported separately, never as a provider) --------------------
     def health(self) -> dict:
+        model_health_by_conn: dict[str, dict] = {}
+        for conn, model in self._catalog:
+            h = self.routing_state.get_health(model.provider, model.model_id)
+            model_health_by_conn.setdefault(conn.name, {})[model.model_id] = h.to_dict()
         out = {}
         for c in self.connections:
             pool = getattr(c, "pool", None)
@@ -640,20 +820,40 @@ class AstraAIGateway:
                 "state": state,
                 "models": list(c.models or []),
                 "base_url": getattr(c, "base_url", ""),
+                "model_health": model_health_by_conn.get(c.name, {}),
             }
         return out
 
+    def routing_status(self) -> dict:
+        """Gateway-routing-specific status: last successful target + every
+        tracked (provider, model) health row. Separate from `health()` so
+        that method's shape (consumed by AstraRouter.gateway_health()) never
+        has to change."""
+        return {
+            "last_category": self.last_category,
+            "last_connection": self.last_connection,
+            "last_model": self.last_model,
+            "last_attempts": self.last_attempts,
+            **self.routing_state.snapshot(),
+        }
 
-def build_astra_ai_gateway(config=None) -> AstraAIGateway | None:
+
+def build_astra_ai_gateway(config=None, store=None,
+                          events=None) -> AstraAIGateway | None:
     """Build the Astra AI Gateway iff at least one connection is configured.
 
     Returns None when no GW_* connection credentials are set, mirroring the
     old "unconfigured means absent" convention. The returned object is the
     router's `gateway`; it is never added to ProviderRegistry.
+
+    `store`, when given, is the project's existing SQLite Store — used only
+    to persist last-successful-target and per-model health (§14) across
+    restarts; no new database is introduced, and no credentials are ever
+    written to it.
     """
     from astra.core.config import Config
     config = config or Config()
-    gw = AstraAIGateway(config=config)
+    gw = AstraAIGateway(config=config, store=store, events=events)
     if not gw.connections:
         return None
     return gw

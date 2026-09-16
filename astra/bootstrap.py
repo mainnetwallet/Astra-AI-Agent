@@ -160,7 +160,12 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     # Isolation is absolute in both directions.
     from astra.ai.gateway import (build_astra_ai_gateway,
                                   build_gateway_request_intelligence)
-    gateway = build_astra_ai_gateway(config)
+    # `store` lets the Gateway persist its own last-successful-target and
+    # per-model health across restarts (§14) — the same SQLite database
+    # everything else uses, no new one. `events` lets it emit its own
+    # "astra_gateway.*" events, kept distinct from the router's "router.*"/
+    # "ai.*" events (see astra/core/events.py).
+    gateway = build_astra_ai_gateway(config, store=store, events=events)
     router = AstraRouter(providers=providers, config=config, store=store,
                          preference=config.get("AI_ROUTING_PREFERENCE", "balanced"),
                          registry=model_registry, gateway=gateway)

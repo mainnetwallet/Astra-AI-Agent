@@ -316,5 +316,23 @@ class TestAdapterConfiguration(unittest.TestCase):
         self.assertNotIn("super-secret-value-123", dumped)
 
 
+    def test_agentrouter_gateway_configured_distinctly_from_internal_router(self):
+        """The agentrouter.org adapter is a distinct registry entry from
+        Astra's own AgentRouter routing engine, and uses plain OpenAI-
+        compatible auth with no special/spoofed headers."""
+        from astra.ai.adapters.agentrouter_gateway import AgentRouterGatewayAdapter
+        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
+        adapter = AgentRouterGatewayAdapter(config=cfg)
+        self.assertEqual(adapter.base_url, "https://agentrouter.org/v1")
+        self.assertEqual(adapter.extra_headers, {})
+        self.assertTrue(bool(adapter.pool))
+
+    def test_agentrouter_gateway_registered_and_absent_when_unconfigured(self):
+        from astra.ai.registry import build_providers
+        self.assertIsNone(build_providers(config=self._config()).get("agentrouter_gateway"))
+        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
+        self.assertIsNotNone(build_providers(config=cfg).get("agentrouter_gateway"))
+
+
 if __name__ == "__main__":
     unittest.main()

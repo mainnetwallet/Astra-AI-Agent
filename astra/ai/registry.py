@@ -14,6 +14,7 @@ from astra.ai.provider import OfflineProvider
 
 # api-keys env var per provider (the spec's normalized naming)
 KEYS_ENV = {
+    "agentrouter_gateway": "AGENTROUTER_API_KEYS",
     "gemini": "GEMINI_API_KEYS", "groq": "GROQ_API_KEYS",
     "mistral": "MISTRAL_API_KEYS", "openrouter": "OPENROUTER_API_KEYS",
     "cerebras": "CEREBRAS_API_KEYS", "cloudflare": "CLOUDFLARE_API_KEYS",

@@ -7,6 +7,7 @@ The AgentRouter never touches provider HTTP — it scores the adapters here.
 from __future__ import annotations
 
 from .base import CompatibleAdapter
+from .agentrouter_gateway import AgentRouterGatewayAdapter
 from .bedrock import BedrockAdapter, BedrockCredentialPool, sign_v4
 from .cloudflare import CloudflareAdapter
 from .cerebras import CerebrasAdapter
@@ -19,7 +20,8 @@ from .sambanova import SambaNovaAdapter
 from .zai import ZAIAdapter
 
 __all__ = [
-    "CompatibleAdapter", "BedrockAdapter", "BedrockCredentialPool", "sign_v4",
+    "CompatibleAdapter", "AgentRouterGatewayAdapter",
+    "BedrockAdapter", "BedrockCredentialPool", "sign_v4",
     "CloudflareAdapter", "CerebrasAdapter", "CohereAdapter", "GeminiAdapter",
     "GroqAdapter", "MistralAdapter", "OpenRouterAdapter", "SambaNovaAdapter",
     "ZAIAdapter",
@@ -27,6 +29,7 @@ __all__ = [
 
 # provider name -> (adapter class, models env, api-keys env, base env)
 ADAPTERS: dict[str, type] = {
+    "agentrouter_gateway": AgentRouterGatewayAdapter,
     "gemini": GeminiAdapter,
     "groq": GroqAdapter,
     "mistral": MistralAdapter,

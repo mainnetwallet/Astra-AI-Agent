@@ -56,6 +56,35 @@ class _ShimPool:
         return self.ok
 
 
+class _FakeGatewayConn:
+    """Stand-in for one Astra AI Gateway connection (adapter surface only).
+
+    Keeps the router/gateway integration tests offline: same contract the
+    real connections (Gemini/Groq/Cloudflare/Bedrock) expose — name, models,
+    pool truthiness, chat(). `fail_times` simulates the first N calls failing
+    so automatic fallback to the next connection can be exercised.
+    """
+    name = "fake-gw-conn"
+    base_url = ""
+
+    def __init__(self, name=None, models=None, fail_times=0, base_url=""):
+        self.name = name or self.name
+        self.models = models or ["m0"]
+        self.base_url = base_url
+        self.pool = _ShimPool(True)
+        self._calls = 0
+        self.fail_times = fail_times
+
+    def chat(self, messages, model=None, max_tokens=500):
+        self._calls += 1
+        if self._calls <= self.fail_times:
+            raise ProviderError("simulated failure")
+        return f"reply-from-{self.name}"
+
+    def health_check(self):
+        return True
+
+
 def _router(*providers, **kw):
     from astra.ai.router import AgentRouter
     return AgentRouter(list(providers), max_retries=0, **kw)
@@ -242,7 +271,7 @@ class TestAgentRouter(unittest.TestCase):
 class TestDynamicProviderModelRouting(unittest.TestCase):
     """Coverage for the dynamic provider+model routing upgrade: capability
     matching, health/cooldown-aware selection, model-aware failover,
-    deterministic tie-breaking, and the AgentRouter.org gateway fallback."""
+    deterministic tie-breaking, and the Astra AI Gateway fallback."""
 
     def _config(self, **env):
         cfg = Config()
@@ -350,7 +379,7 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         for name in expected:
             self.assertIsNotNone(reg.get(name))
         self.assertIsNone(reg.get("agentrouter"))
-        self.assertIsNone(reg.get("agentrouter_gateway"))
+        self.assertIsNone(reg.get("astra_ai_gateway"))
 
     # 11. secrets never exposed in errors
     def test_provider_error_never_contains_api_key(self):
@@ -364,28 +393,84 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
             self.assertNotIn(secret, str(e))
             self.assertNotIn(secret, e.message or "")
 
-    # 12. AgentRouter.org gateway still works as a router fallback
+    # 12. Astra AI Gateway used only as a last-resort router fallback
     def test_gateway_used_as_last_resort_fallback_when_providers_fail(self):
+        from astra.ai.gateway import AstraAIGateway
         from astra.ai.router import RoutingRequest
         dead = FakeAIProvider(name="dead", healthy=False)
-        gateway = FakeAIProvider(name="agentrouter_gateway", models=["deepseek-v4-flash"])
+        gateway = AstraAIGateway(
+            connections=[_FakeGatewayConn(name="astra-gw-gemini",
+                                          models=["gw-model-1"])])
         r = AgentRouter([dead], max_retries=0, gateway=gateway)
         rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
         self.assertTrue(rr.ok)
-        self.assertEqual(rr.provider, "agentrouter_gateway")
+        self.assertEqual(rr.provider, "astra_ai_gateway")
         self.assertTrue(rr.fallback_used)
-        self.assertEqual(rr.route_reason.get("preference"), "agentrouter_gateway_fallback")
+        self.assertEqual(rr.route_reason.get("preference"), "astra_ai_gateway_fallback")
         # never counted among ordinary provider health/dashboard entries
-        self.assertNotIn("agentrouter_gateway", r.health())
+        self.assertNotIn("astra_ai_gateway", r.health())
         self.assertEqual(r.gateway_health()["state"], "healthy")
 
-    # 13. no Claude CLI impersonation
-    def test_gateway_client_sends_no_special_or_spoofed_headers(self):
-        from astra.ai.agentrouter_gateway import AgentRouterGatewayClient
-        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
-        client = AgentRouterGatewayClient(config=cfg)
-        self.assertEqual(client.extra_headers, {})
-        self.assertNotIn("anthropic", client.base_url.lower())
+    # 12b. the four-connection automatic fallback order
+    def test_gateway_automatic_fallback_over_four_connections(self):
+        from astra.ai.gateway import AstraAIGateway, GATEWAY_CONNECTIONS
+        from astra.ai.router import RoutingRequest
+        # canonical fallback order is Gemini → Groq → Cloudflare → Bedrock
+        names = [c.name for c in GATEWAY_CONNECTIONS]
+        self.assertEqual(names, ["astra-gw-gemini", "astra-gw-groq",
+                                 "astra-gw-cloudflare", "astra-gw-bedrock"])
+        # first three connections fail; the fourth serves the request
+        conns = [_FakeGatewayConn(name="astra-gw-gemini", models=["m"], fail_times=1),
+                 _FakeGatewayConn(name="astra-gw-groq", models=["m"], fail_times=1),
+                 _FakeGatewayConn(name="astra-gw-cloudflare", models=["m"], fail_times=1),
+                 _FakeGatewayConn(name="astra-gw-bedrock", models=["m"])]
+        gateway = AstraAIGateway(connections=conns)
+        self.assertTrue(gateway.is_usable())
+        text = gateway.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(text, "reply-from-astra-gw-bedrock")
+        self.assertEqual(gateway.last_connection, "astra-gw-bedrock")
+        self.assertEqual(gateway.last_attempts, 4)
+        self.assertEqual(gateway.last_model, "m")
+
+    # 12c. total gateway failure reports honestly (every connection tried)
+    def test_gateway_all_fail_reports_error(self):
+        from astra.ai.gateway import AstraAIGateway
+        from astra.core.exceptions import ProviderError
+        conns = [_FakeGatewayConn(name="astra-gw-gemini", models=["m"], fail_times=99),
+                 _FakeGatewayConn(name="astra-gw-groq", models=["m"], fail_times=99)]
+        gateway = AstraAIGateway(connections=conns)
+        with self.assertRaises(ProviderError):
+            gateway.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(gateway.last_connection, "")
+        self.assertEqual(gateway.last_attempts, 2)
+
+    # 13. Gateway connections carry the independent GW_* config, never the
+    #     provider adapters' GEMINI_*/GROQ_* envs (configuration separation).
+    def test_gateway_config_fully_separate_from_provider_config(self):
+        from astra.ai.gateway import build_astra_ai_gateway
+        cfg = self._config(
+            GW_GEMINI_API_KEYS="gw-gemini-key", GW_GEMINI_MODELS="gw-model-a",
+            GW_GEMINI_BASE_URL="https://gw.example/v1/gemini",
+            GW_GROQ_API_KEYS="gw-groq-key", GW_GROQ_MODELS="gw-model-b",
+            GW_GROQ_BASE_URL="https://gw.example/v1/groq",
+            GEMINI_API_KEYS="provider-gemini-key", GEMINI_MODELS="provider-model",
+            GEMINI_BASE_URL="https://provider.example/v1/gemini",
+            GROQ_API_KEYS="provider-groq-key", GROQ_MODELS="provider-model",
+            GROQ_BASE_URL="https://provider.example/v1/groq")
+        gw = build_astra_ai_gateway(config=cfg)
+        self.assertIsNotNone(gw)
+        names = {c.name: c for c in gw.connections}
+        gem, groq = names["astra-gw-gemini"], names["astra-gw-groq"]
+        # gateway reads GW_* values, not provider GEMINI_*/GROQ_* values
+        self.assertNotEqual(gem.models, ["provider-model"])
+        self.assertEqual(gem.models, ["gw-model-a"])
+        self.assertEqual(gem.base_url, "https://gw.example/v1/gemini")
+        self.assertNotEqual(groq.models, ["provider-model"])
+        self.assertEqual(groq.models, ["gw-model-b"])
+        self.assertEqual(groq.base_url, "https://gw.example/v1/groq")
+        # and the builder never touches the provider env names either
+        self.assertEqual(gem.api_keys_env, "GW_GEMINI_API_KEYS")
+        self.assertEqual(groq.api_keys_env, "GW_GROQ_API_KEYS")
 
     # 14. empty/unconfigured credentials handled gracefully
     def test_unconfigured_provider_credentials_yield_graceful_failure(self):
@@ -528,47 +613,49 @@ class TestAdapterConfiguration(unittest.TestCase):
         self.assertNotIn("super-secret-value-123", dumped)
 
 
-    def test_agentrouter_gateway_client_distinct_from_internal_router(self):
-        """The agentrouter.org client is a distinct object from Astra's own
-        AgentRouter routing engine, and uses plain OpenAI-compatible auth
-        with no special/spoofed headers."""
-        from astra.ai.agentrouter_gateway import AgentRouterGatewayClient
-        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
-        client = AgentRouterGatewayClient(config=cfg)
-        self.assertEqual(client.base_url, "https://agentrouter.org/v1")
-        self.assertEqual(client.extra_headers, {})
-        self.assertTrue(bool(client.pool))
-
-    def test_agentrouter_gateway_never_in_provider_registry(self):
-        """AgentRouter.org is never a ProviderRegistry entry, configured or not
-        — it is not a provider (see astra/ai/agentrouter_gateway.py)."""
-        from astra.ai.registry import build_providers
-        self.assertIsNone(build_providers(config=self._config()).get("agentrouter_gateway"))
-        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
-        self.assertIsNone(build_providers(config=cfg).get("agentrouter_gateway"))
-        self.assertNotIn("agentrouter_gateway", build_providers(config=cfg).names())
-
-    def test_agentrouter_gateway_builder_absent_when_unconfigured(self):
-        from astra.ai.agentrouter_gateway import build_agentrouter_gateway
-        self.assertIsNone(build_agentrouter_gateway(config=self._config()))
-        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
-        gw = build_agentrouter_gateway(config=cfg)
+    def test_astra_ai_gateway_distinct_from_internal_router(self):
+        """The Astra AI Gateway is a distinct object from Astra's own
+        AgentRouter routing engine, built from its own GW_* config only."""
+        from astra.ai.gateway import build_astra_ai_gateway
+        cfg = self._config(GW_GEMINI_API_KEYS="fake-key-for-test",
+                           GW_GEMINI_MODELS="gw-model-1")
+        gw = build_astra_ai_gateway(config=cfg)
         self.assertIsNotNone(gw)
-        self.assertEqual(gw.name, "agentrouter_gateway")
+        self.assertEqual(gw.name, "astra_ai_gateway")
+        self.assertEqual([c.name for c in gw.connections], ["astra-gw-gemini"])
+        self.assertEqual(gw.connections[0].models, ["gw-model-1"])
+        self.assertEqual(gw.connections[0].base_url_env, "GW_GEMINI_BASE_URL")
 
-    def test_agentrouter_gateway_used_only_as_router_fallback_not_a_provider(self):
+    def test_astra_ai_gateway_never_in_provider_registry(self):
+        """The Astra AI Gateway is never a ProviderRegistry entry, configured
+        or not — it is not a provider (see astra/ai/gateway.py)."""
+        from astra.ai.registry import build_providers
+        self.assertIsNone(build_providers(config=self._config()).get("astra_ai_gateway"))
+        cfg = self._config(GW_GEMINI_API_KEYS="fake-key-for-test")
+        self.assertIsNone(build_providers(config=cfg).get("astra_ai_gateway"))
+        self.assertNotIn("astra_ai_gateway", build_providers(config=cfg).names())
+
+    def test_astra_ai_gateway_builder_absent_when_unconfigured(self):
+        from astra.ai.gateway import build_astra_ai_gateway
+        self.assertIsNone(build_astra_ai_gateway(config=self._config()))
+        # provider-only credentials do NOT enable the gateway
+        cfg = self._config(GEMINI_API_KEYS="fake-key-for-test",
+                           GEMINI_MODELS="provider-model")
+        self.assertIsNone(build_astra_ai_gateway(config=cfg))
+
+    def test_astra_ai_gateway_used_only_as_router_fallback_not_a_provider(self):
         """The gateway, when configured, is reachable only via
         AgentRouter.gateway — never mixed into router.providers."""
+        from astra.ai.gateway import AstraAIGateway
         from astra.ai.router import AgentRouter
-        from astra.ai.agentrouter_gateway import AgentRouterGatewayClient
-        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
-        gw = AgentRouterGatewayClient(config=cfg)
-        r = AgentRouter(providers=[], config=cfg, max_retries=0, gateway=gw)
+        gw = AstraAIGateway(
+            connections=[_FakeGatewayConn(name="astra-gw-gemini", models=["m"])])
+        r = AgentRouter(providers=[], max_retries=0, gateway=gw)
         self.assertEqual(r.providers, [])
         self.assertIs(r.gateway, gw)
         health = r.gateway_health()
         self.assertIn("state", health)
-        self.assertNotIn("agentrouter_gateway", r.health())
+        self.assertNotIn("astra_ai_gateway", r.health())
 
 
 class TestProviderModelRoutingFix(unittest.TestCase):

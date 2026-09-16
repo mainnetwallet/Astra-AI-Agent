@@ -220,7 +220,7 @@ function logCategories(kind, data) {
   const cats = new Set();
   const head = (kind || "").split(".")[0];
   if (head === "router" || head === "credential") cats.add("router");
-  if (head === "agentrouter") cats.add("agentrouter");
+  if (head === "astra_gateway") cats.add("gateway");
   if (head === "provider") cats.add("providers");
   if (head === "ai") cats.add("api");
   if (kind === "router.fallback" || (data && data.fallback)) cats.add("fallback");
@@ -304,75 +304,40 @@ loaders.providers = async function () {
     btn.dataset.hooked = "1";
     btn.onclick = async () => { await post("/api/v1/models/refresh"); loaders.providers(); };
   }
-  renderAgentRouterCard(r.ok ? (r.data.agentrouter_core || null) : null);
-  initAgentRouterTestButton();
+  renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
 };
 
-/* -------------------------- AgentRouter.org gateway ------------------------- */
-function renderAgentRouterCard(core) {
-  const card = $("#agentrouter-card");
+/* -------------------------- Astra AI Gateway ------------------------- */
+const GATEWAY_LABELS = {
+  "astra-gw-gemini": "Gemini",
+  "astra-gw-groq": "Groq",
+  "astra-gw-cloudflare": "Cloudflare",
+  "astra-gw-bedrock": "Bedrock",
+};
+function renderGatewayCard(core) {
+  const card = $("#gateway-card");
   if (!card) return;
-  if (!core || core.state === "not_configured") {
+  const conns = Object.entries((core && core.connections) || {});
+  if (!core || core.state === "not_configured" || conns.length === 0) {
     card.innerHTML = `<div class="row"><span class="status-dot warn"></span>` +
       `<b>Not configured</b></div>` +
-      `<div class="hint muted">Set AGENTROUTER_API_KEYS to enable this gateway.</div>`;
+      `<div class="hint muted">Set any GW_*_API_KEYS / GW_*_CREDENTIALS to enable ` +
+      `the Astra AI Gateway (fallback: Gemini → Groq → Cloudflare → Bedrock).</div>`;
     return;
   }
-  const dot = core.state === "healthy" ? "ok" : core.state === "degraded" ? "warn" : "bad";
-  card.innerHTML =
-    `<div class="row"><span class="status-dot ${dot}"></span>` +
+  const dots = { healthy: "ok", degraded: "warn", not_configured: "warn", unhealthy: "bad" };
+  const rows = conns.map(([key, c]) => {
+    const label = GATEWAY_LABELS[key] || key;
+    const dot = dots[c.state] || "warn";
+    const models = (c.models || []).length ? `${(c.models || []).length} model(s)` : "no models";
+    return `<div class="card"><div class="card-v"><span class="status-dot ${dot}"></span>` +
+      `<b>${esc(label)}</b></div><div class="card-k muted">${esc(c.state)} · ${models}</div></div>`;
+  }).join("");
+  const dot = dots[core.state] || "warn";
+  card.innerHTML = `<div class="row"><span class="status-dot ${dot}"></span>` +
     `<b>${esc(core.state)}</b>` +
-    `<span class="muted">· ${(core.models || []).length} model(s) configured</span></div>`;
-}
-
-function initAgentRouterTestButton() {
-  const btn = $("#btn-agentrouter-test");
-  if (!btn || btn.dataset.hooked) return;
-  btn.dataset.hooked = "1";
-  btn.addEventListener("click", async () => {
-    const out = $("#agentrouter-result");
-    btn.disabled = true;
-    out.textContent = "Testing…";
-    try {
-      const r = await post("/api/agentrouter/health", { all_keys: true, all_models: true });
-      out.innerHTML = renderAgentRouterTestResult(r);
-    } catch (err) {
-      out.textContent = "✗ AgentRouter test failed to run — " + err;
-    } finally {
-      btn.disabled = false;
-    }
-  });
-}
-
-function renderAgentRouterTestResult(r) {
-  if (!r.ok) return `<span class="status-dot bad"></span>✗ ${esc(r.error || "request failed")}`;
-  const d = r.data || {};
-  if (!d.configured) {
-    return `<span class="status-dot warn"></span>○ Not configured — set AGENTROUTER_API_KEYS`;
-  }
-  const lines = [];
-  if (d.status === "ok") {
-    lines.push(`<div><span class="status-dot ok"></span>✓ Connected</div>`);
-    lines.push(`<div>✓ Authenticated</div>`);
-    lines.push(`<div>✓ Model: ${esc(d.model || "")}</div>`);
-    lines.push(`<div>✓ Response received — latency ${esc(String(d.latency_ms))} ms</div>`);
-  } else {
-    lines.push(`<div><span class="status-dot bad"></span>✗ AgentRouter API failed</div>`);
-    lines.push(`<div>${esc(d.detail || d.status || "unknown error")}</div>`);
-    lines.push(`<div class="muted">configured: ${d.configured} · reachable: ${d.reachable} · ` +
-      `authenticated: ${d.authenticated}</div>`);
-  }
-  if (d.keys && d.keys.length) {
-    lines.push(`<div class="muted" style="margin-top:6px">` +
-      d.keys.map((k) => `${esc(k.key)} → ${k.status === "success" ? "✓ success" : "✗ failed"}`)
-        .join(" &nbsp;·&nbsp; ") + `</div>`);
-  }
-  if (d.models && d.models.length) {
-    lines.push(`<div class="muted" style="margin-top:6px">` +
-      d.models.map((m) => `${m.working ? "✓" : "✗"} ${esc(m.model)}`).join(" &nbsp;·&nbsp; ") +
-      `</div>`);
-  }
-  return lines.join("");
+    `<span class="muted">· ${(core.models || []).length} model(s) across ${conns.length} connection(s)</span></div>` +
+    `<div class="cards mini" style="margin-top:8px">${rows}</div>`;
 }
 
 /* -------------------------------- router (core) ---------------------------- */
@@ -496,8 +461,8 @@ const LOG_BADGES = { "task.started": "▶️", "task.completed": "✅",
   "router.request": "🧭", "router.decision": "🎯", "router.fallback": "↩️",
   "router.retry": "🔁", "credential.rotation": "🔑",
   "provider.health_changed": "🩺",
-  "agentrouter.request": "🌐", "agentrouter.success": "🌐✅",
-  "agentrouter.error": "🌐❌",
+  "astra_gateway.request": "🌐", "astra_gateway.success": "🌐✅",
+  "astra_gateway.error": "🌐❌",
   "ai.started": "📡", "ai.completed": "📨", "ai.failed": "⚠️" };
 
 function feedLine(e) {
@@ -513,7 +478,7 @@ function feedLine(e) {
 
   // running counters shown in the stats strip above the log list
   LOGS.counts.total++;
-  if (cats.includes("api") || cats.includes("agentrouter")) LOGS.counts.api++;
+  if (cats.includes("api") || cats.includes("gateway")) LOGS.counts.api++;
   if (isErr) LOGS.counts.errors++;
   else if (isOk) LOGS.counts.success++;
   renderLogStats();

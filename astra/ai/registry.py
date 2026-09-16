@@ -13,9 +13,9 @@ from astra.ai.credentials import CredentialPool
 from astra.ai.provider import OfflineProvider
 
 # api-keys env var per provider (the spec's normalized naming).
-# AgentRouter.org is deliberately absent — it is not a provider (see
-# astra/ai/agentrouter_gateway.py); AGENTROUTER_API_KEYS is read only by
-# that module's build_agentrouter_gateway(), never by this registry.
+# The Astra AI Gateway is deliberately absent — it is not a provider (see
+# astra/ai/gateway.py); its GW_* config is read only by that module's
+# build_astra_ai_gateway(), never by this registry.
 KEYS_ENV = {
     "gemini": "GEMINI_API_KEYS", "groq": "GROQ_API_KEYS",
     "mistral": "MISTRAL_API_KEYS", "openrouter": "OPENROUTER_API_KEYS",

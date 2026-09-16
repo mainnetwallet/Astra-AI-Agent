@@ -1,20 +1,19 @@
 """AgentRouter — Astra's central AI routing core.
 
 NOT a provider. It holds no API keys, no model catalog and no base URL of
-its own beyond the optional AgentRouter.org gateway client described below.
-It receives a task, classifies it, scores every eligible (adapter, model)
-candidate, executes with per-credential retry and cross-provider fallback,
-measures latency, records a normalized results and learns from outcomes so
-future routes improve.
+its own. It receives a task, classifies it, scores every eligible (adapter,
+model) candidate, executes with per-credential retry and cross-provider
+fallback, measures latency, records a normalized result and learns from
+outcomes so future routes improve.
 
-Optionally, `AGENTROUTER_API_KEYS`/`AGENTROUTER_MODELS`/`AGENTROUTER_BASE_URL`
-configure a client for the third-party agentrouter.org gateway (see
-astra/ai/agentrouter_gateway.py). That client is wired in as `self.gateway`
-directly on this class — it is never added to `self.providers` and never
-appears in ProviderRegistry, provider health, or the provider dashboard
-table. It is used only as a final fallback path after every real provider
-candidate has been tried and failed, and is reported separately via
-`gateway_health()` as "AgentRouter Core", not as a provider.
+As a final fallback path, an optional `Astra AI Gateway` may be wired in as
+`self.gateway` (see astra/ai/gateway.py). The Gateway is a separate system
+with its own four AI connections — Gemini, Groq, Cloudflare, Bedrock — each
+with independent credentials/models/endpoints (GW_* config). It is never
+added to `self.providers` and never appears in ProviderRegistry, provider
+health, or the provider dashboard table. It is used only after every real
+provider candidate has been tried and failed, and is reported separately via
+`gateway_health()`, never as a provider.
 
 Classify → score → execute → retry/fallback → record → learn.
 
@@ -29,7 +28,7 @@ from datetime import datetime
 
 from astra.ai.credentials import CredentialPool
 from astra.ai.models import Model, metadata_for
-from astra.ai.routing_policy import RoutingDecisionPolicy, meets_hard_requirements
+from astra.ai.routing_policy import RoutingDecisionPolicy
 from astra.core.exceptions import ProviderError, TimeoutError
 from astra.core.timeutil import duration_ms, ms_now
 
@@ -179,7 +178,7 @@ class AgentRouter:
         self.registry = registry
         self.store = store
         self.preference = preference or "balanced"
-        # optional AgentRouter.org gateway client — deliberately NOT part of
+        # optional Astra AI Gateway — deliberately NOT part of
         # self.providers / ProviderRegistry (see module docstring).
         self.gateway = gateway
         self.policy = RoutingDecisionPolicy(stats=self._load_aggregate(),
@@ -325,35 +324,38 @@ class AgentRouter:
             if rr is not None:
                 results.append(rr.error)
         # every real provider candidate failed (or none were configured) →
-        # last resort: the AgentRouter.org gateway, if configured. This is
-        # never mixed into `ranked` above — it's tried only after the whole
-        # provider registry has been exhausted, and reported distinctly.
+        # last resort: the Astra AI Gateway, if configured. This is never
+        # mixed into `ranked` above — it's tried only after the whole provider
+        # registry has been exhausted, and reported distinctly. The Gateway
+        # itself performs automatic fallback across its four AI connections
+        # (Gemini → Groq → Cloudflare → Bedrock) while preserving the task,
+        # messages, context and system instructions (see astra/ai/gateway.py).
         if self._gateway_usable():
-            gateway_candidates = [m for m in
-                                  (self._gateway_model_obj(mid) for mid in self._gateway_models())
-                                  if self._meets_hard_requirements(m, req)]
-            considered += len(gateway_candidates)
-            for model in gateway_candidates:
-                rr = self._attempt(self.gateway, model, req)
-                attempts += 1
-                if rr is not None and rr.ok:
-                    rr.fallback_used = True
-                    rr.route_reason = {
-                        "task_type": req.task_type, "score": None,
-                        "preference": "agentrouter_gateway_fallback",
-                        "reason": getattr(rr, "_reason", ""),
-                        "candidates_considered": considered,
-                    }
-                    self._emit("router.decision", task=req.task_type, provider=rr.provider,
-                               model=rr.model, score=None, reason="agentrouter_gateway_fallback",
-                               latency_ms=rr.latency_ms, fallback=True)
-                    self._emit("router.fallback", task=req.task_type, provider=rr.provider,
-                               model=rr.model, candidates_considered=considered,
-                               reason="all direct providers exhausted")
-                    self._record_route(req, rr)
-                    return rr
-                if rr is not None:
-                    results.append(rr.error)
+            considered += len(self.gateway.models)
+            gtext, gmodel, gconn, gattempts, gerr = self._gateway_attempt(req)
+            if gtext is not None:
+                rr = RoutingResult(provider="astra_ai_gateway", model=gmodel or "",
+                                   text=gtext, latency_ms=0, attempts=gattempts,
+                                   ok=True,
+                                   usage=getattr(self.gateway, "_last_usage", None) or {},
+                                   _reason=f"gateway:{gconn or '?'}")
+                rr.fallback_used = True
+                rr.route_reason = {
+                    "task_type": req.task_type, "score": None,
+                    "preference": "astra_ai_gateway_fallback",
+                    "reason": f"Astra AI Gateway via {gconn or '?'}",
+                    "candidates_considered": considered,
+                }
+                self._emit("router.decision", task=req.task_type, provider=rr.provider,
+                           model=rr.model, score=None,
+                           reason=f"astra_ai_gateway_fallback:{gconn or '?'}",
+                           latency_ms=rr.latency_ms, fallback=True)
+                self._emit("router.fallback", task=req.task_type, provider=rr.provider,
+                           model=rr.model, candidates_considered=considered,
+                           reason="all direct providers exhausted")
+                self._record_route(req, rr)
+                return rr
+            results.append(gerr or "Astra AI Gateway failed")
         # everything failed → learn and report honestly
         last = RoutingResult(ok=False, error="; ".join(results) or
                              "all providers failed",
@@ -361,41 +363,69 @@ class AgentRouter:
         self._emit("ai.failed", provider=(results[-1] if results else ""))
         return last
 
-    # -- AgentRouter.org gateway (not a provider; see module docstring) -------
-    def _meets_hard_requirements(self, model: Model, req: RoutingRequest) -> bool:
-        return meets_hard_requirements(model, req)
-
+    # -- Astra AI Gateway (not a provider; see module docstring) --------------
     def _gateway_usable(self) -> bool:
         gw = self.gateway
         if gw is None:
             return False
-        return self._provider_usable(gw)
+        try:
+            return bool(gw.is_usable() if hasattr(gw, "is_usable") else gw)
+        except Exception:
+            return False
+
+    def _gateway_attempt(self, req: RoutingRequest):
+        """Run the request once through the Astra AI Gateway.
+
+        The Gateway itself tries Gemini → Groq → Cloudflare → Bedrock with
+        automatic fallback; the same task, messages, context and system
+        instructions continue across every connection without restarting.
+        Returns (text, model, connection, attempts, error); text is None on
+        total failure so the router can report honestly.
+        """
+        gw = self.gateway
+        t0 = ms_now()
+        self._emit("astra_gateway.request", task=req.task_type)
+        try:
+            text = gw.chat(req.messages, max_tokens=req.max_tokens)
+        except Exception as e:
+            err = getattr(e, "message", None) or str(e)
+            self._emit("astra_gateway.error", task=req.task_type, error=err)
+            return None, "", "", 0, err
+        latency = duration_ms(t0)
+        self._emit("astra_gateway.success", task=req.task_type,
+                   connection=gw.last_connection, model=gw.last_model,
+                   latency_ms=latency)
+        return (text, gw.last_model or "", gw.last_connection or "",
+                max(1, gw.last_attempts), "")
 
     def _gateway_models(self) -> list[str]:
         return list(getattr(self.gateway, "models", []) or [])
 
-    def _gateway_model_obj(self, model_id: str) -> Model:
-        meta = metadata_for(model_id, "agentrouter_gateway")
-        meta.pop("provider", None)
-        return Model("agentrouter_gateway", model_id, **meta)
-
     def gateway_health(self) -> dict:
-        """AgentRouter Core status, reported separately from provider health
-        (never as `providers["agentrouter_gateway"]` — see §7/§8)."""
+        """Astra AI Gateway status, reported separately from provider health
+        (never as a provider). Includes the per-connection health of its four
+        AI connections (Gemini, Groq, Cloudflare, Bedrock)."""
         gw = self.gateway
         if gw is None:
-            return {"state": "not_configured", "models": []}
-        info = self._provider_info(gw)
-        state = {"healthy": "healthy", "unhealthy": "degraded",
-                 "not_configured": "not_configured"}.get(info["state"], "unavailable")
-        return {"state": state, "models": self._gateway_models()}
+            return {"state": "not_configured", "connections": []}
+        detail = gw.health() if hasattr(gw, "health") else {}
+        configured = len(detail)
+        healthy = sum(1 for c in detail.values()
+                      if c.get("state") == "healthy")
+        if healthy == configured:
+            state = "healthy"
+        elif healthy > 0:
+            state = "degraded"
+        elif configured == 0:
+            state = "not_configured"
+        else:
+            state = "unavailable"
+        return {"state": state, "models": self._gateway_models(),
+                "connections": detail}
 
     def _attempt(self, adapter, model: Model, req: RoutingRequest) -> RoutingResult | None:
         name = getattr(adapter, "name", "")
-        is_gateway = adapter is self.gateway
         self._emit("ai.started", provider=name, model=model.model_id)
-        if is_gateway:
-            self._emit("agentrouter.request", model=model.model_id, task=req.task_type)
         t0 = ms_now()
         last_error = ""
         # per-credential + per-model retries: a failed key rolls to the next
@@ -432,17 +462,12 @@ class AgentRouter:
                                             f"retry #{attempt}"))
                 self._emit("ai.completed", provider=name, model=model.model_id,
                            latency_ms=ms)
-                if is_gateway:
-                    self._emit("agentrouter.success", model=model.model_id, latency_ms=ms)
                 return rr
             except (ProviderError, TimeoutError) as e:
                 last_error = e.message or getattr(e, "category", type(e).__name__)
                 self._errors[name] = self._errors.get(name, 0) + 1
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt)
-                if is_gateway:
-                    self._emit("agentrouter.error", model=model.model_id,
-                               error=last_error, attempt=attempt)
                 # the adapter's credential pool has already cooled the bad key;
                 # a fresh key on the same model may succeed, so keep retrying up
                 # to max_retries, respecting backoff only for transient errors.
@@ -629,7 +654,7 @@ class AgentRouter:
     def stats(self) -> dict:
         return {"providers": self.health(), "last_route": self._last,
                 "down": sorted(self._down),
-                "agentrouter_core": self.gateway_health(),
+                "astra_ai_gateway": self.gateway_health(),
                 "router": {"preference": self.preference,
                            "task_stats": self.task_stats()}}
 

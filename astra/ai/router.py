@@ -7,8 +7,16 @@ fallback, measures latency, records a normalized result and learns from
 outcomes so future routes improve.
 
 An optional `Astra AI Gateway` may be attached as `self.gateway` (see
-astra/ai/gateway.py) purely for separate status reporting via
-`gateway_health()`. The Gateway is a completely independent system with its
+astra/ai/gateway.py). Beyond separate status reporting via
+`gateway_health()`, an attached Gateway also owns real-time target
+selection and failure recovery for THIS router's own (adapter, model)
+candidates (§2-§12: `_route_via_gateway` asks it who to try next, and its
+classify → cooldown → select decision is what actually gets dispatched —
+not just recorded after the fact). This is still strictly one-directional
+and credential-free: the Gateway only ever receives/returns sanitized
+`ProviderExecutionTarget` provider_id/model_id metadata (astra/ai/
+gateway_contract.py) and never an adapter, a credential or ProviderRegistry
+itself. The Gateway is a completely independent system with its
 own four AI connections — Gemini, Groq, Cloudflare, Bedrock — each with
 independent credentials/models/endpoints (GW_* config). It is never added to
 `self.providers`, never appears in ProviderRegistry, provider health, or the
@@ -331,16 +339,19 @@ class AstraRouter:
                           f"substituting another model")
 
         considered = len(ranked)
-        # §3-§5: sanitized, credential-free targets for the Gateway's
-        # recovery-decision API — provider_id/model_id/capabilities only.
-        # Reporting to the Gateway is best-effort and never influences
-        # whether routing itself succeeds/fails (it "fails open" — see
-        # module docstring: AstraRouter's own fallback chain, built above
-        # from `self.providers`, is authoritative either way).
-        gw_targets = self._execution_targets(ranked) if self.gateway is not None else []
+
+        # §2-§12, §17: when a Gateway is attached, its select/recover
+        # decision — not just `ranked`'s static index order — actually
+        # decides which (adapter, model) is attempted next. A target the
+        # Gateway has cooled down from a previous failure is genuinely
+        # skipped; on a fresh failure, the Gateway classifies it and picks
+        # the next target, and THAT is what gets attempted here.
+        if self.gateway is not None:
+            return self._route_via_gateway(req, ranked, considered)
+
         results, attempts, fallback = [], 0, False
         last_failure_category = ""
-        for i, (score, adapter, model) in enumerate(ranked):
+        for score, adapter, model in ranked:
             rr = self._attempt(adapter, model, req)
             attempts += 1
             if rr is not None and rr.ok:
@@ -357,9 +368,6 @@ class AstraRouter:
                     "reason": getattr(rr, "_reason", ""),
                     "candidates_considered": considered,
                 }
-                if gw_targets:
-                    self._report_gateway_recovery(gw_targets[i], success=True,
-                                                  latency_ms=rr.latency_ms)
                 self._emit("router.decision", task=req.task_type, provider=rr.provider,
                            model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
                            latency_ms=rr.latency_ms, fallback=fallback)
@@ -372,9 +380,116 @@ class AstraRouter:
                 return rr
             if rr is not None:
                 results.append(rr.error)
-                if gw_targets:
-                    last_failure_category = self._report_gateway_recovery(
-                        gw_targets[i], success=False, error=rr.error)
+        # every real provider candidate failed → routing fails honestly.
+        # The Astra AI Gateway is a completely separate system (see module
+        # docstring) and is NEVER used as a fallback here, even when every
+        # provider candidate above has failed — isolation is absolute in both
+        # directions: Provider routing never drops into the Gateway, and the
+        # Gateway (astra/ai/gateway.py) never reads from or falls back into
+        # ProviderRegistry.
+        last = RoutingResult(ok=False, error="; ".join(results) or
+                             "all providers failed",
+                             attempts=attempts, fallback_used=fallback,
+                             requested_provider=req.preferred_provider or "",
+                             requested_model=req.preferred_model or "",
+                             fallback_reason=last_failure_category)
+        self._emit("ai.failed", provider=(results[-1] if results else ""))
+        return last
+
+    # -- Gateway-DRIVEN execution loop (§2-§12, §17-§18) -----------------------
+    # This is the real runtime wiring: `_execution_targets`/
+    # `_report_gateway_recovery` used to build sanitized targets and report
+    # outcomes AFTER the router had already picked, in its own static
+    # `ranked` order, who to call — the Gateway's select/recover API was
+    # only ever exercised directly by unit tests, never by this loop, so a
+    # target the Gateway had cooled down was still attempted again on the
+    # very next request. Now the Gateway's decision IS the loop: each
+    # iteration asks the Gateway "who's next" (first `select_execution_target`,
+    # then `recover_execution_target` after every failure) and dispatches to
+    # whatever `ProviderExecutionTarget` it returns, mapped back to the real
+    # (adapter, model) pair via `by_key` — the Gateway itself never touches
+    # an adapter, a credential or `ProviderRegistry` (§2/§3): it only ever
+    # hands back provider_id/model_id, and this method does the actual
+    # `self._attempt(adapter, model, req)` call against the Existing
+    # Provider system. Fail-open (module docstring): if the Gateway API
+    # itself raises mid-loop, remaining candidates are drained in plain
+    # `ranked` order instead of failing the whole request — a Gateway bug
+    # must never break otherwise-working routing.
+    def _route_via_gateway(self, req: RoutingRequest, ranked: list,
+                           considered: int) -> RoutingResult:
+        from astra.ai.gateway_contract import classify_execution_failure
+
+        gw_targets = self._execution_targets(ranked)
+        by_key = {t.key(): (score, adapter, model)
+                  for t, (score, adapter, model) in zip(gw_targets, ranked)}
+        tried: set = set()
+        results, attempts, fallback = [], 0, False
+        last_failure_category = ""
+        gateway_ok = True
+
+        try:
+            current = self.gateway.select_execution_target(
+                gw_targets, required_capabilities=req.required_capabilities)
+        except Exception:
+            gateway_ok, current = False, None
+
+        while attempts < considered:
+            if current is None:
+                if gateway_ok:
+                    break  # Gateway: nothing eligible left (all excluded/cooling down)
+                remaining = [t for t in gw_targets if t.key() not in tried]
+                if not remaining:
+                    break
+                current = remaining[0]        # fail-open drain, plain order
+
+            score, adapter, model = by_key[current.key()]
+            rr = self._attempt(adapter, model, req)
+            attempts += 1
+            tried.add(current.key())
+
+            if rr is not None and rr.ok:
+                if attempts > 1:
+                    fallback = True
+                rr.fallback_used = fallback
+                rr.requested_provider = req.preferred_provider or ""
+                rr.requested_model = req.preferred_model or ""
+                rr.fallback_reason = last_failure_category if fallback else ""
+                rr.route_reason = {
+                    "task_type": req.task_type,
+                    "score": score,
+                    "preference": req.user_preference if not fallback else "fallback",
+                    "reason": getattr(rr, "_reason", ""),
+                    "candidates_considered": considered,
+                }
+                if gateway_ok:
+                    self._report_gateway_recovery(current, success=True,
+                                                  latency_ms=rr.latency_ms)
+                self._emit("router.decision", task=req.task_type, provider=rr.provider,
+                           model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
+                           latency_ms=rr.latency_ms, fallback=fallback)
+                if fallback:
+                    self._emit("router.fallback", task=req.task_type, provider=rr.provider,
+                               model=rr.model, candidates_considered=considered,
+                               fallback_from=req.preferred_model or "",
+                               fallback_reason=last_failure_category)
+                self._record_route(req, rr)
+                return rr
+
+            error = rr.error if rr is not None else "execution failed"
+            results.append(error)
+            last_failure_category = classify_execution_failure(message=error)
+
+            if gateway_ok:
+                try:
+                    current = self.gateway.recover_execution_target(
+                        gw_targets, current, last_failure_category,
+                        required_capabilities=req.required_capabilities,
+                        exclude=tried)
+                except Exception:
+                    gateway_ok, current = False, None
+            else:
+                current = None
+
         # every real provider candidate failed → routing fails honestly.
         # The Astra AI Gateway is a completely separate system (see module
         # docstring) and is NEVER used as a fallback here, even when every

@@ -88,7 +88,8 @@ class RoutingRequest:
                  max_latency_ms: int | None = None, max_cost_usd: float | None = None,
                  structured_output: bool = False, streaming: bool = False,
                  vision: bool = False, reasoning_level: str = "auto",
-                 user_preference: str | None = None, max_tokens: int = 500):
+                 user_preference: str | None = None, max_tokens: int = 500,
+                 no_fallback: bool = False):
         self.task_type = task_type
         self.messages = messages or []
         self.preferred_model = preferred_model
@@ -104,6 +105,10 @@ class RoutingRequest:
         self.reasoning_level = reasoning_level
         self.user_preference = user_preference or "balanced"
         self.max_tokens = int(max_tokens or 500)
+        # §11: when True and `preferred_model` is set, a recoverable
+        # failure on that exact target must fail honestly rather than
+        # silently falling back to a different model.
+        self.no_fallback = bool(no_fallback)
 
     def __repr__(self):
         return (f"RoutingRequest(task_type={self.task_type!r}, "
@@ -119,7 +124,9 @@ class RoutingResult:
                  latency_ms: int = 0, usage: dict | None = None,
                  estimated_cost_usd: float = 0.0, attempts: int = 0,
                  fallback_used: bool = False, route_reason: dict | None = None,
-                 ok: bool = False, error: str = "", _reason: str = ""):
+                 ok: bool = False, error: str = "", _reason: str = "",
+                 requested_provider: str = "", requested_model: str = "",
+                 fallback_reason: str = ""):
         self.provider = provider
         self.model = model
         self.text = text
@@ -132,13 +139,22 @@ class RoutingResult:
         self._reason = _reason
         self.ok = ok
         self.error = error
+        # §11: what the caller asked for vs. what actually served the
+        # request, plus *why* a fallback happened (a §7 failure category,
+        # when one is known) — so callers can audit fallback decisions.
+        self.requested_provider = requested_provider
+        self.requested_model = requested_model
+        self.fallback_reason = fallback_reason
 
     def to_dict(self) -> dict:
         return {"provider": self.provider, "model": self.model, "text": self.text,
                 "latency_ms": self.latency_ms, "usage": self.usage,
                 "estimated_cost_usd": self.estimated_cost_usd,
                 "attempts": self.attempts, "fallback_used": self.fallback_used,
-                "route_reason": self.route_reason, "ok": self.ok, "error": self.error}
+                "route_reason": self.route_reason, "ok": self.ok, "error": self.error,
+                "requested_provider": self.requested_provider,
+                "requested_model": self.requested_model,
+                "fallback_reason": self.fallback_reason}
 
 
 def classify(text: str) -> str:
@@ -294,18 +310,46 @@ class AstraRouter:
         self._emit("router.request", task=req.task_type)
         candidates = self._candidates(req)
         if not candidates:
-            return RoutingResult(ok=False, error="no eligible provider/model available")
+            return RoutingResult(ok=False, error="no eligible provider/model available",
+                                 requested_provider=req.preferred_provider or "",
+                                 requested_model=req.preferred_model or "")
         ranked = self.policy.rank(candidates, req) if self.policy else \
             [(0.0, c[0], c[1]) for c in candidates]
+
+        # §11: an explicit "use exactly this model, no fallback" request
+        # only ever gets that one target — never silently substituted.
+        if req.no_fallback and req.preferred_model:
+            ranked = [r for r in ranked if r[2].model_id == req.preferred_model and
+                     (not req.preferred_provider or
+                      getattr(r[1], "name", "") == req.preferred_provider)]
+            if not ranked:
+                return RoutingResult(
+                    ok=False, requested_provider=req.preferred_provider or "",
+                    requested_model=req.preferred_model,
+                    error=f"requested model {req.preferred_model!r} unavailable "
+                          f"and no_fallback=True: failing honestly instead of "
+                          f"substituting another model")
+
         considered = len(ranked)
+        # §3-§5: sanitized, credential-free targets for the Gateway's
+        # recovery-decision API — provider_id/model_id/capabilities only.
+        # Reporting to the Gateway is best-effort and never influences
+        # whether routing itself succeeds/fails (it "fails open" — see
+        # module docstring: AstraRouter's own fallback chain, built above
+        # from `self.providers`, is authoritative either way).
+        gw_targets = self._execution_targets(ranked) if self.gateway is not None else []
         results, attempts, fallback = [], 0, False
-        for score, adapter, model in ranked:
+        last_failure_category = ""
+        for i, (score, adapter, model) in enumerate(ranked):
             rr = self._attempt(adapter, model, req)
             attempts += 1
             if rr is not None and rr.ok:
                 if attempts > 1:
                     fallback = True
                 rr.fallback_used = fallback
+                rr.requested_provider = req.preferred_provider or ""
+                rr.requested_model = req.preferred_model or ""
+                rr.fallback_reason = last_failure_category if fallback else ""
                 rr.route_reason = {
                     "task_type": req.task_type,
                     "score": score,
@@ -313,16 +357,24 @@ class AstraRouter:
                     "reason": getattr(rr, "_reason", ""),
                     "candidates_considered": considered,
                 }
+                if gw_targets:
+                    self._report_gateway_recovery(gw_targets[i], success=True,
+                                                  latency_ms=rr.latency_ms)
                 self._emit("router.decision", task=req.task_type, provider=rr.provider,
                            model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
                            latency_ms=rr.latency_ms, fallback=fallback)
                 if fallback:
                     self._emit("router.fallback", task=req.task_type, provider=rr.provider,
-                               model=rr.model, candidates_considered=considered)
+                               model=rr.model, candidates_considered=considered,
+                               fallback_from=req.preferred_model or "",
+                               fallback_reason=last_failure_category)
                 self._record_route(req, rr)
                 return rr
             if rr is not None:
                 results.append(rr.error)
+                if gw_targets:
+                    last_failure_category = self._report_gateway_recovery(
+                        gw_targets[i], success=False, error=rr.error)
         # every real provider candidate failed → routing fails honestly.
         # The Astra AI Gateway is a completely separate system (see module
         # docstring) and is NEVER used as a fallback here, even when every
@@ -332,9 +384,45 @@ class AstraRouter:
         # ProviderRegistry.
         last = RoutingResult(ok=False, error="; ".join(results) or
                              "all providers failed",
-                             attempts=attempts, fallback_used=fallback)
+                             attempts=attempts, fallback_used=fallback,
+                             requested_provider=req.preferred_provider or "",
+                             requested_model=req.preferred_model or "",
+                             fallback_reason=last_failure_category)
         self._emit("ai.failed", provider=(results[-1] if results else ""))
         return last
+
+    # -- Gateway execution-recovery reporting (§3-§5; additive, fail-open) ----
+    def _execution_targets(self, ranked: list) -> list:
+        """Build sanitized ProviderExecutionTarget metadata for each ranked
+        (score, adapter, model) candidate, in the same order — never an
+        adapter/credential object, just plain ids (§3)."""
+        from astra.ai.gateway_contract import ProviderExecutionTarget
+        out = []
+        for _score, adapter, model in ranked:
+            out.append(ProviderExecutionTarget(
+                provider_id=getattr(adapter, "name", ""),
+                model_id=model.model_id,
+                capabilities=tuple(getattr(model, "capabilities", []) or [])))
+        return out
+
+    def _report_gateway_recovery(self, target, *, success: bool,
+                                 latency_ms: int = 0, error: str = "") -> str:
+        """Best-effort report to the attached Gateway's recovery API. Never
+        raises into the caller — a Gateway hiccup must never affect routing.
+        Returns the classified §7 category on failure (empty on success),
+        so the caller can attach it to `fallback_reason`."""
+        if self.gateway is None:
+            return ""
+        try:
+            if success:
+                self.gateway.report_execution_success(target, latency_ms=latency_ms)
+                return ""
+            from astra.ai.gateway_contract import classify_execution_failure
+            category = classify_execution_failure(message=error)
+            self.gateway.report_execution_failure(target, category)
+            return category
+        except Exception:
+            return ""
 
     # -- Astra AI Gateway (not a provider; reporting only — see module
     #    docstring: AstraRouter never executes a request against it) --------

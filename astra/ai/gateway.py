@@ -576,6 +576,13 @@ class AstraAIGateway:
                                               build_gateway_catalog)
         self.routing_state = GatewayRoutingState(store)
         self._catalog = build_gateway_catalog(self.connections)
+        # §2-§5, §18: task-level execution recovery for the EXISTING
+        # Provider system's own catalog — a completely separate namespace
+        # from `self.routing_state` above (which only ever tracks this
+        # Gateway's own four GW_* connections). See gateway_recovery.py.
+        from astra.ai.gateway_recovery import GatewayExecutionRecovery
+        self.execution_recovery = GatewayExecutionRecovery(store=store,
+                                                            events=events)
 
     def attach_events(self, events) -> None:
         self.events = events
@@ -857,6 +864,52 @@ class AstraAIGateway:
             "last_attempts": self.last_attempts,
             **self.routing_state.snapshot(),
         }
+
+    # ═══════════════════════════════════════════════════════════════════
+    # §3-§5, §18: Gateway recovery API for the EXISTING Provider system.
+    #
+    # These four methods are the entire surface the Provider system needs
+    # to let the Gateway own routing/recovery *decisions* while the
+    # Provider system keeps owning actual execution + credentials (§2,
+    # §15, §21). Every argument/return value here is a
+    # `ProviderExecutionTarget` (astra/ai/gateway_contract.py) — plain
+    # provider_id/model_id/capabilities metadata. No adapter, credential,
+    # HTTP client or ProviderRegistry object ever crosses this boundary.
+    # ═══════════════════════════════════════════════════════════════════
+    def select_execution_target(self, candidates, *, required_capabilities=(),
+                                exclude=None):
+        """Pick the best eligible (provider_id, model_id) target for the
+        Existing Provider system to execute against, or None if nothing in
+        `candidates` is currently eligible (out of cooldown, capability
+        match, not already excluded)."""
+        return self.execution_recovery.select_execution_target(
+            candidates, required_capabilities=required_capabilities,
+            exclude=exclude)
+
+    def report_execution_success(self, target, latency_ms: float = 0.0) -> None:
+        """Record that `target` (a ProviderExecutionTarget) just succeeded —
+        clears its cooldown and becomes the new soft last-successful
+        preference (§12)."""
+        self.execution_recovery.report_execution_success(target, latency_ms)
+
+    def report_execution_failure(self, target, category: str,
+                                 cooldown_s: float | None = None) -> None:
+        """Record that `target` just failed with §7 category `category` —
+        cools down that (provider, model) pair only (§6/§8), never the
+        whole provider."""
+        self.execution_recovery.report_execution_failure(
+            target, category, cooldown_s=cooldown_s)
+
+    def recover_execution_target(self, candidates, failed_target, category, *,
+                                 required_capabilities=(), exclude=None):
+        """Report `failed_target`'s failure, then select the next suitable
+        target from `candidates` (excluding `failed_target` and anything in
+        `exclude`) — the single call the Existing Provider system needs on
+        a mid-task AI-provider failure to keep going without restarting the
+        task (§5, §9)."""
+        return self.execution_recovery.recover_execution_target(
+            candidates, failed_target, category,
+            required_capabilities=required_capabilities, exclude=exclude)
 
 
 def build_astra_ai_gateway(config=None, store=None,

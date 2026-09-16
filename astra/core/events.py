@@ -62,6 +62,14 @@ EVENT_KINDS = (
     # existing retry/verify pipeline — see astra.core.executor.
     "supervision.correction_requested", "supervision.correction_succeeded",
     "supervision.correction_exhausted", "supervision.validation_failed",
+    # Gateway execution recovery (§2-5, §7-12, §18 of the FINAL FIX PROMPT):
+    # the Gateway acting as routing/control-plane for the EXISTING Provider
+    # system's own provider/model catalog — never executed against, only
+    # consulted for target selection + health/cooldown bookkeeping (see
+    # astra/ai/gateway_contract.py, astra/ai/gateway_recovery.py).
+    "gateway.execution_completed", "gateway.execution_recovered",
+    "gateway.execution_failed", "gateway.target_cooldown",
+    "gateway.recovery_target_selected",
 )
 
 

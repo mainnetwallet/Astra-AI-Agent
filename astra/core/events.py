@@ -70,6 +70,16 @@ EVENT_KINDS = (
     "gateway.execution_completed", "gateway.execution_recovered",
     "gateway.execution_failed", "gateway.target_cooldown",
     "gateway.recovery_target_selected",
+    # Gateway-OWNED result supervision (§6-12): distinct from
+    # "supervision.*" above (that's the Executor's tool-output validation)
+    # — these fire when the Gateway itself validates a Provider's raw
+    # response and drives a correction back through ProviderExecutionPort
+    # to the SAME target (see astra/ai/gateway_supervision.py).
+    "gateway.supervision.correction_requested",
+    "gateway.supervision.correction_succeeded",
+    "gateway.supervision.correction_failed",
+    "gateway.supervision.correction_exhausted",
+    "router.gateway_supervision",
 )
 
 

@@ -583,6 +583,11 @@ class AstraAIGateway:
         from astra.ai.gateway_recovery import GatewayExecutionRecovery
         self.execution_recovery = GatewayExecutionRecovery(store=store,
                                                             events=events)
+        # §6-§12: Gateway-OWNED result validation + bounded correction loop,
+        # distinct from execution_recovery above (which only ever decides
+        # WHO to execute against). See gateway_supervision.py.
+        from astra.ai.gateway_supervision import GatewayResultSupervision
+        self.result_supervision = GatewayResultSupervision(events=events)
 
     def attach_events(self, events) -> None:
         self.events = events
@@ -910,6 +915,27 @@ class AstraAIGateway:
         return self.execution_recovery.recover_execution_target(
             candidates, failed_target, category,
             required_capabilities=required_capabilities, exclude=exclude)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # §6-§12: Gateway-OWNED result supervision for the EXISTING Provider
+    # system. Distinct from the four methods above: those decide WHO to
+    # execute against; this decides whether WHAT came back is acceptable,
+    # and — if not — drives a bounded correction round-trip to the SAME
+    # target through the caller's `ProviderExecutionPort`. Still never an
+    # adapter/credential/ProviderRegistry object crossing this boundary:
+    # only `ProviderExecutionTarget`/`ProviderExecutionResult` plain data
+    # and the caller-supplied port.
+    # ═══════════════════════════════════════════════════════════════════
+    def supervise_execution(self, port, target, messages, result, *,
+                            max_tokens: int = 500, require_json: bool = False,
+                            required_fields: tuple = ()):
+        """Validate `result` (a ProviderExecutionResult); if invalid/partial,
+        send a correction back through `port` to `target` and validate again
+        (bounded — astra.core.correction.MAX_CORRECTION_ATTEMPTS). Returns
+        `(ProviderExecutionResult, ExecutionValidationOutcome)`."""
+        return self.result_supervision.supervise(
+            port, target, messages, result, max_tokens=max_tokens,
+            require_json=require_json, required_fields=required_fields)
 
 
 def build_astra_ai_gateway(config=None, store=None,

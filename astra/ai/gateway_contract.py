@@ -144,14 +144,31 @@ class ProviderExecutionTarget:
 class ProviderExecutionPort:
     """Dependency-inverted execution interface (§3).
 
-    An optional seam: something that can execute a `ProviderExecutionTarget`
-    without the caller (Gateway-side recovery code) needing to know about
-    ProviderRegistry, adapters, or credentials. Not currently required by
-    anything in this repo — AstraRouter keeps owning execution — but kept
-    here so Gateway-driven recovery never has to reach into the Provider
-    system's internals to get work done.
+    A seam: something that can execute a `ProviderExecutionTarget` without
+    the caller (Gateway-side recovery/supervision code) needing to know
+    about ProviderRegistry, adapters, or credentials. Implemented by
+    `astra.ai.router._RouterExecutionPort` — the concrete bridge that lets
+    Gateway-owned result supervision (gateway_supervision.py) send a
+    correction back to the real Existing Provider adapter without Gateway
+    code ever importing one.
     """
 
     def execute(self, target: ProviderExecutionTarget, messages: list,
                 max_tokens: int = 500, **kwargs) -> str:
         raise NotImplementedError
+
+
+@dataclass
+class ProviderExecutionResult:
+    """Sanitized outcome of one `ProviderExecutionPort.execute()` call (§6).
+
+    Carries only what Gateway-owned result supervision
+    (astra.ai.gateway_supervision) needs to validate a response: whether it
+    succeeded, the raw text, and an error message on failure. Never an
+    adapter object, credential, or provider-native response shape — the
+    Existing Provider system's own `RoutingResult` (astra/ai/router.py) is
+    reduced to this before it ever reaches Gateway code.
+    """
+    ok: bool
+    text: str = ""
+    error: str = ""

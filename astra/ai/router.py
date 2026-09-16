@@ -42,6 +42,7 @@ import time
 from datetime import datetime
 
 from astra.ai.credentials import CredentialPool
+from astra.ai.gateway_contract import ProviderExecutionPort
 from astra.ai.models import Model, metadata_for
 from astra.ai.routing_policy import RoutingDecisionPolicy
 from astra.core.exceptions import ProviderError, TimeoutError
@@ -188,6 +189,48 @@ def classify(text: str) -> str:
     if re.search(r"json|table|csv|structured", low):
         return "structured_output"
     return "simple_chat"
+
+
+class _RouterExecutionPort(ProviderExecutionPort):
+    """Concrete `ProviderExecutionPort` (§3): executes a
+    `ProviderExecutionTarget` against the Existing Provider system's real
+    adapter via `AstraRouter._attempt`. This is the ONLY bridge that lets
+    Gateway-owned result supervision (astra.ai.gateway_supervision) send a
+    correction back to a real Provider — Gateway code itself never imports
+    an adapter class, credential, or ProviderRegistry; it only ever calls
+    `port.execute(target, messages, max_tokens)` on whatever it's handed.
+
+    `no_fallback=True` on the request built here is deliberate (§11): a
+    correction round-trip must land on the SAME (provider, model) target
+    it was given, never silently substitute a different one — a different
+    target is `recover_execution_target`'s job, not this one's.
+    """
+
+    def __init__(self, router: "AstraRouter", by_key: dict, req: RoutingRequest):
+        self._router = router
+        self._by_key = by_key
+        self._req = req
+
+    def execute(self, target, messages: list, max_tokens: int = 500,
+                **kwargs) -> str:
+        entry = self._by_key.get(target.key())
+        if entry is None:
+            raise ProviderError(
+                f"no adapter mapped for {target.provider_id}/{target.model_id}")
+        _score, adapter, model = entry
+        corrected_req = RoutingRequest(
+            task_type=self._req.task_type, messages=messages,
+            preferred_provider=target.provider_id,
+            preferred_model=target.model_id,
+            required_capabilities=self._req.required_capabilities,
+            required_tools=self._req.required_tools,
+            structured_output=self._req.structured_output,
+            max_tokens=max_tokens, no_fallback=True)
+        rr = self._router._attempt(adapter, model, corrected_req)
+        if rr is None or not rr.ok:
+            raise ProviderError(
+                rr.error if rr is not None else "correction execution failed")
+        return rr.text
 
 
 class AstraRouter:
@@ -464,6 +507,11 @@ class AstraRouter:
                 if gateway_ok:
                     self._report_gateway_recovery(current, success=True,
                                                   latency_ms=rr.latency_ms)
+                    # §6-§12: Gateway-owned result validation + bounded
+                    # correction — same target, no failover. See
+                    # _maybe_supervise_result's docstring for when this
+                    # actually does anything.
+                    self._maybe_supervise_result(current, rr, req, by_key)
                 self._emit("router.decision", task=req.task_type, provider=rr.provider,
                            model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
                            latency_ms=rr.latency_ms, fallback=fallback)
@@ -538,6 +586,45 @@ class AstraRouter:
             return category
         except Exception:
             return ""
+
+    # -- Gateway-owned result supervision (§6-§12; additive, fail-open) -------
+    def _maybe_supervise_result(self, target, rr: RoutingResult,
+                                req: RoutingRequest, by_key: dict) -> None:
+        """After a successful attempt, give the attached Gateway a chance to
+        deterministically validate the response and — if it's invalid or
+        incomplete — drive a bounded correction round-trip back through
+        `_RouterExecutionPort` to the SAME `target` (never a different
+        provider/model; recovery/failover is `recover_execution_target`'s
+        job, not this one's).
+
+        A no-op for the common case (§36: don't drag a simple request into
+        supervision it never needs) — only actually asks the Gateway to
+        look when the caller wanted structured output (a genuine
+        deterministic JSON-shape check) or the reply came back empty (a
+        genuine deterministic "did we get anything at all" check). Fully
+        fail-open: any Gateway-side exception here leaves `rr` exactly as
+        `_attempt` produced it — a Gateway bug must never turn an
+        already-successful response into a failure.
+        """
+        if not hasattr(self.gateway, "supervise_execution"):
+            return
+        needs_check = req.structured_output or not (rr.text or "").strip()
+        if not needs_check:
+            return
+        try:
+            from astra.ai.gateway_contract import ProviderExecutionResult
+            port = _RouterExecutionPort(self, by_key, req)
+            result = ProviderExecutionResult(ok=True, text=rr.text)
+            supervised, outcome = self.gateway.supervise_execution(
+                port, target, req.messages, result,
+                max_tokens=req.max_tokens, require_json=req.structured_output)
+            if supervised.text != rr.text:
+                rr.text = supervised.text
+            self._emit("router.gateway_supervision", task=req.task_type,
+                       provider=target.provider_id, model=target.model_id,
+                       ok=outcome.ok, reason=outcome.reason)
+        except Exception:
+            pass
 
     # -- Astra AI Gateway (not a provider; reporting only — see module
     #    docstring: AstraRouter never executes a request against it) --------

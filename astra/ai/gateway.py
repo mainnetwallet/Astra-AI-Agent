@@ -657,3 +657,120 @@ def build_astra_ai_gateway(config=None) -> AstraAIGateway | None:
     if not gw.connections:
         return None
     return gw
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Request Intelligence — the Gateway as an AI Request Intelligence Layer
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#     User -> Assistant -> Astra AI Gateway -> Request Understanding
+#          -> Request Enrichment/Structuring -> Provider-Ready Prompt
+#          -> Existing Provider System -> Provider AI -> Final Response
+#          -> Assistant -> User
+#
+# The Gateway's only job here is to turn a raw, possibly short/incomplete/
+# poorly-structured/mixed-language user message into a clearer, better
+# structured instruction — using its OWN four connections (GW_* config,
+# AstraAIGateway.chat() above) — and hand that improved text back to the
+# caller. It never calls a Provider adapter, never touches ProviderRegistry
+# or AstraRouter, and never performs the user's actual task itself: the
+# existing Provider system remains the sole executor. Gateway -> Provider
+# (as a plain text handoff, done by the caller) is fine; Provider -> Gateway
+# and Gateway -> ProviderRegistry are both absent by design, same as the
+# rest of this module.
+
+GATEWAY_UNDERSTANDING_SYSTEM_PROMPT = (
+    "You are the Astra AI Gateway's Request Understanding layer. You do NOT "
+    "answer the user's request and you do NOT perform the task yourself — a "
+    "separate Provider AI does that after you, using only what you output. "
+    "Your only job is to turn the user's raw message (which may be short, "
+    "incomplete, poorly structured, or mixed Bengali/Banglish/English) into "
+    "a clear, well-structured instruction for that Provider AI to execute.\n\n"
+    "Rules:\n"
+    "- Preserve the user's original intent and goal exactly — never change "
+    "what they actually asked for.\n"
+    "- Preserve important wording, numbers, names, and explicit "
+    "requirements from the message.\n"
+    "- Identify constraints already present in the request and keep them.\n"
+    "- Organize unclear or fragmented instructions into clear structure.\n"
+    "- Add useful structure or context only when it can be safely inferred "
+    "from the message itself. NEVER invent facts, credentials, "
+    "requirements, or user intentions that are not present in the message.\n"
+    "- If information needed to complete the task is genuinely missing and "
+    "cannot be safely inferred, say plainly that it is missing instead of "
+    "guessing or making it up.\n"
+    "- Match the amount of structure to the request: a simple message "
+    "(e.g. \"hello\") gets a short, simple rewrite — do not produce a large "
+    "structured prompt for a simple request. A complex or unclear task "
+    "gets useful structure (for example USER TASK / OBJECTIVE / "
+    "INSTRUCTIONS sections).\n"
+    "- Output ONLY the rewritten request text for the Provider AI — no "
+    "preamble, no explanation, no meta-commentary about what you changed."
+)
+
+GW_UNDERSTANDING_MAX_TOKENS = 400
+
+
+class GatewayRequestIntelligence:
+    """Request Understanding / Enrichment: the Gateway's preprocessing step.
+
+    `process()` sends the user's raw text to the Gateway's own AI
+    connections (via `AstraAIGateway.chat()` — Gemini -> Groq -> Cloudflare
+    -> Bedrock fallback, GW_* config only) and returns a provider-ready
+    version of the request. This class does not execute the task and is
+    never registered as a Provider: callers hand its output to the existing
+    Provider system (e.g. `AstraRouter.route(...)`) for actual execution.
+
+    Fails open: if the Gateway is absent, unconfigured, or every connection
+    errors, `process()` returns the original text unchanged
+    (`enriched=False`) rather than inventing content or blocking the
+    request — the Assistant -> Provider path keeps working exactly as it
+    did before this layer existed.
+    """
+
+    def __init__(self, gateway: "AstraAIGateway | None"):
+        self.gateway = gateway
+
+    def is_usable(self) -> bool:
+        return self.gateway is not None and self.gateway.is_usable()
+
+    def process(self, raw_text: str, *,
+               max_tokens: int = GW_UNDERSTANDING_MAX_TOKENS) -> dict:
+        """Understand + structure `raw_text` into a Provider-ready prompt.
+
+        Returns {"text": str, "enriched": bool, "gateway_connection": str,
+        "raw_text": str}. `text` is always safe to hand straight to the
+        Provider system: either the Gateway's improved version, or (on any
+        failure/absence) the original raw text.
+        """
+        text = " ".join(str(raw_text or "").split()).strip()
+        if not text or not self.is_usable():
+            return {"text": text, "enriched": False,
+                    "gateway_connection": "", "raw_text": text}
+        messages = [
+            {"role": "system", "content": GATEWAY_UNDERSTANDING_SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ]
+        try:
+            improved = self.gateway.chat(messages, max_tokens=max_tokens)
+        except Exception:
+            return {"text": text, "enriched": False,
+                    "gateway_connection": "", "raw_text": text}
+        improved = (improved or "").strip()
+        if not improved or improved == "(no reply)":
+            return {"text": text, "enriched": False,
+                    "gateway_connection": "", "raw_text": text}
+        return {"text": improved, "enriched": True,
+                "gateway_connection": self.gateway.last_connection,
+                "raw_text": text}
+
+
+def build_gateway_request_intelligence(
+        gateway: "AstraAIGateway | None") -> GatewayRequestIntelligence:
+    """Wrap a (possibly None) Gateway in the request-intelligence layer.
+
+    Always returns an object — `GatewayRequestIntelligence.process()`
+    degrades gracefully to a pass-through when `gateway` is None or
+    unusable, so callers never need a None-check of their own.
+    """
+    return GatewayRequestIntelligence(gateway)

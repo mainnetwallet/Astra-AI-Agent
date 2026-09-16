@@ -274,6 +274,118 @@ class TestPlanner(unittest.TestCase):
         self.assertEqual(plan[0]["tool"], "answer")
 
 
+# ── Planner + Astra AI Gateway: Request Intelligence wiring ─────────────────
+class _FakeGatewayIntelligenceCall:
+    """Stand-in for GatewayRequestIntelligence: records the raw goal it was
+    given and returns a distinguishable rewritten string, so tests can
+    prove the *enriched* text (not the raw one) is what reaches the
+    existing Provider system."""
+
+    def __init__(self, rewritten="USER TASK:\nDo the enriched thing.",
+                enriched=True, connection="astra-gw-gemini"):
+        self.calls = []
+        self.rewritten = rewritten
+        self.enriched = enriched
+        self.connection = connection
+
+    def process(self, raw_text, **kw):
+        self.calls.append(raw_text)
+        if not self.enriched:
+            return {"text": raw_text, "enriched": False,
+                    "gateway_connection": "", "raw_text": raw_text}
+        return {"text": self.rewritten, "enriched": True,
+                "gateway_connection": self.connection, "raw_text": raw_text}
+
+
+class _FakeRouterCapturesPrompt:
+    """Stand-in for AstraRouter.route(): records the prompt text it
+    received, so tests can inspect exactly what the (fake) Provider system
+    was handed — without touching any real Provider adapter."""
+
+    def __init__(self, reply_json):
+        self.reply_json = reply_json
+        self.received_prompts = []
+
+    def route(self, messages):
+        prompt = messages[0]["content"]
+        self.received_prompts.append(prompt)
+        return ("fake-provider", "fake-model", self.reply_json)
+
+
+class TestPlannerGatewayIntelligence(unittest.TestCase):
+    """Gateway Request Understanding/Enrichment sits between Planner and the
+    existing Provider system: Planner._ai_steps() must run the raw goal
+    through `gateway_intelligence.process()` first, then hand the *result*
+    (not the raw goal) to `router.route()` — this is the
+    Assistant -> Gateway -> Provider handoff from the spec."""
+
+    def test_ai_steps_enriches_goal_via_gateway_before_provider(self):
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceCall()
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        steps = planner._ai_steps("svpb er task ta kore dao")
+        self.assertEqual(gw.calls, ["svpb er task ta kore dao"])
+        self.assertIn(gw.rewritten, router.received_prompts[0])
+        self.assertNotIn("svpb er task ta kore dao", router.received_prompts[0])
+        self.assertTrue(planner.last_gateway_enriched)
+        self.assertEqual(planner.last_gateway_connection, "astra-gw-gemini")
+        self.assertEqual(steps[0]["tool"], "answer")
+
+    def test_ai_steps_falls_back_to_raw_goal_when_gateway_declines(self):
+        """Graceful degradation: if the Gateway can't/doesn't improve the
+        request, the raw goal still reaches the Provider system unchanged
+        — enrichment is a quality improvement, never a dependency."""
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceCall(enriched=False)
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        planner._ai_steps("raw unclear goal")
+        self.assertIn("raw unclear goal", router.received_prompts[0])
+        self.assertFalse(planner.last_gateway_enriched)
+
+    def test_ai_steps_works_without_gateway_intelligence_at_all(self):
+        """No Gateway configured (gateway_intelligence=None, the default) —
+        planning must behave exactly as it did before this layer existed."""
+        from astra.core.planner import Planner
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"])
+        steps = planner._ai_steps("plain goal text")
+        self.assertIn("plain goal text", router.received_prompts[0])
+        self.assertEqual(steps[0]["tool"], "answer")
+        self.assertFalse(planner.last_gateway_enriched)
+
+    def test_gateway_intelligence_never_touches_the_provider_system(self):
+        """Isolation: the Gateway layer only ever receives the raw goal
+        text — it holds no reference to the router/Provider system, so
+        Gateway -> ProviderRegistry can't happen even by accident. The
+        Provider system (`router`) is still invoked exactly once, by
+        Planner itself — the Gateway never executes the task."""
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceCall()
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        self.assertFalse(hasattr(gw, "router"))
+        self.assertFalse(hasattr(gw, "providers"))
+        planner._ai_steps("goal")
+        self.assertEqual(len(router.received_prompts), 1)
+
+    def test_full_stack_gateway_intelligence_defaults_to_noop_pass_through(self):
+        """End-to-end with the real bootstrap wiring and no GW_* config: the
+        Gateway is absent, so `gateway_intelligence` degrades to a
+        pass-through and normal offline/answer planning is unaffected."""
+        stack = make_stack()
+        planner = stack["planner"]
+        self.assertIsNotNone(planner.gateway_intelligence)
+        self.assertFalse(planner.gateway_intelligence.is_usable())
+        plan = planner.plan("xkcd blorpberry 999")
+        self.assertEqual(plan[0]["tool"], "answer")
+
+
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 class TestOrchestrator(unittest.TestCase):
     def setUp(self): self.stack = make_stack(); self.orch = self.stack["orchestrator"]
@@ -427,9 +539,9 @@ class TestWebSystem(unittest.TestCase):
         r = self._get("/api/tools")
         self.assertGreaterEqual(len(r["data"]["tools"]), 13)
 
-    def test_providers_has_offline(self):
+    def test_providers_has_no_offline(self):
         r = self._get("/api/providers")
-        self.assertIn("offline", r["data"]["providers"])
+        self.assertNotIn("offline", r["data"]["providers"])
 
     def test_memory_round_trip(self):
         self._post("/api/memory", {"content": "test memory", "category": "note"})
@@ -765,7 +877,7 @@ class TestPhase4Router(unittest.TestCase):
         self.assertEqual(reply, "works")
 
     def test_router_marks_unhealthy_provider_down(self):
-        from astra.ai.provider import AIProvider, OfflineProvider
+        from astra.ai.provider import AIProvider
         from astra.ai.router import AstraRouter
 
         class AlwaysDown(AIProvider):
@@ -775,7 +887,7 @@ class TestPhase4Router(unittest.TestCase):
                 return "never reached"
             def health_check(self): return False
 
-        r = AstraRouter(providers=[AlwaysDown(), OfflineProvider({})], max_retries=0)
+        r = AstraRouter(providers=[AlwaysDown()], max_retries=0)
         name, model, reply = r.route([{"role": "user", "content": "hi"}])
         self.assertIsNone(name)
         self.assertIn("dead", r.stats()["down"])

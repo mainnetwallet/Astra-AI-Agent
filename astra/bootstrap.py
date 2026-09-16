@@ -19,8 +19,7 @@ from astra.core.tasks import TaskEngine
 from astra.core.planner import Planner
 from astra.core.executor import Executor
 from astra.core.orchestrator import Orchestrator
-from astra.ai.provider import (ClaudeProvider, OpenAICompatibleProvider,
-                              OfflineProvider)
+from astra.ai.provider import ClaudeProvider, OpenAICompatibleProvider
 from astra.ai.router import AstraRouter
 from astra.ai.registry import build_providers, ProviderRegistry
 from astra.ai.models import ModelRegistry
@@ -159,22 +158,29 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     # output) — AstraRouter never routes or falls back into it, and the
     # Gateway never reads provider config or falls back into ProviderRegistry.
     # Isolation is absolute in both directions.
-    from astra.ai.gateway import build_astra_ai_gateway
+    from astra.ai.gateway import (build_astra_ai_gateway,
+                                  build_gateway_request_intelligence)
     gateway = build_astra_ai_gateway(config)
     router = AstraRouter(providers=providers, config=config, store=store,
                          preference=config.get("AI_ROUTING_PREFERENCE", "balanced"),
                          registry=model_registry, gateway=gateway)
     router.attach_events(events)
+    # Gateway Request Intelligence: rewrites a raw/messy goal into a
+    # Provider-ready prompt using ONLY the Gateway's own GW_* connections,
+    # before Planner hands it to the existing Provider system (`router`
+    # above). Always constructed (never None) — it degrades to a no-op
+    # pass-through on its own when `gateway` is None/unusable. See
+    # astra/ai/gateway.py module docstring for the isolation contract.
+    gateway_intelligence = build_gateway_request_intelligence(gateway)
     discovery = ModelDiscovery(model_registry,
-                               adapter_by_name={p.name: p for p in providers
-                                                if getattr(p, "name", "") != "offline"})
+                               adapter_by_name={p.name: p for p in providers})
     env_models = getattr(config, "get", lambda _k, d="": d)("ASTRA_STARTUP_DISCOVERY", "")
     if env_models == "1":
         discovery.refresh(force=False)   # best-effort, never blocks boot
 
     planner = Planner(router=router,
                       tools=[t["name"] for t in registry.list()],
-                      config=config)
+                      config=config, gateway_intelligence=gateway_intelligence)
     executor = Executor(registry, tasks=tasks, events=events,
                         experiences=experiences)
     # specialist agents (Agent manager): deterministic selection steers
@@ -216,6 +222,7 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
         "browser_manager": browser_manager,
         "tx_manager": tx_manager, "keystore": keystore,
         "web3_policy": policy_engine,
+        "gateway_intelligence": gateway_intelligence,
     }
 
 

@@ -74,10 +74,6 @@ TASK_HARD_CAPABILITIES = {
     "tool_selection": ("tools",),
 }
 
-# adapter names that count as "configured AI" for the boot banner
-NON_OFFLINE = ("offline",)
-
-
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -245,13 +241,10 @@ class AstraRouter:
         out = []
         for adapter in self.providers:
             name = getattr(adapter, "name", "")
-            if name in self._down or name == "offline":
+            if name in self._down:
                 continue
             if not self._provider_usable(adapter):
-                # genuinely-down providers are surfaced as "down" (health
-                # probing discipline); the offline sentinel never is.
-                if name != "offline":
-                    self._down.add(name)
+                self._down.add(name)
                 continue
             adapter.health_info = self._provider_info(adapter)
             for model in self._adapter_models(adapter) or []:

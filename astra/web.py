@@ -922,10 +922,10 @@ class AstraServer(ThreadingHTTPServer):
             out["checks"]["providers"] = self.router().health()
         if self.scheduler():
             out["checks"]["scheduler"] = self.scheduler().stats()
-        # offline provider is the expected default (offline-first), so a
+        # unconfigured providers report "not configured", not unhealthy — a
         # missing API key must not flip /api/health red
         provider_unhealthy = any(
-            p.get("healthy") is False and name != "offline"
+            p.get("healthy") is False
             for name, p in out["checks"].get("providers", {}).items())
         if any(not c.get("ok", True) for c in plugin_checks) or provider_unhealthy:
             out["ok"] = False

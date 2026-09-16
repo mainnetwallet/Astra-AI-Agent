@@ -240,15 +240,3 @@ class OpenAICompatibleProvider(AIProvider):
             return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
         except Exception:
             return list(self.models)
-
-
-class OfflineProvider(AIProvider):
-    """Always-unavailable provider used as the explicit last fallback so the
-    router never spins forever; orchestrator then serves locally."""
-    name = "offline"
-
-    def chat(self, messages, model=None, max_tokens=500):
-        raise ProviderError("offline provider — no AI configured")
-
-    def health_check(self) -> bool:
-        return False

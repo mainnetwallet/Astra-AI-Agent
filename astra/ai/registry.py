@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from astra.ai.adapters import ADAPTERS
 from astra.ai.credentials import CredentialPool
-from astra.ai.provider import OfflineProvider
 
 # api-keys env var per provider (the spec's normalized naming).
 # The Astra AI Gateway is deliberately absent — it is not a provider (see
@@ -107,5 +106,4 @@ def build_providers(config=None, events=None) -> ProviderRegistry:
         reg.add(ClaudeProvider(config=config, api_key=anthropic_key, events=events))
     if (config and config.get("AI_BASE_URL")) or (config and config.get("AI_API_KEY")):
         reg.add(OpenAICompatibleProvider(config=config, events=events))
-    reg.add(OfflineProvider(config))      # explicit last fallback
     return reg

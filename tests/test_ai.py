@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 
 from astra.core.config import Config
-from astra.ai.provider import AIProvider, OfflineProvider
+from astra.ai.provider import AIProvider
 from astra.ai.router import AstraRouter
 from astra.core.exceptions import ProviderError
 
@@ -190,7 +190,7 @@ class TestAstraRouter(unittest.TestCase):
 
     def test_route_none_when_no_healthy_provider(self):
         dead = FakeAIProvider(name="dead", healthy=False)
-        r = _router(dead, OfflineProvider({}))
+        r = _router(dead)
         name, model, reply = r.route([{"role": "user", "content": "hi"}])
         self.assertIsNone(name)
         self.assertIn("dead", r.stats()["down"])
@@ -380,6 +380,20 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
             self.assertIsNotNone(reg.get(name))
         self.assertIsNone(reg.get("astrarouter"))
         self.assertIsNone(reg.get("astra_ai_gateway"))
+
+    def test_offline_provider_removed_completely(self):
+        """The offline sentinel provider no longer exists anywhere: not
+        importable, not registered, and never a router fallback."""
+        import astra.ai.provider as provider_mod
+        self.assertFalse(hasattr(provider_mod, "OfflineProvider"))
+        from astra.ai.registry import build_providers
+        reg = build_providers(config=self._config())
+        self.assertNotIn("offline", reg.names())
+        good = FakeAIProvider(name="good")
+        r = _router(good)
+        name, model, reply = r.route([{"role": "user", "content": "hi"}])
+        self.assertEqual(name, "good")
+        self.assertNotIn("offline", [getattr(p, "name", "") for p in r.providers])
 
     # 11. secrets never exposed in errors
     def test_provider_error_never_contains_api_key(self):
@@ -865,6 +879,105 @@ class TestProviderModelRoutingFix(unittest.TestCase):
                                             preferred_provider="nonexistent"))
         self.assertTrue(rr.ok)
         self.assertEqual(rr.provider, "good")
+
+
+# ── Astra AI Gateway: Request Intelligence layer ─────────────────────────────
+class TestGatewayRequestIntelligence(unittest.TestCase):
+    """GatewayRequestIntelligence.process(): Request Understanding/Enrichment
+    over the Gateway's own connections — never a Provider, never the final
+    executor. See astra/ai/gateway.py."""
+
+    def _gw(self, *conns):
+        from astra.ai.gateway import AstraAIGateway
+        return AstraAIGateway(connections=list(conns))
+
+    # -- simple request handling -------------------------------------------
+    def test_simple_request_gets_enriched_via_gateway_chat(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = _FakeGatewayConn(name="astra-gw-gemini")
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.process("hello")
+        self.assertTrue(result["enriched"])
+        self.assertEqual(result["text"], "reply-from-astra-gw-gemini")
+        self.assertEqual(result["gateway_connection"], "astra-gw-gemini")
+        self.assertEqual(result["raw_text"], "hello")
+        self.assertEqual(conn._calls, 1)
+
+    def test_short_poorly_structured_request_still_processed(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = _FakeGatewayConn(name="astra-gw-groq")
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.process("svpb er task ta kore dao")
+        self.assertTrue(result["enriched"])
+        self.assertEqual(result["gateway_connection"], "astra-gw-groq")
+
+    # -- graceful degradation: never blocks, never invents -------------------
+    def test_no_gateway_passes_text_through_unchanged(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        gi = GatewayRequestIntelligence(None)
+        result = gi.process("some raw goal")
+        self.assertFalse(result["enriched"])
+        self.assertEqual(result["text"], "some raw goal")
+        self.assertEqual(result["gateway_connection"], "")
+
+    def test_unconfigured_gateway_passes_text_through_unchanged(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        gi = GatewayRequestIntelligence(self._gw())   # no connections at all
+        result = gi.process("some raw goal")
+        self.assertFalse(result["enriched"])
+        self.assertEqual(result["text"], "some raw goal")
+
+    def test_all_connections_failing_falls_back_to_raw_text(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        bad1 = _FakeGatewayConn(name="astra-gw-gemini", fail_times=999)
+        bad2 = _FakeGatewayConn(name="astra-gw-groq", fail_times=999)
+        gi = GatewayRequestIntelligence(self._gw(bad1, bad2))
+        result = gi.process("do the thing")
+        self.assertFalse(result["enriched"])
+        self.assertEqual(result["text"], "do the thing")
+
+    def test_empty_text_short_circuits_without_calling_gateway(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = _FakeGatewayConn()
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.process("   ")
+        self.assertFalse(result["enriched"])
+        self.assertEqual(conn._calls, 0)
+
+    # -- fallback across the Gateway's own four connections -------------------
+    def test_enrichment_falls_back_across_gateway_connections(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        bad = _FakeGatewayConn(name="astra-gw-gemini", fail_times=999)
+        good = _FakeGatewayConn(name="astra-gw-groq")
+        gi = GatewayRequestIntelligence(self._gw(bad, good))
+        result = gi.process("fix my task")
+        self.assertTrue(result["enriched"])
+        self.assertEqual(result["gateway_connection"], "astra-gw-groq")
+
+    def test_build_gateway_request_intelligence_never_none(self):
+        from astra.ai.gateway import build_gateway_request_intelligence
+        gi_none = build_gateway_request_intelligence(None)
+        self.assertIsNotNone(gi_none)
+        self.assertFalse(gi_none.is_usable())
+        self.assertFalse(gi_none.process("hi")["enriched"])
+        conn = _FakeGatewayConn()
+        gi = build_gateway_request_intelligence(self._gw(conn))
+        self.assertTrue(gi.is_usable())
+
+    # -- isolation: request intelligence never touches the Provider system ---
+    def test_gateway_request_intelligence_never_calls_provider_or_router(self):
+        """process() only ever calls AstraAIGateway.chat() on the Gateway's
+        own connections — it holds no reference to AstraRouter, no Provider
+        adapter, and never reaches ProviderRegistry."""
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = _FakeGatewayConn(name="astra-gw-cloudflare")
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        self.assertFalse(hasattr(gi, "router"))
+        self.assertFalse(hasattr(gi, "providers"))
+        result = gi.process("check my task")
+        self.assertTrue(result["enriched"])
+        # the only side effect was a call to the gateway connection itself
+        self.assertEqual(conn._calls, 1)
 
 
 if __name__ == "__main__":

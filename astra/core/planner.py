@@ -6,6 +6,17 @@ recall, file analysis, help). When an AI provider is configured and the goal
 is not matched offline, the LLM is asked for a JSON step plan and the result
 is parsed defensively — any failure drops back to offline planning, so the
 agent never blocks on the network.
+
+Astra AI Gateway (optional, `gateway_intelligence`): when a goal falls
+through to the LLM planner, the raw goal is first run through the Gateway's
+Request Understanding/Enrichment layer (astra/ai/gateway.py) — its own
+GW_* AI connections, completely separate from the Provider system — so a
+short, incomplete or poorly structured request becomes a clearer
+Provider-ready prompt before the *existing* Provider system (`self.router`)
+actually executes it. The Gateway only rewrites the request text; it never
+plans, never calls a tool, and is never the one that answers. If the
+Gateway is absent/unusable/fails, the raw goal is used unchanged — this
+layer is a pure quality improvement, never a dependency.
 """
 from __future__ import annotations
 
@@ -14,10 +25,18 @@ import re
 
 
 class Planner:
-    def __init__(self, router=None, tools=None, config=None):
+    def __init__(self, router=None, tools=None, config=None,
+                 gateway_intelligence=None):
         self.router = router          # AstraRouter (optional)
         self.tools = tools or []      # names the executor may call
         self.config = config
+        # Astra AI Gateway's request-understanding layer (optional). Never
+        # a Provider, never part of ProviderRegistry/AstraRouter — see
+        # astra/ai/gateway.py. Purely rewrites the goal text handed to the
+        # existing Provider system below.
+        self.gateway_intelligence = gateway_intelligence
+        self.last_gateway_enriched = False   # did the last _ai_steps use it?
+        self.last_gateway_connection = ""    # which GW_* connection served it
 
     # -- entry ---------------------------------------------------------------
     def plan(self, goal: str, ctx=None, max_goal_chars: int = 1500,
@@ -79,6 +98,18 @@ class Planner:
     def _ai_steps(self, g: str, max_steps: int = 6) -> list | None:
         if not self.router:
             return None
+        # Astra AI Gateway: Request Understanding/Enrichment happens here,
+        # right before the goal reaches the existing Provider system — see
+        # the module docstring. Enrichment failure/absence is silent and
+        # non-fatal: `enriched_goal` just falls back to the raw goal `g`.
+        enriched_goal = g[:1500]
+        self.last_gateway_enriched = False
+        self.last_gateway_connection = ""
+        if self.gateway_intelligence is not None:
+            result = self.gateway_intelligence.process(g[:1500])
+            enriched_goal = result.get("text") or enriched_goal
+            self.last_gateway_enriched = bool(result.get("enriched"))
+            self.last_gateway_connection = result.get("gateway_connection", "")
         prompt = (
             "You are the planner of a personal AI assistant. Split the user's "
             "goal into 1-4 concrete steps. For each step return ONLY JSON "
@@ -88,7 +119,7 @@ class Planner:
             '"depends_on" lists step ids that must finish first (omit when '
             "none). Available tools: " + ", ".join(self.tools or ["(none)"]) +
             '. If no tool fits, use tool name "answer" with params '
-            '{{"text":"<user_facing_reply>"}}. Goal: "{}"'.format(g[:1500]))
+            '{{"text":"<user_facing_reply>"}}. Goal: "{}"'.format(enriched_goal))
         try:
             _, _, text = self.router.route([{"role": "user", "content": prompt}])
             if not text:

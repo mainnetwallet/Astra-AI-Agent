@@ -70,7 +70,7 @@ def main():
     check("tool registry 13 builtins", len(body["data"]["tools"]) >= 13
           and "search_web" in [t["name"] for t in body["data"]["tools"]])
     s, body = get("/api/providers")
-    check("providers has offline", "offline" in body["data"]["providers"])
+    check("offline provider not registered", "offline" not in body["data"]["providers"])
     s, body = get("/api/events")
     check("events endpoint returns list", isinstance(body["data"], list))
 

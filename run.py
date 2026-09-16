@@ -55,7 +55,7 @@ def main() -> int:
     print(f"  📦 Plugins: {', '.join(p.title for p in plugins if p.enabled)}")
     print(f"  🧠 Orchestrator {('ON' if stack['orchestrator'] else 'off')} | "
           f"Tools: {len(stack['registry'].list())} | "
-          f"AI: {'configured' if [p for p in stack['router'].providers if p.name != 'offline'] else 'offline'}")
+          f"AI: {'configured' if stack['router'].providers else 'not configured'}")
     if stack["scheduler"]:
         sched = stack["scheduler"]
         print(f"  ⏰ Scheduler running ({len(sched.list())} schedule)")

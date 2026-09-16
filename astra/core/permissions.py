@@ -33,14 +33,29 @@ class Policy:
     def allows(self, level: int) -> bool:
         return Level.NAMES.get(level, "read") in self.granted
 
-    def decision(self, level: int, requires_confirmation: bool, tool_name: str = "") -> str:
-        """Return 'allow' | 'ask' | 'deny' for a tool invocation."""
+    def decision(self, level: int, requires_confirmation: bool, tool_name: str = "",
+                 confirmation_delegate: str = "") -> str:
+        """Return 'allow' | 'ask' | 'deny' for a tool invocation.
+
+        `confirmation_delegate`: when a tool sets this (e.g. "web3_tx"), it
+        owns its own deterministic confirm/allow/block gate downstream (the
+        Web3 transaction policy, for `tx_prepare`) and encodes the real
+        verdict in its own return value instead of relying on this generic
+        ask-prompt. The permission-level check above (`self.allows(level)`)
+        still applies unchanged — an operator who has not granted that level
+        still gets 'deny' regardless of delegate — only the boolean
+        requires_confirmation ask-gate is skipped for that one tool, so the
+        deterministic downstream policy becomes the sole arbiter of
+        confirm-vs-auto for it. Tools without a delegate are unaffected.
+        """
         name = Level.NAMES.get(level, "read")
         if name == "admin":
             return "deny" if "admin" not in self.granted else "allow"
         if not self.allows(level):
             return "deny"
         if requires_confirmation and tool_name not in self.auto_confirm:
+            if confirmation_delegate:
+                return "allow"
             return "ask"
         return "allow"
 

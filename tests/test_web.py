@@ -5,7 +5,7 @@ import threading
 import unittest
 import urllib.request
 
-from helpers import make_agent
+from tests.helpers import make_agent
 from astra.web import AstraServer, AGENT_NAME
 
 

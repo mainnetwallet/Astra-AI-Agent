@@ -14,6 +14,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
 from astra.security import (ApiError, RateLimiter, make_request_id, redact,
                             redact_text, risky_url, allow_url)
@@ -229,6 +230,108 @@ class TestWebAuth(unittest.TestCase):
     def test_static_still_public(self):
         st, _, _ = _req(self.base + "/")
         self.assertEqual(st, 200)
+
+    def test_web3_authorize_requires_token(self):
+        # unauthenticated request never even reaches the operator-only
+        # gate inside the handler — the global auth gate rejects it first
+        st, body, _ = _req(self.base + "/api/v1/web3/transactions/x/authorize",
+                           method="POST")
+        self.assertEqual(st, 401)
+
+    def test_web3_reject_requires_token(self):
+        st, body, _ = _req(self.base + "/api/v1/web3/transactions/x/reject",
+                           method="POST")
+        self.assertEqual(st, 401)
+
+
+class TestWeb3TxActionEndpoint(unittest.TestCase):
+    """Operator approve/reject for a CONFIRM-mode transaction: the second,
+    endpoint-specific token check (same pattern as the existing mode-change
+    endpoint) closes the gap where an operator who never set ASTRA_TOKEN
+    could otherwise approve financial actions from an "open" local server."""
+
+    def test_no_operator_token_blocks_even_without_global_auth(self):
+        srv, base = _server()   # no token at all -> server is "open"
+        self.addCleanup(srv.shutdown)
+        st, body, _ = _req(base + "/api/v1/web3/transactions/x/authorize",
+                           method="POST")
+        self.assertEqual(st, 403)
+        self.assertEqual(body["error_code"], "authorization")
+        st, body, _ = _req(base + "/api/v1/web3/transactions/x/reject",
+                           method="POST")
+        self.assertEqual(st, 403)
+
+    def test_authorized_operator_can_approve_confirm_mode_send(self):
+        import os
+        import tempfile
+        from astra.core.config import Config
+        from astra.store import Store
+        from astra.bootstrap import build
+        from astra.web import AstraServer
+        from astra.web3.keystore import SecureKeyStore
+        d = tempfile.mkdtemp()
+        cfg = Config()
+        cfg.set("ASTRA_TOKEN", "sekrit")
+        cfg.set("WEB3_TRANSACTION_MODE", "CONFIRM")
+        stack = build(store=Store(os.path.join(d, "t.db")), config=cfg,
+                     with_scheduler=False)
+        # give the manager a signable default wallet
+        stack["keystore"] = SecureKeyStore(stack["store"], master_secret="op")
+        stack["keystore"].store_key("default", "01" * 32)
+        stack["tx_manager"].keystore = stack["keystore"]
+        srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
+                          stack["plugins"], stack=stack)
+        srv.operator_token = "sekrit"
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        self.addCleanup(srv.shutdown)
+        time.sleep(0.2)
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        from astra.web3.policy import TxRequest
+        rec = stack["tx_manager"].create(
+            TxRequest("default", "0x" + "35" * 20, 10 ** 15))
+        self.assertTrue(rec["requires_approval"])
+
+        with patch("astra.web3.txtx.receipt", return_value=None), \
+             patch("astra.web3.txtx.broadcast", return_value="0xdeadbeef"), \
+             patch("astra.web3.txtx.get_nonce", return_value=0), \
+             patch("astra.web3.txtx.get_gas_price", return_value=10 ** 9):
+            st, body, _ = _req(
+                base + f"/api/v1/web3/transactions/{rec['tx_id']}/authorize",
+                token="sekrit", method="POST")
+        self.assertEqual(st, 200)
+        self.assertEqual(body["data"]["status"], "BROADCAST")
+
+    def test_authorized_operator_can_reject(self):
+        import os
+        import tempfile
+        from astra.core.config import Config
+        from astra.store import Store
+        from astra.bootstrap import build
+        from astra.web import AstraServer
+        d = tempfile.mkdtemp()
+        cfg = Config()
+        cfg.set("ASTRA_TOKEN", "sekrit")
+        stack = build(store=Store(os.path.join(d, "t.db")), config=cfg,
+                     with_scheduler=False)
+        srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
+                          stack["plugins"], stack=stack)
+        srv.operator_token = "sekrit"
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        self.addCleanup(srv.shutdown)
+        time.sleep(0.2)
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        from astra.web3.policy import TxRequest
+        rec = stack["tx_manager"].create(
+            TxRequest("default", "0x" + "35" * 20, 10 ** 15))
+        st, body, _ = _req(
+            base + f"/api/v1/web3/transactions/{rec['tx_id']}/reject",
+            token="sekrit", method="POST", body={"reason": "not needed"})
+        self.assertEqual(st, 200)
+        self.assertEqual(body["data"]["status"], "REJECTED")
 
 
 class TestRateLimit(unittest.TestCase):

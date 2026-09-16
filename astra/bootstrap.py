@@ -99,16 +99,43 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     from astra.web3.transactions import (TransactionManager,
                                          TransactionPolicyEngine,
                                          PolicyConfig)
+    from astra.web3.policy import normalize_mode, normalize_address
     from astra.web3.keystore import SecureKeyStore
     from astra.web3.tools import register_web3_tools
-    w3_mode = config.get("WEB3_TRANSACTION_MODE", "CONFIRM").upper()
+    # Environment → PolicyConfig: every WEB3_* limit/allowlist documented in
+    # .env.example must actually reach the runtime policy engine (never just
+    # be parsed and discarded). Invalid mode values fail safe to CONFIRM
+    # rather than silently enabling AUTO.
+    w3_mode = normalize_mode(config.get("WEB3_TRANSACTION_MODE", "CONFIRM"))
+
+    def _addr_set(key: str) -> frozenset:
+        return frozenset(normalize_address(a)
+                         for a in config.getlist(key, default=[]) if a)
+
+    def _chain_id_set(key: str) -> frozenset:
+        out = set()
+        for c in config.getlist(key, default=[]):
+            try:
+                out.add(int(c))
+            except (TypeError, ValueError):
+                continue
+        return frozenset(out)
+
+    w3_cfg = PolicyConfig(
+        mode=w3_mode,
+        max_tx_value_wei=config.getint("WEB3_MAX_TX_VALUE_WEI", 0),
+        max_daily_tx_value_wei=config.getint("WEB3_MAX_DAILY_TX_VALUE_WEI", 0),
+        max_gas_limit=config.getint("WEB3_MAX_GAS_LIMIT", 0),
+        allowed_recipients=_addr_set("WEB3_ALLOWED_RECIPIENTS"),
+        allowed_contracts=_addr_set("WEB3_ALLOWED_CONTRACTS"),
+        allowed_wallets=_addr_set("WEB3_ALLOWED_WALLETS"),
+        allowed_chain_ids=_chain_id_set("WEB3_CHAIN_IDS"))
     # Master secret: operator-set env, or the key file (sixty-four hex chars).
     import astra.web3.keystore as _ks
     master = os.environ.get("ASTRA_MASTER_SECRET", "") or \
         (open(_ks.DEFAULT_MASTER_KEY_FILE).read().strip()
          if os.path.exists(_ks.DEFAULT_MASTER_KEY_FILE) else "")
     keystore = SecureKeyStore(store, master) if master else None
-    w3_cfg = PolicyConfig(mode=w3_mode)
     policy_engine = TransactionPolicyEngine(w3_cfg)
     tx_manager = TransactionManager(store, keystore=keystore,
                                     policy=policy_engine, events=events,

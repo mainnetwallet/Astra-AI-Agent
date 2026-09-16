@@ -3,7 +3,7 @@ AirdropAgent suite of 32 storage/agent assertions)."""
 import unittest
 from datetime import date, timedelta
 
-from helpers import make_agent, make_plugin
+from tests.helpers import make_agent, make_plugin
 from plugins.airdrop import parse_date
 
 

@@ -58,6 +58,8 @@ New /api/v1 endpoints:
   GET  /api/v1/web3/transactions              (+ /{tx_id})
   GET  /api/v1/web3/transaction-policy        (mode/limits/whitelist/stop)
   POST /api/v1/web3/transaction-policy/mode   (operator token required)
+  POST /api/v1/web3/transactions/{tx_id}/authorize  (CONFIRM-mode approve; operator token required)
+  POST /api/v1/web3/transactions/{tx_id}/reject     (CONFIRM-mode reject; operator token required)
   GET  /api/metrics              server + subsystem metrics
 """
 from __future__ import annotations
@@ -572,6 +574,11 @@ class AstraHandler(BaseHTTPRequestHandler):
         if (path == ["api", "web3", "transaction-policy", "mode"]
                 and method == "POST"):
             return self._web3_policy_mode(s, body)
+        # operator approve/reject for a CONFIRM-mode WAITING_USER transaction:
+        # /api/v1/web3/transactions/<tx_id>/authorize | reject
+        if (len(path) == 5 and path[:3] == ["api", "web3", "transactions"]
+                and method == "POST" and path[4] in ("authorize", "reject")):
+            return self._web3_tx_action(s, path[3], path[4], body)
         return False
 
     def _json_ok_rid(self, payload):
@@ -672,6 +679,39 @@ class AstraHandler(BaseHTTPRequestHandler):
         policy.set_mode(mode)
         return self._json_ok_rid({"ok": True,
                                   "data": {"mode": policy.mode}})
+
+    def _web3_tx_action(self, s, tx_id: str, action: str, body) -> bool:
+        """Operator-only approve/reject for a pending (CONFIRM-mode)
+        transaction. The LLM tool surface never reaches authorize()/
+        sign_and_broadcast()/reject() directly — only this gated endpoint
+        does, and only when the operator has explicitly set ASTRA_TOKEN.
+        Switching the global mode to AUTO does not touch existing
+        WAITING_USER/PREPARED transactions; they still need this call.
+        """
+        if not s.operator_token:
+            return self._err_rid(
+                "set ASTRA_TOKEN to allow Web3 transaction approval", 403,
+                "authorization")
+        tx = s._get("tx_manager")
+        if tx is None:
+            return self._err_rid("Web3 transaction manager unavailable", 400,
+                                 "web3_unavailable")
+        from astra.web3.policy import (TransactionPolicyError,
+                                       TransactionRejectedError,
+                                       TransactionFailedError)
+        try:
+            if action == "reject":
+                reason = ((body or {}).get("reason")
+                          if isinstance(body, dict) else None) or \
+                    "operator rejected"
+                rec = tx.reject(tx_id, reason=reason)
+            else:
+                tx.authorize(tx_id)
+                rec = tx.sign_and_broadcast(tx_id)
+            return self._json_ok_rid({"ok": True, "data": rec})
+        except (TransactionPolicyError, TransactionRejectedError,
+                TransactionFailedError) as exc:
+            return self._err_rid(str(exc), 400, "transaction_policy")
 
     # -- SSE ------------------------------------------------------------------
     def _sse(self):

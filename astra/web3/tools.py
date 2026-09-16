@@ -2,10 +2,20 @@
 
 Skewed deliberately toward safety: everything here is either a read
 (token/chain/rpc/wallet/tx-status) or a *prepare* (tx_prepare creates a
-transaction that stays gated behind the deterministic policy in CONFIRM
-mode). tx_prepare never signs and never exposes key material; a Transaction
-Manager `authorize()` + `sign_and_broadcast()` happen only out-of-band
-through the operator layer, never through a tool the LLM can call.
+transaction whose fate is gated behind the deterministic Web3 transaction
+policy). Semantics depend on the operator-set WEB3_TRANSACTION_MODE:
+
+- CONFIRM (default): tx_prepare only ever prepares. It waits at PREPARED
+  for an operator to approve out-of-band (via the gated tx-approval
+  endpoint); it never signs itself.
+- AUTO: tx_prepare may also complete sign+broadcast itself, but only for a
+  transaction the deterministic policy has already authorized (wallet,
+  chain, recipient, contract, gas, value and daily-limit checks all pass).
+  A transaction the policy blocks is never signed regardless of mode.
+
+Either way, `tx_prepare` never exposes key material, and the model never
+calls `authorize()` directly — signing always goes through the
+Transaction Manager's own internal, deterministic state transitions.
 """
 from __future__ import annotations
 
@@ -84,11 +94,14 @@ def tool_rpc_status(args: dict, ctx) -> dict:
 
 
 def tool_tx_prepare(args: dict, ctx) -> dict:
-    """PREPARE a transaction (never sign). Gated by the web3 policy.
+    """PREPARE a transaction. Gated end-to-end by the deterministic web3 policy.
 
-    In CONFIRM mode the returned tx needs operator approval before broadcast;
-    the LLM may create it, it may not bypass the gate. Returns a control
-    record with decision verdict.
+    CONFIRM mode: the returned tx needs operator approval before broadcast;
+    the LLM may create it, it may not bypass the gate.
+    AUTO mode: when the policy has already authorized this exact send,
+    tx_prepare also completes sign+broadcast itself — no further
+    confirmation is asked for. A policy-blocked send is still never signed
+    in either mode. Returns a control record with the decision verdict.
     """
     mgr = _resolve_manager(ctx)
     if mgr is None:
@@ -117,6 +130,23 @@ def tool_tx_prepare(args: dict, ctx) -> dict:
         rec = mgr.create(req)
         rec["ok"] = True
         rec["signed"] = False
+        # AUTO mode, within policy: `requires_approval` is False, meaning the
+        # deterministic policy already authorized this exact send — complete
+        # the pipeline (sign + broadcast) here rather than leaving it parked
+        # at PREPARED. CONFIRM-mode sends (requires_approval True) are left
+        # untouched for the operator to approve/reject out-of-band; the LLM
+        # never reaches authorize()/sign_and_broadcast() itself either way.
+        if not rec.get("requires_approval") and rec.get("status") == "PREPARED":
+            try:
+                final = mgr.sign_and_broadcast(rec["tx_id"])
+                rec.update(final)
+                rec["signed"] = final.get("status") in ("BROADCAST", "CONFIRMED")
+            except TransactionPolicyError as exc:
+                rec["ok"] = False
+                rec["error"] = str(exc)
+            except Exception as exc:
+                rec["ok"] = False
+                rec["error"] = str(exc)[:200]
         return rec
     except TransactionPolicyError as exc:
         return {"ok": False, "error": str(exc),
@@ -163,9 +193,21 @@ def register_web3_tools(reg, manager=None) -> int:
     ]
     n = 0
     for name, fn, desc, risk, conf in specs:
+        # tx_prepare's own confirm/allow/block verdict is owned end-to-end
+        # by the deterministic Web3 transaction policy (see
+        # TransactionManager.create() / TransactionPolicyEngine.evaluate()):
+        # CONFIRM mode parks it at PREPARED for operator approval, AUTO mode
+        # completes sign+broadcast when authorized. The generic
+        # FINANCIAL_ACTION ask-prompt in ToolRegistry must defer to that
+        # policy rather than double-gating the same send with a second,
+        # non-deterministic confirmation step — so only this tool declares
+        # a confirmation_delegate. Every other tool here (and every other
+        # FINANCIAL_ACTION tool anywhere else) keeps the plain ask-gate.
+        delegate = "web3_tx" if name == "tx_prepare" else ""
         reg.register(Tool(
             name=name, fn=fn, description=desc, category="web3",
             risk=risk, requires_confirmation=conf,
+            confirmation_delegate=delegate,
             input={
                 "type": "object",
                 "properties": {

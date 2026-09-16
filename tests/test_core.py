@@ -5,7 +5,7 @@ import io, json, os, time, unittest
 import http.server
 import threading
 from datetime import datetime, timedelta
-from helpers import make_stack, Store
+from tests.helpers import make_stack, Store
 
 # ── EventBus ──────────────────────────────────────────────────────────────────
 class TestEventBus(unittest.TestCase):
@@ -878,7 +878,7 @@ class TestMemory2(unittest.TestCase):
         self.assertEqual(st["by_layer"]["long"], 1)
 
     def test_old_schema_db_self_heals_columns(self):
-        from helpers import Store as HStore
+        from tests.helpers import Store as HStore
         store = HStore(":memory:")
         # install the OLD schema (no memory-2.0 columns)
         store.install("""

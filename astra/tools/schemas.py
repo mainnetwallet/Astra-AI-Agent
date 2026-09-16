@@ -26,7 +26,8 @@ class Tool:
                  timeout: float = 0.0, retries: int = 0,
                  retry_backoff_s: float = 1.0, idempotent: bool = False,
                  supports_async: bool = False, rate_limit_per_min: int = 0,
-                 strict: bool = False, plugin: str = ""):
+                 strict: bool = False, plugin: str = "",
+                 confirmation_delegate: str = ""):
         self.name = name
         self.fn = fn
         self.description = description
@@ -35,6 +36,10 @@ class Tool:
         self.output = output or {}
         self.risk = risk
         self.requires_confirmation = requires_confirmation
+        # Non-empty only for tools (e.g. `tx_prepare`) that own a further
+        # deterministic confirm/allow/block gate downstream of this generic
+        # permission layer — see astra.core.permissions.Policy.decision.
+        self.confirmation_delegate = confirmation_delegate
         self.timeout = float(timeout or 0)             # seconds; 0 = none
         self.retries = max(0, int(retries or 0))
         self.retry_backoff_s = float(retry_backoff_s or 1.0)
@@ -103,6 +108,7 @@ class Tool:
                 "output_schema": self.output,
                 "risk_level": Level.NAMES.get(self.risk, "read"),
                 "requires_confirmation": self.requires_confirmation,
+                "confirmation_delegate": self.confirmation_delegate,
                 "timeout_s": self.timeout, "retries": self.retries,
                 "retry_backoff_s": self.retry_backoff_s,
                 "idempotent": self.idempotent,

@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS web3_transactions (
     error       TEXT DEFAULT '',
     kind        TEXT DEFAULT 'send',
     authorized_by TEXT DEFAULT '',         -- always 'policy' only
+    requires_approval INTEGER DEFAULT 0,   -- decided once, at PREPARE time
     created_at  TEXT DEFAULT '',
     updated_at  TEXT DEFAULT '',
     broadcast_at TEXT DEFAULT ''
@@ -75,6 +76,10 @@ class TransactionManager:
         self._paused = False
         if not store.table_exists("web3_transactions"):
             store.install(TX_SCHEMA)
+        # self-heal: a DB created before `requires_approval` existed still
+        # needs it (see sign_and_broadcast's use of the persisted flag).
+        store.ensure_column("web3_transactions", "requires_approval",
+                            "INTEGER DEFAULT 0")
 
     # -- lifecycle -----------------------------------------------------------
     def create(self, req: TxRequest) -> dict:
@@ -89,6 +94,7 @@ class TransactionManager:
                 raise TransactionPolicyError(
                     f"blocked by web3 policy: {decision.reason}")
             tx_id = "tx-" + _new_tx_id(req)
+            requires_approval = (decision.verdict == "ask")
             self.store.insert(
                 "web3_transactions", tx_id=tx_id, status="PREPARED",
                 chain_id=req.chain_id, from_address=req.from_address,
@@ -97,10 +103,11 @@ class TransactionManager:
                 max_fee_per_gas=req.max_fee_per_gas,
                 max_priority_fee_per_gas=req.max_priority_fee_per_gas,
                 nonce=req.nonce, created_at=_now(), updated_at=_now(),
-                kind="send", authorized_by="")
+                kind="send", authorized_by="",
+                requires_approval=int(requires_approval))
             rec = self.get(tx_id)
             rec["decision"] = decision.to_dict()
-            rec["requires_approval"] = (decision.verdict == "ask")
+            rec["requires_approval"] = requires_approval
             if self.events:
                 self.events.emit("web3.transaction.prepared", tx=tx_id,
                                  status="PREPARED",
@@ -141,10 +148,17 @@ class TransactionManager:
                 raise TransactionFailedError(
                     f"tx {tx_id} not in a signable state ({rec['status']})")
             status = rec["status"]
-            if status == "PREPARED" and self.policy.mode == "CONFIRM":
+            # Gate on THIS tx's own persisted verdict from PREPARE time, not
+            # the *current* global mode: a tx parked while CONFIRM was in
+            # effect must stay gated even if the operator later flips the
+            # global mode to AUTO — it still needs its own approve call
+            # (which moves it to AUTHORIZED first, so this branch no longer
+            # applies). Using the live mode here would let a mode flip
+            # retroactively auto-authorize an old waiting transaction.
+            if status == "PREPARED" and rec.get("requires_approval"):
                 raise TransactionPolicyError(
-                    "tx not authorized: send CONFIRM mode without an "
-                    "operator approve")
+                    "tx not authorized: prepared under a mode that required "
+                    "operator approval — use the approve endpoint first")
 
             # never-sign-twice: exactly the bytes that went out (or would go
             # out) are checked on-chain before anything is recomputed. If a
@@ -199,7 +213,7 @@ class TransactionManager:
                 "submitted_hash=?, broadcast_at=?, updated_at=? WHERE tx_id=?",
                 (hash_broadcast, _now(), _now(), tx_id))
             if self.events:
-                self.events.emit("web3.tx.broadcast", tx=tx_id,
+                self.events.emit("web3.transaction.broadcast", tx=tx_id,
                                  hash=hash_broadcast)
             return {"tx_id": tx_id, "status": "BROADCAST",
                     "tx_hash": hash_broadcast}

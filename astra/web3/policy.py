@@ -43,6 +43,11 @@ class TransactionFailedError(AstraError):
     code = "transaction_failed"
 
 
+# Built-in fallback set used only when the operator has not configured
+# WEB3_CHAIN_IDS — keeps existing (pre-config-wiring) behavior unchanged.
+DEFAULT_SUPPORTED_CHAINS = frozenset({1, 8453, 137, 56, 42161, 10, 11155111})
+
+
 @dataclass(frozen=True)
 class PolicyConfig:
     mode: str = "CONFIRM"                # 'CONFIRM' | 'AUTO'
@@ -52,7 +57,24 @@ class PolicyConfig:
     allowed_contracts: frozenset = frozenset()    # empty = open (with limits)
     allowed_wallets: frozenset = frozenset()      # from-addresses allowed to send
     max_gas_limit: int = 0               # 0 = unlimited
+    allowed_chain_ids: frozenset = frozenset()    # empty = use DEFAULT_SUPPORTED_CHAINS
     daily_spent_key: str = "web3_daily_spent"
+
+
+def normalize_mode(raw: str, default: str = "CONFIRM") -> str:
+    """Safely normalize a WEB3_TRANSACTION_MODE value.
+
+    Case-insensitive; any value other than CONFIRM/AUTO falls back to
+    `default` (CONFIRM) rather than silently enabling AUTO.
+    """
+    m = (raw or "").strip().upper()
+    return m if m in ("CONFIRM", "AUTO") else default
+
+
+def normalize_address(addr: str) -> str:
+    """Public wrapper for the address-normalization used throughout the
+    policy/allowlist logic (lowercase, no '0x' prefix)."""
+    return _norm(addr)
 
 
 @dataclass(frozen=True)
@@ -106,6 +128,7 @@ class TransactionPolicyEngine:
             allowed_contracts=self.cfg.allowed_contracts,
             allowed_wallets=self.cfg.allowed_wallets,
             max_gas_limit=self.cfg.max_gas_limit,
+            allowed_chain_ids=self.cfg.allowed_chain_ids,
             daily_spent_key=self.cfg.daily_spent_key)
 
     @property
@@ -119,7 +142,9 @@ class TransactionPolicyEngine:
                 "recipients_allowed": sorted(self.cfg.allowed_recipients),
                 "contracts_allowed": sorted(self.cfg.allowed_contracts),
                 "wallets_allowed": sorted(self.cfg.allowed_wallets),
-                "gas_limit_max": self.cfg.max_gas_limit}
+                "gas_limit_max": self.cfg.max_gas_limit,
+                "chains_allowed": sorted(self.cfg.allowed_chain_ids
+                                         or DEFAULT_SUPPORTED_CHAINS)}
 
     # -- the one gate every send must pass -----------------------------------
     def evaluate(self, req: TxRequest,
@@ -154,6 +179,7 @@ class TransactionPolicyEngine:
         if cfg.allowed_contracts and req.data_hex:
             if _norm(req.to_address) not in cfg.allowed_contracts:
                 return block("contract call target not allowlisted")
-        if req.chain_id not in (1, 8453, 137, 56, 42161, 10, 11155111):
+        allowed_chains = cfg.allowed_chain_ids or DEFAULT_SUPPORTED_CHAINS
+        if req.chain_id not in allowed_chains:
             return block("chain id not supported")
         return allow(ask=(mode != "AUTO"))

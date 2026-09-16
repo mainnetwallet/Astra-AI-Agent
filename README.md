@@ -126,12 +126,15 @@ logs, UI, or API responses. Router preference order: `AI_PROVIDER=gemini groq �
 ## Web3 transaction safety
 
 * **CONFIRM** (default): every transaction stops at `WAITING_USER` for your
-  review — the LLM can only *prepare* a send, never authorise or sign.
+  review — the LLM can only *prepare* a send, never authorise or sign. The
+  operator approves via `POST .../transactions/{tx_id}/authorize` (signs +
+  broadcasts) or rejects via `.../reject` — both require `ASTRA_TOKEN`.
 * **AUTO**: only transactions that pass the *deterministic* policy
-  (sender/recipient/contract allowlist, max per-tx, daily budget, gas) send
-  automatically, for user-authorized wallets. A tx outside AUTO policy is never
-  auto-approved. The LLM can **never** change mode, policy, or add wallets —
-  only the operator (with `ASTRA_TOKEN`) can.
+  (sender/recipient/contract allowlist, max per-tx, daily budget, gas, chain)
+  send automatically — no per-transaction confirmation — for user-authorized
+  wallets. A tx outside AUTO policy is never auto-approved. The LLM can
+  **never** change mode, policy, or add wallets — only the operator (with
+  `ASTRA_TOKEN`) can.
 * Emergency stop halts all sends. A `WAITING_USER` tx is never silently
   approved on a mode switch.
 * Never-sign-twice is enforced cryptographically (deterministic tx hash + MAC)
@@ -168,6 +171,8 @@ handler). New endpoints below are documented under `/api/v1`.
 | GET | `/api/v1/web3/transactions` (+`/{tx_id}`) | Transaction ledger |
 | GET | `/api/v1/web3/transaction-policy` | Mode + limits + allowlists + stop |
 | POST | `/api/v1/web3/transaction-policy/mode` | Operator-only mode switch |
+| POST | `/api/v1/web3/transactions/{tx_id}/authorize` | Operator-only: approve + sign + broadcast a `CONFIRM`-mode send |
+| POST | `/api/v1/web3/transactions/{tx_id}/reject` | Operator-only: reject a pending send |
 | GET | `/api/metrics` | Server + subsystem metrics (requests, router, tools, web3) |
 | GET | `/api/v1/tasks` · `/api/v1/memory` · `/api/v1/workflows` · `/api/v1/schedules` | Task/memory/workflow/schedule APIs |
 | GET | `/api/v1/events/stream` | SSE live feed |

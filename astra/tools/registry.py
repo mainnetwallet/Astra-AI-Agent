@@ -110,7 +110,8 @@ class ToolRegistry:
         if self.policy:
             decision, reason = evaluate(
                 name, t.risk, t.requires_confirmation, self.policy,
-                self._overrides)
+                self._overrides,
+                confirmation_delegate=getattr(t, "confirmation_delegate", ""))
             if decision == "deny":
                 raise PermissionError(f"tool '{name}' denied: {reason}")
             if decision == "ask":

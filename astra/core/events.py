@@ -43,6 +43,7 @@ EVENT_KINDS = (
     "browser.opened", "browser.navigation", "browser.action", "browser.error",
     # web3
     "web3.transaction.prepared", "web3.transaction.submitted",
+    "web3.transaction.broadcast",
     "web3.transaction.confirmed", "web3.transaction.failed",
     # plugins / providers (contract for future modules)
     "plugin.loaded", "plugin.failed", "plugin.disabled",

@@ -25,9 +25,16 @@ class Agent:
         self.llm = llm  # optional callable(message) -> str
         self.orchestrator = orchestrator  # optional multi-step executor
 
-    def handle(self, message: str) -> dict:
+    def handle(self, message: str, context: str = "") -> dict:
         """Returns {reply, action, data, ok} exactly as the old single-domain
-        agent did, so callers/UI stay compatible."""
+        agent did, so callers/UI stay compatible.
+
+        `context` is optional recent conversation the caller already has
+        (e.g. the client's own chat history) — passed through unchanged to
+        the orchestrator/Planner's Astra AI Gateway preprocessing so a
+        short follow-up message can be understood in context. Plugins
+        never see it; it only ever reaches the free-form AI path below.
+        """
         msg = " ".join(str(message).split()).strip()
         if not msg:
             return {"reply": "Ki korte paren? 'help' likhun.", "action": "none",
@@ -51,7 +58,7 @@ class Agent:
         # nobody claimed it -> orchestrator (multi-step) -> LLM -> fallback
         if self.orchestrator:
             try:
-                report = self.orchestrator.submit(msg, sync=True)
+                report = self.orchestrator.submit(msg, sync=True, context=context)
                 return self._reply_from_report(msg, report)
             except Exception:
                 pass  # orchestrator failed silently -> llm / fallback

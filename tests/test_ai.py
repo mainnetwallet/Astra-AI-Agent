@@ -77,6 +77,7 @@ class _FakeGatewayConn:
 
     def chat(self, messages, model=None, max_tokens=500):
         self._calls += 1
+        self.last_messages = messages
         if self._calls <= self.fail_times:
             raise ProviderError("simulated failure")
         return f"reply-from-{self.name}"
@@ -978,6 +979,39 @@ class TestGatewayRequestIntelligence(unittest.TestCase):
         self.assertTrue(result["enriched"])
         # the only side effect was a call to the gateway connection itself
         self.assertEqual(conn._calls, 1)
+
+    # -- conversation context: understanding only, never a new request -------
+    def test_context_is_included_for_understanding(self):
+        """When the caller has recent prior conversation, it reaches the
+        Gateway's own connection alongside the raw text (as a separate,
+        clearly-labeled message) so a short follow-up can be resolved."""
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = _FakeGatewayConn(name="astra-gw-gemini")
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.process("eita ki dam?",
+                            context="User was asking about the Notcoin airdrop.")
+        self.assertTrue(result["enriched"])
+        joined = " ".join(m["content"] for m in conn.last_messages)
+        self.assertIn("Notcoin airdrop", joined)
+        self.assertIn("eita ki dam?", joined)
+        # raw_text stays exactly the current message, not the context
+        self.assertEqual(result["raw_text"], "eita ki dam?")
+
+    def test_no_context_behaves_exactly_as_before(self):
+        """Omitting context (the default) must not change the message
+        shape at all — existing callers are unaffected."""
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = _FakeGatewayConn(name="astra-gw-gemini")
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        gi.process("hello")
+        self.assertEqual(len(conn.last_messages), 2)   # system + user only
+
+    def test_blank_context_is_dropped(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = _FakeGatewayConn(name="astra-gw-gemini")
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        gi.process("hello", context="   ")
+        self.assertEqual(len(conn.last_messages), 2)
 
 
 if __name__ == "__main__":

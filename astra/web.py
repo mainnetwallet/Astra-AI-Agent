@@ -327,7 +327,8 @@ class AstraHandler(BaseHTTPRequestHandler):
             if path == ["api", "manifest"]:
                 return _json_ok(self, {"ok": True, "data": server.manifest()})
             if path == ["api", "chat"] and method == "POST":
-                reply = server.agent.handle(body.get("message", ""))
+                reply = server.agent.handle(body.get("message", ""),
+                                            context=body.get("context", "") or "")
                 return _json_ok(self, {"ok": True, "data": reply})
             if path == ["api", "dashboard"] and method == "GET":
                 return _json_ok(self, {"ok": True, "data": server.agent.dashboard()})

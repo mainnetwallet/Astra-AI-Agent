@@ -47,7 +47,9 @@ class Planner:
         budget_goal = g[:max_goal_chars] if len(g) > max_goal_chars else g
         steps = self._offline_steps(budget_goal, ctx)
         if steps is None:
-            steps = (self._ai_steps(budget_goal, max_steps=max_steps)
+            convo_context = (ctx or {}).get("conversation_context", "")
+            steps = (self._ai_steps(budget_goal, max_steps=max_steps,
+                                    context=convo_context)
                      or self._offline_steps(budget_goal, ctx, fallback=True) or [])
         if not steps:
             steps = [self._answer(budget_goal)]
@@ -95,18 +97,24 @@ class Planner:
         return None  # let AI plan
 
     # -- LLM-driven planning --------------------------------------------------
-    def _ai_steps(self, g: str, max_steps: int = 6) -> list | None:
+    def _ai_steps(self, g: str, max_steps: int = 6, context: str = "") -> list | None:
         if not self.router:
             return None
         # Astra AI Gateway: Request Understanding/Enrichment happens here,
         # right before the goal reaches the existing Provider system — see
         # the module docstring. Enrichment failure/absence is silent and
         # non-fatal: `enriched_goal` just falls back to the raw goal `g`.
+        # `context` (recent prior conversation, when the caller has it) is
+        # handed through unchanged so the Gateway can resolve references in
+        # a short follow-up message — it never becomes part of the goal
+        # itself and is empty by default, so callers without it are
+        # unaffected.
         enriched_goal = g[:1500]
         self.last_gateway_enriched = False
         self.last_gateway_connection = ""
         if self.gateway_intelligence is not None:
-            result = self.gateway_intelligence.process(g[:1500])
+            result = self.gateway_intelligence.process(
+                g[:1500], context=context[:1500] if context else "")
             enriched_goal = result.get("text") or enriched_goal
             self.last_gateway_enriched = bool(result.get("enriched"))
             self.last_gateway_connection = result.get("gateway_connection", "")

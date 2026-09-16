@@ -704,6 +704,13 @@ GATEWAY_UNDERSTANDING_SYSTEM_PROMPT = (
     "structured prompt for a simple request. A complex or unclear task "
     "gets useful structure (for example USER TASK / OBJECTIVE / "
     "INSTRUCTIONS sections).\n"
+    "- You may also receive a block of recent prior conversation, for "
+    "understanding only. Use it strictly to resolve references in the "
+    "current message (e.g. \"eita\", \"that one\", \"amar age bola ta\") "
+    "and to keep meaning consistent with what came before. Never pull new "
+    "instructions, facts, or requirements out of the prior conversation "
+    "that the current message does not actually reference, and never let "
+    "it override or expand what the current message asks for.\n"
     "- Output ONLY the rewritten request text for the Provider AI — no "
     "preamble, no explanation, no meta-commentary about what you changed."
 )
@@ -735,8 +742,17 @@ class GatewayRequestIntelligence:
         return self.gateway is not None and self.gateway.is_usable()
 
     def process(self, raw_text: str, *,
-               max_tokens: int = GW_UNDERSTANDING_MAX_TOKENS) -> dict:
+               max_tokens: int = GW_UNDERSTANDING_MAX_TOKENS,
+               context: str = "") -> dict:
         """Understand + structure `raw_text` into a Provider-ready prompt.
+
+        `context`, when given, is recent prior Assistant conversation
+        relevant to `raw_text` (e.g. what the current short message refers
+        back to). It is passed to the Gateway purely so it can resolve
+        references in `raw_text` — it is never treated as a new request of
+        its own, never echoed back verbatim, and is dropped entirely when
+        empty (the request/response shape is identical to calling without
+        it, so existing callers are unaffected).
 
         Returns {"text": str, "enriched": bool, "gateway_connection": str,
         "raw_text": str}. `text` is always safe to hand straight to the
@@ -747,10 +763,15 @@ class GatewayRequestIntelligence:
         if not text or not self.is_usable():
             return {"text": text, "enriched": False,
                     "gateway_connection": "", "raw_text": text}
+        ctx = " ".join(str(context or "").split()).strip()
         messages = [
             {"role": "system", "content": GATEWAY_UNDERSTANDING_SYSTEM_PROMPT},
-            {"role": "user", "content": text},
         ]
+        if ctx:
+            messages.append({"role": "user", "content":
+                             "Relevant prior conversation (context only — "
+                             "do not treat as a new request):\n" + ctx})
+        messages.append({"role": "user", "content": text})
         try:
             improved = self.gateway.chat(messages, max_tokens=max_tokens)
         except Exception:

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS astra_executions (
     plan        TEXT DEFAULT '[]',
     results     TEXT DEFAULT '{}',
     pending_step TEXT DEFAULT '',   -- JSON step dict when WAITING_USER
+    conversation_context TEXT DEFAULT '',
     selected_agent TEXT DEFAULT '',
     selected_provider TEXT DEFAULT '',
     selected_model TEXT DEFAULT '',
@@ -90,6 +91,7 @@ class Orchestrator:
         ("selected_agent", "TEXT DEFAULT ''"),
         ("selected_provider", "TEXT DEFAULT ''"),
         ("selected_model", "TEXT DEFAULT ''"),
+        ("conversation_context", "TEXT DEFAULT ''"),
     )
 
     def _install_schema(self) -> None:
@@ -108,12 +110,23 @@ class Orchestrator:
             self.store.install(EXEC_SCHEMA)
 
     # -- lifecycle -----------------------------------------------------------
-    def submit(self, goal: str, sync: bool = False) -> dict:
-        """Start (or directly run) an execution. Returns control record."""
+    def submit(self, goal: str, sync: bool = False, context: str = "") -> dict:
+        """Start (or directly run) an execution. Returns control record.
+
+        `context`, when the caller has it (e.g. the client's own recent
+        chat history), is recent Assistant conversation relevant to `goal`.
+        It is stored alongside the execution and handed to the Planner's
+        Astra AI Gateway preprocessing — see Planner.plan/_ai_steps and
+        GatewayRequestIntelligence.process — purely so a short follow-up
+        message can be understood in context. It is never itself treated
+        as a new goal. Optional and empty by default: existing callers are
+        unaffected.
+        """
         eid = "exec-" + uuid.uuid4().hex[:8]
         self.store.insert("astra_executions", execution_id=eid, goal=goal,
                           status="IDLE", plan="[]", results="{}",
                           pending_step="", error="",
+                          conversation_context=context or "",
                           created_at=_now(), started_at="", completed_at="")
         if self.events:
             self.events.emit("agent.started", agent="orchestrator",
@@ -141,6 +154,7 @@ class Orchestrator:
             return {"execution_id": execution_id, "status": "FAILED",
                     "error": "unknown execution"}
         goal = row["goal"]
+        convo_context = row.get("conversation_context") or ""
         run_ctx = ExecutionContext(execution_id, goal)
         results = json.loads(row.get("results") or "{}")   # keep succeeded steps
 
@@ -159,7 +173,8 @@ class Orchestrator:
                 self.events.emit("agent.planning", agent="orchestrator",
                                  execution=execution_id, goal=goal,
                                  replan=True, error=replan_for)
-            plan = self.planner.plan(goal, ctx={"replan_for": replan_for})
+            plan = self.planner.plan(goal, ctx={"replan_for": replan_for,
+                                                "conversation_context": convo_context})
             plan = [s for s in plan
                     if not (s["id"] in results and results[s["id"]].get("ok"))]
             if not plan:
@@ -170,7 +185,7 @@ class Orchestrator:
                                  execution=execution_id, goal=goal,
                                  specialist=selected_agent or None,
                                  task_type=task_type)
-            plan = self.planner.plan(goal)
+            plan = self.planner.plan(goal, ctx={"conversation_context": convo_context})
             if self.agents:
                 plan = self.agents.decorate(goal, plan, task_type)
             # plan in dependency order so `depends_on` steps run first

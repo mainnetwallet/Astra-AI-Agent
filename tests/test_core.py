@@ -290,6 +290,7 @@ class _FakeGatewayIntelligenceCall:
 
     def process(self, raw_text, **kw):
         self.calls.append(raw_text)
+        self.last_kwargs = kw
         if not self.enriched:
             return {"text": raw_text, "enriched": False,
                     "gateway_connection": "", "raw_text": raw_text}
@@ -374,6 +375,27 @@ class TestPlannerGatewayIntelligence(unittest.TestCase):
         planner._ai_steps("goal")
         self.assertEqual(len(router.received_prompts), 1)
 
+    def test_ai_steps_passes_conversation_context_to_gateway(self):
+        """Planner.plan(goal, ctx={"conversation_context": ...}) must reach
+        gateway_intelligence.process() as `context`, so a short follow-up
+        can be understood against recent prior conversation."""
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceCall()
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        planner.plan("eita ki?", ctx={"conversation_context": "prior turn about X"})
+        self.assertEqual(gw.last_kwargs.get("context"), "prior turn about X")
+
+    def test_ai_steps_context_defaults_to_empty_without_ctx(self):
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceCall()
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        planner.plan("plain goal")
+        self.assertEqual(gw.last_kwargs.get("context"), "")
+
     def test_full_stack_gateway_intelligence_defaults_to_noop_pass_through(self):
         """End-to-end with the real bootstrap wiring and no GW_* config: the
         Gateway is absent, so `gateway_intelligence` degrades to a
@@ -406,6 +428,34 @@ class TestOrchestrator(unittest.TestCase):
         state = self.orch.state(r["execution_id"])
         self.assertIn(state["status"], ("IDLE", "PLANNING", "EXECUTING",
                                         "COMPLETED", "FAILED", "unknown"))
+
+    def test_submit_conversation_context_reaches_planner(self):
+        """submit(goal, context=...) must be persisted and handed to
+        Planner.plan(ctx={"conversation_context": ...}) on both the first
+        run and any replan — the recorded free-form path all the way from
+        the API surface down to the Gateway's request-understanding step."""
+        captured = {}
+        real_plan = self.stack["planner"].plan
+
+        def spy_plan(goal, ctx=None, **kw):
+            captured["ctx"] = ctx
+            return real_plan(goal, ctx=ctx, **kw)
+        self.stack["planner"].plan = spy_plan
+        self.orch.submit("xkcd blorpberry 999", sync=True,
+                         context="earlier: discussed Notcoin airdrop")
+        self.assertEqual(captured["ctx"].get("conversation_context"),
+                         "earlier: discussed Notcoin airdrop")
+
+    def test_submit_without_context_defaults_to_empty(self):
+        captured = {}
+        real_plan = self.stack["planner"].plan
+
+        def spy_plan(goal, ctx=None, **kw):
+            captured["ctx"] = ctx
+            return real_plan(goal, ctx=ctx, **kw)
+        self.stack["planner"].plan = spy_plan
+        self.orch.submit("xkcd blorpberry 999", sync=True)
+        self.assertEqual(captured["ctx"].get("conversation_context"), "")
 
     def test_recent_and_stats(self):
         self.orch.submit("get_health", sync=True)

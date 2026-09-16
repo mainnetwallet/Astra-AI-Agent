@@ -1,9 +1,18 @@
 """Amazon Bedrock Converse adapter.
 
-Implements the AWS Bedrock *Converse API* through AWS Signature V4 signing
-(stdlib only — no botocore dependency). Reads `BEDROCK_CREDENTIALS` as
-`access_key:secret_key` pairs (one per line / comma-separated) alongside
-`AWS_REGION` / `AWS_ACCESS_KEY_ID` fallbacks.
+Two auth modes, tried in this order:
+
+1. `BEDROCK_API_KEYS` — a Bedrock *API key* (bearer token, generated in the
+   AWS Console under Bedrock > API keys). Sent as a plain
+   `Authorization: Bearer <key>` header, same shape as every other
+   OpenAI-compatible adapter in this codebase. No request signing needed.
+2. `BEDROCK_CREDENTIALS` — classic `access_key:secret_key` IAM pairs
+   (one per line / comma-separated), signed per-request with AWS
+   Signature V4 (stdlib only — no botocore dependency).
+
+Either is enough on its own; if both are set, the bearer-token API key
+takes priority since it's the simpler, purpose-built auth path. `AWS_REGION`
+/ `AWS_ACCESS_KEY_ID` fallbacks are still honoured for the SigV4 path.
 
 Calls hit `bedrock-runtime.<region>.amazonaws.com/model/<model_id>/converse`.
 Responses follow the Converse shape (`output.message.content[].text`).
@@ -108,12 +117,28 @@ class BedrockAdapter(AIProvider):
 
     models_env = "BEDROCK_MODELS"
     base_url_env = "BEDROCK_BASE_URL"
+    api_keys_env = "BEDROCK_API_KEYS"
+    credentials_env = "BEDROCK_CREDENTIALS"
     default_region = "us-east-1"
 
     def __init__(self, config=None, events=None, pool=None):
         super().__init__(config)
         self.events = events
-        self.pool = pool or BedrockCredentialPool.from_env(config, "BEDROCK_CREDENTIALS")
+        if pool is not None:
+            self.pool = pool
+            # caller-supplied pool: keep whichever auth mode its class implies
+            self.auth_mode = "bearer" if not isinstance(pool, BedrockCredentialPool) else "sigv4"
+        else:
+            api_keys = config.getlist(self.api_keys_env, default=[]) if config else []
+            if api_keys:
+                # Bearer-token Bedrock API key — plain Authorization header,
+                # no SigV4 signing, same as every other adapter here.
+                self.auth_mode = "bearer"
+                self.pool = CredentialPool.from_env(config, self.api_keys_env, "bedrock")
+            else:
+                # Classic access_key:secret_key IAM pair, SigV4-signed.
+                self.auth_mode = "sigv4"
+                self.pool = BedrockCredentialPool.from_env(config, self.credentials_env)
         self.region = (config.get("AWS_REGION") if config else None) or self.default_region
         raw = (config.get(self.base_url_env) if config else None) or "https://bedrock-runtime.us-east-1.amazonaws.com"
         self.base_url = raw.rstrip("/")
@@ -126,6 +151,10 @@ class BedrockAdapter(AIProvider):
 
     # -- signing --------------------------------------------------------------
     def _sign(self, cred, url: str, payload: bytes) -> dict:
+        if self.auth_mode == "bearer":
+            secret = self.pool.get_secret_for(cred)
+            return {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {secret}"}
         ak, _, sk = self.pool.get_secret_for(cred).partition(":")
         return sign_v4(ak, sk, self.region, SERVICE, "POST", url,
                        {"content-type": "application/json"}, payload)

@@ -26,6 +26,12 @@ KEYS_ENV = {
 
 
 def has_credentials(config, provider: str) -> bool:
+    if provider == "bedrock":
+        # Bedrock accepts either a bearer-token API key or classic
+        # access_key:secret_key IAM pairs — either is sufficient.
+        getlist = getattr(config, "getlist", lambda _k, d=[]: d)
+        return bool(getlist("BEDROCK_API_KEYS", default=[])) or \
+            bool(getlist("BEDROCK_CREDENTIALS", default=[]))
     env = KEYS_ENV.get(provider)
     if not env:
         return False

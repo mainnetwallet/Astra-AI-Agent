@@ -396,6 +396,47 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         self.assertFalse(rr.ok)
         self.assertTrue(rr.error)
 
+    # 14b. Bedrock: bearer-token API key auth mode (in addition to SigV4)
+    def test_bedrock_uses_bearer_auth_when_api_keys_configured(self):
+        from astra.ai.adapters.bedrock import BedrockAdapter
+        cfg = self._config(BEDROCK_API_KEYS="fake-bearer-token-abc")
+        adapter = BedrockAdapter(config=cfg)
+        self.assertEqual(adapter.auth_mode, "bearer")
+        self.assertTrue(bool(adapter.pool))
+        headers = adapter._sign(adapter.pool.pick(), adapter.base_url, b"{}")
+        self.assertEqual(headers["Authorization"], "Bearer fake-bearer-token-abc")
+        self.assertNotIn("X-Amz-Date", headers)
+
+    def test_bedrock_falls_back_to_sigv4_when_no_api_keys(self):
+        from astra.ai.adapters.bedrock import BedrockAdapter
+        cfg = self._config(BEDROCK_CREDENTIALS="AKIAFAKE:secretfakevalue")
+        adapter = BedrockAdapter(config=cfg)
+        self.assertEqual(adapter.auth_mode, "sigv4")
+        self.assertTrue(bool(adapter.pool))
+        headers = adapter._sign(adapter.pool.pick(), adapter.base_url, b"{}")
+        self.assertIn("X-Amz-Date", headers)
+        self.assertIn("AWS4-HMAC-SHA256", headers["Authorization"])
+
+    def test_bedrock_prefers_bearer_when_both_configured(self):
+        from astra.ai.adapters.bedrock import BedrockAdapter
+        cfg = self._config(BEDROCK_API_KEYS="fake-bearer-token-abc",
+                           BEDROCK_CREDENTIALS="AKIAFAKE:secretfakevalue")
+        adapter = BedrockAdapter(config=cfg)
+        self.assertEqual(adapter.auth_mode, "bearer")
+
+    def test_bedrock_has_credentials_true_for_either_auth_mode(self):
+        from astra.ai.registry import has_credentials
+        self.assertTrue(has_credentials(self._config(BEDROCK_API_KEYS="k"), "bedrock"))
+        self.assertTrue(has_credentials(self._config(BEDROCK_CREDENTIALS="a:b"), "bedrock"))
+        self.assertFalse(has_credentials(self._config(), "bedrock"))
+
+    def test_bedrock_registered_via_api_keys_only(self):
+        from astra.ai.registry import build_providers
+        reg = build_providers(config=self._config(BEDROCK_API_KEYS="fake-bearer-token"))
+        adapter = reg.get("bedrock")
+        self.assertIsNotNone(adapter)
+        self.assertEqual(adapter.auth_mode, "bearer")
+
     # 15. deterministic tie-breaking
     def test_equal_score_candidates_rank_deterministically(self):
         from astra.ai.routing_policy import RoutingDecisionPolicy

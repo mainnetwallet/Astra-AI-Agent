@@ -316,22 +316,47 @@ class TestAdapterConfiguration(unittest.TestCase):
         self.assertNotIn("super-secret-value-123", dumped)
 
 
-    def test_agentrouter_gateway_configured_distinctly_from_internal_router(self):
-        """The agentrouter.org adapter is a distinct registry entry from
-        Astra's own AgentRouter routing engine, and uses plain OpenAI-
-        compatible auth with no special/spoofed headers."""
-        from astra.ai.adapters.agentrouter_gateway import AgentRouterGatewayAdapter
+    def test_agentrouter_gateway_client_distinct_from_internal_router(self):
+        """The agentrouter.org client is a distinct object from Astra's own
+        AgentRouter routing engine, and uses plain OpenAI-compatible auth
+        with no special/spoofed headers."""
+        from astra.ai.agentrouter_gateway import AgentRouterGatewayClient
         cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
-        adapter = AgentRouterGatewayAdapter(config=cfg)
-        self.assertEqual(adapter.base_url, "https://agentrouter.org/v1")
-        self.assertEqual(adapter.extra_headers, {})
-        self.assertTrue(bool(adapter.pool))
+        client = AgentRouterGatewayClient(config=cfg)
+        self.assertEqual(client.base_url, "https://agentrouter.org/v1")
+        self.assertEqual(client.extra_headers, {})
+        self.assertTrue(bool(client.pool))
 
-    def test_agentrouter_gateway_registered_and_absent_when_unconfigured(self):
+    def test_agentrouter_gateway_never_in_provider_registry(self):
+        """AgentRouter.org is never a ProviderRegistry entry, configured or not
+        — it is not a provider (see astra/ai/agentrouter_gateway.py)."""
         from astra.ai.registry import build_providers
         self.assertIsNone(build_providers(config=self._config()).get("agentrouter_gateway"))
         cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
-        self.assertIsNotNone(build_providers(config=cfg).get("agentrouter_gateway"))
+        self.assertIsNone(build_providers(config=cfg).get("agentrouter_gateway"))
+        self.assertNotIn("agentrouter_gateway", build_providers(config=cfg).names())
+
+    def test_agentrouter_gateway_builder_absent_when_unconfigured(self):
+        from astra.ai.agentrouter_gateway import build_agentrouter_gateway
+        self.assertIsNone(build_agentrouter_gateway(config=self._config()))
+        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
+        gw = build_agentrouter_gateway(config=cfg)
+        self.assertIsNotNone(gw)
+        self.assertEqual(gw.name, "agentrouter_gateway")
+
+    def test_agentrouter_gateway_used_only_as_router_fallback_not_a_provider(self):
+        """The gateway, when configured, is reachable only via
+        AgentRouter.gateway — never mixed into router.providers."""
+        from astra.ai.router import AgentRouter
+        from astra.ai.agentrouter_gateway import AgentRouterGatewayClient
+        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
+        gw = AgentRouterGatewayClient(config=cfg)
+        r = AgentRouter(providers=[], config=cfg, max_retries=0, gateway=gw)
+        self.assertEqual(r.providers, [])
+        self.assertIs(r.gateway, gw)
+        health = r.gateway_health()
+        self.assertIn("state", health)
+        self.assertNotIn("agentrouter_gateway", r.health())
 
 
 if __name__ == "__main__":

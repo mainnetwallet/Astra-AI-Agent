@@ -43,7 +43,7 @@ one plugin, drop it in `plugins/`, restart. The core never changes.
 
 | Subsystem | What it does |
 |-----------|-------------|
-| **AgentRouter** | **The central AI routing core.** Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes, and records routing stats. It consumes the 10 adapters + model registry — it is **never** registered as a provider and has no models/API-keys/base-URL of its own (there is no `AGENTROUTER_*` env). |
+| **AgentRouter** | **The central AI routing core.** Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes, and records routing stats. It consumes the 10 adapters + model registry — it is **never** registered as a provider itself. It optionally holds one client of its own: `AGENTROUTER_*` config for the third-party agentrouter.org gateway, used only as a last-resort fallback after every real provider has failed, and reported separately from the provider table (see `astra/ai/agentrouter_gateway.py`). |
 | **Provider adapters (10)** | Gemini, Groq, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova, Cohere, Z.ai, Bedrock — one shared OpenAI-compatible adapter class + a real AWS SigV4 Bedrock adapter. Unlimited credentials per provider via key pools. |
 | **Model registry** | Capabilities, context window, streaming/tools/vision support, cost/speed/quality classes, preferred/disabled status. |
 | `Orchestrator` | UNDERSTAND → PLAN → SELECT TOOL → EXECUTE → OBSERVE → VERIFY → LEARN → CONTINUE. Recoverable across restarts (WAITING_USER runs are reconstituted, never blanket-failed). |

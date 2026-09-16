@@ -150,9 +150,15 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     provider_registry = build_providers(config, events=events)
     providers = provider_registry.all()
     model_registry = ModelRegistry(config)
+    # Optional AgentRouter.org gateway client (AGENTROUTER_API_KEYS). This is
+    # NOT a provider and is never added to provider_registry/providers — see
+    # astra/ai/agentrouter_gateway.py. It's handed to AgentRouter itself as a
+    # last-resort fallback, reported separately as "AgentRouter Core".
+    from astra.ai.agentrouter_gateway import build_agentrouter_gateway
+    gateway = build_agentrouter_gateway(config)
     router = AgentRouter(providers=providers, config=config, store=store,
                          preference=config.get("AI_ROUTING_PREFERENCE", "balanced"),
-                         registry=model_registry)
+                         registry=model_registry, gateway=gateway)
     router.attach_events(events)
     discovery = ModelDiscovery(model_registry,
                                adapter_by_name={p.name: p for p in providers

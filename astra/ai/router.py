@@ -1,10 +1,20 @@
 """AgentRouter — Astra's central AI routing core.
 
-NOT a provider. It holds no API keys, no model catalog of its own, no base URL
-and no `AGENTROUTER_*` config. It receives a task, classifies it, scores every
-eligible (adapter, model) candidate, executes with per-credential retry and
-cross-provider fallback, measures latency, records a normalized results and
-learns from outcomes so future routes improve.
+NOT a provider. It holds no API keys, no model catalog and no base URL of
+its own beyond the optional AgentRouter.org gateway client described below.
+It receives a task, classifies it, scores every eligible (adapter, model)
+candidate, executes with per-credential retry and cross-provider fallback,
+measures latency, records a normalized results and learns from outcomes so
+future routes improve.
+
+Optionally, `AGENTROUTER_API_KEYS`/`AGENTROUTER_MODELS`/`AGENTROUTER_BASE_URL`
+configure a client for the third-party agentrouter.org gateway (see
+astra/ai/agentrouter_gateway.py). That client is wired in as `self.gateway`
+directly on this class — it is never added to `self.providers` and never
+appears in ProviderRegistry, provider health, or the provider dashboard
+table. It is used only as a final fallback path after every real provider
+candidate has been tried and failed, and is reported separately via
+`gateway_health()` as "AgentRouter Core", not as a provider.
 
 Classify → score → execute → retry/fallback → record → learn.
 
@@ -146,7 +156,8 @@ class AgentRouter:
 
     def __init__(self, providers: list | None = None, config=None,
                  max_retries: int = 2, backoff_s: float = 1.0,
-                 registry=None, preference: str = "balanced", store=None):
+                 registry=None, preference: str = "balanced", store=None,
+                 gateway=None):
         self.config = config
         self.max_retries = max(0, int((config and config.get("AI_MAX_RETRIES")) or max_retries))
         self.backoff_s = float((config and config.get("AI_BACKOFF")) or backoff_s)
@@ -154,6 +165,9 @@ class AgentRouter:
         self.registry = registry
         self.store = store
         self.preference = preference or "balanced"
+        # optional AgentRouter.org gateway client — deliberately NOT part of
+        # self.providers / ProviderRegistry (see module docstring).
+        self.gateway = gateway
         self.policy = RoutingDecisionPolicy(stats=self._load_aggregate(),
                                             preference=self.preference)
         self._lock = threading.RLock()
@@ -248,7 +262,7 @@ class AgentRouter:
     # -- execution ------------------------------------------------------------
     def route_request(self, req: RoutingRequest) -> RoutingResult:
         candidates = self._candidates(req)
-        if not candidates:
+        if not candidates and not self._gateway_usable():
             return RoutingResult(ok=False, error="no eligible provider/model available")
         ranked = self.policy.rank(candidates, req) if self.policy else \
             [(0.0, c[0], c[1]) for c in candidates]
@@ -270,12 +284,57 @@ class AgentRouter:
                 return rr
             if rr is not None:
                 results.append(rr.error)
+        # every real provider candidate failed (or none were configured) →
+        # last resort: the AgentRouter.org gateway, if configured. This is
+        # never mixed into `ranked` above — it's tried only after the whole
+        # provider registry has been exhausted, and reported distinctly.
+        if self._gateway_usable():
+            for model_id in self._gateway_models():
+                rr = self._attempt(self.gateway, self._gateway_model_obj(model_id), req)
+                attempts += 1
+                if rr is not None and rr.ok:
+                    rr.fallback_used = True
+                    rr.route_reason = {
+                        "task_type": req.task_type, "score": None,
+                        "preference": "agentrouter_gateway_fallback",
+                        "reason": getattr(rr, "_reason", ""),
+                    }
+                    self._record_route(req, rr)
+                    return rr
+                if rr is not None:
+                    results.append(rr.error)
         # everything failed → learn and report honestly
         last = RoutingResult(ok=False, error="; ".join(results) or
                              "all providers failed",
                              attempts=attempts, fallback_used=fallback)
         self._emit("ai.failed", provider=(results[-1] if results else ""))
         return last
+
+    # -- AgentRouter.org gateway (not a provider; see module docstring) -------
+    def _gateway_usable(self) -> bool:
+        gw = self.gateway
+        if gw is None:
+            return False
+        return self._provider_usable(gw)
+
+    def _gateway_models(self) -> list[str]:
+        return list(getattr(self.gateway, "models", []) or [])
+
+    def _gateway_model_obj(self, model_id: str) -> Model:
+        meta = metadata_for(model_id, "agentrouter_gateway")
+        meta.pop("provider", None)
+        return Model("agentrouter_gateway", model_id, **meta)
+
+    def gateway_health(self) -> dict:
+        """AgentRouter Core status, reported separately from provider health
+        (never as `providers["agentrouter_gateway"]` — see §7/§8)."""
+        gw = self.gateway
+        if gw is None:
+            return {"state": "not_configured", "models": []}
+        info = self._provider_info(gw)
+        state = {"healthy": "healthy", "unhealthy": "degraded",
+                 "not_configured": "not_configured"}.get(info["state"], "unavailable")
+        return {"state": state, "models": self._gateway_models()}
 
     def _attempt(self, adapter, model: Model, req: RoutingRequest) -> RoutingResult | None:
         name = getattr(adapter, "name", "")
@@ -496,6 +555,7 @@ class AgentRouter:
     def stats(self) -> dict:
         return {"providers": self.health(), "last_route": self._last,
                 "down": sorted(self._down),
+                "agentrouter_core": self.gateway_health(),
                 "router": {"preference": self.preference,
                            "task_stats": self.task_stats()}}
 

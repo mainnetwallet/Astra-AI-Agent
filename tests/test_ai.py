@@ -82,6 +82,18 @@ class _FakeGatewayConn:
             raise ProviderError("simulated failure")
         return f"reply-from-{self.name}"
 
+    def stream(self, messages, model=None, max_tokens=500):
+        """Optional: `chunks` yielded, then a ProviderError if
+        `fail_after_chunks` is set (simulates a mid-stream interruption)."""
+        self._calls += 1
+        for i, c in enumerate(getattr(self, "chunks", []) or []):
+            if getattr(self, "fail_after_chunks", None) == i:
+                raise ProviderError("simulated stream interruption")
+            yield c
+        if getattr(self, "fail_after_chunks", None) is not None and \
+                self.fail_after_chunks >= len(getattr(self, "chunks", []) or []):
+            raise ProviderError("simulated stream interruption")
+
     def health_check(self):
         return True
 
@@ -554,6 +566,37 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         order1 = [ad.name for _, ad, _ in r.policy.rank(candidates, req)]
         order2 = [ad.name for _, ad, _ in r.policy.rank(candidates, req)]
         self.assertEqual(order1, order2)
+
+
+class TestGatewayStreamingRecovery(unittest.TestCase):
+    """§23 streaming recovery: once a chunk has reached the caller, a
+    mid-stream interruption must end the call cleanly — never fall over to
+    a second connection and duplicate/concatenate an unrelated response."""
+
+    def test_interruption_before_any_chunk_falls_over_normally(self):
+        from astra.ai.gateway import AstraAIGateway
+        broken = _FakeGatewayConn(name="astra-gw-gemini", models=["m"])
+        broken.chunks, broken.fail_after_chunks = [], 0   # fails immediately
+        healthy = _FakeGatewayConn(name="astra-gw-groq", models=["m"])
+        healthy.chunks = ["hello", " world"]
+        gateway = AstraAIGateway(connections=[broken, healthy])
+        out = list(gateway.stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual(out, ["hello", " world"])
+        self.assertEqual(gateway.last_connection, "astra-gw-groq")
+
+    def test_interruption_after_partial_chunks_stops_cleanly_no_duplication(self):
+        from astra.ai.gateway import AstraAIGateway
+        broken = _FakeGatewayConn(name="astra-gw-gemini", models=["m"])
+        broken.chunks = ["par", "tial"]
+        broken.fail_after_chunks = 2   # yields both chunks, then raises
+        healthy = _FakeGatewayConn(name="astra-gw-groq", models=["m"])
+        healthy.chunks = ["a totally different response"]
+        gateway = AstraAIGateway(connections=[broken, healthy])
+        out = list(gateway.stream([{"role": "user", "content": "hi"}]))
+        # only the partial content already sent — never falls over to groq
+        # and appends/duplicates a second, unrelated response after it.
+        self.assertEqual(out, ["par", "tial"])
+        self.assertEqual(healthy._calls, 0)
 
 
 class TestAdapterConfiguration(unittest.TestCase):

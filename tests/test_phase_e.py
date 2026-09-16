@@ -36,11 +36,16 @@ def make_stack():
 # ── error classification ──────────────────────────────────────────────────────
 class TestClassification(unittest.TestCase):
     def test_canonical_codes_are_the_spec_set(self):
+        # Extended for the Gateway-spec result-validation/correction loop
+        # (§9-12): invalid_result/incomplete_result/schema_failure are
+        # deterministic-validation outcomes, not exception categories —
+        # see astra.core.result_validation and astra.core.correction.
         spec = {"validation", "authentication", "authorization", "rate_limit",
                 "timeout", "network", "provider", "model_unavailable", "tool",
                 "browser", "web3", "database", "internal", "user_cancelled",
                 "transaction_policy", "transaction_rejected",
-                "transaction_failed"}
+                "transaction_failed",
+                "invalid_result", "incomplete_result", "schema_failure"}
         self.assertEqual(CODES, spec)
 
     def test_maps_exception_categories(self):
@@ -114,6 +119,131 @@ class TestExecutorClassified(unittest.TestCase):
                          ctx=None, run_ctx=None)
         self.assertEqual(out["error_code"], "authorization")
         self.assertEqual(len(calls), 1)   # never retried authorization
+
+
+# ── Gateway-spec supervision: side-effect safety + correction (§9-12, §19) ──
+class TestExecutorSupervision(unittest.TestCase):
+    def test_non_idempotent_tool_never_blindly_retried(self):
+        """A non-idempotent tool gets exactly one attempt even though the
+        step asks for retries and the failure code is normally retryable —
+        §19: its reply may have been lost after the real (non-idempotent)
+        action already happened."""
+        from astra.tools.registry import ToolRegistry
+        from astra.tools.schemas import Tool
+        reg = ToolRegistry()
+        calls = []
+
+        def flaky(args, ctx):
+            calls.append(1)
+            raise NetworkError("connection reset")
+        reg.register(Tool("submit_tx", flaky, idempotent=False, retries=0))
+        ex = Executor(reg)
+        out = ex.execute(
+            {"id": "s1", "tool": "submit_tx", "params": {}, "retries": 5},
+            ctx=None, run_ctx=None)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error_code"], "network")
+        self.assertEqual(len(calls), 1)   # NOT 6 — never blindly retried
+
+    def test_idempotent_tool_still_retries_as_before(self):
+        """Same failure, idempotent tool: existing multi-attempt behavior is
+        unchanged."""
+        from astra.tools.registry import ToolRegistry
+        from astra.tools.schemas import Tool
+        reg = ToolRegistry()
+        calls = []
+
+        def flaky(args, ctx):
+            calls.append(1)
+            raise NetworkError("connection reset")
+        reg.register(Tool("lookup", flaky, idempotent=True, retries=0))
+        ex = Executor(reg, retry_policy=RetryPolicy(base_delay_s=0.001,
+                                                    max_delay_s=0.001))
+        out = ex.execute(
+            {"id": "s1", "tool": "lookup", "params": {}, "retries": 2},
+            ctx=None, run_ctx=None)
+        self.assertFalse(out["ok"])
+        self.assertEqual(len(calls), 3)   # 1 + 2 retries, as declared
+
+    def _corrigible_reg(self, fixes_on_hint: bool, always_broken: bool = False):
+        from astra.tools.registry import ToolRegistry
+        from astra.tools.schemas import Tool
+        reg = ToolRegistry()
+        calls = []
+
+        def gen(args, ctx):
+            calls.append(dict(args))
+            if always_broken:
+                return {"path": ""}
+            if args.get("_correction_hint") and fixes_on_hint:
+                return {"path": "/tmp/astra_corrected_file_that_exists"}
+            return {"path": "/tmp/astra_definitely_nonexistent_file_xyz"}
+        reg.register(Tool("write_report", gen, idempotent=True, retries=0))
+        return reg, calls
+
+    def test_correction_loop_succeeds_on_idempotent_tool(self):
+        import os
+        target = "/tmp/astra_corrected_file_that_exists"
+        open(target, "w").close()
+        try:
+            reg, calls = self._corrigible_reg(fixes_on_hint=True)
+            ex = Executor(reg)
+            out = ex.execute(
+                {"id": "s1", "tool": "write_report", "params": {},
+                 "expect_file": "path"}, ctx=None, run_ctx=None)
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["output"]["path"], target)
+            # first attempt (no hint) + 1 correction attempt (with hint)
+            self.assertEqual(len(calls), 2)
+            self.assertNotIn("_correction_hint", calls[0])
+            self.assertIn("_correction_hint", calls[1])
+        finally:
+            os.remove(target)
+
+    def test_correction_exhausted_marks_invalid_result(self):
+        reg, calls = self._corrigible_reg(fixes_on_hint=False, always_broken=True)
+        ex = Executor(reg)
+        out = ex.execute(
+            {"id": "s1", "tool": "write_report", "params": {},
+             "expect_file": "path"}, ctx=None, run_ctx=None)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error_code"], "invalid_result")
+        # 1 initial + MAX_CORRECTION_ATTEMPTS(2) corrections = 3
+        self.assertEqual(len(calls), 3)
+
+    def test_non_idempotent_tool_gets_no_correction_attempts(self):
+        """An invalid/partial result from a non-idempotent tool is failed
+        immediately — it is never re-invoked "to fix itself"."""
+        from astra.tools.registry import ToolRegistry
+        from astra.tools.schemas import Tool
+        reg = ToolRegistry()
+        calls = []
+
+        def gen(args, ctx):
+            calls.append(1)
+            return {"path": "/tmp/astra_definitely_nonexistent_file_xyz"}
+        reg.register(Tool("mutate", gen, idempotent=False, retries=0))
+        ex = Executor(reg)
+        out = ex.execute(
+            {"id": "s1", "tool": "mutate", "params": {}, "expect_file": "path"},
+            ctx=None, run_ctx=None)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error_code"], "invalid_result")
+        self.assertEqual(len(calls), 1)
+
+    def test_expect_nonempty_valid_and_invalid(self):
+        from astra.core.result_validation import validate_step_result
+        step = {"expect_nonempty": "text"}
+        self.assertTrue(validate_step_result(step, {"text": "hello"}).ok)
+        bad = validate_step_result(step, {"text": "   "})
+        self.assertFalse(bad.ok)
+        self.assertEqual(bad.status, "invalid")
+
+    def test_unrelated_steps_unaffected_by_validation(self):
+        """A step declaring neither verify/expect_file/expect_nonempty is
+        untouched — the new layer is fully opt-in."""
+        from astra.core.result_validation import validate_step_result
+        self.assertEqual(validate_step_result({}, {"anything": 1}).status, "valid")
 
 
 # ── planner dependency + budget ──────────────────────────────────────────────

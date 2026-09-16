@@ -10,12 +10,31 @@ a classified step result carrying a canonical `error_code` (see
 core.classification), and retries follow the RetryPolicy — non-retryable
 codes (authorization, validation, transaction verdicts, …) are never
 retried no matter what the step's `retries` says.
+
+Gateway-spec supervision (§9-12, §19): two additions layered on top of the
+above, both no-ops for steps that don't opt in, so no existing plan/tool
+behavior changes unless a step actually uses the new fields:
+
+  1. Side-effect safety (§19) — the backoff-retry loop below only ever
+     retries a tool blindly when astra.tools.schemas.Tool.idempotent is
+     True. A non-idempotent tool (write_file, a wallet tx, ...) gets exactly
+     one attempt: if its response is lost to a network/timeout blip *after*
+     the real action already happened, we must not resubmit it just because
+     the reply didn't arrive.
+  2. Correction loop (§11-12) — after a tool call reports ok=True,
+     astra.core.result_validation checks any `verify`/`expect_file`/
+     `expect_nonempty` the step declared. An invalid/partial result from an
+     IDEMPOTENT tool gets up to MAX_CORRECTION_ATTEMPTS "please continue/fix"
+     re-invocations (astra.core.correction) before the step is finally
+     marked failed with error_code invalid_result/incomplete_result.
 """
 from __future__ import annotations
 
 import time
 
 from astra.core.classification import RetryPolicy, code_for
+from astra.core.correction import MAX_CORRECTION_ATTEMPTS, build_correction_instruction
+from astra.core.result_validation import validate_step_result
 from astra.core.timeutil import duration_ms, ms_now
 
 
@@ -28,6 +47,17 @@ class Executor:
         self.experiences = experiences
         self.retry_policy = retry_policy or RetryPolicy()
 
+    def _emit(self, kind: str, **data) -> None:
+        if self.events:
+            try:
+                self.events.emit(kind, agent="executor", **data)
+            except Exception:
+                pass
+
+    def _is_idempotent(self, tool: str) -> bool:
+        t = self.registry.get(tool) if self.registry else None
+        return bool(getattr(t, "idempotent", False))
+
     def execute(self, step: dict, ctx, run_ctx) -> dict:
         sid, tool = step.get("id", "s"), step.get("tool", "answer")
         if tool == "answer":
@@ -39,7 +69,12 @@ class Executor:
         experience = self.experiences.recall(f"{tool} {step.get('params', {})}".lower(), k=1) \
             if self.experiences else []
 
-        attempts = 1 + int(step.get("retries", 0))
+        idempotent = self._is_idempotent(tool)
+        requested_attempts = 1 + int(step.get("retries", 0))
+        # §19 side-effect safety: a non-idempotent tool never gets a blind
+        # backoff-retry — if its reply was lost after the real action
+        # already happened, resubmitting would duplicate the side effect.
+        attempts = requested_attempts if idempotent else 1
         params = step.get("params") or {}
         error, output, code = "", None, ""
         decision, duration = "allow", 0
@@ -71,13 +106,51 @@ class Executor:
             time.sleep(self.retry_policy.backoff_ms(attempt) / 1000.0)
         ok = decision == "allow" and (output is not None or step.get("is_answer"))
 
-        # 2. verify: required keys present in output?
+        # 2. verify: required keys present in output? (kept exactly as
+        # before for backward compatibility with existing plans/tests)
         missing = []
         if ok and step.get("verify"):
             for k in step["verify"]:
                 if not _deep_get(output, k):
                     missing.append(k)
         ok = ok and not missing
+
+        # 2b. §9-12 deterministic result validation + bounded correction.
+        # A no-op unless the step declares expect_file/expect_nonempty (or
+        # verify, already folded above) — every other step behaves exactly
+        # as before this addition.
+        if ok:
+            outcome = validate_step_result(step, output)
+            correction_attempts = 0
+            while not outcome.ok and idempotent and \
+                    correction_attempts < MAX_CORRECTION_ATTEMPTS:
+                correction_attempts += 1
+                self._emit("supervision.correction_requested", tool=tool,
+                           step=sid, reason=outcome.reason,
+                           attempt=correction_attempts)
+                hint = build_correction_instruction(step, outcome, output)
+                corrected_params = dict(params, _correction_hint=hint)
+                out = self._call(tool, corrected_params, ctx)
+                if out.get("ok"):
+                    output = out.get("result")
+                    outcome = validate_step_result(step, output)
+                    if outcome.ok:
+                        self._emit("supervision.correction_succeeded", tool=tool,
+                                   step=sid, attempt=correction_attempts)
+                else:
+                    # the tool itself failed on the correction attempt —
+                    # stop correcting, fall through to the invalid-result path
+                    break
+            if not outcome.ok:
+                ok = False
+                error = f"result validation failed: {outcome.reason}"
+                code = ("incomplete_result" if outcome.status == "partial"
+                        else "invalid_result")
+                self._emit("supervision.correction_exhausted" if
+                           correction_attempts else "supervision.validation_failed",
+                           tool=tool, step=sid, reason=outcome.reason,
+                           correction_attempts=correction_attempts,
+                           idempotent=idempotent)
 
         # 3. learn from the outcome (experience memory)
         if self.experiences:

@@ -771,25 +771,46 @@ class AstraAIGateway:
         category, ranked = self._select_order(messages, max_tokens)
         self._emit("astra_gateway.request", category=category,
                    candidates=len(ranked))
+        # §23 streaming recovery: once ANY chunk has reached the caller for
+        # this call, we must never silently start a second, independent
+        # stream on the next connection — that would concatenate an
+        # unrelated model's full response after the partial one already
+        # sent, or duplicate it outright. So a target is only ever retried
+        # here while emitted_any is still False; once it flips True an
+        # interruption ends the call cleanly instead of falling over.
+        emitted_any = False
         for conn, target_model, health in ranked:
             start = time.perf_counter()
             try:
                 for chunk in conn.stream(messages, model=target_model.model_id,
                                          max_tokens=max_tokens):
+                    emitted_any = True
                     yield chunk
             except (ProviderError, TimeoutError) as e:
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
+                reason = getattr(e, "message", None) or str(e)
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id,
-                          reason=getattr(e, "message", None) or str(e))
+                          model=target_model.model_id, reason=reason)
+                if emitted_any:
+                    self._emit("astra_gateway.stream_interrupted",
+                              provider=target_model.provider,
+                              model=target_model.model_id, reason=reason,
+                              partial_content_sent=True)
+                    return
                 continue
             except Exception as e:
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
+                reason = f"{type(e).__name__}: {e}"
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id,
-                          reason=f"{type(e).__name__}: {e}")
+                          model=target_model.model_id, reason=reason)
+                if emitted_any:
+                    self._emit("astra_gateway.stream_interrupted",
+                              provider=target_model.provider,
+                              model=target_model.model_id, reason=reason,
+                              partial_content_sent=True)
+                    return
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
             self.routing_state.record_success(target_model.provider,

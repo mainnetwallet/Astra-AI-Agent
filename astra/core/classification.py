@@ -6,7 +6,8 @@ so recovery is chosen by *kind*, never by scraping message text:
     validation, authentication, authorization, rate_limit, timeout, network,
     provider, model_unavailable, tool, browser, web3, database, internal,
     user_cancelled,
-    transaction_policy, transaction_rejected, transaction_failed
+    transaction_policy, transaction_rejected, transaction_failed,
+    invalid_result, incomplete_result, schema_failure
 
 The retry policy is deliberately conservative:
  - never retry: validation, authentication, authorization, user_cancelled,
@@ -15,6 +16,14 @@ The retry policy is deliberately conservative:
  - retry with exponential backoff + full jitter (capped): rate_limit,
    timeout, network, provider, model_unavailable, tool, browser, web3,
    database, internal.
+ - correction, not blind backoff-retry: invalid_result, incomplete_result,
+   schema_failure — these mean the call itself *succeeded* (no exception,
+   no HTTP error) but astra.core.result_validation determined the claimed
+   result doesn't match reality (e.g. a claimed file that doesn't exist, or
+   declared `verify` keys missing from the output). See
+   astra.core.correction.build_correction_instruction — the executor asks
+   the same (idempotent) tool to continue/fix, bounded, rather than
+   replaying the whole step blindly.
 """
 from __future__ import annotations
 
@@ -27,6 +36,11 @@ CODES = frozenset({
     "timeout", "network", "provider", "model_unavailable", "tool",
     "browser", "web3", "database", "internal", "user_cancelled",
     "transaction_policy", "transaction_rejected", "transaction_failed",
+    # deterministic result-validation failures (astra.core.result_validation)
+    # — the call succeeded but the claimed result doesn't hold up; these are
+    # retried via a *correction* instruction to the same target, not a plain
+    # backoff-retry (see astra.core.correction).
+    "invalid_result", "incomplete_result", "schema_failure",
 })
 
 # Codes that must never be retried.
@@ -92,6 +106,9 @@ def _from_text(text: str) -> str:
         ("user_cancelled", "user_cancelled"), ("cancelled", "user_cancelled"),
         ("cancel", "user_cancelled"),
         ("transaction", "web3"), ("web3", "web3"), ("rpc", "web3"),
+        ("schema", "schema_failure"),
+        ("incomplete", "incomplete_result"),
+        ("invalid_result", "invalid_result"),
     ):
         if token in t:
             return code

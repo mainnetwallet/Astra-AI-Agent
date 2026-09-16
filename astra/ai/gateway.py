@@ -15,13 +15,15 @@ GW_GEMINI_API_KEYS ≠ GEMINI_API_KEYS, etc. The Gateway is NOT a provider:
 it is never added to ProviderRegistry and is reported separately in
 health/dashboard output, never inside the provider table.
 
-Architecture note: this is a *gateway*, not a provider-adapters shim. Each
-Gateway connection is its own adapter class with its own configuration env
-vars. The existing provider adapter classes below (GeminiAdapter, GroqAdapter,
-CloudflareAdapter, BedrockAdapter) are subclassed purely to reuse their
-request/response/auth plumbing — an implementation detail, not a statement
-that the Gateway redistributes the providers' configuration. All environment
-variables the Gateway reads are GW_-prefixed and independent.
+Architecture note: this module is fully self-contained. It does NOT import,
+subclass, or instantiate the existing Provider adapter classes
+(GeminiAdapter, GroqAdapter, CloudflareAdapter, BedrockAdapter in
+astra/ai/adapters/*) — those remain exclusively the Provider system's. Each
+Gateway connection below (AstraGatewayGemini, AstraGatewayGroq,
+AstraGatewayCloudflare, AstraGatewayBedrock) implements its own request/
+response/auth plumbing against its own GW_-prefixed configuration. Nothing
+here reads GEMINI_*/GROQ_*/CLOUDFLARE_*/BEDROCK_* or touches a Provider
+adapter instance, client, or config object.
 
 Fallback: if Gemini fails → Groq → Cloudflare → Bedrock. The same task,
 messages, context and system instructions carry over unchanged between
@@ -30,53 +32,325 @@ succeeds) — no restart, no task duplication.
 """
 from __future__ import annotations
 
-from astra.ai.adapters.bedrock import BedrockAdapter
-from astra.ai.adapters.cloudflare import CloudflareAdapter
-from astra.ai.adapters.gemini import GeminiAdapter
-from astra.ai.adapters.groq import GroqAdapter
+import hashlib
+import hmac
+import json
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+from astra.ai.credentials import CredentialPool
 from astra.core.exceptions import ProviderError, TimeoutError
+
+GW_DEFAULT_TIMEOUT = 60
+GW_STREAM_TIMEOUT = 120
+
+
+# ── shared OpenAI-compatible plumbing (Gateway-only; not the Provider base) ──
+# Gemini, Groq and Cloudflare all speak the same `{model, messages, max_tokens}`
+# → `choices[].message.content` dialect. This base is private to the Gateway
+# module — it does not derive from astra.ai.adapters.base.CompatibleAdapter or
+# astra.ai.provider.AIProvider, and every connection built on it reads only
+# its own GW_* env vars via its own CredentialPool instance.
+class _GatewayCompatibleConnection:
+    name: str = "astra-gw-compatible"
+    models_env: str = ""
+    api_keys_env: str = ""
+    base_url_env: str = ""
+    base_url: str = ""
+    capabilities: list[str] = ["chat", "stream"]
+
+    def __init__(self, config=None, events=None, pool: CredentialPool | None = None):
+        self.config = config
+        self.events = events
+        self.pool = pool or CredentialPool.from_env(config, self.api_keys_env, self.name)
+        self.models = (config.getlist(self.models_env, default=[])
+                       if config and self.models_env else list(self.models
+                       if hasattr(self, "models") else []))
+        raw = (config.get(self.base_url_env, None) if config and self.base_url_env else None)
+        self.base_url = (raw or self.base_url or "").rstrip("/")
+        self._last_usage: dict = {}
+
+    # -- credentials ------------------------------------------------------
+    def _pick(self):
+        return self.pool.pick()
+
+    def _done(self, cred=None, errored=False, reason="", *, rate_limited=False,
+              auth_failure=False, cooldown_s: float = 30.0) -> None:
+        if cred is None:
+            return
+        if errored:
+            self.pool.report_failure(cred, reason=reason, rate_limited=rate_limited,
+                                     auth_failure=auth_failure, cooldown_s=cooldown_s)
+        else:
+            self.pool.report_success(cred)
+
+    def _headers(self, cred) -> dict:
+        h = {"content-type": "application/json"}
+        secret = self.pool.get_secret_for(cred) if cred else ""
+        if secret:
+            h["Authorization"] = f"Bearer {secret}"
+        return h
+
+    # -- HTTP ---------------------------------------------------------------
+    def _post(self, url: str, body: dict, cred) -> dict:
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=self._headers(cred))
+        try:
+            with urllib.request.urlopen(req, timeout=GW_DEFAULT_TIMEOUT) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as e:
+            self._classify_http(e, cred)
+            raise
+        except urllib.error.URLError as e:
+            self._done(cred, True, reason=f"network: {getattr(e, 'reason', e)}")
+            raise ProviderError(f"{self.name} network error: {getattr(e, 'reason', e)}") from e
+        try:
+            return json.loads(raw.decode("utf-8", errors="replace"))
+        except ValueError as e:
+            raise ProviderError(f"{self.name} bad json response") from e
+
+    def _classify_http(self, e: urllib.error.HTTPError, cred) -> None:
+        code = getattr(e, "code", 0)
+        rate_limited = code in (408, 429)
+        auth = code in (401, 403)
+        self._done(cred, True, reason=f"http {code}", rate_limited=rate_limited,
+                   auth_failure=auth, cooldown_s=(45 if rate_limited else 30))
+        if code == 408:
+            raise TimeoutError(f"{self.name} timed out")
+        if code == 429:
+            raise ProviderError(f"{self.name} rate limit reached")
+        if code in (401, 403):
+            raise ProviderError(f"{self.name} authentication failed")
+        raise ProviderError(f"{self.name} http {code}")
+
+    def _read_sse(self, resp) -> list[dict]:
+        results = []
+        raw = resp.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        for line in raw.split("\n"):
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                results.append(json.loads(payload))
+            except json.JSONDecodeError:
+                pass
+        return results
+
+    # -- interface ------------------------------------------------------------
+    def chat(self, messages, model=None, max_tokens=500) -> str:
+        cred = self._pick()
+        if cred is None:
+            raise ProviderError(f"{self.name}: no healthy credential configured")
+        body = {"model": model or (self.models[0] if self.models else ""),
+                "max_tokens": max_tokens, "messages": messages}
+        data = self._post(f"{self.base_url}/chat/completions", body, cred)
+        self._done(cred)
+        try:
+            text = data["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError):
+            text = ""
+        self._last_usage = data.get("usage", {})
+        return text.strip() or "(no reply)"
+
+    def stream(self, messages, model=None, max_tokens=500):
+        cred = self._pick()
+        if cred is None:
+            raise ProviderError(f"{self.name}: no healthy credential configured")
+        if self.events:
+            self.events.emit("ai.started", agent="gateway", provider=self.name,
+                             model=model or (self.models[0] if self.models else ""))
+        body = {"model": model or (self.models[0] if self.models else ""),
+                "max_tokens": max_tokens, "messages": messages, "stream": True}
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(f"{self.base_url}/chat/completions",
+                                     data=data, headers=self._headers(cred))
+        full = ""
+        try:
+            with urllib.request.urlopen(req, timeout=GW_STREAM_TIMEOUT) as resp:
+                for chunk in self._read_sse(resp):
+                    choices = chunk.get("choices", [])
+                    delta = choices[0].get("delta", {}) if choices else {}
+                    text = delta.get("content", "")
+                    if text:
+                        full += text
+                        yield text
+        except urllib.error.HTTPError as e:
+            self._classify_http(e, cred)
+            raise
+        except urllib.error.URLError as e:
+            self._done(cred, True, reason="stream network error")
+            raise ProviderError(f"{self.name} stream network error") from e
+        self._done(cred)
+        if self.events:
+            self.events.emit("ai.completed", agent="gateway", provider=self.name,
+                             length=len(full))
+
+    def health_check(self) -> bool:
+        return bool(self.pool)
+
+    def credential_summary(self) -> dict:
+        return self.pool.summary()
+
+    def supports(self, capability: str) -> bool:
+        return capability in self.capabilities
 
 
 # ── Gateway connections ─────────────────────────────────────────────────────
-# Each service has its own credentials / model list / endpoint. These classes
-# only override env-var names so the Gateway never reads the Provider config.
+# Each service has its own credentials / model list / endpoint, read only
+# from its own GW_-prefixed env vars — completely independent of the
+# existing Provider system's adapters, config and clients.
 
-class AstraGatewayGemini(GeminiAdapter):
-    """Astra AI Gateway / Gemini connection."""
+class AstraGatewayGemini(_GatewayCompatibleConnection):
+    """Astra AI Gateway / Gemini connection (independent of GeminiAdapter)."""
     name = "astra-gw-gemini"
+    base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
     models_env = "GW_GEMINI_MODELS"
     api_keys_env = "GW_GEMINI_API_KEYS"
     base_url_env = "GW_GEMINI_BASE_URL"
+    capabilities = ["chat", "stream", "tools", "json", "vision"]
 
 
-class AstraGatewayGroq(GroqAdapter):
-    """Astra AI Gateway / Groq connection."""
+class AstraGatewayGroq(_GatewayCompatibleConnection):
+    """Astra AI Gateway / Groq connection (independent of GroqAdapter)."""
     name = "astra-gw-groq"
+    base_url = "https://api.groq.com/openai/v1"
     models_env = "GW_GROQ_MODELS"
     api_keys_env = "GW_GROQ_API_KEYS"
     base_url_env = "GW_GROQ_BASE_URL"
+    capabilities = ["chat", "stream", "tools", "json"]
 
 
-class AstraGatewayCloudflare(CloudflareAdapter):
-    """Astra AI Gateway / Cloudflare connection.
-
-    Reuses CloudflareAdapter's per-account round-robin; account ids are read
-    from the independent GW_CLOUDFLARE_ACCOUNT_IDS list.
+class AstraGatewayCloudflare(_GatewayCompatibleConnection):
+    """Astra AI Gateway / Cloudflare connection (independent of
+    CloudflareAdapter). Implements its own per-account round-robin over the
+    independent GW_CLOUDFLARE_ACCOUNT_IDS list.
     """
     name = "astra-gw-cloudflare"
+    base_url = "https://api.cloudflare.com/client/v4"
     models_env = "GW_CLOUDFLARE_MODELS"
     api_keys_env = "GW_CLOUDFLARE_API_KEYS"
     base_url_env = "GW_CLOUDFLARE_BASE_URL"
     account_ids_env = "GW_CLOUDFLARE_ACCOUNT_IDS"
+    capabilities = ["chat", "stream", "tools", "json"]
+
+    def __init__(self, config=None, events=None, pool=None):
+        super().__init__(config, events, pool)
+        accounts = (config.getlist(self.account_ids_env) if config else []) or []
+        self._accounts = accounts or []
+        self._aidx = 0
+
+    def _account_base(self) -> str:
+        if not self._accounts:
+            raise ProviderError(
+                f"{self.name}: no account ids configured ({self.account_ids_env})")
+        acc = self._accounts[self._aidx % len(self._accounts)]
+        self._aidx += 1
+        return f"{self.base_url}/accounts/{acc}/ai/v1"
+
+    def chat(self, messages, model=None, max_tokens=500) -> str:
+        base = self.base_url
+        self.base_url = self._account_base()
+        try:
+            return super().chat(messages, model, max_tokens)
+        finally:
+            self.base_url = base
+
+    def stream(self, messages, model=None, max_tokens=500):
+        base = self.base_url
+        self.base_url = self._account_base()
+        try:
+            yield from super().stream(messages, model, max_tokens)
+        finally:
+            self.base_url = base
 
 
-class AstraGatewayBedrock(BedrockAdapter):
-    """Astra AI Gateway / Bedrock connection.
+# ── Gateway Bedrock connection (independent of BedrockAdapter) ──────────────
+def _gw_hmac(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
 
-    Reuses BedrockAdapter's two auth modes (bearer-token API key, or classic
-    SigV4 IAM pairs) with the gateway's own env vars and region override.
+
+def _gw_sign_v4(access_key: str, secret_key: str, region: str, service: str,
+                method: str, url: str, content_type: str, payload: bytes) -> dict:
+    """Gateway-local AWS SigV4 signer — duplicated here (not imported from
+    astra.ai.adapters.bedrock) so the Gateway has zero dependency on the
+    Provider Bedrock adapter module."""
+    from urllib.parse import urlsplit, quote
+    now = datetime.now(timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now.strftime("%Y%m%d")
+
+    parts = urlsplit(url)
+    host = parts.netloc
+    canonical_uri = quote(parts.path, safe="/-_.~") or "/"
+    canonical_querystring = parts.query or ""
+
+    signed_headers = "content-type;host;x-amz-date"
+    canonical_headers = (
+        f"content-type:{content_type}\n"
+        f"host:{host}\n"
+        f"x-amz-date:{amz_date}\n")
+    payload_hash = hashlib.sha256(payload).hexdigest()
+    canonical_request = "\n".join([
+        method, canonical_uri, canonical_querystring, canonical_headers,
+        signed_headers, payload_hash])
+    scope = f"{date_stamp}/{region}/{service}/aws4_request"
+    string_to_sign = "\n".join([
+        "AWS4-HMAC-SHA256", amz_date, scope,
+        hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()])
+    k_date = _gw_hmac(("AWS4" + secret_key).encode("utf-8"), date_stamp)
+    k_region = _gw_hmac(k_date, region)
+    k_service = _gw_hmac(k_region, service)
+    k_signing = _gw_hmac(k_service, "aws4_request")
+    signature = hmac.new(k_signing, string_to_sign.encode("utf-8"),
+                         hashlib.sha256).hexdigest()
+    auth = (f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}")
+    return {"Content-Type": content_type, "Host": host,
+            "X-Amz-Date": amz_date, "Authorization": auth}
+
+
+class _GatewayBedrockCredentialPool(CredentialPool):
+    """Parses `access_key:secret_key` pairs from GW_BEDROCK_CREDENTIALS.
+    A Gateway-local pool class — not astra.ai.adapters.bedrock.BedrockCredentialPool."""
+
+    @classmethod
+    def from_env(cls, config, env_name: str, provider: str | None = None):
+        pairs: list[str] = []
+        text = getattr(config, "get", lambda _k, d="": d)(env_name, "") or ""
+        for line in text.replace(",", "\n").splitlines():
+            line = line.strip()
+            if line and ":" in line:
+                pairs.append(line)
+        pool = cls(provider or "astra-gw-bedrock", [])
+        for entry in pairs:
+            ak, _, sk = entry.partition(":")
+            if ak and sk:
+                pool.add(entry)
+        return pool
+
+    def add(self, secret: str):
+        ak, _, sk = secret.partition(":")
+        return super().add(f"{ak}:{sk}")
+
+
+class AstraGatewayBedrock:
+    """Astra AI Gateway / Bedrock connection (independent of BedrockAdapter).
+
+    Own two auth modes — GW_BEDROCK_API_KEYS (bearer) or GW_BEDROCK_CREDENTIALS
+    (SigV4 access_key:secret_key pairs) — own region (GW_BEDROCK_REGION, no
+    fallback to the shared AWS_REGION/AWS_ACCESS_KEY_ID env vars the Provider
+    Bedrock adapter reads) and own model list/base URL.
     """
     name = "astra-gw-bedrock"
+    capabilities = ["chat", "stream", "tools", "json", "vision"]
+
     models_env = "GW_BEDROCK_MODELS"
     base_url_env = "GW_BEDROCK_BASE_URL"
     api_keys_env = "GW_BEDROCK_API_KEYS"
@@ -85,17 +359,138 @@ class AstraGatewayBedrock(BedrockAdapter):
     default_region = "us-east-1"
 
     def __init__(self, config=None, events=None, pool=None):
-        # independent gateway region (defaults to AWS_REGION when unset)
-        _region = None
-        if config is not None:
-            try:
-                _region = config.get(getattr(self, "region_env", "AWS_REGION"), None) \
-                    or config.get("AWS_REGION", None)
-            except Exception:
-                _region = None
-        if _region:
-            self.default_region = _region
-        super().__init__(config, events, pool)
+        self.config = config
+        self.events = events
+        if pool is not None:
+            self.pool = pool
+            self.auth_mode = "sigv4" if isinstance(pool, _GatewayBedrockCredentialPool) else "bearer"
+        else:
+            api_keys = config.getlist(self.api_keys_env, default=[]) if config else []
+            if api_keys:
+                self.auth_mode = "bearer"
+                self.pool = CredentialPool.from_env(config, self.api_keys_env, self.name)
+            else:
+                self.auth_mode = "sigv4"
+                self.pool = _GatewayBedrockCredentialPool.from_env(
+                    config, self.credentials_env, self.name)
+        self.region = (config.get(self.region_env) if config else None) or self.default_region
+        raw = (config.get(self.base_url_env) if config else None) \
+            or f"https://bedrock-runtime.{self.region}.amazonaws.com"
+        self.base_url = raw.rstrip("/")
+        self.models = config.getlist(self.models_env, default=[]) if config else []
+
+    # -- signing --------------------------------------------------------------
+    def _sign(self, cred, url: str, payload: bytes) -> dict:
+        if self.auth_mode == "bearer":
+            secret = self.pool.get_secret_for(cred)
+            return {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {secret}"}
+        ak, _, sk = self.pool.get_secret_for(cred).partition(":")
+        return _gw_sign_v4(ak, sk, self.region, "bedrock", "POST", url,
+                           "application/json", payload)
+
+    def _post(self, url: str, body: dict, cred) -> dict:
+        payload = json.dumps(body).encode("utf-8")
+        headers = self._sign(cred, url, payload)
+        req = urllib.request.Request(url, data=payload, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            self.pool.report_failure(cred, reason=f"{self.name} http {e.code}",
+                                     auth_failure=e.code in (401, 403),
+                                     rate_limited=e.code == 429,
+                                     cooldown_s=(45 if e.code == 429 else 30))
+            code = e.code
+            if code in (401, 403):
+                raise ProviderError(f"{self.name} authentication/authorization failed")
+            if code == 429:
+                raise ProviderError(f"{self.name} rate limit reached")
+            raise ProviderError(f"{self.name} http {code}")
+        except urllib.error.URLError as e:
+            raise ProviderError(f"{self.name} network: {getattr(e, 'reason', e)}") from e
+        self.pool.report_success(cred)
+        return data
+
+    # -- Converse shapes ------------------------------------------------------
+    def _converse_body(self, messages, model, max_tokens) -> dict:
+        system = "\n".join(m.get("content", "") for m in messages
+                           if m.get("role") == "system")
+        convo = []
+        for m in messages:
+            if m.get("role") == "system":
+                continue
+            role = "assistant" if m.get("role") == "assistant" else "user"
+            content = m.get("content", "")
+            if isinstance(content, list):
+                blocks = [{"text": (b.get("text") if isinstance(b, dict) else str(b))}
+                          for b in content]
+            else:
+                blocks = [{"text": str(content)}]
+            convo.append({"role": role, "content": blocks})
+        body = {"modelId": model, "messages": convo,
+                "inferenceConfig": {"maxTokens": max_tokens}}
+        if system:
+            body["system"] = [{"text": system}]
+        return body
+
+    def chat(self, messages, model=None, max_tokens=500) -> str:
+        model = model or (self.models[0] if self.models else "")
+        if not model:
+            raise ProviderError(f"{self.name}: no model configured")
+        cred = self.pool.pick()
+        if cred is None:
+            raise ProviderError(f"{self.name}: no healthy credential configured")
+        body = self._converse_body(messages, model, max_tokens)
+        data = self._post(f"{self.base_url}/model/{model}/converse", body, cred)
+        blocks = data.get("output", {}).get("message", {}).get("content", [])
+        return "".join(b.get("text", "") for b in blocks).strip() or "(no reply)"
+
+    def stream(self, messages, model=None, max_tokens=500):
+        model = model or (self.models[0] if self.models else "")
+        if not model:
+            raise ProviderError(f"{self.name}: no model configured")
+        cred = self.pool.pick()
+        if cred is None:
+            raise ProviderError(f"{self.name}: no healthy credential configured")
+        if self.events:
+            self.events.emit("ai.started", agent="gateway", provider=self.name, model=model)
+        body = self._converse_body(messages, model, max_tokens)
+        payload = json.dumps(body).encode("utf-8")
+        url = f"{self.base_url}/model/{model}/converse-stream"
+        req = urllib.request.Request(url, data=payload,
+                                     headers=self._sign(cred, url, payload))
+        import io
+        full = ""
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                for line in io.TextIOWrapper(resp, encoding="utf-8", errors="replace"):
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        event = json.loads(line[len("data:"):].strip())
+                    except ValueError:
+                        continue
+                    if event.get("contentBlockDelta", {}).get("delta", {}).get("text"):
+                        text = event["contentBlockDelta"]["delta"]["text"]
+                        full += text
+                        yield text
+        except urllib.error.HTTPError as e:
+            raise ProviderError(f"{self.name} stream http {e.code}") from e
+        self.pool.report_success(cred)
+        if self.events:
+            self.events.emit("ai.completed", agent="gateway", provider=self.name,
+                             length=len(full))
+
+    def health_check(self) -> bool:
+        return self.pool.healthy_count > 0
+
+    def credential_summary(self) -> dict:
+        return self.pool.summary()
+
+    def supports(self, capability: str) -> bool:
+        return capability in self.capabilities
 
 
 # Canonical fallback order: Gemini → Groq → Cloudflare → Bedrock

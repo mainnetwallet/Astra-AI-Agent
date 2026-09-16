@@ -42,6 +42,8 @@ System endpoints:
   GET/POST /api/workflows   workflow definitions; runs via POST {id}/run
   GET/POST /api/schedules   scheduler CRUD
   GET  /api/providers       AI provider health/latency/cost
+  GET/POST /api/agentrouter/health  real agentrouter.org live API test
+                            (?model=&all_keys=1&all_models=1, or JSON body)
   GET  /api/agents          recent executions; GET {exec}/… state
   POST /api/agents          submit a goal to the orchestrator
   POST /api/agents/{exec}/resume | /cancel   control WAITING_USER runs
@@ -461,6 +463,10 @@ class AstraHandler(BaseHTTPRequestHandler):
                 return _json_ok(self, {"ok": True,
                                        "data": server.router().stats()})
 
+            # agentrouter.org gateway — real live API test (never mocked)
+            if path == ["api", "agentrouter", "health"] and method in ("GET", "POST"):
+                return self._agentrouter_health(server, q, body)
+
             # orchestrator / agents
             if path == ["api", "agents"] and method == "GET":
                 return _json_ok(self, {"ok": True,
@@ -608,6 +614,28 @@ class AstraHandler(BaseHTTPRequestHandler):
         return self._json_ok_rid({"ok": True,
                                   "data": {"models": models,
                                            "summary": summary}})
+
+    def _agentrouter_health(self, server, q, body) -> None:
+        """GET/POST /api/agentrouter/health — a REAL live API test against
+        agentrouter.org (never mocked). See astra/ai/agentrouter_livecheck.py."""
+        from astra.ai.agentrouter_livecheck import check_agentrouter
+
+        def _flag(name: str) -> bool:
+            raw = body.get(name) if body else None
+            if raw is None:
+                raw = q.get(name)
+            if isinstance(raw, bool):
+                return raw
+            return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+        model = (body.get("model") if body else None) or q.get("model") or None
+        cfg = server.cfg()
+        if cfg is None:
+            return _json_err(self, "config unavailable", 400, "config_unavailable")
+        result = check_agentrouter(
+            cfg, events=server.events(), model=model,
+            test_all_keys=_flag("all_keys"), test_all_models=_flag("all_models"))
+        return _json_ok(self, {"ok": True, "data": result})
 
     def _provider_admin(self, s, name, action) -> bool:
         reg = s._get("provider_registry")

@@ -39,7 +39,24 @@
       </div>
       <h4>🛠️ Tools</h4>
       <div id="live-tools" class="tools-legend"></div>
-      <h4>📡 Activity feed</h4>
+      <h4>📡 Live logs</h4>
+      <div class="logs-toolbar">
+        <div class="chips" id="logs-filters">
+          <span class="chip active" data-filter="all">All</span>
+          <span class="chip" data-filter="router">Router</span>
+          <span class="chip" data-filter="agentrouter">AgentRouter</span>
+          <span class="chip" data-filter="providers">Providers</span>
+          <span class="chip" data-filter="api">API</span>
+          <span class="chip" data-filter="errors">Errors</span>
+          <span class="chip" data-filter="fallback">Fallback</span>
+          <span class="chip" data-filter="success">Success</span>
+        </div>
+      </div>
+      <div class="logs-toolbar">
+        <input type="search" id="logs-search" placeholder="Search logs…">
+        <button class="btn mini toggle" id="btn-logs-pause">⏸ Pause</button>
+        <button class="btn mini" id="btn-logs-clear">🗑️ Clear</button>
+      </div>
       <div id="live-feed" class="live-feed"><div class="muted">listening…</div></div>
     </div>
   </section>
@@ -82,6 +99,16 @@
         <button class="btn" id="btn-providers-refresh">🔄 Refresh discovery</button>
       </div>
       <div id="providers-list" class="list"><div class="empty">Loading…</div></div>
+
+      <h3 style="margin-top:16px">🌐 AgentRouter.org gateway</h3>
+      <p class="muted">External aggregator gateway — used only as a last-resort
+        fallback after every direct provider above is exhausted. Never one of
+        the providers itself.</p>
+      <div id="agentrouter-card" class="list"><div class="empty">Loading…</div></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="btn-agentrouter-test">🧪 Test AgentRouter API</button>
+      </div>
+      <div id="agentrouter-result" class="hint"></div>
     </div>
   </section>
 

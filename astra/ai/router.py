@@ -292,6 +292,7 @@ class AgentRouter:
 
     def route_request(self, req: RoutingRequest) -> RoutingResult:
         self._normalize_requirements(req)
+        self._emit("router.request", task=req.task_type)
         candidates = self._candidates(req)
         if not candidates and not self._gateway_usable():
             return RoutingResult(ok=False, error="no eligible provider/model available")
@@ -313,6 +314,12 @@ class AgentRouter:
                     "reason": getattr(rr, "_reason", ""),
                     "candidates_considered": considered,
                 }
+                self._emit("router.decision", task=req.task_type, provider=rr.provider,
+                           model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
+                           latency_ms=rr.latency_ms, fallback=fallback)
+                if fallback:
+                    self._emit("router.fallback", task=req.task_type, provider=rr.provider,
+                               model=rr.model, candidates_considered=considered)
                 self._record_route(req, rr)
                 return rr
             if rr is not None:
@@ -337,6 +344,12 @@ class AgentRouter:
                         "reason": getattr(rr, "_reason", ""),
                         "candidates_considered": considered,
                     }
+                    self._emit("router.decision", task=req.task_type, provider=rr.provider,
+                               model=rr.model, score=None, reason="agentrouter_gateway_fallback",
+                               latency_ms=rr.latency_ms, fallback=True)
+                    self._emit("router.fallback", task=req.task_type, provider=rr.provider,
+                               model=rr.model, candidates_considered=considered,
+                               reason="all direct providers exhausted")
                     self._record_route(req, rr)
                     return rr
                 if rr is not None:
@@ -379,12 +392,20 @@ class AgentRouter:
 
     def _attempt(self, adapter, model: Model, req: RoutingRequest) -> RoutingResult | None:
         name = getattr(adapter, "name", "")
+        is_gateway = adapter is self.gateway
         self._emit("ai.started", provider=name, model=model.model_id)
+        if is_gateway:
+            self._emit("agentrouter.request", model=model.model_id, task=req.task_type)
         t0 = ms_now()
         last_error = ""
         # per-credential + per-model retries: a failed key rolls to the next
         # key on the same model, then same provider's next model, then provider.
         for attempt in range(1, self.max_retries + 2):
+            if attempt > 1:
+                self._emit("credential.rotation", provider=name, model=model.model_id,
+                           attempt=attempt)
+                self._emit("router.retry", provider=name, model=model.model_id,
+                           attempt=attempt)
             try:
                 if req.required_tools or req.structured_output:
                     text = adapter.chat(req.messages, model=model.model_id,
@@ -411,12 +432,17 @@ class AgentRouter:
                                             f"retry #{attempt}"))
                 self._emit("ai.completed", provider=name, model=model.model_id,
                            latency_ms=ms)
+                if is_gateway:
+                    self._emit("agentrouter.success", model=model.model_id, latency_ms=ms)
                 return rr
             except (ProviderError, TimeoutError) as e:
                 last_error = e.message or getattr(e, "category", type(e).__name__)
                 self._errors[name] = self._errors.get(name, 0) + 1
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt)
+                if is_gateway:
+                    self._emit("agentrouter.error", model=model.model_id,
+                               error=last_error, attempt=attempt)
                 # the adapter's credential pool has already cooled the bad key;
                 # a fresh key on the same model may succeed, so keep retrying up
                 # to max_retries, respecting backoff only for transient errors.
@@ -435,7 +461,11 @@ class AgentRouter:
     def _mark_down(self, name: str, error: str) -> None:
         """Flag a provider down only when it's genuinely down (not merely a
         rate-limit blip on one key)."""
+        was_down = name in self._down
         self._down.add(name)
+        if not was_down:
+            self._emit("provider.health_changed", provider=name, healthy=False,
+                       reason=error)
 
     # -- streaming ------------------------------------------------------------
     def stream_request(self, req: RoutingRequest):
@@ -564,7 +594,10 @@ class AgentRouter:
 
     def enable(self, name: str) -> None:
         """Re-enable a provider after an operator-disable or transient failure."""
+        was_down = name in self._down
         self._down.discard(name)
+        if was_down:
+            self._emit("provider.health_changed", provider=name, healthy=True, reason="")
 
     def disable(self, name: str) -> None:
         """Operator force-disable: excluded from candidates; health reports down."""

@@ -180,10 +180,86 @@ loaders.live = async function () {
     setInterval(toolsTick, 30_000);
     executionsTick();
     setInterval(executionsTick, 10_000);
+    initLogsToolbar();
     if (window.EventSource) openSse();
     else setInterval(eventsPoll, 3000);   // fallback for older browsers
   }
 };
+
+/* ------------------------------ logs toolbar --------------------------------
+ * Category filters, search, pause/resume and clear for the Live activity
+ * feed. Purely client-side: every rendered feed-line carries the event kind
+ * + a resolved category as data attributes, and the toolbar just toggles
+ * visibility / appends nothing while paused. */
+const LOGS = { filter: "all", query: "", paused: false, buffer: [] };
+const LOGS_MAX_BUFFER = 300;
+
+// event kind (dotted, e.g. "router.decision") -> filter categories it
+// belongs to. A kind can belong to more than one (e.g. an "ai.failed" event
+// is both "api" and "errors").
+function logCategories(kind, data) {
+  const cats = new Set();
+  const head = (kind || "").split(".")[0];
+  if (head === "router" || head === "credential") cats.add("router");
+  if (head === "agentrouter") cats.add("agentrouter");
+  if (head === "provider") cats.add("providers");
+  if (head === "ai") cats.add("api");
+  if (kind === "router.fallback" || (data && data.fallback)) cats.add("fallback");
+  if (/failed|error|\.error$/.test(kind || "")) cats.add("errors");
+  if (/completed|success|\.success$/.test(kind || "") || kind === "router.decision")
+    cats.add("success");
+  return cats;
+}
+
+function initLogsToolbar() {
+  const bar = $("#logs-filters");
+  if (bar && !bar.dataset.hooked) {
+    bar.dataset.hooked = "1";
+    bar.addEventListener("click", (e) => {
+      const chip = e.target.closest(".chip");
+      if (!chip) return;
+      $$(".chip", bar).forEach((c) => c.classList.toggle("active", c === chip));
+      LOGS.filter = chip.dataset.filter;
+      applyLogsFilter();
+    });
+  }
+  const search = $("#logs-search");
+  if (search && !search.dataset.hooked) {
+    search.dataset.hooked = "1";
+    search.addEventListener("input", () => {
+      LOGS.query = search.value.trim().toLowerCase();
+      applyLogsFilter();
+    });
+  }
+  const pauseBtn = $("#btn-logs-pause");
+  if (pauseBtn && !pauseBtn.dataset.hooked) {
+    pauseBtn.dataset.hooked = "1";
+    pauseBtn.addEventListener("click", () => {
+      LOGS.paused = !LOGS.paused;
+      pauseBtn.textContent = LOGS.paused ? "▶ Resume" : "⏸ Pause";
+      pauseBtn.classList.toggle("on", LOGS.paused);
+    });
+  }
+  const clearBtn = $("#btn-logs-clear");
+  if (clearBtn && !clearBtn.dataset.hooked) {
+    clearBtn.dataset.hooked = "1";
+    clearBtn.addEventListener("click", () => {
+      LOGS.buffer = [];
+      $("#live-feed").innerHTML = `<div class="muted">cleared — listening…</div>`;
+    });
+  }
+}
+
+function applyLogsFilter() {
+  const feed = $("#live-feed");
+  if (!feed) return;
+  $$(".feed-line", feed).forEach((el) => {
+    const cats = (el.dataset.cats || "").split(",");
+    const matchesFilter = LOGS.filter === "all" || cats.includes(LOGS.filter);
+    const matchesQuery = !LOGS.query || (el.dataset.text || "").includes(LOGS.query);
+    el.classList.toggle("hidden", !(matchesFilter && matchesQuery));
+  });
+}
 
 /* ------------------------------ providers (core) --------------------------- */
 loaders.providers = async function () {
@@ -206,7 +282,76 @@ loaders.providers = async function () {
     btn.dataset.hooked = "1";
     btn.onclick = async () => { await post("/api/v1/models/refresh"); loaders.providers(); };
   }
+  renderAgentRouterCard(r.ok ? (r.data.agentrouter_core || null) : null);
+  initAgentRouterTestButton();
 };
+
+/* -------------------------- AgentRouter.org gateway ------------------------- */
+function renderAgentRouterCard(core) {
+  const card = $("#agentrouter-card");
+  if (!card) return;
+  if (!core || core.state === "not_configured") {
+    card.innerHTML = `<div class="row"><span class="status-dot warn"></span>` +
+      `<b>Not configured</b></div>` +
+      `<div class="hint muted">Set AGENTROUTER_API_KEYS to enable this gateway.</div>`;
+    return;
+  }
+  const dot = core.state === "healthy" ? "ok" : core.state === "degraded" ? "warn" : "bad";
+  card.innerHTML =
+    `<div class="row"><span class="status-dot ${dot}"></span>` +
+    `<b>${esc(core.state)}</b>` +
+    `<span class="muted">· ${(core.models || []).length} model(s) configured</span></div>`;
+}
+
+function initAgentRouterTestButton() {
+  const btn = $("#btn-agentrouter-test");
+  if (!btn || btn.dataset.hooked) return;
+  btn.dataset.hooked = "1";
+  btn.addEventListener("click", async () => {
+    const out = $("#agentrouter-result");
+    btn.disabled = true;
+    out.textContent = "Testing…";
+    try {
+      const r = await post("/api/agentrouter/health", { all_keys: true, all_models: true });
+      out.innerHTML = renderAgentRouterTestResult(r);
+    } catch (err) {
+      out.textContent = "✗ AgentRouter test failed to run — " + err;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function renderAgentRouterTestResult(r) {
+  if (!r.ok) return `<span class="status-dot bad"></span>✗ ${esc(r.error || "request failed")}`;
+  const d = r.data || {};
+  if (!d.configured) {
+    return `<span class="status-dot warn"></span>○ Not configured — set AGENTROUTER_API_KEYS`;
+  }
+  const lines = [];
+  if (d.status === "ok") {
+    lines.push(`<div><span class="status-dot ok"></span>✓ Connected</div>`);
+    lines.push(`<div>✓ Authenticated</div>`);
+    lines.push(`<div>✓ Model: ${esc(d.model || "")}</div>`);
+    lines.push(`<div>✓ Response received — latency ${esc(String(d.latency_ms))} ms</div>`);
+  } else {
+    lines.push(`<div><span class="status-dot bad"></span>✗ AgentRouter API failed</div>`);
+    lines.push(`<div>${esc(d.detail || d.status || "unknown error")}</div>`);
+    lines.push(`<div class="muted">configured: ${d.configured} · reachable: ${d.reachable} · ` +
+      `authenticated: ${d.authenticated}</div>`);
+  }
+  if (d.keys && d.keys.length) {
+    lines.push(`<div class="muted" style="margin-top:6px">` +
+      d.keys.map((k) => `${esc(k.key)} → ${k.status === "success" ? "✓ success" : "✗ failed"}`)
+        .join(" &nbsp;·&nbsp; ") + `</div>`);
+  }
+  if (d.models && d.models.length) {
+    lines.push(`<div class="muted" style="margin-top:6px">` +
+      d.models.map((m) => `${m.working ? "✓" : "✗"} ${esc(m.model)}`).join(" &nbsp;·&nbsp; ") +
+      `</div>`);
+  }
+  return lines.join("");
+}
 
 /* -------------------------------- router (core) ---------------------------- */
 loaders.router = async function () {
@@ -322,23 +467,51 @@ function openSse() {
   es.onerror = () => { /* browser auto-reconnects */ };
 }
 
+const LOG_BADGES = { "task.started": "▶️", "task.completed": "✅",
+  "tool.executed": "🔧", "agent.completed": "🏁", "agent.failed": "❌",
+  "memory.saved": "🧠", "workflow.completed": "📋", "scheduler.tick": "⏰",
+  "task.created": "📌", "execution.started": "🧠",
+  "router.request": "🧭", "router.decision": "🎯", "router.fallback": "↩️",
+  "router.retry": "🔁", "credential.rotation": "🔑",
+  "provider.health_changed": "🩺",
+  "agentrouter.request": "🌐", "agentrouter.success": "🌐✅",
+  "agentrouter.error": "🌐❌",
+  "ai.started": "📡", "ai.completed": "📨", "ai.failed": "⚠️" };
+
 function feedLine(e) {
+  if (LOGS.paused) return;   // pause just stops new lines from appearing
   const feed = $("#live-feed");
+  if (!feed) return;
+  if (feed.firstElementChild && feed.firstElementChild.classList.contains("muted"))
+    feed.innerHTML = "";
   const div = document.createElement("div");
-  div.className = "feed-line";
+  const cats = [...logCategories(e.kind, e.data)];
+  const isErr = cats.includes("errors");
+  const isOk = !isErr && cats.includes("success");
+  div.className = "feed-line" + (isErr ? " err" : isOk ? " ok" : "");
+  div.dataset.cats = cats.join(",");
   const when = (e.created_at || "").split(" ")[1] || "";
-  const badge = { "task.started": "▶️", "task.completed": "✅",
-    "tool.executed": "🔧", "agent.completed": "🏁", "agent.failed": "❌",
-    "memory.saved": "🧠", "workflow.completed": "📋", "scheduler.tick": "⏰",
-    "task.created": "📌", "execution.started": "🧠" }
-    [e.kind] || "•";
+  const badge = LOG_BADGES[e.kind] || "•";
+  const text = `${e.kind} ${e.agent || ""} ${feedText(e.data)}`;
+  div.dataset.text = text.toLowerCase();
   div.innerHTML = `${badge} <code>${esc(when)}</code> <b>${esc(e.kind)}</b> ` +
     `${esc(e.agent || "")} ${feedText(e.data)}`;
+  const matchesFilter = LOGS.filter === "all" || cats.includes(LOGS.filter);
+  const matchesQuery = !LOGS.query || text.toLowerCase().includes(LOGS.query);
+  div.classList.toggle("hidden", !(matchesFilter && matchesQuery));
   feed.prepend(div);
-  while (feed.children.length > 60) feed.removeChild(feed.lastChild);
+  while (feed.children.length > LOGS_MAX_BUFFER) feed.removeChild(feed.lastChild);
 }
 function feedText(d) {
   if (!d) return "";
+  const parts = [];
+  if (d.task) parts.push("task:" + d.task);
+  if (d.provider) parts.push(d.provider);
+  if (d.model) parts.push(d.model);
+  if (d.latency_ms != null) parts.push(d.latency_ms + "ms");
+  if (d.error) parts.push("err:" + d.error);
+  if (d.reason) parts.push(d.reason);
+  if (parts.length) return "· " + esc(parts.join(" "));
   const pick = ["goal", "tool", "step", "title", "name", "description", "status", "workflow"];
   for (const k of pick) if (d[k] && typeof d[k] === "string") return "· " + esc(d[k]);
   try { return "· " + esc(JSON.stringify(d)); } catch (_) { return ""; }

@@ -47,7 +47,14 @@ EVENT_KINDS = (
     "web3.transaction.confirmed", "web3.transaction.failed",
     # plugins / providers (contract for future modules)
     "plugin.loaded", "plugin.failed", "plugin.disabled",
-    "provider.selected", "provider.failed",
+    "provider.selected", "provider.failed", "provider.health_changed",
+    # AgentRouter (internal routing brain) — routing decision visibility
+    "router.request", "router.decision", "router.fallback", "router.retry",
+    "credential.rotation",
+    # agentrouter.org (external gateway) — kept distinct from the internal
+    # router's own "router.*"/"ai.*" events so the dashboard Logs panel can
+    # filter for this one third-party service specifically.
+    "agentrouter.request", "agentrouter.success", "agentrouter.error",
 )
 
 

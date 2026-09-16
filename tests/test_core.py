@@ -247,33 +247,15 @@ class TestScheduler(unittest.TestCase):
         self.assertIsNone(compute_next_run("oneshot", "2025-01-01 00:00", now=now))
 
 
-# ── Planner (offline) ────────────────────────────────────────────────────────
+# ── Planner ────────────────────────────────────────────────────────────────
 class TestPlanner(unittest.TestCase):
     def setUp(self): self.stack = make_stack()
 
-    def test_offline_wallet_balances(self):
-        plan = self.stack["planner"].plan("amader wallet balance dekho")
-        self.assertEqual(plan[0]["tool"], "wallet_balances")
-
-    def test_offline_help(self):
-        plan = self.stack["planner"].plan("help")
-        self.assertEqual(plan[0]["tool"], "get_health")
-
-    def test_offline_plan_my_day(self):
-        plan = self.stack["planner"].plan("plan my day")
-        # matches (today|what do i need|plan my day|…), produces list_tasks
-        self.assertEqual(plan[0]["tool"], "list_tasks")
-
-    def test_offline_research_url(self):
-        plan = self.stack["planner"].plan("research https://example.com")
-        self.assertEqual(plan[0]["tool"], "fetch_url")
-        self.assertIn("example.com", plan[0]["params"]["url"])
-
     def test_research_keyword_without_url_does_not_bypass_gateway(self):
-        """'review'/'about'/'analyse'/'research' alone, with no actual URL,
-        is normal free-form language — it must NOT be forced into
-        fetch_url with a non-URL param. It has to fall through to the AI
-        planner, i.e. the Astra AI Gateway -> Provider path."""
+        """'review'/'about'/'analyse'/'research' — free-form language, with
+        or without a URL — must always be handed to the AI planner, i.e.
+        the Astra AI Gateway -> Provider path. There is no deterministic
+        tool-matching step in the Planner any more."""
         from astra.core.planner import Planner
         gw = _FakeGatewayIntelligenceCall(enriched=False)
         router = _FakeRouterCapturesPrompt(
@@ -287,6 +269,17 @@ class TestPlanner(unittest.TestCase):
     def test_answer_tool_for_unknown(self):
         plan = self.stack["planner"].plan("xkcd blorpberry 999")
         self.assertEqual(plan[0]["tool"], "answer")
+
+    def test_no_provider_configured_falls_back_to_plain_answer_not_a_tool(self):
+        """With no Provider configured (this stack's default — no AI keys
+        set), *every* request — even ones that look like they map cleanly
+        to a tool — gets a plain fallback reply, never a tool picked by
+        keyword matching. Tool selection is exclusively a Provider AI
+        decision now, reached only through the Gateway -> Provider path."""
+        for goal in ("check my wallet balance", "help", "plan my day",
+                    "research https://example.com", "remember this note"):
+            plan = self.stack["planner"].plan(goal)
+            self.assertEqual(plan[0]["tool"], "answer")
 
 
 # ── Planner + Astra AI Gateway: Request Intelligence wiring ─────────────────
@@ -414,13 +407,124 @@ class TestPlannerGatewayIntelligence(unittest.TestCase):
     def test_full_stack_gateway_intelligence_defaults_to_noop_pass_through(self):
         """End-to-end with the real bootstrap wiring and no GW_* config: the
         Gateway is absent, so `gateway_intelligence` degrades to a
-        pass-through and normal offline/answer planning is unaffected."""
+        pass-through and planning falls back to a plain answer (never a
+        deterministic tool pick — that mechanism no longer exists)."""
         stack = make_stack()
         planner = stack["planner"]
         self.assertIsNotNone(planner.gateway_intelligence)
         self.assertFalse(planner.gateway_intelligence.is_usable())
         plan = planner.plan("xkcd blorpberry 999")
         self.assertEqual(plan[0]["tool"], "answer")
+
+
+# ── Removal verification: Planner offline/deterministic step is gone ───────
+class TestPlannerOfflineStepsRemoved(unittest.TestCase):
+    """Targeted-fix verification: the deterministic/offline tool-matching
+    mechanism that used to live in Planner is completely gone, every normal
+    request reaches the Astra AI Gateway -> Provider path, no tool
+    capability was lost, and the Gateway/Provider isolation established
+    earlier is untouched."""
+
+    # 1. the mechanism itself no longer exists ------------------------------
+    def test_offline_steps_method_does_not_exist(self):
+        from astra.core.planner import Planner
+        self.assertFalse(hasattr(Planner, "_offline_steps"))
+        self.assertFalse(hasattr(Planner, "_deterministic_tool_steps"))
+
+    def test_planner_module_has_no_offline_keyword_matching(self):
+        """There is no regex/keyword table left in the module that maps raw
+        text straight to a tool — `plan()` has exactly one path to a tool
+        pick: `_ai_steps()` (Gateway -> Provider)."""
+        import inspect
+        from astra.core import planner as planner_mod
+        src = inspect.getsource(planner_mod)
+        for needle in ("_offline_steps", "_deterministic_tool_steps",
+                      "fallback: bool = False"):
+            self.assertNotIn(needle, src)
+
+    # 2 & 3. normal requests go through Gateway preprocessing, whose output
+    # is what reaches the existing Provider system --------------------------
+    def test_normal_request_goes_through_gateway_before_provider(self):
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceCall(
+            rewritten="USER TASK:\nCheck the wallet balance.")
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"wallet_balances","params":{},'
+            '"description":"check"}]}')
+        planner = Planner(router=router, tools=["wallet_balances"],
+                          gateway_intelligence=gw)
+        steps = planner.plan("amader wallet balance dekho")
+        # Gateway was consulted with the raw text ...
+        self.assertEqual(gw.calls, ["amader wallet balance dekho"])
+        # ... and its *enriched* output, not the raw text, is what the
+        # existing Provider system actually received.
+        self.assertIn(gw.rewritten, router.received_prompts[0])
+        self.assertNotIn("amader wallet balance dekho", router.received_prompts[0])
+        # the Provider AI is the one that picked the tool
+        self.assertEqual(steps[0]["tool"], "wallet_balances")
+
+    # 4. existing tool capabilities are preserved ----------------------------
+    def test_provider_can_still_select_every_kind_of_tool(self):
+        """Wallet, URL-fetch, memory, task and browser tools are all still
+        reachable — the Provider AI selects them via the normal JSON step
+        plan, exactly like before; only the deterministic shortcut to them
+        is gone."""
+        from astra.core.planner import Planner
+        for tool in ("wallet_balances", "fetch_url", "remember", "recall",
+                    "list_tasks", "browser_navigate", "get_health"):
+            router = _FakeRouterCapturesPrompt(
+                '{{"steps":[{{"id":"s1","tool":"{}","params":{{}},'
+                '"description":"d"}}]}}'.format(tool))
+            planner = Planner(router=router, tools=[tool])
+            steps = planner.plan("do the thing")
+            self.assertEqual(steps[0]["tool"], tool)
+
+    # 5. no request silently bypasses the Gateway ----------------------------
+    def test_previously_deterministic_phrases_now_all_reach_gateway(self):
+        """Every phrase that used to be caught by the removed offline
+        matcher (wallet balance, help, plan my day, remember, recall,
+        eligibility, file analysis, airdrop discovery, a bare URL) must now
+        reach the Gateway — none of them can silently skip it any more."""
+        from astra.core.planner import Planner
+        phrases = [
+            "check my wallet balance", "help", "plan my day",
+            "remember this note", "what do i know about airdrops",
+            "am i eligible", "analyze the file report.txt",
+            "find new airdrops", "research https://example.com",
+        ]
+        for phrase in phrases:
+            gw = _FakeGatewayIntelligenceCall(enriched=False)
+            router = _FakeRouterCapturesPrompt(
+                '{"steps":[{"id":"s1","tool":"answer","params":{"text":"ok"}}]}')
+            planner = Planner(router=router, tools=["answer"],
+                              gateway_intelligence=gw)
+            planner.plan(phrase)
+            self.assertEqual(gw.calls, [phrase],
+                             f"{phrase!r} did not reach the Gateway")
+
+    def test_with_no_provider_at_all_request_still_does_not_pick_a_tool(self):
+        """When there is truly no Provider configured, the Planner must
+        fall back to a plain reply — never quietly resolve to a tool via
+        keyword matching, which is exactly the removed shortcut."""
+        from astra.core.planner import Planner
+        planner = Planner()   # no router, no gateway_intelligence
+        steps = planner.plan("check my wallet balance")
+        self.assertEqual(steps[0]["tool"], "answer")
+
+    # 6. no Offline AI Provider exists ---------------------------------------
+    def test_no_offline_ai_provider_exists(self):
+        from astra.ai import provider as provider_mod
+        self.assertFalse(hasattr(provider_mod, "OfflineProvider"))
+
+    # 7. Gateway stays isolated from ProviderRegistry / Provider adapters ----
+    def test_gateway_never_touches_provider_registry_or_adapters(self):
+        from astra.ai.gateway import AstraAIGateway, GatewayRequestIntelligence
+        gw = AstraAIGateway(connections=[])
+        gi = GatewayRequestIntelligence(gw)
+        for obj in (gw, gi):
+            self.assertFalse(hasattr(obj, "provider_registry"))
+            self.assertFalse(hasattr(obj, "providers"))
+            self.assertFalse(hasattr(obj, "router"))
 
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────

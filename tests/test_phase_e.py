@@ -117,13 +117,36 @@ class TestExecutorClassified(unittest.TestCase):
 
 
 # ── planner dependency + budget ──────────────────────────────────────────────
+class _FakeDependencyRouter:
+    """Stand-in existing Provider system: returns a fixed two-step JSON plan
+    with a declared dependency, so the AI planning path (Astra AI Gateway ->
+    Provider) can be exercised deterministically without a real AI provider
+    configured. There is no offline/deterministic tool-matching step in the
+    Planner any more — dependency-bearing plans now only ever come from the
+    Provider AI's JSON response, which is what this fake stands in for."""
+
+    def route(self, messages):
+        plan = {
+            "steps": [
+                {"id": "s1", "tool": "list_tasks", "params": {"status": "pending"},
+                 "description": "List pending tasks"},
+                {"id": "s2", "tool": "list_tasks", "params": {"status": "ready"},
+                 "description": "List ready tasks", "depends_on": ["s1"]},
+            ]
+        }
+        return ("fake-provider", "fake-model", json.dumps(plan))
+
+
 class TestPlannerDependencies(unittest.TestCase):
-    def test_offline_step_declares_dependency(self):
-        p = Planner()
+    def test_ai_plan_step_declares_dependency(self):
+        """Dependency ordering is a Provider AI capability now, reached only
+        through the Gateway -> Provider path — there is no deterministic
+        shortcut that fabricates a dependent step from raw text."""
+        p = Planner(router=_FakeDependencyRouter(), tools=["list_tasks"])
         steps = p.plan("plan my day")
-        t2 = [s for s in steps if s["id"] == "t2"]
+        t2 = [s for s in steps if s["id"] == "s2"]
         self.assertTrue(t2)
-        self.assertEqual(t2[0]["depends_on"], ["t1"])
+        self.assertEqual(t2[0]["depends_on"], ["s1"])
 
     def test_plan_respects_budget(self):
         p = Planner()
@@ -193,6 +216,11 @@ class TestOrchestratorDependencyRun(unittest.TestCase):
         self.orch = self.stack["orchestrator"]
 
     def test_dependency_steps_run_in_order(self):
+        # No AI provider is configured in this stack; inject a fake
+        # Provider-system router so the AI planning path (Astra AI Gateway
+        # -> Provider) can be exercised end-to-end through the real
+        # orchestrator, exactly like a configured Provider would behave.
+        self.stack["planner"].router = _FakeDependencyRouter()
         r = self.orch.submit("plan my day", sync=True)
         self.assertEqual(r["status"], "COMPLETED")
         order = [s["tool"] for s in r["steps_detail"]]

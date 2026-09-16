@@ -1,34 +1,43 @@
 """Planner: turn a natural-language goal into ordered, tool-backed steps.
 
-Deterministic-first, narrowly: a fixed set of *genuinely tool-specific*
-intent patterns (`_deterministic_tool_steps`) are matched before anything
-else — ones that need no AI reasoning at all (system health, memory
-read/write, task listing) or hinge on a concrete structural signal in the
-message (an actual URL, an explicit file path). This is unrelated to the
-(removed) Offline AI Provider — it never touches an AI provider at all, it
-is pure text matching. Everything else — any normal free-form request that
-actually requires AI reasoning to understand or answer — falls through to
-the LLM planner, which always goes through the Astra AI Gateway first (see
-below). The deterministic patterns intentionally do NOT match on topic
-keywords alone (e.g. "review", "about", "analyse" with no URL) precisely so
-they can't silently steal a normal conversational request away from the
-Gateway -> Provider path.
+No offline/deterministic shortcut: every normal request goes through the
+same path —
 
-Astra AI Gateway (optional, `gateway_intelligence`): when a goal falls
-through to the LLM planner, the raw goal is first run through the Gateway's
-Request Understanding/Enrichment layer (astra/ai/gateway.py) — its own
-GW_* AI connections, completely separate from the Provider system — so a
-short, incomplete or poorly structured request becomes a clearer
-Provider-ready prompt before the *existing* Provider system (`self.router`)
-actually executes it. The Gateway only rewrites the request text; it never
-plans, never calls a tool, and is never the one that answers. If the
-Gateway is absent/unusable/fails, the raw goal is used unchanged — this
-layer is a pure quality improvement, never a dependency.
+    User -> Assistant -> Astra AI Gateway -> Provider-ready request
+         -> Existing Provider System -> Provider AI decides which tool(s)
+         (wallet balances, URL fetch, memory, tasks, browser, ...) to use
+         -> tools execute -> final response
+
+There is no keyword/regex matching in this module that decides a tool
+directly from the raw text. `plan()` always hands the goal to `_ai_steps()`,
+which is the Astra AI Gateway -> Provider path (see below); the only
+non-Gateway fallback is a plain "answer" step, used solely when there is
+literally no Provider configured to plan with (`self.router` is None/
+unusable) or the Provider returns nothing usable. That fallback never picks
+a tool — it is a graceful "can't plan this right now" reply, not a
+deterministic shortcut.
+
+Removing this deterministic layer does not remove any tool capability:
+wallet balance checks, URL fetching, memory, task management, browser
+actions, and every other registered tool remain fully available — the
+Provider AI is the one that now decides when to use them, through the
+normal plan -> execute flow, exactly like any other tool it can call.
+
+Astra AI Gateway (optional, `gateway_intelligence`): the raw goal is first
+run through the Gateway's Request Understanding/Enrichment layer
+(astra/ai/gateway.py) — its own GW_* AI connections, completely separate
+from the Provider system — so a short, incomplete or poorly structured
+request becomes a clearer Provider-ready prompt before the *existing*
+Provider system (`self.router`) actually executes it. The Gateway only
+rewrites the request text; it never plans, never calls a tool, and is never
+the one that answers. If the Gateway is absent/unusable/fails, the raw goal
+is used unchanged — this layer is a pure quality improvement, never a
+dependency, and its absence never causes a request to skip the Provider
+system.
 """
 from __future__ import annotations
 
 import json
-import re
 
 
 class Planner:
@@ -52,74 +61,18 @@ class Planner:
         if not g:
             return [self._answer(g, "Kichu bollen na. 'help' likhen.")]
         budget_goal = g[:max_goal_chars] if len(g) > max_goal_chars else g
-        steps = self._deterministic_tool_steps(budget_goal, ctx)
-        if steps is None:
-            convo_context = (ctx or {}).get("conversation_context", "")
-            steps = (self._ai_steps(budget_goal, max_steps=max_steps,
-                                    context=convo_context)
-                     or self._deterministic_tool_steps(budget_goal, ctx, fallback=True) or [])
+        convo_context = (ctx or {}).get("conversation_context", "")
+        # Every normal request goes through the Gateway -> Provider path.
+        # There is no deterministic/offline tool-matching step here — the
+        # Provider AI is the one that decides which tool(s), if any, the
+        # request needs.
+        steps = self._ai_steps(budget_goal, max_steps=max_steps,
+                               context=convo_context)
         if not steps:
+            # No Provider configured, or the Provider returned nothing
+            # usable — a plain fallback reply, never a picked tool.
             steps = [self._answer(budget_goal)]
         return steps[:max_steps]
-
-    # -- deterministic tool matching ------------------------------------------
-    # Deliberately NOT called "offline steps" — that name invited confusion
-    # with the (removed) Offline AI Provider. This has nothing to do with
-    # an AI provider: it is a small, fixed set of genuinely tool-specific
-    # matches, each either needing no AI reasoning at all (get_health,
-    # memory read/write, listing tasks) or hinging on a concrete structural
-    # signal in the message itself (an actual URL, an explicit file path)
-    # rather than a loose topic keyword. A normal free-form request that
-    # merely *mentions* a related word (e.g. "can you review this idea?"
-    # with no URL) must NOT be caught here — it falls through to
-    # `_ai_steps()`, which is the Assistant -> Astra AI Gateway -> Provider
-    # path. Bypassing that path is reserved for requests where a
-    # deterministic tool call is unambiguously the right answer.
-    def _deterministic_tool_steps(self, g: str, ctx=None, fallback: bool = False):
-        low = g.lower()
-        url = re.search(r"https?://\S+", g)
-
-        if re.search(r"\b(find|discover|new|latest|top)\b", low) and re.search(r"\bairdrop", low):
-            return [self._step("s1", "search_web",
-                               {"query": "new crypto airdrops this month 2026"},
-                               "Discover campaigns",
-                               verify=["count"])]
-        if re.search(r"\b(balance|balanc|check my wallet|wallet balance)\b", low):
-            return [self._step("w1", "wallet_balances", {"network": ""},
-                               "Check wallet balances")]
-        if re.search(r"\b(eligible|eligibility|am i in|qualify)\b", low):
-            return [self._step("e1", "list_tasks", {"status": "pending"},
-                               "Check pending eligibility tasks")]
-        # Fetching a URL is only ever deterministic when a URL is actually
-        # present — that is the unambiguous, structural signal. Words like
-        # "research", "report", "about", "review", "analyse" on their own
-        # are normal free-form language and must go through the Gateway ->
-        # Provider path instead of being forced into fetch_url with a
-        # non-URL "url" param.
-        if url:
-            q = url.group(0).rstrip(".,;)")
-            return [self._step("r1", "fetch_url", {"url": q}, "Research project")]
-        m = re.search(r"\b(analyze|read|analyse|look at)\s+(?:the\s+)?file\s+(.+)$", low)
-        if m:
-            return [self._step("f1", "read_file", {"path": m.group(2).strip().strip('"')},
-                               "Read file for analysis")]
-        if re.search(r"\b(today|what do i need|plan my day|pending|task list|due)\b", low):
-            return [self._step("t1", "list_tasks", {"status": "pending"}, "List today's tasks"),
-                    self._step("t2", "list_tasks", {"status": "ready"}, "List ready tasks",
-                               depends_on=["t1"])]
-        if re.search(r"\b(remember|save this|note down)\b", low):
-            return [self._step("m1", "remember",
-                               {"content": g, "category": "note"},
-                               "Save to memory")]
-        if re.search(r"\b(recall|what do i know|remembered|search memory)\b", low):
-            q = re.sub(r"\b(recall|search memory|what do i know about|remembered)\b", "", low).strip()
-            return [self._step("m2", "recall", {"query": q or g, "k": 5},
-                               "Recall from memory")]
-        if re.search(r"\b(help|what can you do|capabil|commands)\b", low):
-            return [self._step("h1", "get_health", {}, "System health + capabilities")]
-        if fallback:
-            return [self._answer(g)]
-        return None  # let AI plan
 
     # -- LLM-driven planning --------------------------------------------------
     def _ai_steps(self, g: str, max_steps: int = 6, context: str = "") -> list | None:
@@ -187,11 +140,11 @@ class Planner:
     def _answer(g: str, text: str = "") -> dict:
         return {"id": "a1", "tool": "answer",
                 "params": {"text": text or _fallback_text()},
-                "description": "Direct reply (no tool matched)", "verify": [],
-                "retries": 0, "is_answer": True}
+                "description": "Direct reply (no Provider configured)",
+                "verify": [], "retries": 0, "is_answer": True}
 
 
 def _fallback_text() -> str:
-    return ("Ei command ta ami bodhokorar chesta korlam, kintu kono tool/plugin "
-            "match korlo na. 'help' likhe dekhte paren — ba chotto theke shuru "
-            "korun (jemon 'add airdrop Notcoin deadline 30 oct').")
+    return ("Ei command ta ami bodhokorar chesta korlam, kintu kono AI Provider "
+            "configure kora nai. 'help' likhe dekhte paren, ba ekta Provider "
+            "(jemon GEMINI_API_KEYS / GROQ_API_KEYS) config korun.")

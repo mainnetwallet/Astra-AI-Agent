@@ -462,6 +462,25 @@ class AgentRouter:
             }
         return out
 
+    def enable(self, name: str) -> None:
+        """Re-enable a provider after an operator-disable or transient failure."""
+        self._down.discard(name)
+
+    def disable(self, name: str) -> None:
+        """Operator force-disable: excluded from candidates; health reports down."""
+        self._down.add(name)
+
+    def reset_health(self, name: str) -> None:
+        """Clear transient health bookkeeping (down-state, error counts,
+        latency samples) for one provider without touching its pool."""
+        self._down.discard(name)
+        for by_name in (self._errors, self._latency):
+            bucket = by_name.get(name)
+            if isinstance(bucket, list):
+                bucket.clear()
+            elif isinstance(bucket, int):
+                by_name[name] = 0
+
     def _credential_count(self, provider) -> int:
         pool = getattr(provider, "pool", None)
         if pool is not None and hasattr(pool, "summary"):

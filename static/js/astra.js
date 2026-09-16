@@ -185,6 +185,83 @@ loaders.live = async function () {
   }
 };
 
+/* ------------------------------ providers (core) --------------------------- */
+loaders.providers = async function () {
+  const r = await api("/api/providers");
+  const list = $("#providers-list");
+  if (!r.ok) { list.innerHTML = `<div class="empty">${esc(r.error || "providers unavailable")}</div>`; return; }
+  const provs = (r.data && r.data.providers) ? r.data.providers : r.data;
+  const rows = Object.entries(provs || {}).map(([n, p]) => {
+    const dot = p.healthy ? "🟢" : (p.state === "down" ? "🔴" : "⚪");
+    const lat = p.latency_avg_ms == null ? "—" : p.latency_avg_ms + "ms";
+    return `<div class="row"><b>${dot} ${esc(n)}</b>` +
+      `<span>${esc(p.state || p.healthy || "?")}</span>` +
+      `<span>${p.models ? p.models.length : 0} models</span>` +
+      `<span>${p.calls || 0} calls · ${p.errors || 0} err</span>` +
+      `<span>${esc(lat)}</span></div>`;
+  }).join("");
+  list.innerHTML = rows || `<div class="empty">kono provider e creds nai (offline mode)</div>`;
+  const btn = $("#btn-providers-refresh");
+  if (btn && !btn.dataset.hooked) {
+    btn.dataset.hooked = "1";
+    btn.onclick = async () => { await post("/api/v1/models/refresh"); loaders.providers(); };
+  }
+};
+
+/* -------------------------------- router (core) ---------------------------- */
+loaders.router = async function () {
+  const [m, sr] = await Promise.all([api("/api/v1/models"), api("/api/v1/router/stats")]);
+  const list = $("#router-list");
+  const blocks = [];
+  if (m.ok) {
+    const models = m.data.models || [];
+    blocks.push(`<div class="panel"><div class="panel-head"><h3>Model registry</h3></div><div class="table">` +
+      (models.length ? models.map((md) =>
+        `<div class="row"><b>${esc(md.display_name || md.model_id)}</b>` +
+        `<span>${esc(md.provider)}</span>` +
+        `<span>${esc((md.capabilities || []).slice(0, 5).join("・"))}</span>` +
+        `<span>${md.preferred ? "★" : ""}</span></div>`).join("")
+        : `<span class="muted">no models — provider API key add korle ekhane asbe</span>`) +
+      `</div></div>`);
+  }
+  if (sr.ok) {
+    const task = sr.data.task || {};
+    const rows = Object.entries(task).map(([k, v]) =>
+      `<div class="row"><b>${esc(k)}</b><span>${esc(String(v))}</span></div>`).join("");
+    blocks.push(`<div class="panel"><div class="panel-head"><h3>Task routing stats</h3></div>` +
+      `<div class="table">${rows || `<span class="muted">routing kora ekhono bondho — kotha bolo age</span>`}</div></div>`);
+  }
+  list.innerHTML = blocks.join("");
+};
+
+/* ------------------------------ wallet / web3 (core) ----------------------- */
+loaders.web3 = async function () {
+  const [pol, txs] = await Promise.all([
+    api("/api/v1/web3/transaction-policy"), api("/api/v1/web3/transactions")]);
+  const lim = (n) => n == null ? "—" : (Number(n) / 1e18).toFixed(4) + " ETH";
+  if (pol.ok) {
+    const d = pol.data, p = d.policy || {};
+    const stopped = d.stopped ? "🚨 EMERGENCY STOP" : "running";
+    $("#web3-policy").innerHTML =
+      `<div class="table">` +
+      `<div class="row"><b>Mode</b><span>${esc(d.mode)} (CONFIRM = review, AUTO = policy-approved)</span></div>` +
+      `<div class="row"><b>Status</b><span>${esc(stopped)}</span></div>` +
+      `<div class="row"><b>Max per tx</b><span>${esc(lim(p.tx_limit_wei))}</span></div>` +
+      `<div class="row"><b>Max daily</b><span>${esc(lim(p.daily_limit_wei))}</span></div>` +
+      `<div class="row"><b>Allowlist</b><span>${p.recipients_allowed?.length || 0} recipients · ${p.contracts_allowed?.length || 0} contracts · ${p.wallets_allowed?.length || 0} wallets</span></div>` +
+      `</div>`;
+  } else {
+    $("#web3-policy").innerHTML = `<span class="muted">Web3 unavailable</span>`;
+  }
+  if (txs.ok) {
+    const rows = (txs.data.transactions || []).map((t) =>
+      `<div class="row"><b>${esc(String(t.tx_id || t.tx_hash || "").slice(0, 12))}…</b>` +
+      `<span>${esc(t.status || "?")}</span>` +
+      `<span>${esc(lim(t.value_wei))}</span></div>`).join("");
+    $("#web3-txs").innerHTML = rows || `<span class="muted">kono transaction nei</span>`;
+  }
+};
+
 async function healthTick() {
   const r = await api("/api/health");
   if (!r.ok) return;

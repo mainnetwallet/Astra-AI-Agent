@@ -1,0 +1,9 @@
+# Astra AI Agent — developer/test tooling (optional, not required to run).
+#
+#   pip install -r requirements-dev.txt
+#
+pytest>=7.0            # optional runner (unittest also fully supported)
+playwright>=1.40       # optional: real-browser subsystem (see requirements.txt)
+
+# Style/lint (optional)
+# ruff>=0.4

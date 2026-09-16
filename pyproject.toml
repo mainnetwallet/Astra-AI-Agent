@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "astra-ai-agent"
+version = "1.0.0"
+description = "Astra AI Agent — plugin-based Personal AI OS (stdlib only, no runtime deps)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "mainnetwallet" }]
+classifiers = ["Programming Language :: Python :: 3",
+               "Operating System :: OS Independent"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "playwright"]
+
+[tool.setuptools]
+packages = ["astra", "astra.ai", "astra.ai.adapters", "astra.agents",
+            "astra.browser", "astra.core", "astra.memory", "astra.research",
+            "astra.tools", "astra.web3", "astra.workflows"]
+include-package-data = true
+
+[project.scripts]
+astra = "run:main"

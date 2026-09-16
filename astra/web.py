@@ -5,6 +5,22 @@ work (network research) don't block the UI. Routes come from each plugin's
 `routes()`; a small matcher turns `("PATCH", ("api","wallets","<id>"), h)`
 into a call with `params={"id": <int>}`.
 
+Security hardening (production build):
+  * optional operator auth — set ASTRA_TOKEN: all /api/* then require a
+    Bearer token / X-Astra-Token header / ?token= (SSE has no headers);
+    unset token = open (safe local-first default)
+  * per-IP rate limiting — ASTRA_API_RATE_LIMIT (default 300 requests/min)
+  * request body cap — ASTRA_MAX_BODY_MB (default 10 MB)
+  * security headers + Content-Security-Policy on every response
+  * X-Request-Id on every response; request_id in every JSON body
+  * structured JSON errors {ok, error, error_code, request_id} — never
+    leaks stack traces (message detail gated to non-production)
+  * every response redacted through security.redact — no secrets egress
+
+Versioning: every /api/... route is ALSO served under /api/v1/... (the v1
+segment is stripped before dispatch, so there is no duplicated code path).
+New endpoints exist only under /api/v1.
+
 Core (non-plugin) endpoints (all old routes stay backward-compatible):
 
   GET  /api/manifest        agent name + plugin tabs + core tabs
@@ -13,7 +29,7 @@ Core (non-plugin) endpoints (all old routes stay backward-compatible):
   GET  /api/export          aggregated plugin export()
   POST /api/import          aggregate import across plugins
 
-New system endpoints:
+System endpoints:
 
   GET  /api/health          database/plugins/providers/scheduler diagnostics
   GET  /api/config          public (non-secret) config snapshot
@@ -31,9 +47,22 @@ New system endpoints:
   POST /api/agents/{exec}/resume | /cancel   control WAITING_USER runs
   GET  /api/executions      alias for /api/agents
   GET  /api/plugins         list plugins (+enabled); POST {slug}/enable|disable
+
+New /api/v1 endpoints:
+
+  GET  /api/v1/models            model registry (capabilities + health)
+  POST /api/v1/models/refresh    re-run provider model discovery
+  GET  /api/v1/router/status     routing health
+  GET  /api/v1/router/stats      routing + task statistics
+  POST /api/v1/providers/<name>/refresh | enable | disable
+  GET  /api/v1/web3/transactions              (+ /{tx_id})
+  GET  /api/v1/web3/transaction-policy        (mode/limits/whitelist/stop)
+  POST /api/v1/web3/transaction-policy/mode   (operator token required)
+  GET  /api/metrics              server + subsystem metrics
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import time
@@ -42,6 +71,8 @@ from urllib.parse import urlparse, parse_qs
 
 from .agent import Agent
 from .core import Plugin
+from .security import (ApiError, RateLimiter, make_request_id, redact,
+                       redact_text)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 
@@ -60,26 +91,58 @@ CORE_TABS = [
     {"tab": "dashboard", "label": "📊 Dashboard", "core": True},
     {"tab": "live", "label": "⚡ Live", "core": True},
     {"tab": "assistant", "label": "🤖 Assistant", "core": True},
+    {"tab": "providers", "label": "🔌 Providers", "core": True},
+    {"tab": "router", "label": "🧠 Router", "core": True},
+    {"tab": "web3", "label": "⛓️ Wallet", "core": True},
     {"tab": "backup", "label": "💾 Backup", "core": True},
 ]
 
+# Header templates for a hardened server.
+# * X-Frame-Options / nosniff / Referrer-Policy / CSP defend the SPA
+# * X-Request-Id correlates one request across logs + response bodies
+# * Cache-Control: no-store keeps API payloads off shared caches
+SECURITY_HEADERS = [
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "SAMEORIGIN"),
+    ("Referrer-Policy", "no-referrer"),
+    ("X-XSS-Protection", "0"),  # modern browsers: this header is deprecated
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Content-Security-Policy",
+     "default-src 'self'; img-src 'self' data:; "
+     "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+     "connect-src 'self'; frame-ancestors 'self'"),
+]
 
-def _json(handler, payload, code=200):
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+def _json(handler: "AstraHandler", payload, code: int = 200) -> None:
+    """Serialise a payload as JSON with full hardening. The payload is
+    redacted defensively so a subsystem that leaks a secret can never egress
+    it through the API. The request_id rides both header and body."""
+    rid = getattr(handler, "_rid", "")
+    if isinstance(payload, dict) and "request_id" not in payload:
+        payload = {**payload, "request_id": rid}
+    body = json.dumps(redact(payload), ensure_ascii=False).encode("utf-8")
     handler.send_response(code)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("X-Request-Id", rid)
+    handler.apply_security_headers()
+    handler.apply_cors_headers()
+    handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
     handler.wfile.write(body)
 
 
-def _json_ok(handler, payload, code=200):
+def _json_ok(handler: "AstraHandler", payload, code: int = 200) -> None:
     _json(handler, payload, code)
 
 
-def _json_err(handler, message, code=400):
-    _json(handler, {"ok": False, "error": message}, code)
+def _json_err(handler: "AstraHandler", message: str, code: int = 400,
+              error_code: str = "bad_request") -> None:
+    """Structured error envelope — no stack traces, ever."""
+    _json(handler, {"ok": False, "error": message,
+                    "error_code": error_code,
+                    "request_id": getattr(handler, "_rid", "")}, code)
 
 
 def _route_matcher(route_parts, path_parts):
@@ -115,27 +178,116 @@ class AstraHandler(BaseHTTPRequestHandler):
         return {k: v[0] for k, v in q.items()}
 
     def _read_json(self) -> dict:
+        """Read a JSON body with a hard size cap (prevents memory blowup)."""
+        max_bytes = self.server.max_body_bytes
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
         if length <= 0:
             return {}
+        if length > max_bytes:
+            # drain (bounded) so the client finishes sending and can read the
+            # 413 response instead of hitting a broken pipe
+            self._drain(min(length, 64 * 1024 * 1024))
+            raise ApiError("payload_too_large",
+                           f"request body exceeds {max_bytes} bytes limit", 413)
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            raw = self.rfile.read(length)
         except Exception:
             return {}
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except Exception:
+            return {}
+
+    # -- security helpers ------------------------------------------------
+    def _drain(self, length: int) -> None:
+        """Read and discard up to `length` bytes of an oversized body so the
+        client can complete its send and read the error response."""
+        remaining = length
+        while remaining > 0:
+            try:
+                chunk = self.rfile.read(min(64 * 1024, remaining))
+            except Exception:
+                return
+            if not chunk:
+                return
+            remaining -= len(chunk)
+
+    def apply_security_headers(self) -> None:
+        for name, value in SECURITY_HEADERS:
+            self.send_header(name, value)
+
+    def apply_cors_headers(self) -> None:
+        origin = self.headers.get("Origin")
+        allowed = self.server.cors_origin(origin)
+        if allowed:
+            self.send_header("Access-Control-Allow-Origin", allowed)
+            self.send_header("Vary", "Origin")
+            if self.command == "OPTIONS":
+                self.send_header("Access-Control-Allow-Methods",
+                                 "GET,POST,PATCH,DELETE,OPTIONS")
+                self.send_header("Access-Control-Allow-Headers",
+                                 "Content-Type, X-Astra-Token, Authorization")
+                self.send_header("Access-Control-Max-Age", "600")
+
+    def _authorized(self) -> bool:
+        """Operator token gate. ASTRA_TOKEN unset = open (local-first);
+        set = Bearer / X-Astra-Token / ?token= must match, constant-time."""
+        token = self.server.operator_token
+        if not token:
+            return True
+        supplied = self.headers.get("Authorization", "")
+        if supplied.lower().startswith("bearer "):
+            candidate = supplied[7:].strip()
+        else:
+            candidate = (self.headers.get("X-Astra-Token", "")
+                         or self._query().get("token", ""))
+        return bool(candidate) and hmac.compare_digest(candidate, token)
+
+    def _rate_limited(self) -> bool:
+        limiter = self.server.rate_limiter
+        if not limiter:
+            return False
+        ip = (self.client_address or ("unknown", 0))[0]
+        return not limiter.allow(ip)
+
+    def _resolve_v1(self, path: list[str]) -> list[str]:
+        """/api/v1/<rest> -> /api/<rest> so every legacy route is served
+        under the versioned prefix with no duplicated code path."""
+        if len(path) >= 3 and path[0] == "api" and path[1] == "v1":
+            return ["api"] + path[2:]
+        return path
+
+    def _gate(self, path: list[str]):
+        """Auth + rate-limit for API traffic. Returns an already-sent marker
+        string (truthy) on rejection or None to proceed."""
+        if not (path and path[0] == "api"):
+            return None
+        if not self._authorized():
+            _json_err(self, "authentication required", 401,
+                      error_code="authentication")
+            return "auth"
+        if self._rate_limited():
+            _json_err(self, "rate limit exceeded", 429, error_code="rate_limit")
+            return "rate"
+        return None
 
     def _send_static(self, rel: str) -> None:
         if rel in ("", "/"):
             rel = "index.html"
         rel = rel.lstrip("/")
-        if ".." in rel:
+        if ".." in rel or "\\" in rel:
             _json_err(self, "bad path", 400)
             return
         root = os.path.abspath(STATIC_DIR)
         path = os.path.abspath(os.path.join(root, rel))
-        if not path.startswith(root) or not os.path.isfile(path):
+        # path-traversal guard: resolved path must stay inside static root
+        if not (path == root or path.startswith(root + os.sep)):
+            _json_err(self, "forbidden", 403)
+            return
+        if not os.path.isfile(path):
             self.send_error(404, "not found")
             return
         ctype = CONTENT_TYPES.get(path.rsplit(".", 1)[-1], "application/octet-stream")
@@ -144,20 +296,28 @@ class AstraHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
+        self.apply_security_headers()
         self.end_headers()
         self.wfile.write(body)
 
     # -- dispatch ------------------------------------------------------------
     def _dispatch(self, method: str) -> None:
-        server, path = self.server, self._path_parts()
-        q, body = self._query(), self._read_json()
+        self._rid = make_request_id()
+        server, path = self.server, self._resolve_v1(self._path_parts())
+        gated = self._gate(path)
+        if gated:
+            return
+        server.note_request(method, path)
         try:
+            q, body = self._query(), self._read_json()
             if not path:
                 return self._send_static("index.html")
             if path[0] == "static":
                 return self._send_static("/".join(path[1:]))
             if path[0] == "favicon.ico":
                 self.send_response(204)
+                self.send_header("X-Request-Id", self._rid)
                 return self.end_headers()
 
             # system / manifest endpoints
@@ -290,6 +450,10 @@ class AstraHandler(BaseHTTPRequestHandler):
                 return _json_ok(self, {"ok": True, "data": row}) if row else \
                     _json_err(self, "schedule not found", 404)
 
+            # /api/v1 endpoints (v1 prefix already stripped by _resolve_v1)
+            if self._handle_v1(path, method, q, body):
+                return
+
             # ai providers
             if path == ["api", "providers"] and method == "GET":
                 return _json_ok(self, {"ok": True,
@@ -358,8 +522,156 @@ class AstraHandler(BaseHTTPRequestHandler):
                     status, payload = handler(server.store, params, body, q)
                     return _json_ok(self, payload, status)
             return _json_err(self, "unknown route", 404)
+        except ApiError as e:
+            server.note_request(method, path, error=True)
+            if not e.request_id:
+                e.request_id = self._rid
+            return _json(self, e.to_dict(), e.status)
         except Exception as e:
-            return _json_err(self, f"internal error: {type(e).__name__}: {e}", 500)
+            server.note_request(method, path, error=True)
+            detail = str(e) if self.server.env != "production" else ""
+            msg = f"internal error{': ' + detail if detail else ''}"
+            return _json_err(self, msg, 500, error_code="internal")
+
+    # -- /api/v1 endpoints --------------------------------------------------
+    def _handle_v1(self, path, method, q, body) -> bool:
+        """Production endpoints: model registry, router status/stats,
+        provider admin, Web3 transactions + policy, metrics. Returns True
+        when the route was handled (response already sent)."""
+        s = self.server
+        if path == ["api", "metrics"] and method == "GET":
+            return self._json_ok_rid({"ok": True, "data": s.metrics()})
+        if path == ["api", "models"] and method == "GET":
+            return self._models(s)
+        if path == ["api", "models", "refresh"] and method == "POST":
+            disco = s._get("discovery")
+            if disco is None:
+                return self._err_rid("model discovery unavailable", 400,
+                                     "model_unavailable")
+            disco.refresh_all(force=True)
+            return self._json_ok_rid({"ok": True, "data": {"refreshed": True}})
+        if path == ["api", "router", "status"] and method == "GET":
+            return self._json_ok_rid({"ok": True,
+                                      "data": s.router().health()})
+        if path == ["api", "router", "stats"] and method == "GET":
+            r = s.router()
+            return self._json_ok_rid({"ok": True,
+                                      "data": {"routing": r.routing_stats(),
+                                               "task": r.task_stats(),
+                                               "last_route": r.last_route()}})
+        # provider admin: /api/v1/providers/<name>/refresh|enable|disable
+        if (len(path) == 5 and path[:2] == ["api", "providers"]
+                and method == "POST"
+                and path[4] in ("refresh", "enable", "disable")):
+            return self._provider_admin(s, path[2], path[4])
+        # web3
+        if path[:3] == ["api", "web3", "transactions"] and method == "GET":
+            return self._web3_tx_list(s, path)
+        if path == ["api", "web3", "transaction-policy"] and method == "GET":
+            return self._web3_policy(s)
+        if (path == ["api", "web3", "transaction-policy", "mode"]
+                and method == "POST"):
+            return self._web3_policy_mode(s, body)
+        return False
+
+    def _json_ok_rid(self, payload):
+        _json_ok(self, payload)
+        return True
+
+    def _err_rid(self, message, code=400, error_code="bad_request"):
+        _json_err(self, message, code, error_code)
+        return True
+
+    def _models(self, s) -> bool:
+        reg = s._get("model_registry") or s._get("models")
+        if reg is None:
+            return self._err_rid("model registry unavailable", 400,
+                                 "model_unavailable")
+        router = s.router()
+        health = router.health() if router else {}
+        models = []
+        for m in reg.all_models():
+            row = m.to_dict()
+            row["status"] = health.get(m.provider, {}).get("status", "unknown")
+            models.append(row)
+        summary = {"count": reg.count(),
+                   "by_provider": {p: len(reg.for_provider(p))
+                                   for p in reg.providers()},
+                   "by_status": reg.status_summary()}
+        return self._json_ok_rid({"ok": True,
+                                  "data": {"models": models,
+                                           "summary": summary}})
+
+    def _provider_admin(self, s, name, action) -> bool:
+        reg = s._get("provider_registry")
+        router = s.router()
+        if router is None or reg is None:
+            return self._err_rid("providers unavailable", 400,
+                                 "provider_unavailable")
+        if action == "refresh":
+            disco = s._get("discovery")
+            if disco is not None:
+                disco.discover(name, force=True)
+            router.reset_health(name)
+            return self._json_ok_rid({"ok": True,
+                                      "data": {"provider": name,
+                                               "refreshed": True}})
+        if action in ("enable", "disable"):
+            want = action == "enable"
+            if want:
+                router.enable(name)
+            else:
+                router.disable(name)
+            return self._json_ok_rid({"ok": True,
+                                      "data": {"provider": name,
+                                               "enabled": want}})
+        return self._err_rid(f"unknown action: {action}", 400)
+
+    def _web3_tx_list(self, s, path) -> bool:
+        tx = s._get("tx_manager")
+        if tx is None:
+            return self._err_rid("Web3 transaction manager unavailable",
+                                 400, "web3_unavailable")
+        if len(path) == 3:
+            return self._json_ok_rid({"ok": True,
+                                      "data": {"transactions": tx.list(100),
+                                               "stats": tx.stats()}})
+        if len(path) == 4:
+            row = tx.get(path[3])
+            if row is None or row.get("status") == "UNKNOWN":
+                return self._err_rid("transaction not found", 404,
+                                     "transaction_not_found")
+            return self._json_ok_rid({"ok": True, "data": row})
+        return False
+
+    def _web3_policy(self, s) -> bool:
+        policy = s._get("web3_policy") or s._get("tx_policy")
+        if policy is None:
+            return self._err_rid("transaction policy unavailable", 400,
+                                 "web3_unavailable")
+        data = {"policy": policy.describe(),
+                "mode": policy.mode,
+                "stopped": bool(getattr(s._get("tx_manager"), "stopped", False))}
+        return self._json_ok_rid({"ok": True, "data": data})
+
+    def _web3_policy_mode(self, s, body) -> bool:
+        # operator-only: LLM must never change web3 mode; require a token
+        if not s.operator_token:
+            return self._err_rid(
+                "set ASTRA_TOKEN to allow Web3 mode changes", 403,
+                "authorization")
+        policy = s._get("web3_policy") or s._get("tx_policy")
+        tx = s._get("tx_manager")
+        if policy is None or tx is None:
+            return self._err_rid("transaction policy unavailable", 400,
+                                 "web3_unavailable")
+        mode = (body.get("mode") or "").strip().upper()
+        if mode not in ("CONFIRM", "AUTO"):
+            return self._err_rid("mode must be CONFIRM or AUTO", 400,
+                                 "validation")
+        policy.set_mode(mode)
+        return self._json_ok_rid({"ok": True,
+                                  "data": {"mode": policy.mode}})
 
     # -- SSE ------------------------------------------------------------------
     def _sse(self):
@@ -370,6 +682,9 @@ class AstraHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
+        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
+        self.apply_security_headers()
+        self.apply_cors_headers()
         self.end_headers()
         after = int(self._query().get("after_id") or self.server.events().last_id())
         written, idle, deadline = 0, 0, time.time() + 45
@@ -379,10 +694,10 @@ class AstraHandler(BaseHTTPRequestHandler):
                 if evs:
                     for e in evs:
                         frame = (f"id: {e['id']}\ndata: " +
-                                 json.dumps({"id": e["id"], "kind": e["kind"],
+                                 json.dumps(redact({"id": e["id"], "kind": e["kind"],
                                              "agent": e.get("agent", ""),
                                              "data": e.get("data", {}),
-                                             "created_at": e.get("created_at", "")},
+                                             "created_at": e.get("created_at", "")}),
                                             ensure_ascii=False) + "\n\n")
                         self.wfile.write(frame.encode("utf-8"))
                         self.wfile.flush()
@@ -406,9 +721,9 @@ class AstraHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
+        self.apply_security_headers()
+        self.apply_cors_headers()
         self.end_headers()
 
 
@@ -421,6 +736,29 @@ class AstraServer(ThreadingHTTPServer):
         self.agent = agent
         self.plugins = plugins
         self._stack = stack or {}
+        cfg = self._get("config")
+        # -- security knobs (all safe defaults) --------------------------------
+        self.env = (cfg.get("ENV") if cfg else None) or os.environ.get("ENV", "development")
+        self.operator_token = (cfg.get("ASTRA_TOKEN") if cfg else None) \
+            or os.environ.get("ASTRA_TOKEN") or os.environ.get("ASTRA_API_KEY", "")
+        self.max_body_bytes = int((cfg.getint("ASTRA_MAX_BODY_MB", 10)
+                                   if cfg else 10) * 1024 * 1024)
+        try:
+            rl = (cfg.getint("ASTRA_API_RATE_LIMIT", 300) if cfg else 300)
+        except Exception:
+            rl = 300
+        self.rate_limiter = RateLimiter(rl, 60.0)
+        self._allowed_origins = set(
+            (cfg.getlist("ASTRA_CORS_ORIGINS") if cfg else None) or [])
+        try:
+            self.bind_host = addr[0]
+        except Exception:
+            self.bind_host = "0.0.0.0"
+        # -- observability: tiny in-memory request counters --------------------
+        self._req_lock = __import__("threading").Lock()
+        self._req = {"count": 0, "errors": 0,
+                     "by_path": {}, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
+        self._metrics_start = time.time()
 
     # accessors (safe when a subsystem is absent)
     def _get(self, key):
@@ -455,6 +793,63 @@ class AstraServer(ThreadingHTTPServer):
 
     def cfg(self):
         return self._get("config")
+
+    # -- security / observability -------------------------------------------
+    def cors_origin(self, origin):
+        """CORS: explicit ASTRA_CORS_ORIGINS wins; else same-origin always,
+        cross-origin allowed for SPA/LAN tools unless production."""
+        if not origin:
+            return None
+        if self._allowed_origins:
+            if "*" in self._allowed_origins:
+                return "*"
+            return origin if origin in self._allowed_origins else None
+        if self.env == "production":
+            return None  # same-origin only
+        return origin  # dev/LAN: reflect request origin
+
+    def note_request(self, method, path, error=False):
+        with self._req_lock:
+            self._req["count"] += 1
+            if error:
+                self._req["errors"] += 1
+            label = "/".join(path) if path else "/"
+            blob = self._req["by_path"].setdefault(label, {"count": 0, "errors": 0})
+            blob["count"] += 1
+            if error:
+                blob["errors"] += 1
+
+    def metrics(self) -> dict:
+        """/api/metrics aggregate — secret-free, cheap, always available."""
+        out = {"app": AGENT_NAME,
+               "uptime_s": round(time.time() - self._metrics_start, 1),
+               "requests": dict(self._req)}
+        if self.router():
+            out["router"] = {name: {k: info[k] for k in
+                                    ("healthy", "state", "calls",
+                                     "errors", "latency_avg_ms")
+                                    if k in info}
+                             for name, info in self.router().health().items()}
+        reg = self.registry()
+        if reg:
+            all_stats = reg.stats()
+            out["tools"] = {"count": len(all_stats),
+                            "calls": sum(s["calls"] for s in all_stats.values()),
+                            "errors": sum(s["errors"] for s in all_stats.values())}
+        orch = self.orchestrator()
+        if orch:
+            out["orchestrator"] = {k: v for k, v in orch.stats().items()
+                                   if not isinstance(v, dict)}
+        tx = self._get("tx_manager")
+        if tx:
+            txs = tx.stats()
+            pol = self._get("web3_policy") or self._get("tx_policy")
+            out["web3"] = {"status_counts": txs.get("by_status", {}),
+                           "mode": (pol.mode if pol else None),
+                           "stopped": bool(getattr(tx, "stopped", False))}
+        if self.scheduler():
+            out["scheduler"] = self.scheduler().stats()
+        return out
 
     def health(self) -> dict:
         out = {"app": AGENT_NAME, "ok": True, "checks": {}}

@@ -39,7 +39,7 @@ if [ ! -f config.json ]; then
 {
   "PORT": 8787,
   "NO_BROWSER": "",
-  "BIND": "0.0.0.0"
+  "BIND": "127.0.0.1"
 }
 CONF
     echo "✅ config.json created (PORT=8787)"

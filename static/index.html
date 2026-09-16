@@ -71,6 +71,43 @@
     </div>
   </section>
 
+  <!-- ======== PROVIDERS (core) ======== -->
+  <section id="tab-providers" class="tabview">
+    <div class="panel">
+      <h3>🔌 AI Providers</h3>
+      <p class="muted">Ja-thuk provider e AI model cholche, oi provider login
+        healthy ki na, latency, calls, errors — sob ekhane dekha jay. AgentRouter
+        nije kono provider noy — ei providers-ke use kore routing kore.</p>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn" id="btn-providers-refresh">🔄 Refresh discovery</button>
+      </div>
+      <div id="providers-list" class="list"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- ======== ROUTER (core) ======== -->
+  <section id="tab-router" class="tabview">
+    <div class="panel">
+      <h3>🧠 Agent Router</h3>
+      <p class="muted">Routing er brain: je task e kon provider/model best —
+        score + health diye decide hoy. Routing stats + last decision ekhane.</p>
+      <div id="router-list" class="list"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- ======== WALLET / WEB3 (core) ======== -->
+  <section id="tab-web3" class="tabview">
+    <div class="panel">
+      <h3>⛓️ Web3 Transaction Safety</h3>
+      <p class="muted">Transaction mode (CONFIRM default), policy limits, ar
+        recent transactions er list. Kono secret ekhane show kora hoy na —
+        private key kokhono server theke bahir hoy na.</p>
+      <div id="web3-policy" class="list"><div class="empty">Loading…</div></div>
+      <h3 style="margin-top:16px">Recent transactions</h3>
+      <div id="web3-txs" class="list table"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
 </main>
 
 <script src="/static/js/astra.js"></script>

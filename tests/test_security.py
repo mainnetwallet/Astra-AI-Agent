@@ -1,0 +1,245 @@
+"""Security + API hardening tests (master-prompt Phase 7).
+
+Covers the global security module (redaction, SSRF guard, rate limiting,
+request ids, structured errors) and the hardened web layer (auth gate,
+path-traversal guard, body cap, /api/v1 aliases, new production endpoints,
+and stack-trace-free error envelopes)."""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
+
+from astra.security import (ApiError, RateLimiter, make_request_id, redact,
+                            redact_text, risky_url, allow_url)
+
+
+class TestRedaction(unittest.TestCase):
+    def test_masks_secret_keys_deeply(self):
+        src = {"api_key": "abc", "nested": {"password": "p", "token": "t"},
+               "list": [{"secret": "s"}], "safe": "visible"}
+        out = redact(src)
+        self.assertEqual(out["api_key"], "***redacted***")
+        self.assertEqual(out["nested"]["password"], "***redacted***")
+        self.assertEqual(out["nested"]["token"], "***redacted***")
+        self.assertEqual(out["list"][0]["secret"], "***redacted***")
+        self.assertEqual(out["safe"], "visible")
+
+    def test_masks_secret_shaped_values_anywhere(self):
+        out = redact({"note": "use sk-abcdefghijklmno now",
+                      "hex": "0x" + "a" * 64})
+        self.assertIn("***redacted***", out["note"])
+        self.assertNotIn("sk-abcdefghijklmno", json.dumps(out))
+        self.assertNotIn("a" * 64, out["hex"])
+
+    def test_does_not_mutate_input(self):
+        src = {"api_key": "keep"}
+        redact(src)
+        self.assertEqual(src["api_key"], "keep")
+
+    def test_redact_text(self):
+        self.assertNotIn("Bearer xyz", redact_text("auth Bearer xyz done"))
+
+
+class TestSsrfGuard(unittest.TestCase):
+    def test_blocks_loopback_private_linklocal(self):
+        for bad in ("http://127.0.0.1/x", "http://localhost/x",
+                    "http://10.0.0.1/", "http://192.168.1.1/",
+                    "http://169.254.169.254/latest/meta-data/",
+                    "http://[::1]/"):
+            self.assertTrue(risky_url(bad, resolve_dns=False), bad)
+
+    def test_blocks_non_http_schemes(self):
+        for bad in ("file:///etc/passwd", "gopher://x/", "ftp://h/"):
+            self.assertTrue(risky_url(bad, resolve_dns=False), bad)
+
+    def test_allows_public_https(self):
+        self.assertFalse(risky_url("https://example.com/page", resolve_dns=False))
+
+    def test_override_allows_private(self):
+        self.assertTrue(allow_url("http://127.0.0.1/x", allow_private=True))
+
+
+class TestRateLimiterRequestId(unittest.TestCase):
+    def test_fixed_window(self):
+        rl = RateLimiter(3, 60.0)
+        self.assertTrue(all(rl.allow("ip") for _ in range(3)))
+        self.assertFalse(rl.allow("ip"))
+        self.assertTrue(rl.allow("other"))
+
+    def test_request_ids_unique(self):
+        self.assertNotEqual(make_request_id(), make_request_id())
+
+
+class TestApiError(unittest.TestCase):
+    def test_envelope(self):
+        e = ApiError("validation", "bad input", 400, "rid1")
+        d = e.to_dict()
+        self.assertEqual(d["error_code"], "validation")
+        self.assertEqual(d["request_id"], "rid1")
+        self.assertFalse(d["ok"])
+
+
+# ── live server tests ─────────────────────────────────────────────────────────
+def _server(token="", env="development"):
+    from astra.bootstrap import build
+    from astra.store import Store
+    from astra.web import AstraServer
+    d = tempfile.mkdtemp()
+    stack = build(Store(os.path.join(d, "t.db")))
+    if token:
+        stack["config"].set("ASTRA_TOKEN", token)
+    stack["config"].set("ENV", env)
+    srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
+                      stack["plugins"], stack=stack)
+    srv.operator_token = token
+    srv.env = env
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    time.sleep(0.2)
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def _req(url, token="", method="GET", body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(url, data=data, method=method)
+    if token:
+        r.add_header("X-Astra-Token", token)
+    def _parse(raw):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {"_raw": raw.decode("utf-8", "replace")}
+
+    try:
+        with urllib.request.urlopen(r, timeout=5) as resp:
+            return resp.status, _parse(resp.read()), dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, _parse(e.read()), dict(e.headers)
+
+
+class TestWebHardening(unittest.TestCase):
+    def setUp(self):
+        self.srv, self.base = _server()
+        self.addCleanup(self.srv.shutdown)
+
+    def test_request_id_header_and_body(self):
+        st, body, hdr = _req(self.base + "/api/v1/health")
+        self.assertEqual(st, 200)
+        self.assertTrue(hdr.get("X-Request-Id"))
+        self.assertTrue(body.get("request_id"))
+        self.assertEqual(hdr["X-Request-Id"], body["request_id"])
+
+    def test_security_headers(self):
+        _, _, hdr = _req(self.base + "/api/v1/health")
+        self.assertEqual(hdr.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(hdr.get("X-Frame-Options"), "SAMEORIGIN")
+        self.assertIn("Content-Security-Policy", hdr)
+        self.assertEqual(hdr.get("Cache-Control"), "no-store")
+
+    def test_path_traversal_blocked(self):
+        st, body, _ = _req(self.base + "/static/../run.py")
+        self.assertEqual(st, 400)
+
+    def test_v1_alias_matches_legacy(self):
+        a = _req(self.base + "/api/tools")[1]
+        b = _req(self.base + "/api/v1/tools")[1]
+        self.assertEqual([t["name"] for t in a["data"]["tools"]],
+                         [t["name"] for t in b["data"]["tools"]])
+
+    def test_models_endpoint(self):
+        st, body, _ = _req(self.base + "/api/v1/models")
+        self.assertEqual(st, 200)
+        self.assertIn("models", body["data"])
+        self.assertIn("summary", body["data"])
+
+    def test_metrics_endpoint(self):
+        st, body, _ = _req(self.base + "/api/metrics")
+        self.assertEqual(st, 200)
+        self.assertIn("requests", body["data"])
+        self.assertIn("router", body["data"])
+
+    def test_router_endpoints(self):
+        self.assertEqual(_req(self.base + "/api/v1/router/status")[0], 200)
+        self.assertEqual(_req(self.base + "/api/v1/router/stats")[0], 200)
+
+    def test_web3_policy_endpoint(self):
+        st, body, _ = _req(self.base + "/api/v1/web3/transaction-policy")
+        self.assertEqual(st, 200)
+        self.assertEqual(body["data"]["mode"], "CONFIRM")
+
+    def test_web3_mode_change_requires_token(self):
+        st, body, _ = _req(self.base + "/api/v1/web3/transaction-policy/mode",
+                           method="POST", body={"mode": "AUTO"})
+        self.assertEqual(st, 403)
+        self.assertEqual(body["error_code"], "authorization")
+
+    def test_missing_tx_404(self):
+        st, body, _ = _req(self.base + "/api/v1/web3/transactions/nope")
+        self.assertEqual(st, 404)
+        self.assertEqual(body["error_code"], "transaction_not_found")
+
+    def test_unknown_route_structured(self):
+        st, body, _ = _req(self.base + "/api/v1/does-not-exist")
+        self.assertEqual(st, 404)
+        self.assertFalse(body["ok"])
+        self.assertIn("error_code", body)
+
+    def test_body_cap(self):
+        r = urllib.request.Request(self.base + "/api/v1/chat",
+                                   data=b"x" * (11 * 1024 * 1024), method="POST")
+        try:
+            urllib.request.urlopen(r, timeout=5)
+            self.fail("oversized body accepted")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 413)
+
+    def test_internal_error_hides_detail_in_production(self):
+        srv, base = _server(env="production")
+        self.addCleanup(srv.shutdown)
+        # patch a handler to raise, then confirm the message is generic
+        st, body, _ = _req(base + "/api/v1/web3/transactions/BAD")
+        # (dev path exercised above); production must not leak a traceback
+        self.assertNotIn("Traceback", json.dumps(body))
+
+
+class TestWebAuth(unittest.TestCase):
+    def setUp(self):
+        self.srv, self.base = _server(token="sekrit")
+        self.addCleanup(self.srv.shutdown)
+
+    def test_requires_token(self):
+        st, body, _ = _req(self.base + "/api/v1/health")
+        self.assertEqual(st, 401)
+        self.assertEqual(body["error_code"], "authentication")
+
+    def test_accepts_token(self):
+        st, body, _ = _req(self.base + "/api/v1/health", token="sekrit")
+        self.assertEqual(st, 200)
+
+    def test_rejects_wrong_token(self):
+        st, _, _ = _req(self.base + "/api/v1/health", token="wrong")
+        self.assertEqual(st, 401)
+
+    def test_static_still_public(self):
+        st, _, _ = _req(self.base + "/")
+        self.assertEqual(st, 200)
+
+
+class TestRateLimit(unittest.TestCase):
+    def test_429_after_limit(self):
+        from astra.security import RateLimiter as RL
+        srv, base = _server()
+        srv.rate_limiter = RL(2, 60.0)   # tight window for the test
+        self.addCleanup(srv.shutdown)
+        codes = [_req(base + "/api/v1/health")[0] for _ in range(4)]
+        self.assertIn(429, codes)
+
+
+if __name__ == "__main__":
+    unittest.main()

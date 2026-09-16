@@ -13,7 +13,7 @@ if errorlevel 1 (
 )
 if not exist data mkdir data
 if not exist config.json (
-    echo {"PORT": 8787, "NO_BROWSER": "", "BIND": "0.0.0.0"}> config.json
+    echo {"PORT": 8787, "NO_BROWSER": "", "BIND": "127.0.0.1"}> config.json
     echo [OK] config.json created
 ) else (
     echo [i] config.json already exists

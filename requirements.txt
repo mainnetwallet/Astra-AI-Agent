@@ -1,0 +1,19 @@
+# Astra AI Agent — dependency policy: ZERO runtime dependencies.
+#
+# The core (astra/) runs entirely on the Python 3.9+ standard library
+# (http.server, urllib, sqlite3, threading). There is nothing to pip install
+# to run the agent. This file exists so the dependency contract is explicit.
+#
+#   pip install -r requirements.txt        # no-op (correct)
+#   pip install -r requirements-dev.txt    # dev tools (tests, playwright)
+#
+# ── optional extras (uncomment only what your setup needs) ─────────────
+#
+# Real Playwright browser for the BrowserManager subsystem (optional).
+# Without it the browser tools report "unavailable" honestly — the agent
+# still works. Install then run:  python -m playwright install chromium
+# playwright>=1.40
+#
+# `requests` — never required by the core (urllib is used), but handy for
+# writing your own plugin adapters / one-off scripts against external APIs.
+# requests>=2.31

@@ -1,13 +1,42 @@
+# ── runtime data ──────────────────────────────────────────────
 data/
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
 *.db
 *.db-shm
 *.db-wal
+logs/
+*.log
 /tmp/
-/tmp
-.DS_Store
+
+# ── secrets (never commit) ────────────────────────────────────
 .env
 config.json
+credentials/
+keys/
+secrets/
+*.pem
+*.key
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# ── browser (Playwright) profiles ─────────────────────────────
+browser_profiles/
+.ms-playwright/
+.cache/
+
+# ── editor / OS ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ── local helpers ─────────────────────────────────────────────
+_check_web.py

@@ -22,7 +22,18 @@ class ResearchReply:
 
 
 def _fetch(url: str) -> tuple[str, str]:
-    """Fetch a URL and strip it to (title, meta_description)."""
+    """Fetch a URL and strip it to (title, meta_description).
+
+    SSRF-guarded: only http/https to public addresses; loopback, link-local
+    and private ranges are refused unless the operator explicitly opens them
+    with ASTRA_ALLOW_PRIVATE_URLS=1.
+    """
+    import os
+
+    import astra.security as sec
+    if not sec.allow_url(url,
+                         allow_private=os.environ.get("ASTRA_ALLOW_PRIVATE_URLS") == "1"):
+        raise ValueError("refused URL (private/blocked network)")
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
         raw = resp.read(200_000)

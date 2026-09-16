@@ -22,7 +22,7 @@ if (-not (Test-Path ".\config.json")) {
 {
   "PORT": 8787,
   "NO_BROWSER": "",
-  "BIND": "0.0.0.0"
+  "BIND": "127.0.0.1"
 }
 "@ | Set-Content -Encoding UTF8 ".\config.json"
     Write-Host "`u{2705} config.json created (PORT=8787)"

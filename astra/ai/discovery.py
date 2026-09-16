@@ -50,6 +50,10 @@ class ModelDiscovery:
             self._cache[provider] = {"at": time.monotonic(), "models": ids}
         return {"provider": provider, "models": ids, "from_cache": False}
 
+    def refresh_all(self, *, force: bool = True) -> dict:
+        """Refresh discovery for every registered provider (force available)."""
+        return self.refresh(None, force=force)
+
     def refresh(self, providers: list[str] | None = None, *, force: bool = True) -> dict:
         """Refresh discovery for the given providers (all by default)."""
         targets = providers or self.registry.providers()

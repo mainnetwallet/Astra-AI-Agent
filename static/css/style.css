@@ -147,11 +147,35 @@ a[class*="hl-"] { pointer-events: none; }
 .badge { background: var(--panel2); border: 1px solid var(--line); padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
 .tools-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .tool-chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 11px; white-space: nowrap; }
-.live-feed { max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
-.feed-line { border-bottom: 1px solid var(--line); padding: 4px 0; word-break: break-word; }
-.feed-line.err { color: var(--bad); }
-.feed-line.ok { color: var(--good); }
-.feed-line.hidden { display: none; }
+
+/* mini stat cards above the log list (event counts, errors, success, api calls) */
+.cards.mini { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.cards.mini .card { padding: 10px 12px; }
+.cards.mini .card-v { font-size: 20px; }
+.cards.mini .card-k { font-size: 11px; }
+
+/* activity log — structured rows, same visual language as Providers/Router/Wallet lists */
+.log-list { max-height: 42vh; overflow-y: auto; gap: 6px; }
+.log-row {
+  align-items: flex-start; border-left: 3px solid var(--line);
+  transition: opacity .15s;
+}
+.log-row.ok { border-left-color: var(--good); }
+.log-row.err { border-left-color: var(--bad); }
+.log-row .rowtitle { gap: 6px; font-size: 12.5px; }
+.log-row .rowsub { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+.log-row .rowacts { flex-direction: column; align-items: flex-end; gap: 4px; }
+.log-time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.log-cat {
+  text-transform: uppercase; letter-spacing: .3px; font-size: 9.5px;
+  border-color: var(--line); color: var(--muted);
+}
+.log-cat.router, .log-cat.api { color: var(--accent); border-color: var(--accent); }
+.log-cat.agentrouter, .log-cat.providers { color: var(--accent2); border-color: var(--accent2); }
+.log-cat.errors { color: var(--bad); border-color: var(--bad); }
+.log-cat.success { color: var(--good); border-color: var(--good); }
+.log-cat.fallback { color: var(--warn); border-color: var(--warn); }
+.log-row.hidden { display: none; }
 
 /* logs toolbar (filters/search/pause/clear) */
 .logs-toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
@@ -160,7 +184,8 @@ a[class*="hl-"] { pointer-events: none; }
 .chip.toggle.on { border-color: var(--warn); color: var(--warn); }
 
 /* status dots (AgentRouter card etc.) */
-.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
 .status-dot.ok { background: var(--good); }
 .status-dot.bad { background: var(--bad); }
 .status-dot.warn { background: var(--warn); }
+.status-dot.info { background: var(--accent); }

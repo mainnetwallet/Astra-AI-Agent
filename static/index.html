@@ -39,7 +39,14 @@
       </div>
       <h4>🛠️ Tools</h4>
       <div id="live-tools" class="tools-legend"></div>
-      <h4>📡 Live logs</h4>
+    </div>
+
+    <!-- ---- Activity log panel — same card/row language as Providers/Router/Wallet ---- -->
+    <div class="panel">
+      <div class="panel-head"><h3>📡 Activity Log</h3>
+        <span class="hint muted" id="logs-count" style="margin:0">0 events</span></div>
+      <div class="cards mini" id="logs-stats"></div>
+
       <div class="logs-toolbar">
         <div class="chips" id="logs-filters">
           <span class="chip active" data-filter="all">All</span>
@@ -57,7 +64,8 @@
         <button class="btn mini toggle" id="btn-logs-pause">⏸ Pause</button>
         <button class="btn mini" id="btn-logs-clear">🗑️ Clear</button>
       </div>
-      <div id="live-feed" class="live-feed"><div class="muted">listening…</div></div>
+
+      <div id="live-feed" class="list log-list"><div class="empty">listening…</div></div>
     </div>
   </section>
 

@@ -191,8 +191,27 @@ loaders.live = async function () {
  * feed. Purely client-side: every rendered feed-line carries the event kind
  * + a resolved category as data attributes, and the toolbar just toggles
  * visibility / appends nothing while paused. */
-const LOGS = { filter: "all", query: "", paused: false, buffer: [] };
+const LOGS = {
+  filter: "all", query: "", paused: false, buffer: [],
+  counts: { total: 0, api: 0, errors: 0, success: 0 },
+};
 const LOGS_MAX_BUFFER = 300;
+
+const LOG_STAT_DEFS = [
+  { key: "total", label: "Total events" },
+  { key: "api", label: "API calls" },
+  { key: "success", label: "Success" },
+  { key: "errors", label: "Errors" },
+];
+
+function renderLogStats() {
+  const el = $("#logs-stats");
+  if (el) el.innerHTML = LOG_STAT_DEFS.map((d) =>
+    `<div class="card"><div class="card-v">${LOGS.counts[d.key] || 0}</div>` +
+    `<div class="card-k">${esc(d.label)}</div></div>`).join("");
+  const count = $("#logs-count");
+  if (count) count.textContent = `${LOGS.counts.total} events`;
+}
 
 // event kind (dotted, e.g. "router.decision") -> filter categories it
 // belongs to. A kind can belong to more than one (e.g. an "ai.failed" event
@@ -245,15 +264,18 @@ function initLogsToolbar() {
     clearBtn.dataset.hooked = "1";
     clearBtn.addEventListener("click", () => {
       LOGS.buffer = [];
-      $("#live-feed").innerHTML = `<div class="muted">cleared — listening…</div>`;
+      LOGS.counts = { total: 0, api: 0, errors: 0, success: 0 };
+      renderLogStats();
+      $("#live-feed").innerHTML = `<div class="empty">cleared — listening…</div>`;
     });
   }
+  renderLogStats();
 }
 
 function applyLogsFilter() {
   const feed = $("#live-feed");
   if (!feed) return;
-  $$(".feed-line", feed).forEach((el) => {
+  $$(".log-row", feed).forEach((el) => {
     const cats = (el.dataset.cats || "").split(",");
     const matchesFilter = LOGS.filter === "all" || cats.includes(LOGS.filter);
     const matchesQuery = !LOGS.query || (el.dataset.text || "").includes(LOGS.query);
@@ -482,20 +504,40 @@ function feedLine(e) {
   if (LOGS.paused) return;   // pause just stops new lines from appearing
   const feed = $("#live-feed");
   if (!feed) return;
-  if (feed.firstElementChild && feed.firstElementChild.classList.contains("muted"))
+  if (feed.firstElementChild && feed.firstElementChild.classList.contains("empty"))
     feed.innerHTML = "";
-  const div = document.createElement("div");
+
   const cats = [...logCategories(e.kind, e.data)];
   const isErr = cats.includes("errors");
   const isOk = !isErr && cats.includes("success");
-  div.className = "feed-line" + (isErr ? " err" : isOk ? " ok" : "");
+
+  // running counters shown in the stats strip above the log list
+  LOGS.counts.total++;
+  if (cats.includes("api") || cats.includes("agentrouter")) LOGS.counts.api++;
+  if (isErr) LOGS.counts.errors++;
+  else if (isOk) LOGS.counts.success++;
+  renderLogStats();
+
+  const div = document.createElement("div");
+  div.className = "rowitem log-row" + (isErr ? " err" : isOk ? " ok" : "");
   div.dataset.cats = cats.join(",");
   const when = (e.created_at || "").split(" ")[1] || "";
   const badge = LOG_BADGES[e.kind] || "•";
   const text = `${e.kind} ${e.agent || ""} ${feedText(e.data)}`;
   div.dataset.text = text.toLowerCase();
-  div.innerHTML = `${badge} <code>${esc(when)}</code> <b>${esc(e.kind)}</b> ` +
-    `${esc(e.agent || "")} ${feedText(e.data)}`;
+  const dotClass = isErr ? "bad" : isOk ? "ok" : "info";
+  const primaryCat = cats[0] || "general";
+  div.innerHTML =
+    `<span class="status-dot ${dotClass}" style="margin-top:4px"></span>` +
+    `<div class="rowmain">` +
+      `<div class="rowtitle"><b>${badge} ${esc(e.kind)}</b>` +
+      (e.agent ? `<span class="tag">${esc(e.agent)}</span>` : "") + `</div>` +
+      `<div class="rowsub">${feedText(e.data) || "<span class=\"muted\">—</span>"}</div>` +
+    `</div>` +
+    `<div class="rowacts">` +
+      `<span class="pill log-cat ${esc(primaryCat)}">${esc(primaryCat)}</span>` +
+      `<span class="log-time mono">${esc(when)}</span>` +
+    `</div>`;
   const matchesFilter = LOGS.filter === "all" || cats.includes(LOGS.filter);
   const matchesQuery = !LOGS.query || text.toLowerCase().includes(LOGS.query);
   div.classList.toggle("hidden", !(matchesFilter && matchesQuery));

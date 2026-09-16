@@ -530,5 +530,208 @@ class TestAdapterConfiguration(unittest.TestCase):
         self.assertNotIn("agentrouter_gateway", r.health())
 
 
+class TestProviderModelRoutingFix(unittest.TestCase):
+    """Regression coverage for the AgentRouter dynamic provider+model
+    routing fix: provider identity, conservative capability metadata,
+    max_latency_ms / max_cost_usd actually influencing scoring,
+    specific_provider / specific_model preferences, and stats being
+    recorded against the real serving provider (not a family guess)."""
+
+    def _config(self, **env):
+        cfg = Config()
+        cfg._runtime.update(env)
+        return cfg
+
+    # -- provider identity ------------------------------------------------
+    def test_metadata_for_keeps_real_provider_for_family_mismatched_model(self):
+        from astra.ai.models import metadata_for
+        # deepseek/kimi/qwen model ids match a family whose base_provider
+        # guess differs from the real adapter serving them through
+        # OpenRouter — the real provider must always win.
+        self.assertEqual(metadata_for("deepseek-v4-flash", "openrouter")["provider"],
+                         "openrouter")
+        self.assertEqual(metadata_for("kimi-k2", "openrouter")["provider"],
+                         "openrouter")
+        self.assertEqual(metadata_for("qwen-2.5-coder", "openrouter")["provider"],
+                         "openrouter")
+        self.assertEqual(metadata_for("glm-4.7-flash", "zai")["provider"], "zai")
+        self.assertEqual(metadata_for("llama-3.3-70b", "groq")["provider"], "groq")
+
+    def test_model_registry_add_keeps_real_provider_for_family_mismatched_model(self):
+        from astra.ai.models import ModelRegistry
+        reg = ModelRegistry()
+        m = reg.add("openrouter", "deepseek-v4-flash")
+        self.assertEqual(m.provider, "openrouter")
+
+    def test_router_candidate_model_provider_matches_real_adapter(self):
+        from astra.ai.router import RoutingRequest
+        provider = FakeAIProvider(name="openrouter", models=["deepseek-v4-flash"])
+        r = _router(provider)
+        candidates = r._candidates(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
+        self.assertEqual(len(candidates), 1)
+        _, model = candidates[0]
+        self.assertEqual(model.provider, "openrouter")
+
+    def test_discovery_validate_no_longer_raises_on_provider_kwarg(self):
+        from astra.ai.models import ModelRegistry
+        from astra.ai.discovery import ModelDiscovery
+
+        class _Adapter:
+            name = "openrouter"
+
+            def list_models(self):
+                return ["deepseek-v4-flash"]
+
+        reg = ModelRegistry()
+        disc = ModelDiscovery(reg, adapter_by_name={"openrouter": _Adapter()})
+        result = disc.validate("openrouter", "deepseek-v4-flash")
+        self.assertTrue(result["valid"])
+        m = reg.get("openrouter", "deepseek-v4-flash")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.provider, "openrouter")
+
+    def test_stats_recorded_under_real_adapter_provider_not_family_guess(self):
+        from astra.ai.router import RoutingRequest
+        provider = FakeAIProvider(name="openrouter", models=["deepseek-v4-flash"])
+        r = _router(provider)
+        r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
+        stats = r.routing_stats()
+        self.assertIn("openrouter:deepseek-v4-flash", stats)
+        self.assertNotIn("deepseek:deepseek-v4-flash", stats)
+
+    # -- conservative capability metadata -----------------------------------
+    def test_unknown_model_family_gets_conservative_capabilities(self):
+        from astra.ai.models import metadata_for
+        meta = metadata_for("some-totally-unknown-model-xyz", "customprovider")
+        self.assertEqual(meta["capabilities"], ["chat"])
+        self.assertFalse(meta["supports_json"])
+
+    def test_capabilities_and_supports_flags_stay_consistent(self):
+        from astra.ai.models import metadata_for
+        meta = metadata_for("gemini-3.5-pro", "gemini")
+        self.assertIn("vision", meta["capabilities"])
+        self.assertTrue(meta["supports_vision"])
+        self.assertEqual(meta["supports_tools"], "tools" in meta["capabilities"])
+
+    # -- long-context capability routing -------------------------------------
+    def test_context_window_requirement_excludes_short_context_model(self):
+        from astra.ai.router import RoutingRequest
+        provider = FakeAIProvider(name="ctxprov",
+                                  models=["short-1", "gemini-3.5-pro-longctx"])
+        r = _router(provider)
+        rr = r.route_request(RoutingRequest(context_tokens=500000,
+                                            messages=[{"role": "user", "content": "hi"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.model, "gemini-3.5-pro-longctx")
+
+    # -- lowest-cost preference -----------------------------------------------
+    def test_lowest_cost_preference_favors_cheap_model(self):
+        from astra.ai.router import RoutingRequest
+        provider = FakeAIProvider(name="costprov", models=["gemini-3.5-flash", "grok-4"])
+        r = _router(provider)
+        rr = r.route_request(RoutingRequest(user_preference="lowest_cost",
+                                            messages=[{"role": "user", "content": "hi"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.model, "gemini-3.5-flash")
+
+    # -- max_latency_ms actually influences scoring --------------------------
+    def test_max_latency_ms_penalizes_slow_candidate(self):
+        from astra.ai.routing_policy import RoutingDecisionPolicy
+        from astra.ai.router import RoutingRequest
+        from astra.ai.models import Model
+        fast = Model("p", "fast-model", capabilities=["chat"], speed_class="fast")
+        slow = Model("p", "slow-model", capabilities=["chat"], speed_class="slow")
+        req = RoutingRequest(max_latency_ms=500)
+        pol = RoutingDecisionPolicy()
+        self.assertGreater(pol.score(fast, req), pol.score(slow, req))
+
+    def test_max_latency_ms_end_to_end_prefers_faster_candidate(self):
+        from astra.ai.router import RoutingRequest
+        from astra.ai.models import Model, ModelRegistry
+        reg = ModelRegistry()
+        reg.add("multi", "fast-1", speed_class="fast")
+        reg.add("multi", "slow-1", speed_class="slow")
+        provider = FakeAIProvider(name="multi", models=["fast-1", "slow-1"])
+        r = _router(provider, registry=reg)
+        rr = r.route_request(RoutingRequest(max_latency_ms=500,
+                                            messages=[{"role": "user", "content": "hi"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.model, "fast-1")
+
+    # -- max_cost_usd actually influences scoring -----------------------------
+    def test_max_cost_usd_penalizes_expensive_candidate(self):
+        from astra.ai.routing_policy import RoutingDecisionPolicy
+        from astra.ai.router import RoutingRequest
+        from astra.ai.models import Model
+        cheap = Model("p", "cheap-model", capabilities=["chat"], cost_class="cheap")
+        premium = Model("p", "premium-model", capabilities=["chat"], cost_class="premium")
+        req = RoutingRequest(max_cost_usd=0.0005, max_tokens=500)
+        pol = RoutingDecisionPolicy()
+        self.assertGreater(pol.score(cheap, req), pol.score(premium, req))
+
+    def test_max_cost_usd_end_to_end_prefers_cheaper_candidate(self):
+        from astra.ai.router import RoutingRequest
+        from astra.ai.models import ModelRegistry
+        reg = ModelRegistry()
+        reg.add("multi", "cheap-1", cost_class="cheap")
+        reg.add("multi", "premium-1", cost_class="premium")
+        provider = FakeAIProvider(name="multi", models=["cheap-1", "premium-1"])
+        r = _router(provider, registry=reg)
+        rr = r.route_request(RoutingRequest(max_cost_usd=0.0005, max_tokens=500,
+                                            messages=[{"role": "user", "content": "hi"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.model, "cheap-1")
+
+    # -- specific_provider / specific_model preferences -----------------------
+    def test_preferred_provider_bonus_changes_ranking(self):
+        from astra.ai.routing_policy import RoutingDecisionPolicy
+        from astra.ai.router import RoutingRequest
+        from astra.ai.models import Model
+        a = Model("providerA", "m", capabilities=["chat"])
+        b = Model("providerB", "m", capabilities=["chat"])
+        req = RoutingRequest(preferred_provider="providerB")
+        pol = RoutingDecisionPolicy()
+        self.assertGreater(pol.score(b, req), pol.score(a, req))
+
+    def test_preferred_model_bonus_changes_ranking(self):
+        from astra.ai.routing_policy import RoutingDecisionPolicy
+        from astra.ai.router import RoutingRequest
+        from astra.ai.models import Model
+        m1 = Model("p", "model-a", capabilities=["chat"])
+        m2 = Model("p", "model-b", capabilities=["chat"])
+        req = RoutingRequest(preferred_model="model-b")
+        pol = RoutingDecisionPolicy()
+        self.assertGreater(pol.score(m2, req), pol.score(m1, req))
+
+    def test_router_prefers_specific_provider_end_to_end(self):
+        from astra.ai.router import RoutingRequest
+        a = FakeAIProvider(name="a", models=["m0"])
+        b = FakeAIProvider(name="b", models=["m0"])
+        r = _router(a, b)
+        rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}],
+                                            preferred_provider="b"))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.provider, "b")
+
+    def test_router_prefers_specific_model_end_to_end(self):
+        from astra.ai.router import RoutingRequest
+        provider = FakeAIProvider(name="multi", models=["m0", "m1"])
+        r = _router(provider)
+        rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}],
+                                            preferred_model="m1"))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.model, "m1")
+
+    # -- unavailable specific provider degrades gracefully, doesn't break routing
+    def test_preferred_provider_not_available_still_routes(self):
+        from astra.ai.router import RoutingRequest
+        good = FakeAIProvider(name="good")
+        r = _router(good)
+        rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}],
+                                            preferred_provider="nonexistent"))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.provider, "good")
+
+
 if __name__ == "__main__":
     unittest.main()

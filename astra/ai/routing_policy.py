@@ -18,6 +18,43 @@ CLASS_WEIGHT = {"cheap": 1, "mid": 3, "premium": 9}
 SPEED_WEIGHT = {"fast": 2, "mid": 1, "slow": 0}
 QUALITY_WEIGHT = {"high": 2, "mid": 1, "fast": 1}
 
+# Coarse expected-latency estimate (ms) used only when a candidate has no
+# historical avg_latency_ms yet, so max_latency_ms still has *something* to
+# compare against for a brand-new candidate.
+SPEED_ESTIMATE_MS = {"fast": 400, "mid": 1500, "slow": 4000}
+
+# Same per-token baseline AgentRouter._estimate_cost()/_estimate_cost_adapter()
+# use for post-hoc cost accounting ("cheap" class, ~4 chars/token). No exact
+# pricing feed exists at this layer, so max_cost_usd is checked against this
+# conservative estimate scaled by the model's cost_class multiplier, per the
+# spec's "use the existing cost class/multiplier conservatively" guidance.
+BASE_COST_PER_TOKEN_USD = 0.25e-6
+
+# Finite penalty applied when a candidate violates a soft caller-supplied
+# budget (max_latency_ms / max_cost_usd). Large enough to always rank below
+# any budget-compliant eligible candidate, but — unlike the -1.0e6 used for
+# meets_hard_requirements() — not an absolute exclusion, so a violating
+# candidate remains selectable as a last resort when nothing else is
+# eligible (see spec: "should not be selected when an eligible alternative
+# exists", not "must never be selected").
+BUDGET_VIOLATION_PENALTY = 1000.0
+
+# Bonus applied when a candidate matches the caller's explicit
+# preferred_provider / preferred_model. A *preference*, not a hard filter:
+# meets_hard_requirements() never checks these, so an unavailable specific
+# provider/model simply loses this bonus rather than breaking routing.
+PREFERENCE_MATCH_BONUS = 5.0
+
+
+def estimated_cost_usd(model: Model, request) -> float:
+    """Conservative per-request cost estimate for `model` under `request`.
+
+    Used to give max_cost_usd real influence over scoring even though no
+    per-token pricing table exists at this layer — see BASE_COST_PER_TOKEN_USD.
+    """
+    tokens = max(1, int(getattr(request, "max_tokens", 0) or 500))
+    return tokens * BASE_COST_PER_TOKEN_USD * model.cost_multiplier
+
 
 def preference_weights(preference: str) -> dict:
     """Weights that turn a user preference into concrete scoring terms."""
@@ -128,13 +165,48 @@ class RoutingDecisionPolicy:
             score -= w["latency"] * (
                 (float(stat.get("avg_latency_ms") or 0.0) / 4000.0))
 
-        # 6. latency / cost penalties
-        score -= w["latency"] * (request.max_latency_ms or 0) / 1000.0 * 0.0
+        # 6. latency / cost budgets — max_latency_ms and max_cost_usd must
+        # actually shape the ranking, not just be recorded on the request.
+        if request.max_latency_ms:
+            if stat and stat.get("avg_latency_ms"):
+                est_latency_ms = float(stat["avg_latency_ms"])
+            else:
+                est_latency_ms = SPEED_ESTIMATE_MS.get(
+                    getattr(model, "speed_class", "mid"), 1500)
+            if est_latency_ms > request.max_latency_ms:
+                # Exceeds the caller's latency budget: strongly deprioritized
+                # (see BUDGET_VIOLATION_PENALTY) rather than hard-excluded,
+                # so it's still usable as a last resort if it's the only
+                # eligible candidate.
+                score -= BUDGET_VIOLATION_PENALTY
+            else:
+                score += w["latency"] * (1.0 - est_latency_ms / request.max_latency_ms)
+        if request.max_cost_usd is not None:
+            est_cost = estimated_cost_usd(model, request)
+            if est_cost > request.max_cost_usd:
+                score -= BUDGET_VIOLATION_PENALTY
+            else:
+                score += w["cost"] * (1.0 - est_cost / request.max_cost_usd)
         score -= w["cost"] * model.cost_multiplier * 0.25
         score += (0.1 if getattr(model, "preferred", False) else 0)
         score -= (10 if getattr(model, "disabled", False) else 0)
 
-        # 7. reasoning level fit
+        # 7. explicit specific_provider / specific_model preference. This is
+        # a caller-requested ranking preference, not a hard requirement —
+        # meets_hard_requirements() never checks it, so an unavailable
+        # specific provider/model just loses the bonus instead of breaking
+        # routing. Kept independent of `self.preference`/`user_preference`
+        # so it applies whenever the caller names a specific provider/model,
+        # regardless of which weighting profile ("balanced",
+        # "specific_provider", ...) is otherwise in effect.
+        if getattr(request, "preferred_provider", None) and \
+                model.provider == request.preferred_provider:
+            score += PREFERENCE_MATCH_BONUS
+        if getattr(request, "preferred_model", None) and \
+                model.model_id == request.preferred_model:
+            score += PREFERENCE_MATCH_BONUS
+
+        # 8. reasoning level fit
         rl = getattr(model, "reasoning_level", "auto")
         if request.reasoning_level == "high" and rl not in ("high", "auto"):
             score -= 2

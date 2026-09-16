@@ -142,18 +142,49 @@ def _family_of(model_id: str) -> str:
 
 
 def metadata_for(model_id: str, provider: str | None = None) -> dict:
-    """Derive metadata for a model id from family heuristics."""
+    """Derive metadata for a model id from family heuristics.
+
+    `provider`, when given, is the real adapter/provider identity — the
+    ProviderRegistry entry that will actually serve requests for this model
+    (e.g. "openrouter" for a deepseek/kimi/qwen model routed through
+    OpenRouter). It is always authoritative for the returned "provider"
+    field. Family metadata (`_FAMILIES`) is a *capability/quality* hint
+    table only, keyed by a substring match on the model id — it must never
+    be allowed to overwrite who actually owns/serves the model. The
+    family's own `base_provider` is used as a provider guess only when the
+    caller did not supply a real one (e.g. building a catalog entry with no
+    adapter context yet).
+
+    Capability inference is conservative: unknown-family models start from
+    a bare "chat" capability rather than assuming tool/JSON support, and
+    vision is only inferred from fairly specific signals. Explicit
+    overrides passed by the caller (e.g. via ModelRegistry.add(**kw)) always
+    win over anything derived here, since those are applied on top of this
+    dict's keys.
+    """
     fam = _family_of(model_id)
     info = _FAMILIES.get(fam)
     if info:
         base_provider, caps, ctx, q, cost, _mods = info
-        provider = "?" if not fam else base_provider
+        caps = list(caps)
     else:
-        caps, ctx, q, cost = ["chat", "tools", "json"], 128000, "mid", "cheap"
-    caps = list(caps)
+        base_provider = None
+        # Unknown family → conservative fallback. Do NOT assume tools/json
+        # support just because most families happen to have them; that
+        # would falsely grant capabilities to a model we know nothing
+        # about. Callers that know more can override via explicit kwargs.
+        caps, ctx, q, cost = ["chat"], 128000, "mid", "cheap"
     low = model_id.lower()
-    vision = ("vision" in low or "pixtral" in low or "vl" in low or "4o" in low
-              or "gemma-4" in low)
+    # Vision inference stays narrow: a bare "vl" substring is too easy to
+    # false-positive on unrelated model ids, so it's only honoured as a
+    # distinct token (e.g. "...-vl-...", "qwen2-vl"), not any substring.
+    vision = bool(
+        "vision" in low
+        or "pixtral" in low
+        or re.search(r"(?:^|[-_/])vl(?:[-_]|$)", low)
+        or ("gpt" in low and "4o" in low)
+        or "vision" in caps
+    )
     if vision and "vision" not in caps:
         caps.append("vision")
     if "flash" in low or "lightning" in low or any(w in low for w in
@@ -161,12 +192,16 @@ def metadata_for(model_id: str, provider: str | None = None) -> dict:
         q = "fast"; cost = "cheap"
     if any(w in low for w in ("opus", "pro", "sonnet", "reasoning", "ultra", "-120b", "k2.5", "m3")):
         q = "high"; cost = "premium" if fam not in ("deepseek",) else cost
-    struct = fam != "" and info and "json" in caps and "flash" not in low and "lite" not in low
+    # JSON/structured-output support: only claimed for a verified family
+    # that lists "json" and isn't a fast/lite variant (those are more
+    # likely to drop strict structured-output adherence under load).
+    struct = bool(info) and "json" in caps and "flash" not in low and "lite" not in low
     return {
-        "provider": provider or fam or "unknown",
+        "provider": provider or base_provider or fam or "unknown",
         "capabilities": caps, "context_window": ctx,
         "quality_class": q, "cost_class": cost,
         "supports_vision": vision, "supports_json": bool(struct),
+        "supports_tools": "tools" in caps,
     }
 
 

@@ -76,8 +76,11 @@ class ModelDiscovery:
                 except Exception:
                     known = False
         if known:
-            m = self.registry.get(provider, model_id) or \
-                self.registry.add(provider, model_id, **metadata_for(model_id, provider))
+            m = self.registry.get(provider, model_id)
+            if m is None:
+                meta = metadata_for(model_id, provider)
+                meta.pop("provider", None)   # `provider` positional is authoritative
+                m = self.registry.add(provider, model_id, **meta)
             m.availability = "available"
         return {"provider": provider, "model": model_id, "valid": known,
                 "status": "available" if known else "unavailable"}

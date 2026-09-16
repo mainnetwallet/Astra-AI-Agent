@@ -269,6 +269,21 @@ class TestPlanner(unittest.TestCase):
         self.assertEqual(plan[0]["tool"], "fetch_url")
         self.assertIn("example.com", plan[0]["params"]["url"])
 
+    def test_research_keyword_without_url_does_not_bypass_gateway(self):
+        """'review'/'about'/'analyse'/'research' alone, with no actual URL,
+        is normal free-form language — it must NOT be forced into
+        fetch_url with a non-URL param. It has to fall through to the AI
+        planner, i.e. the Astra AI Gateway -> Provider path."""
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceCall(enriched=False)
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"ok"}}]}')
+        planner = Planner(router=router, tools=["fetch_url", "answer"],
+                          gateway_intelligence=gw)
+        plan = planner.plan("can you review this idea for my project?")
+        self.assertEqual(plan[0]["tool"], "answer")
+        self.assertEqual(gw.calls, ["can you review this idea for my project?"])
+
     def test_answer_tool_for_unknown(self):
         plan = self.stack["planner"].plan("xkcd blorpberry 999")
         self.assertEqual(plan[0]["tool"], "answer")

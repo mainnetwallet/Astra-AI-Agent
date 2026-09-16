@@ -1,11 +1,15 @@
 """Planner: turn a natural-language goal into ordered, tool-backed steps.
 
-Offline-first: built-in intent patterns cover the everyday requests (discover
-airdrops, check balances, research a project, review today's tasks, remember /
-recall, file analysis, help). When an AI provider is configured and the goal
-is not matched offline, the LLM is asked for a JSON step plan and the result
-is parsed defensively — any failure drops back to offline planning, so the
-agent never blocks on the network.
+Deterministic-first, narrowly: a fixed set of *genuinely tool-specific*
+intent patterns are matched offline — ones that need no AI reasoning at all
+(system health, memory read/write, task listing) or hinge on a concrete
+structural signal in the message (an actual URL, an explicit file path).
+Everything else — any normal free-form request that actually requires AI
+reasoning to understand or answer — falls through to the LLM planner, which
+always goes through the Astra AI Gateway first (see below). The offline
+patterns intentionally do NOT match on topic keywords alone (e.g. "review",
+"about", "analyse" with no URL) precisely so they can't silently steal a
+normal conversational request away from the Gateway -> Provider path.
 
 Astra AI Gateway (optional, `gateway_intelligence`): when a goal falls
 through to the LLM planner, the raw goal is first run through the Gateway's
@@ -56,6 +60,16 @@ class Planner:
         return steps[:max_steps]
 
     # -- offline intent matching ---------------------------------------------
+    # NOTE: every branch here is a genuinely tool-specific, deterministic
+    # match — either it needs no AI reasoning at all (get_health, memory
+    # read/write, listing tasks) or it hinges on a concrete structural
+    # signal in the message itself (an actual URL, an explicit file path)
+    # rather than a loose topic keyword. A normal free-form request that
+    # merely *mentions* a related word (e.g. "can you review this idea?"
+    # with no URL) must NOT be caught here — it falls through to
+    # `_ai_steps()`, which is the Assistant -> Astra AI Gateway -> Provider
+    # path. Bypassing that path is reserved for requests where a
+    # deterministic tool call is unambiguously the right answer.
     def _offline_steps(self, g: str, ctx=None, fallback: bool = False):
         low = g.lower()
         url = re.search(r"https?://\S+", g)
@@ -71,8 +85,14 @@ class Planner:
         if re.search(r"\b(eligible|eligibility|am i in|qualify)\b", low):
             return [self._step("e1", "list_tasks", {"status": "pending"},
                                "Check pending eligibility tasks")]
-        if url or re.search(r"\b(research|report|about|review|analyse|analyze)\b", low):
-            q = url.group(0).rstrip(".,;)" if url else "") if url else g.replace("research", "").replace("about", "").strip()
+        # Fetching a URL is only ever deterministic when a URL is actually
+        # present — that is the unambiguous, structural signal. Words like
+        # "research", "report", "about", "review", "analyse" on their own
+        # are normal free-form language and must go through the Gateway ->
+        # Provider path instead of being forced into fetch_url with a
+        # non-URL "url" param.
+        if url:
+            q = url.group(0).rstrip(".,;)")
             return [self._step("r1", "fetch_url", {"url": q}, "Research project")]
         m = re.search(r"\b(analyze|read|analyse|look at)\s+(?:the\s+)?file\s+(.+)$", low)
         if m:

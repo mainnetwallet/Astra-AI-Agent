@@ -12,13 +12,15 @@ class ToolContext:
     """Everything a tool may legitimately touch, by dependency injection."""
 
     def __init__(self, store=None, config=None, events=None, memory=None,
-                 plugins=None, tasks=None):
+                 plugins=None, tasks=None, web3_manager=None):
         self.store = store
         self.config = config
         self.events = events
         self.memory = memory
         self.plugins = list(plugins or [])
         self.tasks = tasks
+        self.web3_manager = web3_manager
+        self.tx_manager = web3_manager   # alias used by web3 tools
 
     def plugin(self, slug: str):
         for p in self.plugins:

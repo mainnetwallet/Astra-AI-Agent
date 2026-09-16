@@ -77,6 +77,7 @@ class Orchestrator:
         self.events = events
         self.policy = policy
         self.agents = agents                 # AgentManager (specialist selection)
+        self.web3_manager = None             # set by bootstrap (transaction mgr)
         self._plugins = list(plugins or [])
         self._pending: dict[str, dict] = {}
         self._threads: dict[str, threading.Thread] = {}
@@ -449,4 +450,5 @@ class Orchestrator:
         from astra.core.context import ToolContext
         return ToolContext(store=self.store, config=self.config,
                            events=self.events, memory=self.memory,
-                           plugins=self._plugins, tasks=self.tasks)
+                           plugins=self._plugins, tasks=self.tasks,
+                           web3_manager=getattr(self, "web3_manager", None))

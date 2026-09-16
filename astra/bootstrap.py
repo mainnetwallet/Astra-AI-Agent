@@ -92,6 +92,29 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     register_browser_tools(registry, browser_manager)
     registry.register_plugin_tools(plugins)
 
+    # Web3 transaction manager: deterministic policy + encrypted keystore.
+    # The LLM may only *prepare*; authorize/sign/broadcast stay out of the
+    # tool surface. Master secret comes from ASTRA_MASTER_SECRET (or the
+    # operator's key file), never from model prompts.
+    from astra.web3.transactions import (TransactionManager,
+                                         TransactionPolicyEngine,
+                                         PolicyConfig)
+    from astra.web3.keystore import SecureKeyStore
+    from astra.web3.tools import register_web3_tools
+    w3_mode = config.get("WEB3_TRANSACTION_MODE", "CONFIRM").upper()
+    # Master secret: operator-set env, or the key file (sixty-four hex chars).
+    import astra.web3.keystore as _ks
+    master = os.environ.get("ASTRA_MASTER_SECRET", "") or \
+        (open(_ks.DEFAULT_MASTER_KEY_FILE).read().strip()
+         if os.path.exists(_ks.DEFAULT_MASTER_KEY_FILE) else "")
+    keystore = SecureKeyStore(store, master) if master else None
+    w3_cfg = PolicyConfig(mode=w3_mode)
+    policy_engine = TransactionPolicyEngine(w3_cfg)
+    tx_manager = TransactionManager(store, keystore=keystore,
+                                    policy=policy_engine, events=events,
+                                    config=config)
+    register_web3_tools(registry, manager=tx_manager)
+
     # AI providers + router
     # Provider adapters (Gemini/Groq/Mistral/…/Bedrock) are built by the
     # ProviderRegistry from configured credential pools; the legacy Anthropic
@@ -125,9 +148,11 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
         planner=planner, executor=executor, router=router, memory=memory,
         experiences=experiences, events=events, policy=policy,
         plugins=plugins, agents=agent_manager)
+    orchestrator.web3_manager = tx_manager
     # crash recovery: executions stranded mid-flight by a previous shutdown
     # are marked FAILED so they no longer read as "running".
     orchestrator.recover_stale()
+    tx_manager.recover()   # resolve in-flight web3 txs safely (chain-checked)
 
     # workflows + scheduler
     workflows = WorkflowEngine(store, registry, events)
@@ -151,6 +176,8 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
         "model_registry": model_registry, "provider_registry": provider_registry,
         "discovery": discovery, "agent_manager": agent_manager,
         "browser_manager": browser_manager,
+        "tx_manager": tx_manager, "keystore": keystore,
+        "web3_policy": policy_engine,
     }
 
 

@@ -1,15 +1,18 @@
 """Planner: turn a natural-language goal into ordered, tool-backed steps.
 
 Deterministic-first, narrowly: a fixed set of *genuinely tool-specific*
-intent patterns are matched offline — ones that need no AI reasoning at all
-(system health, memory read/write, task listing) or hinge on a concrete
-structural signal in the message (an actual URL, an explicit file path).
-Everything else — any normal free-form request that actually requires AI
-reasoning to understand or answer — falls through to the LLM planner, which
-always goes through the Astra AI Gateway first (see below). The offline
-patterns intentionally do NOT match on topic keywords alone (e.g. "review",
-"about", "analyse" with no URL) precisely so they can't silently steal a
-normal conversational request away from the Gateway -> Provider path.
+intent patterns (`_deterministic_tool_steps`) are matched before anything
+else — ones that need no AI reasoning at all (system health, memory
+read/write, task listing) or hinge on a concrete structural signal in the
+message (an actual URL, an explicit file path). This is unrelated to the
+(removed) Offline AI Provider — it never touches an AI provider at all, it
+is pure text matching. Everything else — any normal free-form request that
+actually requires AI reasoning to understand or answer — falls through to
+the LLM planner, which always goes through the Astra AI Gateway first (see
+below). The deterministic patterns intentionally do NOT match on topic
+keywords alone (e.g. "review", "about", "analyse" with no URL) precisely so
+they can't silently steal a normal conversational request away from the
+Gateway -> Provider path.
 
 Astra AI Gateway (optional, `gateway_intelligence`): when a goal falls
 through to the LLM planner, the raw goal is first run through the Gateway's
@@ -49,20 +52,22 @@ class Planner:
         if not g:
             return [self._answer(g, "Kichu bollen na. 'help' likhen.")]
         budget_goal = g[:max_goal_chars] if len(g) > max_goal_chars else g
-        steps = self._offline_steps(budget_goal, ctx)
+        steps = self._deterministic_tool_steps(budget_goal, ctx)
         if steps is None:
             convo_context = (ctx or {}).get("conversation_context", "")
             steps = (self._ai_steps(budget_goal, max_steps=max_steps,
                                     context=convo_context)
-                     or self._offline_steps(budget_goal, ctx, fallback=True) or [])
+                     or self._deterministic_tool_steps(budget_goal, ctx, fallback=True) or [])
         if not steps:
             steps = [self._answer(budget_goal)]
         return steps[:max_steps]
 
-    # -- offline intent matching ---------------------------------------------
-    # NOTE: every branch here is a genuinely tool-specific, deterministic
-    # match — either it needs no AI reasoning at all (get_health, memory
-    # read/write, listing tasks) or it hinges on a concrete structural
+    # -- deterministic tool matching ------------------------------------------
+    # Deliberately NOT called "offline steps" — that name invited confusion
+    # with the (removed) Offline AI Provider. This has nothing to do with
+    # an AI provider: it is a small, fixed set of genuinely tool-specific
+    # matches, each either needing no AI reasoning at all (get_health,
+    # memory read/write, listing tasks) or hinging on a concrete structural
     # signal in the message itself (an actual URL, an explicit file path)
     # rather than a loose topic keyword. A normal free-form request that
     # merely *mentions* a related word (e.g. "can you review this idea?"
@@ -70,7 +75,7 @@ class Planner:
     # `_ai_steps()`, which is the Assistant -> Astra AI Gateway -> Provider
     # path. Bypassing that path is reserved for requests where a
     # deterministic tool call is unambiguously the right answer.
-    def _offline_steps(self, g: str, ctx=None, fallback: bool = False):
+    def _deterministic_tool_steps(self, g: str, ctx=None, fallback: bool = False):
         low = g.lower()
         url = re.search(r"https?://\S+", g)
 
@@ -182,8 +187,8 @@ class Planner:
     def _answer(g: str, text: str = "") -> dict:
         return {"id": "a1", "tool": "answer",
                 "params": {"text": text or _fallback_text()},
-                "description": "Offline reply", "verify": [], "retries": 0,
-                "is_answer": True}
+                "description": "Direct reply (no tool matched)", "verify": [],
+                "retries": 0, "is_answer": True}
 
 
 def _fallback_text() -> str:

@@ -51,10 +51,11 @@ EVENT_KINDS = (
     # AgentRouter (internal routing brain) — routing decision visibility
     "router.request", "router.decision", "router.fallback", "router.retry",
     "credential.rotation",
-    # agentrouter.org (external gateway) — kept distinct from the internal
-    # router's own "router.*"/"ai.*" events so the dashboard Logs panel can
-    # filter for this one third-party service specifically.
-    "agentrouter.request", "agentrouter.success", "agentrouter.error",
+    # Astra AI Gateway (separate system: own four AI connections with
+    # automatic fallback) — kept distinct from the internal router's own
+    # "router.*"/"ai.*" events so the dashboard Logs panel can filter for
+    # the Gateway specifically.
+    "astra_gateway.request", "astra_gateway.success", "astra_gateway.error",
 )
 
 

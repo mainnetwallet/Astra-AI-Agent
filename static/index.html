@@ -51,7 +51,7 @@
         <div class="chips" id="logs-filters">
           <span class="chip active" data-filter="all">All</span>
           <span class="chip" data-filter="router">Router</span>
-          <span class="chip" data-filter="agentrouter">AgentRouter</span>
+          <span class="chip" data-filter="gateway">Gateway</span>
           <span class="chip" data-filter="providers">Providers</span>
           <span class="chip" data-filter="api">API</span>
           <span class="chip" data-filter="errors">Errors</span>
@@ -108,15 +108,11 @@
       </div>
       <div id="providers-list" class="list"><div class="empty">Loading…</div></div>
 
-      <h3 style="margin-top:16px">🌐 AgentRouter.org gateway</h3>
-      <p class="muted">External aggregator gateway — used only as a last-resort
-        fallback after every direct provider above is exhausted. Never one of
-        the providers itself.</p>
-      <div id="agentrouter-card" class="list"><div class="empty">Loading…</div></div>
-      <div class="row" style="margin-top:8px">
-        <button class="btn" id="btn-agentrouter-test">🧪 Test AgentRouter API</button>
-      </div>
-      <div id="agentrouter-result" class="hint"></div>
+      <h3 style="margin-top:16px">🌐 Astra AI Gateway</h3>
+      <p class="muted">Separate last-resort gateway after every direct provider
+        above is exhausted. Auto-fallback: Gemini → Groq → Cloudflare →
+        Bedrock. Never one of the providers itself.</p>
+      <div id="gateway-card" class="list"><div class="empty">Loading…</div></div>
     </div>
   </section>
 

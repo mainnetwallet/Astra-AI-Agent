@@ -4,9 +4,9 @@ Each adapter implements the common interface (chat/stream/health_check/
 list_models/supports) and keeps provider-specific HTTP inside its own file.
 The AgentRouter never touches provider HTTP — it scores the adapters here.
 
-AgentRouter.org (the third-party gateway at agentrouter.org) is deliberately
-NOT among these: its client lives at astra/ai/agentrouter_gateway.py, a
-core/service module, not a provider adapter — see that file's docstring.
+The Astra AI Gateway (astra/ai/gateway.py) is NOT among these either: it is
+a separate system with its own four AI connections (GW_* config) used only
+as a last-resort fallback — never a provider adapter, never in this table.
 """
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ __all__ = [
     "ZAIAdapter",
 ]
 
-# provider name -> adapter class. AgentRouter.org is intentionally absent —
-# it is not a provider (see astra/ai/agentrouter_gateway.py).
+# provider name -> adapter class. The Astra AI Gateway is intentionally absent —
+# it is not a provider (see astra/ai/gateway.py).
 ADAPTERS: dict[str, type] = {
     "gemini": GeminiAdapter,
     "groq": GroqAdapter,

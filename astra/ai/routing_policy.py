@@ -84,7 +84,7 @@ def _task_class(task_type: str) -> str:
 
 def meets_hard_requirements(model: Model, request) -> bool:
     """Binary capability/context gate shared by scoring and any code path
-    (like the AgentRouter.org gateway fallback) that needs to filter
+    (like the Astra AI Gateway fallback) that needs to filter
     candidates without going through the full scorer. A model that fails
     this is never selectable for the request, regardless of score."""
     need = set(request.required_capabilities)

@@ -239,6 +239,177 @@ class TestAgentRouter(unittest.TestCase):
         self.assertTrue(rr.ok)
 
 
+class TestDynamicProviderModelRouting(unittest.TestCase):
+    """Coverage for the dynamic provider+model routing upgrade: capability
+    matching, health/cooldown-aware selection, model-aware failover,
+    deterministic tie-breaking, and the AgentRouter.org gateway fallback."""
+
+    def _config(self, **env):
+        cfg = Config()
+        cfg._runtime.update(env)
+        return cfg
+
+    # 1. coding task -> coding-capable model
+    def test_coding_task_selects_coding_capable_model(self):
+        from astra.ai.router import RoutingRequest
+        provider = FakeAIProvider(name="multi", models=["m0", "codestral-1"])
+        r = _router(provider)
+        rr = r.route_request(RoutingRequest(task_type="coding",
+                                            messages=[{"role": "user", "content": "fix this bug"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.model, "codestral-1")
+
+    # 2. vision task -> never a text-only model
+    def test_vision_task_never_selects_text_only_model(self):
+        from astra.ai.router import RoutingRequest
+        provider = FakeAIProvider(name="multi", models=["m0", "vl-1"])
+        r = _router(provider)
+        rr = r.route_request(RoutingRequest(task_type="vision",
+                                            messages=[{"role": "user", "content": "describe this image"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.model, "vl-1")
+
+    def test_vision_task_fails_cleanly_with_no_vision_model_available(self):
+        from astra.ai.router import RoutingRequest
+        provider = FakeAIProvider(name="textonly", models=["m0"])
+        r = _router(provider)
+        rr = r.route_request(RoutingRequest(task_type="vision",
+                                            messages=[{"role": "user", "content": "describe this image"}]))
+        self.assertFalse(rr.ok)
+        self.assertNotEqual(rr.model, "m0")
+
+    # 3. reasoning task -> prefers reasoning-capable model
+    def test_reasoning_task_prefers_reasoning_capable_model(self):
+        from astra.ai.router import RoutingRequest
+        provider = FakeAIProvider(name="multi", models=["m0", "kimi-k2"])
+        r = _router(provider)
+        rr = r.route_request(RoutingRequest(task_type="reasoning",
+                                            messages=[{"role": "user", "content": "why is the sky blue"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.model, "kimi-k2")
+
+    # 4. unhealthy provider excluded
+    def test_unhealthy_provider_excluded_from_candidates(self):
+        from astra.ai.router import RoutingRequest
+        dead = FakeAIProvider(name="dead", healthy=False)
+        good = FakeAIProvider(name="good")
+        r = _router(dead, good)
+        rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.provider, "good")
+        self.assertIn("dead", r.stats()["down"])
+
+    # 5. cooling-down credential excluded
+    def test_cooling_down_credential_excludes_provider(self):
+        from astra.ai.credentials import CredentialPool
+        from astra.ai.router import RoutingRequest
+        pool = CredentialPool("cooled", ["only-key"])
+        pool._creds[0].mark_failure("rate limited", rate_limited=True, block_s=999)
+        cooled = FakeAIProvider(name="cooled", pool=pool)
+        good = FakeAIProvider(name="good")
+        r = _router(cooled, good)
+        rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.provider, "good")
+
+    # 6/7. failed candidate moves on, and is never retried within one call
+    def test_failed_model_moves_to_next_candidate_without_repeating(self):
+        from astra.ai.router import RoutingRequest
+        always_fails = FakeAIProvider(name="broken", models=["a", "b"], fail_first=9999)
+        r = AgentRouter([always_fails], max_retries=0)
+        rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
+        self.assertFalse(rr.ok)
+        # exactly one attempt per distinct (provider, model) candidate — no
+        # candidate is retried once it has failed within this call.
+        self.assertEqual(rr.attempts, 2)
+
+    # 8. provider + model both present on success
+    def test_routing_decision_has_provider_and_model(self):
+        from astra.ai.router import RoutingRequest
+        good = FakeAIProvider(name="good")
+        r = _router(good)
+        rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
+        self.assertTrue(rr.provider)
+        self.assertTrue(rr.model)
+        self.assertIn("candidates_considered", rr.route_reason)
+
+    # 9/10. registry shape
+    def test_all_ten_real_providers_registered_and_agentrouter_absent(self):
+        from astra.ai.registry import build_providers
+        keys = {
+            "GEMINI_API_KEYS": "k", "GROQ_API_KEYS": "k", "MISTRAL_API_KEYS": "k",
+            "OPENROUTER_API_KEYS": "k", "CEREBRAS_API_KEYS": "k",
+            "CLOUDFLARE_API_KEYS": "k", "SAMBA_API_KEYS": "k",
+            "COHERE_API_KEYS": "k", "ZAI_API_KEYS": "k", "BEDROCK_CREDENTIALS": "k",
+        }
+        cfg = self._config(**keys)
+        reg = build_providers(config=cfg)
+        expected = {"gemini", "groq", "mistral", "openrouter", "cerebras",
+                    "cloudflare", "sambanova", "cohere", "zai", "bedrock"}
+        self.assertEqual(expected, set(reg.names()) & expected)
+        for name in expected:
+            self.assertIsNotNone(reg.get(name))
+        self.assertIsNone(reg.get("agentrouter"))
+        self.assertIsNone(reg.get("agentrouter_gateway"))
+
+    # 11. secrets never exposed in errors
+    def test_provider_error_never_contains_api_key(self):
+        from astra.ai.adapters.mistral import MistralAdapter
+        from astra.core.exceptions import ProviderError
+        secret = "super-secret-mistral-key-xyz"
+        adapter = MistralAdapter(config=self._config(MISTRAL_API_KEYS=secret))
+        try:
+            adapter.chat([{"role": "user", "content": "hi"}])
+        except ProviderError as e:
+            self.assertNotIn(secret, str(e))
+            self.assertNotIn(secret, e.message or "")
+
+    # 12. AgentRouter.org gateway still works as a router fallback
+    def test_gateway_used_as_last_resort_fallback_when_providers_fail(self):
+        from astra.ai.router import RoutingRequest
+        dead = FakeAIProvider(name="dead", healthy=False)
+        gateway = FakeAIProvider(name="agentrouter_gateway", models=["deepseek-v4-flash"])
+        r = AgentRouter([dead], max_retries=0, gateway=gateway)
+        rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
+        self.assertTrue(rr.ok)
+        self.assertEqual(rr.provider, "agentrouter_gateway")
+        self.assertTrue(rr.fallback_used)
+        self.assertEqual(rr.route_reason.get("preference"), "agentrouter_gateway_fallback")
+        # never counted among ordinary provider health/dashboard entries
+        self.assertNotIn("agentrouter_gateway", r.health())
+        self.assertEqual(r.gateway_health()["state"], "healthy")
+
+    # 13. no Claude CLI impersonation
+    def test_gateway_client_sends_no_special_or_spoofed_headers(self):
+        from astra.ai.agentrouter_gateway import AgentRouterGatewayClient
+        cfg = self._config(AGENTROUTER_API_KEYS="fake-key-for-test")
+        client = AgentRouterGatewayClient(config=cfg)
+        self.assertEqual(client.extra_headers, {})
+        self.assertNotIn("anthropic", client.base_url.lower())
+
+    # 14. empty/unconfigured credentials handled gracefully
+    def test_unconfigured_provider_credentials_yield_graceful_failure(self):
+        from astra.ai.router import RoutingRequest
+        unconfigured = FakeAIProvider(name="empty", healthy=False)
+        r = _router(unconfigured)
+        rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
+        self.assertFalse(rr.ok)
+        self.assertTrue(rr.error)
+
+    # 15. deterministic tie-breaking
+    def test_equal_score_candidates_rank_deterministically(self):
+        from astra.ai.routing_policy import RoutingDecisionPolicy
+        from astra.ai.router import RoutingRequest
+        a = FakeAIProvider(name="a", models=["m0"])
+        b = FakeAIProvider(name="b", models=["m0"])
+        r = _router(a, b)
+        req = RoutingRequest(messages=[{"role": "user", "content": "hi"}])
+        candidates = r._candidates(req)
+        order1 = [ad.name for _, ad, _ in r.policy.rank(candidates, req)]
+        order2 = [ad.name for _, ad, _ in r.policy.rank(candidates, req)]
+        self.assertEqual(order1, order2)
+
+
 class TestAdapterConfiguration(unittest.TestCase):
     """Provider adapters read models/base URL from env, tolerate a blank
     key without crashing, and are absent from the registry when

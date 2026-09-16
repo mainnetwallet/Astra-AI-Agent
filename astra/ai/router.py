@@ -29,7 +29,7 @@ from datetime import datetime
 
 from astra.ai.credentials import CredentialPool
 from astra.ai.models import Model, metadata_for
-from astra.ai.routing_policy import RoutingDecisionPolicy
+from astra.ai.routing_policy import RoutingDecisionPolicy, meets_hard_requirements
 from astra.core.exceptions import ProviderError, TimeoutError
 from astra.core.timeutil import duration_ms, ms_now
 
@@ -53,6 +53,20 @@ CREATE TABLE IF NOT EXISTS routing_stats (
 TASK_TYPES = ("simple_chat", "reasoning", "research", "coding", "vision",
               "browser", "structured_output", "translation", "summarization",
               "planning", "tool_selection", "web3")
+
+# task_type -> capability that a candidate MUST declare (hard filter). Left
+# out: "reasoning" and general task-quality signals, which are a spectrum
+# (handled as a soft score preference via quality_class plus the
+# capability-name coincidence RoutingDecisionPolicy.score already picks up
+# from the task_type fallback) rather than a binary supported/unsupported
+# flag, so hard-excluding on them would be too blunt.
+TASK_HARD_CAPABILITIES = {
+    "coding": ("coding",),
+    "vision": ("vision",),
+    "structured_output": ("json",),
+    "translation": ("translation",),
+    "tool_selection": ("tools",),
+}
 
 # adapter names that count as "configured AI" for the boot banner
 NON_OFFLINE = ("offline",)
@@ -179,6 +193,8 @@ class AgentRouter:
         self._last: dict = {}
         for p in self.providers:
             self._slots(p)
+        if self.gateway is not None:
+            self._slots(self.gateway)
         if store is not None and store:
             store.install(STATS_SCHEMA)
 
@@ -260,12 +276,28 @@ class AgentRouter:
                  getattr(adapter, "pool", None) else "not_configured")}
 
     # -- execution ------------------------------------------------------------
+    def _normalize_requirements(self, req: RoutingRequest) -> None:
+        """Fill in hard capability requirements implied by task_type, without
+        overriding anything the caller already set explicitly. This is what
+        makes e.g. a vision task_type actually hard-exclude text-only models
+        instead of merely scoring them lower (see TASK_HARD_CAPABILITIES)."""
+        if req.task_type == "vision":
+            req.vision = True
+        if req.task_type == "structured_output":
+            req.structured_output = True
+        if not req.required_capabilities:
+            hard = TASK_HARD_CAPABILITIES.get(req.task_type)
+            if hard:
+                req.required_capabilities = list(hard)
+
     def route_request(self, req: RoutingRequest) -> RoutingResult:
+        self._normalize_requirements(req)
         candidates = self._candidates(req)
         if not candidates and not self._gateway_usable():
             return RoutingResult(ok=False, error="no eligible provider/model available")
         ranked = self.policy.rank(candidates, req) if self.policy else \
             [(0.0, c[0], c[1]) for c in candidates]
+        considered = len(ranked)
         results, attempts, fallback = [], 0, False
         for score, adapter, model in ranked:
             rr = self._attempt(adapter, model, req)
@@ -279,6 +311,7 @@ class AgentRouter:
                     "score": score,
                     "preference": req.user_preference if not fallback else "fallback",
                     "reason": getattr(rr, "_reason", ""),
+                    "candidates_considered": considered,
                 }
                 self._record_route(req, rr)
                 return rr
@@ -289,8 +322,12 @@ class AgentRouter:
         # never mixed into `ranked` above — it's tried only after the whole
         # provider registry has been exhausted, and reported distinctly.
         if self._gateway_usable():
-            for model_id in self._gateway_models():
-                rr = self._attempt(self.gateway, self._gateway_model_obj(model_id), req)
+            gateway_candidates = [m for m in
+                                  (self._gateway_model_obj(mid) for mid in self._gateway_models())
+                                  if self._meets_hard_requirements(m, req)]
+            considered += len(gateway_candidates)
+            for model in gateway_candidates:
+                rr = self._attempt(self.gateway, model, req)
                 attempts += 1
                 if rr is not None and rr.ok:
                     rr.fallback_used = True
@@ -298,6 +335,7 @@ class AgentRouter:
                         "task_type": req.task_type, "score": None,
                         "preference": "agentrouter_gateway_fallback",
                         "reason": getattr(rr, "_reason", ""),
+                        "candidates_considered": considered,
                     }
                     self._record_route(req, rr)
                     return rr
@@ -311,6 +349,9 @@ class AgentRouter:
         return last
 
     # -- AgentRouter.org gateway (not a provider; see module docstring) -------
+    def _meets_hard_requirements(self, model: Model, req: RoutingRequest) -> bool:
+        return meets_hard_requirements(model, req)
+
     def _gateway_usable(self) -> bool:
         gw = self.gateway
         if gw is None:

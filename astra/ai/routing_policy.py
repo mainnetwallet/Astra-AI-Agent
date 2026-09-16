@@ -45,6 +45,27 @@ def _task_class(task_type: str) -> str:
     return "balanced"
 
 
+def meets_hard_requirements(model: Model, request) -> bool:
+    """Binary capability/context gate shared by scoring and any code path
+    (like the AgentRouter.org gateway fallback) that needs to filter
+    candidates without going through the full scorer. A model that fails
+    this is never selectable for the request, regardless of score."""
+    need = set(request.required_capabilities)
+    caps = set(model.capabilities)
+    if need and not need.issubset(caps):
+        return False
+    for flag, cap in ((request.vision, "vision"),
+                      (request.structured_output, "json"),
+                      (bool(request.required_tools), "tools"),
+                      (request.streaming, "stream")):
+        if flag and cap not in caps:
+            return False
+    ctx = int(request.context_tokens or 0)
+    if ctx > model.context_window:
+        return False
+    return True
+
+
 class RoutingDecisionPolicy:
     """Scores candidate routes for one RoutingRequest."""
 
@@ -55,11 +76,17 @@ class RoutingDecisionPolicy:
     # -- scoring --------------------------------------------------------------
     def score(self, model: Model, request, provider_info: dict | None = None,
               stat: dict | None = None) -> float:
+        if not meets_hard_requirements(model, request):
+            return -1.0e6
         w = preference_weights(self.preference)
         score = 0.0
         provider_info = provider_info or {}
 
-        # 1. capability match
+        # 1. capability match (soft: proportional bonus on top of the hard
+        # gate above, using either the explicit requirement or the task_type
+        # string as a loose proxy for capability names — see router.py's
+        # TASK_HARD_CAPABILITIES for where that proxy is promoted to a hard
+        # requirement for unambiguous, binary capabilities)
         need = set(request.required_capabilities) or set(request.task_type.split(","))
         if request.task_type == "vision":
             need.add("vision")
@@ -67,20 +94,9 @@ class RoutingDecisionPolicy:
         if need:
             have = len(need & caps)
             score += w["capability"] * (have / max(1, len(need)))
-            if request.required_capabilities and not need.issubset(caps):
-                return -1.0e6                     # hard requirement missed
-        # vision / json / tools / streaming hard filters
-        for flag, cap in ((request.vision, "vision"),
-                          (request.structured_output, "json"),
-                          (bool(request.required_tools), "tools"),
-                          (request.streaming, "stream")):
-            if flag and cap not in caps:
-                return -1.0e6
 
         # 2. context fit
         ctx = int(request.context_tokens or 0)
-        if ctx > model.context_window:
-            return -1.0e6
         score += 0.5 * min(1.0, (model.context_window - ctx) /
                            max(1, model.context_window))
 

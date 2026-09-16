@@ -8,6 +8,7 @@ class OpenRouterAdapter(CompatibleAdapter):
     name = "openrouter"
     base_url = "https://openrouter.ai/api/v1"
     models_env = "OPENROUTER_MODELS"
+    base_url_env = "OPENROUTER_BASE_URL"
     api_keys_env = "OPENROUTER_API_KEYS"
     capabilities = ["chat", "stream", "tools", "json", "vision"]
     extra_headers = {

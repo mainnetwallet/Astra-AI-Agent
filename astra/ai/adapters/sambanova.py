@@ -8,5 +8,6 @@ class SambaNovaAdapter(CompatibleAdapter):
     name = "sambanova"
     base_url = "https://api.sambanova.ai/v1"
     models_env = "SAMBA_MODELS"
+    base_url_env = "SAMBA_BASE_URL"
     api_keys_env = "SAMBA_API_KEYS"
     capabilities = ["chat", "stream", "tools", "json"]

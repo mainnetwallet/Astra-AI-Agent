@@ -8,5 +8,6 @@ class CerebrasAdapter(CompatibleAdapter):
     name = "cerebras"
     base_url = "https://api.cerebras.ai/v1"
     models_env = "CEREBRAS_MODELS"
+    base_url_env = "CEREBRAS_BASE_URL"
     api_keys_env = "CEREBRAS_API_KEYS"
     capabilities = ["chat", "stream", "tools", "json"]

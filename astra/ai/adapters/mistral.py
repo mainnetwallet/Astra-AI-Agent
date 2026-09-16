@@ -8,5 +8,6 @@ class MistralAdapter(CompatibleAdapter):
     name = "mistral"
     base_url = "https://api.mistral.ai/v1"
     models_env = "MISTRAL_MODELS"
+    base_url_env = "MISTRAL_BASE_URL"
     api_keys_env = "MISTRAL_API_KEYS"
     capabilities = ["chat", "stream", "tools", "json", "coding"]

@@ -38,12 +38,14 @@ class CompatibleAdapter(AIProvider):
     extra_headers: dict = {}                  # static headers e.g. api-key
     models_env: str = ""                      # env var holding the model list
     api_keys_env: str = ""                    # env var holding the key list
+    base_url_env: str = ""                    # env var overriding base_url
 
     def __init__(self, config=None, events=None, pool: CredentialPool | None = None):
         super().__init__(config)
         self.events = events
         self.pool = pool or CredentialPool.from_env(config, self.api_keys_env, self.name)
         self.models = self._configured_models()
+        self.base_url = self._configured_base_url()
         self._health = None
         self._health_at = 0.0
 
@@ -52,6 +54,16 @@ class CompatibleAdapter(AIProvider):
         if self.config and self.models_env:
             return self.config.getlist(self.models_env, default=[])
         return list(self.models)
+
+    def _configured_base_url(self) -> str:
+        """Env override wins when set, else the class default. Normalises a
+        trailing slash so callers can safely do f"{base_url}/chat/completions"
+        without producing "//chat/completions" or double "/v1/v1"."""
+        raw = None
+        if self.config and self.base_url_env:
+            raw = self.config.get(self.base_url_env, None)
+        raw = (raw or self.base_url or "").rstrip("/")
+        return raw
 
     # -- credential handling --------------------------------------------------
     def _pick(self):

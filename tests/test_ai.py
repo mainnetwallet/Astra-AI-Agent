@@ -239,5 +239,82 @@ class TestAgentRouter(unittest.TestCase):
         self.assertTrue(rr.ok)
 
 
+class TestAdapterConfiguration(unittest.TestCase):
+    """Provider adapters read models/base URL from env, tolerate a blank
+    key without crashing, and are absent from the registry when
+    unconfigured — never silently "healthy" with nothing to call."""
+
+    def _config(self, **env):
+        cfg = Config()
+        cfg._runtime.update(env)
+        return cfg
+
+    def test_base_url_env_overrides_default(self):
+        from astra.ai.adapters.groq import GroqAdapter
+        cfg = self._config(GROQ_BASE_URL="https://example.test/custom/v1")
+        adapter = GroqAdapter(config=cfg)
+        self.assertEqual(adapter.base_url, "https://example.test/custom/v1")
+
+    def test_base_url_falls_back_to_class_default(self):
+        from astra.ai.adapters.groq import GroqAdapter
+        adapter = GroqAdapter(config=self._config())
+        self.assertEqual(adapter.base_url, "https://api.groq.com/openai/v1")
+
+    def test_base_url_trailing_slash_normalized(self):
+        from astra.ai.adapters.mistral import MistralAdapter
+        cfg = self._config(MISTRAL_BASE_URL="https://example.test/v1/")
+        adapter = MistralAdapter(config=cfg)
+        self.assertFalse(adapter.base_url.endswith("/"))
+
+    def test_models_loaded_from_env(self):
+        from astra.ai.adapters.gemini import GeminiAdapter
+        cfg = self._config(GEMINI_MODELS="gemini-3.7-flash,gemini-3.6-flash")
+        adapter = GeminiAdapter(config=cfg)
+        self.assertEqual(adapter.models, ["gemini-3.7-flash", "gemini-3.6-flash"])
+
+    def test_empty_api_key_does_not_crash_construction(self):
+        from astra.ai.adapters.mistral import MistralAdapter
+        adapter = MistralAdapter(config=self._config())  # no MISTRAL_API_KEYS
+        self.assertFalse(bool(adapter.pool))              # unhealthy, not absent
+        self.assertFalse(adapter.health_check() and bool(adapter.pool))
+
+    def test_empty_api_key_raises_clean_provider_error_on_chat(self):
+        from astra.ai.adapters.mistral import MistralAdapter
+        from astra.core.exceptions import ProviderError
+        adapter = MistralAdapter(config=self._config())
+        with self.assertRaises(ProviderError):
+            adapter.chat([{"role": "user", "content": "hi"}])
+
+    def test_multiple_keys_parsed_and_trimmed(self):
+        from astra.ai.credentials import CredentialPool
+        pool = CredentialPool.from_env(
+            self._config(GEMINI_API_KEYS=" key-1 , key-2 ,,key-3 "),
+            "GEMINI_API_KEYS", "gemini")
+        self.assertEqual(pool.count, 3)
+        self.assertEqual(pool.healthy_count, 3)
+
+    def test_unconfigured_provider_absent_from_registry(self):
+        from astra.ai.registry import build_providers
+        cfg = self._config()  # nothing configured at all
+        reg = build_providers(config=cfg)
+        self.assertIsNone(reg.get("groq"))
+        self.assertIsNone(reg.get("gemini"))
+        # AgentRouter is the routing brain, never a registry entry itself.
+        self.assertIsNone(reg.get("agentrouter"))
+
+    def test_configured_provider_present_in_registry(self):
+        from astra.ai.registry import build_providers
+        cfg = self._config(GROQ_API_KEYS="fake-key-for-test")
+        reg = build_providers(config=cfg)
+        self.assertIsNotNone(reg.get("groq"))
+
+    def test_credential_summary_never_exposes_secret(self):
+        from astra.ai.adapters.groq import GroqAdapter
+        cfg = self._config(GROQ_API_KEYS="super-secret-value-123")
+        adapter = GroqAdapter(config=cfg)
+        dumped = str(adapter.credential_summary())
+        self.assertNotIn("super-secret-value-123", dumped)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,9 @@ class CloudflareAdapter(CompatibleAdapter):
     base_url = "https://api.cloudflare.com/client/v4"
     models_env = "CLOUDFLARE_MODELS"
     api_keys_env = "CLOUDFLARE_API_KEYS"
+    base_url_env = "CLOUDFLARE_API_BASE_URL"  # overrides the client/v4 root only;
+                                               # the per-account /accounts/<id>/ai/v1
+                                               # suffix below is always appended.
     capabilities = ["chat", "stream", "tools", "json"]
     account_ids_env = "CLOUDFLARE_ACCOUNT_IDS"
 

@@ -8,6 +8,7 @@ class CohereAdapter(CompatibleAdapter):
     name = "cohere"
     base_url = "https://api.cohere.ai/compatibility/v1"
     models_env = "COHERE_MODELS"
+    base_url_env = "COHERE_BASE_URL"
     api_keys_env = "COHERE_API_KEYS"
     capabilities = ["chat", "stream", "tools", "json", "vision", "translation"]
     extra_headers = {}

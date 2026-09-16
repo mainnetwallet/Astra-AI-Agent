@@ -150,12 +150,15 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     provider_registry = build_providers(config, events=events)
     providers = provider_registry.all()
     model_registry = ModelRegistry(config)
-    # Optional Astra AI Gateway (GW_* config). This is a separate system, NOT
-    # a provider, and is never added to provider_registry/providers — see
-    # astra/ai/gateway.py. It has its own four AI connections (Gemini, Groq,
-    # Cloudflare, Bedrock) with independent credentials/models/endpoints and
-    # is handed to AstraRouter itself as a last-resort fallback, reported
-    # separately as "Astra AI Gateway".
+    # Optional Astra AI Gateway (GW_* config). This is a COMPLETELY SEPARATE
+    # system, NOT a provider, and is never added to provider_registry/
+    # providers — see astra/ai/gateway.py. It has its own four AI connections
+    # (Gemini, Groq, Cloudflare, Bedrock) with independent credentials/
+    # models/endpoints. It is handed to AstraRouter only as a reference for
+    # separate status reporting ("Astra AI Gateway" in health/dashboard
+    # output) — AstraRouter never routes or falls back into it, and the
+    # Gateway never reads provider config or falls back into ProviderRegistry.
+    # Isolation is absolute in both directions.
     from astra.ai.gateway import build_astra_ai_gateway
     gateway = build_astra_ai_gateway(config)
     router = AstraRouter(providers=providers, config=config, store=store,

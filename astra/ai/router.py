@@ -6,14 +6,21 @@ model) candidate, executes with per-credential retry and cross-provider
 fallback, measures latency, records a normalized result and learns from
 outcomes so future routes improve.
 
-As a final fallback path, an optional `Astra AI Gateway` may be wired in as
-`self.gateway` (see astra/ai/gateway.py). The Gateway is a separate system
-with its own four AI connections — Gemini, Groq, Cloudflare, Bedrock — each
-with independent credentials/models/endpoints (GW_* config). It is never
-added to `self.providers` and never appears in ProviderRegistry, provider
-health, or the provider dashboard table. It is used only after every real
-provider candidate has been tried and failed, and is reported separately via
-`gateway_health()`, never as a provider.
+An optional `Astra AI Gateway` may be attached as `self.gateway` (see
+astra/ai/gateway.py) purely for separate status reporting via
+`gateway_health()`. The Gateway is a completely independent system with its
+own four AI connections — Gemini, Groq, Cloudflare, Bedrock — each with
+independent credentials/models/endpoints (GW_* config). It is never added to
+`self.providers`, never appears in ProviderRegistry, provider health, or the
+provider dashboard table, and — just as important — AstraRouter NEVER
+executes a routing request against it. Provider routing/retry/fallback in
+this file only ever moves between the real provider adapters in
+`self.providers`; when every one of them fails, routing fails honestly
+instead of dropping down into the Gateway. The Gateway has its own separate
+execution path (`AstraAIGateway.chat()` in gateway.py) with its own internal
+fallback across its four connections — that is the only fallback chain the
+Gateway ever participates in. The two systems share no code path: Provider →
+Gateway and Gateway → ProviderRegistry are both absent by design.
 
 Classify → score → execute → retry/fallback → record → learn.
 
@@ -293,7 +300,7 @@ class AstraRouter:
         self._normalize_requirements(req)
         self._emit("router.request", task=req.task_type)
         candidates = self._candidates(req)
-        if not candidates and not self._gateway_usable():
+        if not candidates:
             return RoutingResult(ok=False, error="no eligible provider/model available")
         ranked = self.policy.rank(candidates, req) if self.policy else \
             [(0.0, c[0], c[1]) for c in candidates]
@@ -323,81 +330,21 @@ class AstraRouter:
                 return rr
             if rr is not None:
                 results.append(rr.error)
-        # every real provider candidate failed (or none were configured) →
-        # last resort: the Astra AI Gateway, if configured. This is never
-        # mixed into `ranked` above — it's tried only after the whole provider
-        # registry has been exhausted, and reported distinctly. The Gateway
-        # itself performs automatic fallback across its four AI connections
-        # (Gemini → Groq → Cloudflare → Bedrock) while preserving the task,
-        # messages, context and system instructions (see astra/ai/gateway.py).
-        if self._gateway_usable():
-            considered += len(self.gateway.models)
-            gtext, gmodel, gconn, gattempts, gerr = self._gateway_attempt(req)
-            if gtext is not None:
-                rr = RoutingResult(provider="astra_ai_gateway", model=gmodel or "",
-                                   text=gtext, latency_ms=0, attempts=gattempts,
-                                   ok=True,
-                                   usage=getattr(self.gateway, "_last_usage", None) or {},
-                                   _reason=f"gateway:{gconn or '?'}")
-                rr.fallback_used = True
-                rr.route_reason = {
-                    "task_type": req.task_type, "score": None,
-                    "preference": "astra_ai_gateway_fallback",
-                    "reason": f"Astra AI Gateway via {gconn or '?'}",
-                    "candidates_considered": considered,
-                }
-                self._emit("router.decision", task=req.task_type, provider=rr.provider,
-                           model=rr.model, score=None,
-                           reason=f"astra_ai_gateway_fallback:{gconn or '?'}",
-                           latency_ms=rr.latency_ms, fallback=True)
-                self._emit("router.fallback", task=req.task_type, provider=rr.provider,
-                           model=rr.model, candidates_considered=considered,
-                           reason="all direct providers exhausted")
-                self._record_route(req, rr)
-                return rr
-            results.append(gerr or "Astra AI Gateway failed")
-        # everything failed → learn and report honestly
+        # every real provider candidate failed → routing fails honestly.
+        # The Astra AI Gateway is a completely separate system (see module
+        # docstring) and is NEVER used as a fallback here, even when every
+        # provider candidate above has failed — isolation is absolute in both
+        # directions: Provider routing never drops into the Gateway, and the
+        # Gateway (astra/ai/gateway.py) never reads from or falls back into
+        # ProviderRegistry.
         last = RoutingResult(ok=False, error="; ".join(results) or
                              "all providers failed",
                              attempts=attempts, fallback_used=fallback)
         self._emit("ai.failed", provider=(results[-1] if results else ""))
         return last
 
-    # -- Astra AI Gateway (not a provider; see module docstring) --------------
-    def _gateway_usable(self) -> bool:
-        gw = self.gateway
-        if gw is None:
-            return False
-        try:
-            return bool(gw.is_usable() if hasattr(gw, "is_usable") else gw)
-        except Exception:
-            return False
-
-    def _gateway_attempt(self, req: RoutingRequest):
-        """Run the request once through the Astra AI Gateway.
-
-        The Gateway itself tries Gemini → Groq → Cloudflare → Bedrock with
-        automatic fallback; the same task, messages, context and system
-        instructions continue across every connection without restarting.
-        Returns (text, model, connection, attempts, error); text is None on
-        total failure so the router can report honestly.
-        """
-        gw = self.gateway
-        t0 = ms_now()
-        self._emit("astra_gateway.request", task=req.task_type)
-        try:
-            text = gw.chat(req.messages, max_tokens=req.max_tokens)
-        except Exception as e:
-            err = getattr(e, "message", None) or str(e)
-            self._emit("astra_gateway.error", task=req.task_type, error=err)
-            return None, "", "", 0, err
-        latency = duration_ms(t0)
-        self._emit("astra_gateway.success", task=req.task_type,
-                   connection=gw.last_connection, model=gw.last_model,
-                   latency_ms=latency)
-        return (text, gw.last_model or "", gw.last_connection or "",
-                max(1, gw.last_attempts), "")
-
+    # -- Astra AI Gateway (not a provider; reporting only — see module
+    #    docstring: AstraRouter never executes a request against it) --------
     def _gateway_models(self) -> list[str]:
         return list(getattr(self.gateway, "models", []) or [])
 

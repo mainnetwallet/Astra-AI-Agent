@@ -393,21 +393,26 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
             self.assertNotIn(secret, str(e))
             self.assertNotIn(secret, e.message or "")
 
-    # 12. Astra AI Gateway used only as a last-resort router fallback
-    def test_gateway_used_as_last_resort_fallback_when_providers_fail(self):
+    # 12. Astra AI Gateway is NEVER used as a router fallback — isolation is
+    #     absolute: when every provider candidate fails, routing must fail
+    #     honestly rather than dropping down into the Gateway, even though a
+    #     perfectly healthy Gateway connection is attached and available.
+    def test_gateway_never_used_as_router_fallback_when_providers_fail(self):
         from astra.ai.gateway import AstraAIGateway
         from astra.ai.router import RoutingRequest
         dead = FakeAIProvider(name="dead", healthy=False)
         gateway = AstraAIGateway(
             connections=[_FakeGatewayConn(name="astra-gw-gemini",
                                           models=["gw-model-1"])])
+        self.assertTrue(gateway.is_usable())
         r = AstraRouter([dead], max_retries=0, gateway=gateway)
         rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
-        self.assertTrue(rr.ok)
-        self.assertEqual(rr.provider, "astra_ai_gateway")
-        self.assertTrue(rr.fallback_used)
-        self.assertEqual(rr.route_reason.get("preference"), "astra_ai_gateway_fallback")
-        # never counted among ordinary provider health/dashboard entries
+        # routing fails honestly — the Gateway is never consulted, let alone
+        # used to serve the reply, no matter how many providers failed first.
+        self.assertFalse(rr.ok)
+        self.assertNotEqual(rr.provider, "astra_ai_gateway")
+        self.assertEqual(gateway.last_connection, "")  # gateway.chat() never called
+        # health/status reporting stays available and separate regardless
         self.assertNotIn("astra_ai_gateway", r.health())
         self.assertEqual(r.gateway_health()["state"], "healthy")
 
@@ -643,9 +648,10 @@ class TestAdapterConfiguration(unittest.TestCase):
                            GEMINI_MODELS="provider-model")
         self.assertIsNone(build_astra_ai_gateway(config=cfg))
 
-    def test_astra_ai_gateway_used_only_as_router_fallback_not_a_provider(self):
+    def test_astra_ai_gateway_attached_for_reporting_only_not_a_provider(self):
         """The gateway, when configured, is reachable only via
-        AstraRouter.gateway — never mixed into router.providers."""
+        AstraRouter.gateway (for separate status reporting) — never mixed
+        into router.providers and never invoked to execute a request."""
         from astra.ai.gateway import AstraAIGateway
         from astra.ai.router import AstraRouter
         gw = AstraAIGateway(

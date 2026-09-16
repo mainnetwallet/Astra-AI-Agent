@@ -1,6 +1,6 @@
 """Astra AI Gateway — a separate multi-service AI gateway with automatic fallback.
 
-Replaces the old third-party AgentRouter.org gateway with a set of four
+Replaces the old third-party AI gateway service with a set of four
 independent AI connections:
 
     Astra AI Gateway

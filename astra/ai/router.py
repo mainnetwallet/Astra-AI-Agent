@@ -1,4 +1,4 @@
-"""AgentRouter — Astra's central AI routing core.
+"""AstraRouter — Astra's central AI routing core.
 
 NOT a provider. It holds no API keys, no model catalog and no base URL of
 its own. It receives a task, classifies it, scores every eligible (adapter,
@@ -163,7 +163,7 @@ def classify(text: str) -> str:
     return "simple_chat"
 
 
-class AgentRouter:
+class AstraRouter:
     """Central routing brain. Consumes adapters + model registry; is itself
     neither provider nor model catalog."""
 

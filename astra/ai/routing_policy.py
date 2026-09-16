@@ -1,4 +1,4 @@
-"""Deterministic route-scoring policy for the AgentRouter.
+"""Deterministic route-scoring policy for the AstraRouter.
 
 Candidate (provider, model) pairs are scored on capability fit, historical
 success, context fit, tool/vision/JSON support and quality — penalised by
@@ -23,7 +23,7 @@ QUALITY_WEIGHT = {"high": 2, "mid": 1, "fast": 1}
 # compare against for a brand-new candidate.
 SPEED_ESTIMATE_MS = {"fast": 400, "mid": 1500, "slow": 4000}
 
-# Same per-token baseline AgentRouter._estimate_cost()/_estimate_cost_adapter()
+# Same per-token baseline AstraRouter._estimate_cost()/_estimate_cost_adapter()
 # use for post-hoc cost accounting ("cheap" class, ~4 chars/token). No exact
 # pricing feed exists at this layer, so max_cost_usd is checked against this
 # conservative estimate scaled by the model's cost_class multiplier, per the

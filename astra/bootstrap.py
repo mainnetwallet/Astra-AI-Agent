@@ -2,7 +2,7 @@
 
 `build()` wires: Store → Registry(plugins) → TaskEngine → Memories →
 EventBus → Policy → ToolRegistry(+builtins+plugin tools) → Providers →
-AgentRouter → Planner → Executor → WorkflowEngine → Scheduler → Orchestrator
+AstraRouter → Planner → Executor → WorkflowEngine → Scheduler → Orchestrator
 → Agent. run.py, tests, and boot helpers all call this, so the wiring is
 defined once and verified everywhere.
 """
@@ -21,7 +21,7 @@ from astra.core.executor import Executor
 from astra.core.orchestrator import Orchestrator
 from astra.ai.provider import (ClaudeProvider, OpenAICompatibleProvider,
                               OfflineProvider)
-from astra.ai.router import AgentRouter
+from astra.ai.router import AstraRouter
 from astra.ai.registry import build_providers, ProviderRegistry
 from astra.ai.models import ModelRegistry
 from astra.ai.discovery import ModelDiscovery
@@ -145,7 +145,7 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     # AI providers + router
     # Provider adapters (Gemini/Groq/Mistral/…/Bedrock) are built by the
     # ProviderRegistry from configured credential pools; the legacy Anthropic
-    # and OpenAI-compatible providers still join when configured. AgentRouter
+    # and OpenAI-compatible providers still join when configured. AstraRouter
     # routes across all of them — it is the routing core, never a provider.
     provider_registry = build_providers(config, events=events)
     providers = provider_registry.all()
@@ -154,11 +154,11 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     # a provider, and is never added to provider_registry/providers — see
     # astra/ai/gateway.py. It has its own four AI connections (Gemini, Groq,
     # Cloudflare, Bedrock) with independent credentials/models/endpoints and
-    # is handed to AgentRouter itself as a last-resort fallback, reported
+    # is handed to AstraRouter itself as a last-resort fallback, reported
     # separately as "Astra AI Gateway".
     from astra.ai.gateway import build_astra_ai_gateway
     gateway = build_astra_ai_gateway(config)
-    router = AgentRouter(providers=providers, config=config, store=store,
+    router = AstraRouter(providers=providers, config=config, store=store,
                          preference=config.get("AI_ROUTING_PREFERENCE", "balanced"),
                          registry=model_registry, gateway=gateway)
     router.attach_events(events)

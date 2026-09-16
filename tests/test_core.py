@@ -743,7 +743,7 @@ class TestPhase4Providers(unittest.TestCase):
 class TestPhase4Router(unittest.TestCase):
     def test_router_falls_back_to_second_provider(self):
         from astra.ai.provider import AIProvider
-        from astra.ai.router import AgentRouter
+        from astra.ai.router import AstraRouter
         from astra.core.exceptions import ProviderError
 
         class Bad(AIProvider):
@@ -759,14 +759,14 @@ class TestPhase4Router(unittest.TestCase):
             def chat(self, messages, model=None, max_tokens=500):
                 return "works"
 
-        r = AgentRouter(providers=[Bad(), Good()], max_retries=0)
+        r = AstraRouter(providers=[Bad(), Good()], max_retries=0)
         name, model, reply = r.route([{"role": "user", "content": "hi"}])
         self.assertEqual(name, "good")
         self.assertEqual(reply, "works")
 
     def test_router_marks_unhealthy_provider_down(self):
         from astra.ai.provider import AIProvider, OfflineProvider
-        from astra.ai.router import AgentRouter
+        from astra.ai.router import AstraRouter
 
         class AlwaysDown(AIProvider):
             name = "dead"
@@ -775,14 +775,14 @@ class TestPhase4Router(unittest.TestCase):
                 return "never reached"
             def health_check(self): return False
 
-        r = AgentRouter(providers=[AlwaysDown(), OfflineProvider({})], max_retries=0)
+        r = AstraRouter(providers=[AlwaysDown(), OfflineProvider({})], max_retries=0)
         name, model, reply = r.route([{"role": "user", "content": "hi"}])
         self.assertIsNone(name)
         self.assertIn("dead", r.stats()["down"])
 
     def test_router_stats_track_latency_and_calls(self):
         from astra.ai.provider import AIProvider
-        from astra.ai.router import AgentRouter
+        from astra.ai.router import AstraRouter
 
         class Fast(AIProvider):
             name = "fast"
@@ -790,7 +790,7 @@ class TestPhase4Router(unittest.TestCase):
             def chat(self, messages, model=None, max_tokens=500):
                 return "yo"
 
-        r = AgentRouter(providers=[Fast()], max_retries=0, backoff_s=0.01)
+        r = AstraRouter(providers=[Fast()], max_retries=0, backoff_s=0.01)
         r.route([{"role": "user", "content": "x"}])
         h = r.health()["fast"]
         self.assertEqual(h["calls"], 1)

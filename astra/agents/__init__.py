@@ -4,7 +4,7 @@ Agents are *task specialists* — declarative, tool-oriented skill buckets that
 the AgentManager selects based on a goal. They are NOT AI providers and NOT
 plugins: agents know *what kind of work* this is and *which tools* fit; the
 Orchestrator plans and executes through the ToolRegistry, and AI reasoning goes
-through the AgentRouter. Boundaries stay clean (§63).
+through the AstraRouter. Boundaries stay clean (§63).
 """
 from __future__ import annotations
 

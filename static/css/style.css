@@ -171,7 +171,7 @@ a[class*="hl-"] { pointer-events: none; }
   border-color: var(--line); color: var(--muted);
 }
 .log-cat.router, .log-cat.api { color: var(--accent); border-color: var(--accent); }
-.log-cat.agentrouter, .log-cat.providers { color: var(--accent2); border-color: var(--accent2); }
+.log-cat.providers { color: var(--accent2); border-color: var(--accent2); }
 .log-cat.errors { color: var(--bad); border-color: var(--bad); }
 .log-cat.success { color: var(--good); border-color: var(--good); }
 .log-cat.fallback { color: var(--warn); border-color: var(--warn); }
@@ -183,7 +183,7 @@ a[class*="hl-"] { pointer-events: none; }
 .chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .chip.toggle.on { border-color: var(--warn); color: var(--warn); }
 
-/* status dots (AgentRouter card etc.) */
+/* status dots (AstraRouter card etc.) */
 .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
 .status-dot.ok { background: var(--good); }
 .status-dot.bad { background: var(--bad); }

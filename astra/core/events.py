@@ -48,7 +48,7 @@ EVENT_KINDS = (
     # plugins / providers (contract for future modules)
     "plugin.loaded", "plugin.failed", "plugin.disabled",
     "provider.selected", "provider.failed", "provider.health_changed",
-    # AgentRouter (internal routing brain) — routing decision visibility
+    # AstraRouter (internal routing brain) — routing decision visibility
     "router.request", "router.decision", "router.fallback", "router.retry",
     "credential.rotation",
     # Astra AI Gateway (separate system: own four AI connections with

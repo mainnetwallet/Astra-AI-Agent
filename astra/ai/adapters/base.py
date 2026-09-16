@@ -6,7 +6,7 @@ Cohere and Z.AI all accept `{model, messages, max_tokens}` and return
 `choices[].message.content`, with SSE `data:` frames when `stream: true`.
 
 This base adapter normalises request/response/streaming/errors/usage across
-them: one interface for the AgentRouter, provider-specific details confined to
+them: one interface for the AstraRouter, provider-specific details confined to
 a small class per provider (name, base_url, model list, headers).
 
 Credentials come from a CredentialPool (multi-key with health/cooldown) — a

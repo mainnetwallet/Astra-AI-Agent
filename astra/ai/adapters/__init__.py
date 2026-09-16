@@ -2,7 +2,7 @@
 
 Each adapter implements the common interface (chat/stream/health_check/
 list_models/supports) and keeps provider-specific HTTP inside its own file.
-The AgentRouter never touches provider HTTP — it scores the adapters here.
+The AstraRouter never touches provider HTTP — it scores the adapters here.
 
 The Astra AI Gateway (astra/ai/gateway.py) is NOT among these either: it is
 a separate system with its own four AI connections (GW_* config) used only

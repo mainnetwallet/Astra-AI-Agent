@@ -4,7 +4,7 @@ A specialist declares:
   name, description, capabilities, preferred task types, tools it relies on,
   and required model capabilities for AI reasoning.
 
-The `route_hint()` method returns routing guidance for the AgentRouter
+The `route_hint()` method returns routing guidance for the AstraRouter
 (task_type, extra required capabilities) so the selected specialist steers
 *which model class* is chosen without itself being a provider.
 """
@@ -27,7 +27,7 @@ class SpecialistAgent:
         return 0
 
     def route_hint(self, goal: str) -> dict:
-        """AgentRouter routing guidance for this specialist."""
+        """AstraRouter routing guidance for this specialist."""
         return {"task_type": "simple_chat",
                 "required_capabilities": list(self.required_model_capabilities)}
 

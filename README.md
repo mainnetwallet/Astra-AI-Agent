@@ -23,7 +23,7 @@ one plugin, drop it in `plugins/`, restart. The core never changes.
 │  └─────────────┘  └─────────────┘  └──────────────┘  └───────────────┘  │
 │                                                                          │
 │  ┌──────────────────────┐   ┌─────────────────────────────────────────┐ │
-│  │   AgentRouter        │   │  Provider Adapters (10)                 │ │
+│  │   AstraRouter        │   │  Provider Adapters (10)                 │ │
 │  │   CENTRAL routing    │   │  gemini groq mistral openrouter         │ │
 │  │   core — it is NOT   │──▶│  cerebras cloudflare sambanova cohere   │ │
 │  │   a provider         │   │  zai bedrock (+claude / openai-compat)  │ │
@@ -43,7 +43,7 @@ one plugin, drop it in `plugins/`, restart. The core never changes.
 
 | Subsystem | What it does |
 |-----------|-------------|
-| **AgentRouter** | **The central AI routing core.** Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes, and records routing stats. It consumes the 10 adapters + model registry — it is **never** registered as a provider itself. It optionally holds one gateway of its own: the **Astra AI Gateway** (`GW_*` config in `astra/ai/gateway.py`), four independent AI connections with automatic fallback (Gemini → Groq → Cloudflare → Bedrock), used only as a last-resort fallback after every real provider has failed, and reported separately from the provider table. |
+| **AstraRouter** | **The central AI routing core.** Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes, and records routing stats. It consumes the 10 adapters + model registry — it is **never** registered as a provider itself. It optionally holds one gateway of its own: the **Astra AI Gateway** (`GW_*` config in `astra/ai/gateway.py`), four independent AI connections with automatic fallback (Gemini → Groq → Cloudflare → Bedrock), used only as a last-resort fallback after every real provider has failed, and reported separately from the provider table. |
 | **Provider adapters (10)** | Gemini, Groq, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova, Cohere, Z.ai, Bedrock — one shared OpenAI-compatible adapter class + a real AWS SigV4 Bedrock adapter. Unlimited credentials per provider via key pools. |
 | **Model registry** | Capabilities, context window, streaming/tools/vision support, cost/speed/quality classes, preferred/disabled status. |
 | `Orchestrator` | UNDERSTAND → PLAN → SELECT TOOL → EXECUTE → OBSERVE → VERIFY → LEARN → CONTINUE. Recoverable across restarts (WAITING_USER runs are reconstituted, never blanket-failed). |
@@ -150,7 +150,7 @@ logs, UI, or API responses. Router preference order: `AI_PROVIDER=gemini groq �
 | **Assistant** | Chat interface — natural language commands |
 | **Live** | Real-time SSE event stream, health, tools, executions |
 | **Providers** | AI provider health, latency, calls/errors, model refresh |
-| **Router** | Model registry + task routing stats (the AgentRouter's view) |
+| **Router** | Model registry + task routing stats (the AstraRouter's view) |
 | **Wallet** | Web3 transaction policy (mode, limits, allowlists) + recent txs |
 | **Backup** | Export/import all data as one JSON file |
 

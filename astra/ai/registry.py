@@ -3,7 +3,7 @@
 A provider is only instantiated when it has credentials (a pool with at least
 one key) **or** explicit user opt-in via `AI_PROVIDER`/`PROVIDERS`. Providers
 without credentials are reported as "not configured" — never as healthy.
-AgentRouter is deliberately absent here: it is the routing brain, not a
+AstraRouter is deliberately absent here: it is the routing brain, not a
 provider, and gets no adapter, no models list, no credentials.
 """
 from __future__ import annotations

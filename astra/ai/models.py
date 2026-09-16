@@ -1,11 +1,11 @@
 """Central model registry for Astra.
 
 Every model carries rich metadata (context window, capabilities, cost/quality
-classes …) so the AgentRouter can score candidate routes instead of hard-coding
+classes …) so the AstraRouter can score candidate routes instead of hard-coding
 ordering assumptions. The registry is seeded from the configured provider model
 lists (env / config.json / .env) with sensible per-family metadata defaults,
 then refined by discovery and usage. It is a *resource* catalog — it is NOT a
-provider and is NOT AgentRouter.
+provider and is NOT AstraRouter.
 """
 from __future__ import annotations
 
@@ -209,7 +209,7 @@ class ModelRegistry:
     """Holds the universe of known models keyed by (provider, model_id).
 
     Seed order: env/config list vars per provider, then explicit registry.add()
-    from discovery. NOT a routing decision-maker — the AgentRouter consumes it.
+    from discovery. NOT a routing decision-maker — the AstraRouter consumes it.
     """
 
     def __init__(self, config: Config | None = None):

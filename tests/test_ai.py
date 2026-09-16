@@ -1,6 +1,6 @@
-"""AgentRouter + model registry + credentials + adapters (Phase A).
+"""AstraRouter + model registry + credentials + adapters (Phase A).
 
-The build requires AgentRouter behave as the *central routing core*: score by
+The build requires AstraRouter behave as the *central routing core*: score by
 capability/history/health, rotate credentials, fall back across providers, and
 never leak secrets. These tests exercise real behavior with fakes where HTTP
 would otherwise be needed.
@@ -11,7 +11,7 @@ import unittest
 
 from astra.core.config import Config
 from astra.ai.provider import AIProvider, OfflineProvider
-from astra.ai.router import AgentRouter
+from astra.ai.router import AstraRouter
 from astra.core.exceptions import ProviderError
 
 
@@ -86,8 +86,8 @@ class _FakeGatewayConn:
 
 
 def _router(*providers, **kw):
-    from astra.ai.router import AgentRouter
-    return AgentRouter(list(providers), max_retries=0, **kw)
+    from astra.ai.router import AstraRouter
+    return AstraRouter(list(providers), max_retries=0, **kw)
 
 
 class TestModelRegistry(unittest.TestCase):
@@ -179,7 +179,7 @@ class TestRoutingDecisionPolicy(unittest.TestCase):
         self.assertEqual(pol.score(self.caps, req), -1.0e6)
 
 
-class TestAgentRouter(unittest.TestCase):
+class TestAstraRouter(unittest.TestCase):
     def test_route_falls_back_to_second_provider(self):
         bad = FakeAIProvider(name="bad", fail_first=9999)
         good = FakeAIProvider(name="good")
@@ -215,7 +215,7 @@ class TestAgentRouter(unittest.TestCase):
         pool = CredentialPool("p", ["k1", "k2"])
         pool._creds[0].healthy = False          # simulate auth-failed key
         provider = FakeAIProvider(name="flaky", pool=pool)
-        r = AgentRouter([provider], max_retries=2, backoff_s=0.01)
+        r = AstraRouter([provider], max_retries=2, backoff_s=0.01)
         name, _, reply = r.route([{"role": "user", "content": "hi"}])
         self.assertEqual(reply, "reply-from-flaky")
         self.assertFalse(pool.metadata()[0]["healthy"])   # k1 stays dead
@@ -224,7 +224,7 @@ class TestAgentRouter(unittest.TestCase):
 
     def test_retry_with_backoff_recovers(self):
         flaky = FakeAIProvider(name="flaky", fail_first=1)
-        r = AgentRouter([flaky], max_retries=2, backoff_s=0.01)
+        r = AstraRouter([flaky], max_retries=2, backoff_s=0.01)
         name, _, reply = r.route([{"role": "user", "content": "hi"}])
         self.assertEqual(reply, "reply-from-flaky")
 
@@ -345,7 +345,7 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
     def test_failed_model_moves_to_next_candidate_without_repeating(self):
         from astra.ai.router import RoutingRequest
         always_fails = FakeAIProvider(name="broken", models=["a", "b"], fail_first=9999)
-        r = AgentRouter([always_fails], max_retries=0)
+        r = AstraRouter([always_fails], max_retries=0)
         rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
         self.assertFalse(rr.ok)
         # exactly one attempt per distinct (provider, model) candidate — no
@@ -363,7 +363,7 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         self.assertIn("candidates_considered", rr.route_reason)
 
     # 9/10. registry shape
-    def test_all_ten_real_providers_registered_and_agentrouter_absent(self):
+    def test_all_ten_real_providers_registered_and_astrarouter_absent(self):
         from astra.ai.registry import build_providers
         keys = {
             "GEMINI_API_KEYS": "k", "GROQ_API_KEYS": "k", "MISTRAL_API_KEYS": "k",
@@ -378,7 +378,7 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         self.assertEqual(expected, set(reg.names()) & expected)
         for name in expected:
             self.assertIsNotNone(reg.get(name))
-        self.assertIsNone(reg.get("agentrouter"))
+        self.assertIsNone(reg.get("astrarouter"))
         self.assertIsNone(reg.get("astra_ai_gateway"))
 
     # 11. secrets never exposed in errors
@@ -401,7 +401,7 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         gateway = AstraAIGateway(
             connections=[_FakeGatewayConn(name="astra-gw-gemini",
                                           models=["gw-model-1"])])
-        r = AgentRouter([dead], max_retries=0, gateway=gateway)
+        r = AstraRouter([dead], max_retries=0, gateway=gateway)
         rr = r.route_request(RoutingRequest(messages=[{"role": "user", "content": "hi"}]))
         self.assertTrue(rr.ok)
         self.assertEqual(rr.provider, "astra_ai_gateway")
@@ -596,8 +596,8 @@ class TestAdapterConfiguration(unittest.TestCase):
         reg = build_providers(config=cfg)
         self.assertIsNone(reg.get("groq"))
         self.assertIsNone(reg.get("gemini"))
-        # AgentRouter is the routing brain, never a registry entry itself.
-        self.assertIsNone(reg.get("agentrouter"))
+        # AstraRouter is the routing brain, never a registry entry itself.
+        self.assertIsNone(reg.get("astrarouter"))
 
     def test_configured_provider_present_in_registry(self):
         from astra.ai.registry import build_providers
@@ -615,7 +615,7 @@ class TestAdapterConfiguration(unittest.TestCase):
 
     def test_astra_ai_gateway_distinct_from_internal_router(self):
         """The Astra AI Gateway is a distinct object from Astra's own
-        AgentRouter routing engine, built from its own GW_* config only."""
+        AstraRouter routing engine, built from its own GW_* config only."""
         from astra.ai.gateway import build_astra_ai_gateway
         cfg = self._config(GW_GEMINI_API_KEYS="fake-key-for-test",
                            GW_GEMINI_MODELS="gw-model-1")
@@ -645,12 +645,12 @@ class TestAdapterConfiguration(unittest.TestCase):
 
     def test_astra_ai_gateway_used_only_as_router_fallback_not_a_provider(self):
         """The gateway, when configured, is reachable only via
-        AgentRouter.gateway — never mixed into router.providers."""
+        AstraRouter.gateway — never mixed into router.providers."""
         from astra.ai.gateway import AstraAIGateway
-        from astra.ai.router import AgentRouter
+        from astra.ai.router import AstraRouter
         gw = AstraAIGateway(
             connections=[_FakeGatewayConn(name="astra-gw-gemini", models=["m"])])
-        r = AgentRouter(providers=[], max_retries=0, gateway=gw)
+        r = AstraRouter(providers=[], max_retries=0, gateway=gw)
         self.assertEqual(r.providers, [])
         self.assertIs(r.gateway, gw)
         health = r.gateway_health()
@@ -659,7 +659,7 @@ class TestAdapterConfiguration(unittest.TestCase):
 
 
 class TestProviderModelRoutingFix(unittest.TestCase):
-    """Regression coverage for the AgentRouter dynamic provider+model
+    """Regression coverage for the AstraRouter dynamic provider+model
     routing fix: provider identity, conservative capability metadata,
     max_latency_ms / max_cost_usd actually influencing scoring,
     specific_provider / specific_model preferences, and stats being

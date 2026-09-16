@@ -1,6 +1,6 @@
 """AgentManager — selects the right specialist for a goal.
 
-Selection combines the AgentRouter's task-type classification with per-agent
+Selection combines the AstraRouter's task-type classification with per-agent
 keyword scoring. The winner steers routing hints and may decorate the plan;
 multi-step work still runs through the Orchestrator → Planner → ToolRegistry
 pipeline. AgentManager is not a provider and not a plugin.

@@ -2,7 +2,7 @@
 
 The AgentManager selects a task specialist per goal; the Orchestrator persists
 that selection and a per-step execution_steps trail; AI routing stays in the
-AgentRouter (agents are not providers).
+AstraRouter (agents are not providers).
 """
 from __future__ import annotations
 

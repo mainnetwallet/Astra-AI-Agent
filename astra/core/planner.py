@@ -15,7 +15,7 @@ import re
 
 class Planner:
     def __init__(self, router=None, tools=None, config=None):
-        self.router = router          # AgentRouter (optional)
+        self.router = router          # AstraRouter (optional)
         self.tools = tools or []      # names the executor may call
         self.config = config
 

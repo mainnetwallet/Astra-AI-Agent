@@ -86,10 +86,13 @@ class ToolRegistry:
 
     # -- execution ----------------------------------------------------------
     def execute(self, name: str, args: dict | None = None, ctx=None,
-                allow_confirmation: bool = True) -> dict:
+                allow_confirmation: bool = True, retries: int | None = None,
+                ) -> dict:
         """Validate, gate, run and audit one tool call.
 
-        Pipeline (after the fix):
+        `retries` overrides the tool's own retry count (0 = run exactly once,
+        which the executor uses so *it* owns retry policy; None = tool's).
+        Pipeline:
         1. input schema + strict unknown-arg check
         2. permission policy gate
         3. rate-limit wait (if rate_limit_per_min set)
@@ -126,7 +129,7 @@ class ToolRegistry:
         t0 = time.perf_counter()
         ok, error, result = False, "", None
         last_exc: Exception | None = None
-        max_attempts = 1 + t.retries
+        max_attempts = 1 + (t.retries if retries is None else retries)
         try:
             for attempt in range(1, max_attempts + 1):
                 try:

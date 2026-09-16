@@ -276,30 +276,31 @@ def get_health(args: dict, ctx=None) -> dict:
 # ── registry helper ─────────────────────────────────────────────────────────────
 
 BUILTIN_TOOLS = [
-    # name, fn, category, risk, requires_confirmation
-    ("remember",       remember,       "memory",  Level.READ,            False),
-    ("recall",         recall,         "memory",  Level.READ,            False),
-    ("search_memory",  search_memory,  "memory",  Level.READ,            False),
-    ("create_task",    create_task,    "tasks",   Level.LOW_RISK_WRITE,  False),
-    ("list_tasks",     list_tasks,     "tasks",   Level.READ,            False),
-    ("search_web",     search_web,     "research", Level.READ,           False),
-    ("fetch_url",      fetch_url,      "research", Level.READ,           False),
-    ("wallet_balances", wallet_balances,"wallet",  Level.READ,            False),
-    ("list_files",     list_files,     "files",   Level.READ,            False),
-    ("read_file",      read_file,      "files",   Level.READ,            False),
-    ("write_file",     write_file,     "files",   Level.LOW_RISK_WRITE,  True),
-    ("search_files",   search_files,   "files",   Level.READ,            False),
-    ("get_health",     get_health,     "system",  Level.READ,            False),
+    # name, fn, category, risk, requires_confirmation, idempotent
+    ("remember",       remember,       "memory",  Level.READ,           False, True),
+    ("recall",         recall,         "memory",  Level.READ,           False, True),
+    ("search_memory",  search_memory,  "memory",  Level.READ,           False, True),
+    ("create_task",    create_task,    "tasks",   Level.LOW_RISK_WRITE, False, True),
+    ("list_tasks",     list_tasks,     "tasks",   Level.READ,           False, True),
+    ("search_web",     search_web,     "research", Level.READ,          False, True),
+    ("fetch_url",      fetch_url,      "research", Level.READ,          False, True),
+    ("wallet_balances", wallet_balances,"wallet",  Level.READ,           False, True),
+    ("list_files",     list_files,     "files",   Level.READ,           False, True),
+    ("read_file",      read_file,      "files",   Level.READ,           False, True),
+    ("write_file",     write_file,     "files",   Level.LOW_RISK_WRITE, True,  False),
+    ("search_files",   search_files,   "files",   Level.READ,           False, True),
+    ("get_health",     get_health,     "system",  Level.READ,           False, True),
 ]
 
 
 def register_builtins(reg, plugin_slug: str = "") -> int:
     """Register every built-in tool. Returns count."""
-    for name, fn, cat, risk, conf in BUILTIN_TOOLS:
+    for name, fn, cat, risk, conf, idem in BUILTIN_TOOLS:
         reg.register(Tool(
             name=name, fn=fn,
             description=(fn.__doc__ or name),
             category=cat, risk=risk,
             requires_confirmation=conf,
+            idempotent=idem,
             plugin=plugin_slug or "core"))
     return len(BUILTIN_TOOLS)

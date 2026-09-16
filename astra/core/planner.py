@@ -20,16 +20,19 @@ class Planner:
         self.config = config
 
     # -- entry ---------------------------------------------------------------
-    def plan(self, goal: str, ctx=None) -> list[dict]:
+    def plan(self, goal: str, ctx=None, max_goal_chars: int = 1500,
+             max_steps: int = 6) -> list[dict]:
         g = goal.strip()
         if not g:
             return [self._answer(g, "Kichu bollen na. 'help' likhen.")]
-        steps = self._offline_steps(g, ctx)
+        budget_goal = g[:max_goal_chars] if len(g) > max_goal_chars else g
+        steps = self._offline_steps(budget_goal, ctx)
         if steps is None:
-            steps = self._ai_steps(g) or self._offline_steps(g, ctx, fallback=True) or []
+            steps = (self._ai_steps(budget_goal, max_steps=max_steps)
+                     or self._offline_steps(budget_goal, ctx, fallback=True) or [])
         if not steps:
-            steps = [self._answer(g)]
-        return steps
+            steps = [self._answer(budget_goal)]
+        return steps[:max_steps]
 
     # -- offline intent matching ---------------------------------------------
     def _offline_steps(self, g: str, ctx=None, fallback: bool = False):
@@ -56,7 +59,8 @@ class Planner:
                                "Read file for analysis")]
         if re.search(r"\b(today|what do i need|plan my day|pending|task list|due)\b", low):
             return [self._step("t1", "list_tasks", {"status": "pending"}, "List today's tasks"),
-                    self._step("t2", "list_tasks", {"status": "ready"}, "List ready tasks")]
+                    self._step("t2", "list_tasks", {"status": "ready"}, "List ready tasks",
+                               depends_on=["t1"])]
         if re.search(r"\b(remember|save this|note down)\b", low):
             return [self._step("m1", "remember",
                                {"content": g, "category": "note"},
@@ -72,7 +76,7 @@ class Planner:
         return None  # let AI plan
 
     # -- LLM-driven planning --------------------------------------------------
-    def _ai_steps(self, g: str):
+    def _ai_steps(self, g: str, max_steps: int = 6) -> list | None:
         if not self.router:
             return None
         prompt = (
@@ -80,8 +84,9 @@ class Planner:
             "goal into 1-4 concrete steps. For each step return ONLY JSON "
             "matching: "
             '{{"steps":[{{"id":"s1","tool":"<toolname>","params":{{...}},'
-            '"description":"<human label>"}}]}}. '
-            "Available tools: " + ", ".join(self.tools or ["(none)"]) +
+            '"description":"<human label>","depends_on":["s0"]}}]}}. '
+            '"depends_on" lists step ids that must finish first (omit when '
+            "none). Available tools: " + ", ".join(self.tools or ["(none)"]) +
             '. If no tool fits, use tool name "answer" with params '
             '{{"text":"<user_facing_reply>"}}. Goal: "{}"'.format(g[:1500]))
         try:
@@ -90,22 +95,29 @@ class Planner:
                 return None
             data = json.loads(text.strip().strip("`"))
             steps = []
-            for i, s in enumerate(data.get("steps", [])[:6]):
+            issued: set[str] = set()
+            for s in data.get("steps", [])[:max_steps]:
                 tool = s.get("tool") or "answer"
                 if tool not in (self.tools or []) + ["answer"]:
                     tool = "answer"
-                steps.append(self._step("s%d" % (i + 1), tool,
-                                        s.get("params") or {}, s.get("description", "")))
+                deps = [d for d in (s.get("depends_on") or [])
+                        if isinstance(d, str) and d in issued]
+                steps.append(self._step("s%d" % (len(issued) + 1), tool,
+                                        s.get("params") or {},
+                                        s.get("description", ""),
+                                        depends_on=deps))
+                issued.add(steps[-1]["id"])
             return steps or None
         except Exception:
             return None
 
     # -- step factory ---------------------------------------------------------
     @staticmethod
-    def _step(sid: str, tool: str, params: dict, description: str, verify=None) -> dict:
+    def _step(sid: str, tool: str, params: dict, description: str,
+              verify=None, depends_on: list | None = None) -> dict:
         return {"id": sid, "tool": tool, "params": params,
                 "description": description, "verify": verify or [],
-                "retries": 2}
+                "retries": 2, "depends_on": depends_on or []}
 
     @staticmethod
     def _answer(g: str, text: str = "") -> dict:

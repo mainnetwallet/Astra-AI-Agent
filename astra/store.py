@@ -73,6 +73,18 @@ class Store:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,))
         return r is not None
 
+    def ensure_column(self, table: str, name: str, ddl: str) -> None:
+        """Add a column if missing (idempotent self-heal for old DBs)."""
+        try:
+            cols = {r["name"] for r in self.fetch(f"PRAGMA table_info({table})")}
+        except Exception:
+            return
+        if name not in cols:
+            try:
+                self.exec(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            except Exception:
+                pass
+
     # -- versioning / migrations ---------------------------------------------
     def user_version(self) -> int:
         r = self.fetchone("PRAGMA user_version")

@@ -15,6 +15,7 @@ approves (resume) — the agent never silently performs gated actions.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from datetime import datetime
@@ -172,6 +173,8 @@ class Orchestrator:
             plan = self.planner.plan(goal)
             if self.agents:
                 plan = self.agents.decorate(goal, plan, task_type)
+            # plan in dependency order so `depends_on` steps run first
+            plan = self._topo(plan)
         self._set(row, "PLANNING", started=not row.get("started_at"),
                   pending_step="")
         if selected_agent and (row.get("selected_agent") or "") != selected_agent:
@@ -213,7 +216,12 @@ class Orchestrator:
                                  execution=execution_id, tool=step["tool"],
                                  task=step_task["id"] if step_task else None,
                                  description=step["description"])
-            out = self.executor.execute(step, self._tool_ctx(), run_ctx)
+            # dependency data-flow: substitute {{<step_id>.<field>}} from
+            # earlier results before executing this step.
+            frozen = self._resolve(step, results, {})
+            out = self.executor.execute(frozen, self._tool_ctx(), run_ctx)
+            if out.get("error_code"):
+                step = dict(step, error_code=out["error_code"])
             results[step["id"]] = out
             run_ctx.results[step["id"]] = out
             self._record_step(execution_id, step,
@@ -277,25 +285,45 @@ class Orchestrator:
         return self.run(execution_id)
 
     def recover_stale(self) -> list[str]:
-        """Crash recovery: executions stranded mid-flight by a restart are
-        terminal-failed so they no longer appear 'running'. Returns ids."""
+        """Crash recovery with recovery semantics (never mark-all-failed).
+
+        - WAITING_USER executions are *reconstituted*: their pending step is
+          restored into `_pending` and status stays WAITING_USER so the user
+          can still approve/deny after a restart (recovery, not failure).
+        - IDLE / PLANNING (nothing executed yet) and EXECUTING (a tool may
+          have run and its effect is unknown) are terminal-failed — resuming
+          mid-flight could duplicate a non-idempotent side effect, so we fail
+          them with a recovery note instead of silently re-running.
+        Returns ids touched.
+        """
         stale = self.store.fetch(
-            "SELECT execution_id, status FROM astra_executions "
+            "SELECT execution_id, status, pending_step FROM astra_executions "
             "WHERE status IN ('IDLE', 'PLANNING', 'EXECUTING', 'WAITING_USER')")
         ids = []
         for r in stale:
-            ids.append(r["execution_id"])
+            eid = r["execution_id"]
+            ids.append(eid)
+            if r["status"] == "WAITING_USER" and r.get("pending_step"):
+                try:
+                    self._pending[eid] = json.loads(r["pending_step"])
+                except Exception:
+                    self._pending[eid] = {}
+                continue   # stays WAITING_USER; user decides
+            # a mid-flight tool's effect is unknown → fail, never auto-resume
             self.store.exec(
                 "UPDATE astra_executions SET status = 'FAILED', "
-                "error = 'interrupted by restart (recovery)', "
-                "completed_at = ? WHERE execution_id = ?",
-                (_now(), r["execution_id"]))
+                "error = 'interrupted by restart (recovery); the run may "
+                "have partially executed', completed_at = ? "
+                "WHERE execution_id = ?",
+                (_now(), eid))
             if self.events:
                 self.events.emit("agent.failed", agent="orchestrator",
-                                 execution=r["execution_id"], status="FAILED",
+                                 execution=eid, status="FAILED",
                                  error="interrupted by restart (recovery)")
+        # drop pending markers for anything now terminal, keep the ones
+        # freshly reconstituted (status still WAITING_USER).
         self._pending = {k: v for k, v in self._pending.items()
-                         if k not in ids}
+                         if (self._row(k) or {}).get("status") == "WAITING_USER"}
         return ids
 
     def cancel(self, execution_id: str) -> dict:
@@ -399,6 +427,7 @@ class Orchestrator:
                 return
             status_s = "completed" if status == "ok" else status
             error = result.get("error") or ""
+            error_code = result.get("error_code") or step.get("error_code") or ""
             completed = _now()
             started = (self._tool_times.get(execution_id) or [""])[0]
             out = {}
@@ -408,11 +437,14 @@ class Orchestrator:
                 out["summary"] = result["summary"]
             if result.get("decision") == "ask":
                 out["pending"] = True
+            self.store.ensure_column("execution_steps", "error_code",
+                                     "TEXT DEFAULT ''")
             self.store.insert(
                 "execution_steps", execution_id=execution_id,
                 step_id=step.get("id", ""), tool=step.get("tool", ""),
                 description=step.get("description", ""), status=status_s,
                 result=json.dumps(out, ensure_ascii=False)[:4000], error=error,
+                error_code=error_code,
                 started_at=started, completed_at=completed)
         except Exception:
             pass   # step trail is advisory; never break the run on it
@@ -452,3 +484,65 @@ class Orchestrator:
                            events=self.events, memory=self.memory,
                            plugins=self._plugins, tasks=self.tasks,
                            web3_manager=getattr(self, "web3_manager", None))
+
+    # -- dependency support -----------------------------------------------------
+    @staticmethod
+    def _topo(steps: list) -> list[dict]:
+        """Stable dependency order: any step listed in another's `depends_on`
+        runs first. Unknown/missing deps are ignored, cycles never deadlock
+        (unresolved steps fall to the end)."""
+        by_id = {s["id"]: s for s in steps}
+        ordered, done = [], set()
+        pending = True
+        while pending and len(ordered) < len(steps):
+            pending = False
+            for s in steps:
+                if s["id"] in done:
+                    continue
+                deps = [d for d in (s.get("depends_on") or []) if d in by_id]
+                if all(d in done for d in deps):
+                    ordered.append(s)
+                    done.add(s["id"])
+                    pending = True
+        return ordered
+
+    @staticmethod
+    def _resolve(step: dict, results: dict, params: dict) -> dict:
+        """Fill {{<step_id>.<path>}} / {{path}} placeholders in step params
+        from earlier step results (dependency data-flow)."""
+        out = {}
+        for k, v in (step.get("params") or {}).items():
+            if isinstance(v, str) and "{{" in v:
+                v = re.sub(r"\{\{\s*([\w.]+)\s*\}\}",
+                           lambda m: str(Orchestrator._lookup(
+                               m.group(1), results, params)), v)
+            out[k] = v
+        return dict(step, params=out)
+
+    @staticmethod
+    def _lookup(path: str, results: dict, params: dict):
+        """Resolve a dotted path from an earlier step result. `{{w1.output.url}}`
+        walks results['w1']['output']['url']; a path that skips the executor's
+        'output' wrapper (`{{w1.url}}`) is auto-prefixed so both spellings work."""
+        if path in params:
+            return params[path]
+        parts = path.split(".")
+        if parts[0] not in results:
+            return ""
+        base = results[parts[0]]
+        if not isinstance(base, dict):
+            return ""
+        candidates = (base, base.get("output"))
+        for bundle in candidates:
+            if not isinstance(bundle, dict):
+                continue
+            cur, ok = bundle, True
+            for p in parts[1:]:
+                if isinstance(cur, dict) and p in cur:
+                    cur = cur[p]
+                else:
+                    ok = False
+                    break
+            if ok:
+                return cur if cur is not None else ""
+        return ""

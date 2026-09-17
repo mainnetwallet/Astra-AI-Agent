@@ -46,12 +46,34 @@ a:hover { text-decoration: underline; }
   background: linear-gradient(90deg, var(--accent), var(--accent2));
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
-.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* left-side 3-dot menu (holds the tab list as a dropdown) */
+.nav-menu { position: relative; }
+.menu-btn {
+  background: transparent; border: 1px solid transparent; color: var(--text);
+  width: 34px; height: 34px; border-radius: 8px; cursor: pointer;
+  font-size: 20px; line-height: 1; display: flex; align-items: center;
+  justify-content: center;
+}
+.menu-btn:hover, .menu-btn[aria-expanded="true"] {
+  background: var(--panel2); border-color: var(--line);
+}
+.tabs {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 20;
+  display: flex; flex-direction: column; gap: 2px; min-width: 190px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 6px; box-shadow: 0 12px 28px rgba(0,0,0,.35);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity .12s ease, transform .12s ease;
+}
+.tabs.open { opacity: 1; visibility: visible; transform: translateY(0); }
 .tab {
-  background: transparent; border: 0; color: var(--muted);
-  padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  background: transparent; border: 0; color: var(--muted); text-align: left;
+  padding: 9px 12px; border-radius: 7px; cursor: pointer; font-size: 13px;
+  white-space: nowrap;
 }
 .tab.active, .tab:hover { background: var(--panel2); color: var(--text); }
+.tab.active { color: var(--accent2); font-weight: 600; }
 .status { margin-left: auto; color: var(--good); font-size: 12px; }
 
 /* layout */

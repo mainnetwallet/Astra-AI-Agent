@@ -43,9 +43,31 @@ const loaders = {};
 function showTab(name) {
   $$("#nav .tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
   $$(".tabview").forEach((v) => v.classList.toggle("active", v.id === `tab-${name}`));
+  closeNavMenu();
   const loader = loaders[name];
   if (loader) loader();
 }
+
+/* left-side 3-dot menu that holds the tab list */
+function openNavMenu() {
+  $("#nav").classList.add("open");
+  $("#menu-btn").setAttribute("aria-expanded", "true");
+}
+function closeNavMenu() {
+  $("#nav").classList.remove("open");
+  $("#menu-btn").setAttribute("aria-expanded", "false");
+}
+$("#menu-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const open = $("#nav").classList.contains("open");
+  if (open) closeNavMenu(); else openNavMenu();
+});
+document.addEventListener("click", (e) => {
+  if (!$("#nav-menu").contains(e.target)) closeNavMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeNavMenu();
+});
 
 function deadlineText(d, today = new Date()) {
   if (!d) return "";

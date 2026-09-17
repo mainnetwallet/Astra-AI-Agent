@@ -39,11 +39,13 @@ window.Astra = {
 /* -------------------------------- tabs -------------------------------------- */
 let MANIFEST = null;
 const loaders = {};
+const TAB_LABELS = {};
 
 function showTab(name) {
   $$("#nav .tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
   $$(".tabview").forEach((v) => v.classList.toggle("active", v.id === `tab-${name}`));
   closeNavMenu();
+  try { localStorage.setItem("astra:active-tab", name); } catch (_) { /* ignore */ }
   const loader = loaders[name];
   if (loader) loader();
 }
@@ -127,7 +129,7 @@ loaders.assistant = function () {
   wireChatComposer();
 };
 
-function chatBubble(who, text) {
+function chatBubble(who, text, action) {
   hideChatEmpty();
   const row = document.createElement("div");
   row.className = "msg " + (who === "me" ? "user" : "assistant");
@@ -144,6 +146,17 @@ function chatBubble(who, text) {
   textEl.innerHTML = String(text || "").replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
     .replace(/`(.+?)`/g, "<code>$1</code>").replace(/\n/g, "<br>");
   content.appendChild(textEl);
+  // A background action (e.g. a tool ran, or something needs approval)
+  // never yanks the person out of the chat they're in — it's offered as
+  // a link they can choose to follow instead.
+  if (action && action !== "none") {
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "msg-action-link";
+    link.textContent = "→ " + (TAB_LABELS[action] || action) + " e dekhun";
+    link.addEventListener("click", () => showTab(action));
+    content.appendChild(link);
+  }
   row.appendChild(content);
   $("#chat-log").appendChild(row);
   $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
@@ -200,8 +213,10 @@ $("#chat-form").addEventListener("submit", async (e) => {
   try {
     const r = await post("/api/chat", { message: msg });
     typingRow.remove();
-    chatBubble("ai", r.data.reply);
-    if (r.data.action && r.data.action !== "none") showTab(r.data.action);
+    chatBubble("ai", r.data.reply, r.data.action);
+    // Refresh dashboard data quietly in the background so it's current
+    // whenever the person does switch there — never force-navigate away
+    // from the chat they're in.
     if (r.data.action === "dashboard") loaders.dashboard();
   } catch (err) {
     typingRow.remove();
@@ -596,6 +611,7 @@ async function boot() {
   if (!r.ok) { $("#netstatus").textContent = "✗"; return; }
   MANIFEST = r.data;
   document.title = MANIFEST.name;
+  MANIFEST.tabs.forEach((t) => { TAB_LABELS[t.tab] = t.label; });
 
   // tab bar
   $("#nav").innerHTML = MANIFEST.tabs.map((t) =>
@@ -626,7 +642,14 @@ async function boot() {
   await Promise.all(scriptLoads);
 
   loaders.dashboard();
-  showTab("dashboard");
+  // Reopen whichever tab was active before the last refresh, if it still
+  // exists; otherwise fall back to Dashboard.
+  let initialTab = "dashboard";
+  try {
+    const saved = localStorage.getItem("astra:active-tab");
+    if (saved && $("#tab-" + saved)) initialTab = saved;
+  } catch (_) { /* ignore */ }
+  showTab(initialTab);
   setInterval(() => {
     if ($("#tab-dashboard").classList.contains("active")) loaders.dashboard();
   }, 60_000);

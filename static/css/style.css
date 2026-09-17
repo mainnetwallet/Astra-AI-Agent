@@ -209,6 +209,12 @@ a[class*="hl-"] { pointer-events: none; }
 }
 .msg-text { white-space: pre-wrap; word-wrap: break-word; line-height: 1.55; font-size: 14.5px; }
 .msg-text code { background: #0b0d13; padding: 1px 5px; border-radius: 5px; }
+.msg-action-link {
+  display: inline-flex; align-items: center; margin-top: 8px;
+  background: transparent; border: 1px solid var(--line); color: var(--accent2);
+  border-radius: 999px; padding: 5px 12px; font-size: 12px; cursor: pointer;
+}
+.msg-action-link:hover { border-color: var(--accent); color: var(--accent); }
 .typing { display: flex; gap: 4px; padding: 8px 0 4px; }
 .typing span {
   width: 6px; height: 6px; border-radius: 50%; background: var(--muted);

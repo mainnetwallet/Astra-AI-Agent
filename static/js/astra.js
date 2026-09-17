@@ -258,6 +258,13 @@ loaders.live = async function () {
     setInterval(toolsTick, 30_000);
     executionsTick();
     setInterval(executionsTick, 10_000);
+  }
+};
+
+/* ------------------------------ ACTIVITY LOG (core tab) ---------------------- */
+loaders.logs = async function () {
+  if (!Astra.plugins._logsLoaded) {
+    Astra.plugins._logsLoaded = true;
     initLogsToolbar();
     if (window.EventSource) openSse();
     else setInterval(eventsPoll, 3000);   // fallback for older browsers

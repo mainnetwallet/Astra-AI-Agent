@@ -100,6 +100,9 @@ CORE_TABS = [
     {"tab": "backup", "label": "💾 Backup", "core": True},
 ]
 
+# Appended after every plugin tab (Airdrops, etc.) — see manifest().
+LOGS_TAB = {"tab": "logs", "label": "📡 Activity Log", "core": True}
+
 # Header templates for a hardened server.
 # * X-Frame-Options / nosniff / Referrer-Policy / CSP defend the SPA
 # * X-Request-Id correlates one request across logs + response bodies
@@ -955,6 +958,7 @@ class AstraServer(ThreadingHTTPServer):
                 continue
             tabs.append({"tab": p.slug, "label": f"{p.icon} {p.title}",
                          "plugin": p.slug, "js": f"/static/js/plugins/{p.slug}.js"})
+        tabs.append(dict(LOGS_TAB))
         return {
             "name": AGENT_NAME,
             "version": getattr(__import__("astra"), "__version__", "1.0.0"),

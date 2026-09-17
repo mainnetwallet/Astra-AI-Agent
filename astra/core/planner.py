@@ -4,18 +4,22 @@ No offline/deterministic shortcut: every normal request goes through the
 same path —
 
     User -> Assistant -> Astra AI Gateway -> Provider-ready request
+         -> Task Completion Contract (astra.ai.gateway_task_completion)
          -> Existing Provider System -> Provider AI decides which tool(s)
          (wallet balances, URL fetch, memory, tasks, browser, ...) to use
-         -> tools execute -> final response
+         -> Gateway verifies the result against the Contract (valid JSON,
+         a "steps" plan present) -> bounded correction if not -> tools
+         execute -> final response
 
 There is no keyword/regex matching in this module that decides a tool
 directly from the raw text. `plan()` always hands the goal to `_ai_steps()`,
-which is the Astra AI Gateway -> Provider path (see below); the only
-non-Gateway fallback is a plain "answer" step, used solely when there is
-literally no Provider configured to plan with (`self.router` is None/
-unusable) or the Provider returns nothing usable. That fallback never picks
-a tool — it is a graceful "can't plan this right now" reply, not a
-deterministic shortcut.
+which is the Astra AI Gateway -> Task Completion Contract -> Provider path
+(see below); the only non-Gateway fallback is a plain "answer" step, used
+solely when there is literally no Provider configured to plan with
+(`self.router` is None/unusable) or the Provider returns nothing usable
+after Gateway verification/correction. That fallback never picks a tool —
+it is a graceful "can't plan this right now" reply, not a deterministic
+shortcut.
 
 Removing this deterministic layer does not remove any tool capability:
 wallet balance checks, URL fetching, memory, task management, browser
@@ -34,10 +38,29 @@ the one that answers. If the Gateway is absent/unusable/fails, the raw goal
 is used unchanged — this layer is a pure quality improvement, never a
 dependency, and its absence never causes a request to skip the Provider
 system.
+
+Task Completion Contract (§1-§12 of the Gateway spec, astra.ai.
+gateway_task_completion): every planning call now builds a minimal
+contract — "produce a valid step plan, as JSON, with a 'steps' field" —
+and routes through `AstraRouter.route_request()` with that contract
+attached, instead of the old bare `route()` tuple call. This is a pure
+promotion of a check the planner already did by hand (json.loads + a
+"steps" key) into the Gateway's own verify -> correct -> re-verify loop:
+a malformed/incomplete plan now gets ONE bounded correction round-trip to
+the SAME provider/model before falling back to "no usable plan", instead
+of silently giving up on the first bad JSON. No semantic verifier is
+attached here — a syntactic/shape check is all a "did the planner produce
+a usable plan" question needs, keeping this cheap for every request,
+including trivial ones (§8/§9 of the spec: no expensive verification for
+simple asks). No new evidence exists at planning time (tools haven't run
+yet), so the contract carries none — nothing is invented.
 """
 from __future__ import annotations
 
 import json
+
+from astra.ai.gateway_task_completion import build_task_completion_contract
+from astra.ai.router import RoutingRequest
 
 
 class Planner:
@@ -53,6 +76,12 @@ class Planner:
         self.gateway_intelligence = gateway_intelligence
         self.last_gateway_enriched = False   # did the last _ai_steps use it?
         self.last_gateway_connection = ""    # which GW_* connection served it
+        # §8 final result gate, surfaced for callers/tests: the
+        # completion_status (COMPLETE/INCOMPLETE/FAILED/UNCERTAIN/"") the
+        # Gateway's Task Completion supervisor reported for the most
+        # recent planning call. "" means no contract-backed call has run
+        # yet (e.g. no router configured).
+        self.last_completion_status = ""
 
     # -- entry ---------------------------------------------------------------
     def plan(self, goal: str, ctx=None, max_goal_chars: int = 1500,
@@ -70,7 +99,8 @@ class Planner:
                                context=convo_context)
         if not steps:
             # No Provider configured, or the Provider returned nothing
-            # usable — a plain fallback reply, never a picked tool.
+            # usable even after Gateway verification/correction — a plain
+            # fallback reply, never a picked tool.
             steps = [self._answer(budget_goal)]
         return steps[:max_steps]
 
@@ -90,6 +120,7 @@ class Planner:
         enriched_goal = g[:1500]
         self.last_gateway_enriched = False
         self.last_gateway_connection = ""
+        self.last_completion_status = ""
         if self.gateway_intelligence is not None:
             result = self.gateway_intelligence.process(
                 g[:1500], context=context[:1500] if context else "")
@@ -107,9 +138,43 @@ class Planner:
             '. If no tool fits, use tool name "answer" with params '
             '{{"text":"<user_facing_reply>"}}. Goal: "{}"'.format(enriched_goal))
         try:
-            _, _, text = self.router.route([{"role": "user", "content": prompt}])
-            if not text:
-                return None
+            # §1-§12: a minimal Task Completion Contract — "this call must
+            # produce a usable step plan, as JSON, with a 'steps' field" —
+            # attached to the RoutingRequest so the Gateway's own
+            # verify/correct/re-verify loop runs on the SAME provider/model
+            # (astra.ai.gateway_task_completion), instead of the planner
+            # silently giving up on the first malformed reply. No evidence
+            # or semantic verifier is attached: nothing exists yet at
+            # planning time to check evidence against, and a JSON-shape
+            # check is all this call needs (§8/§9: stay cheap).
+            #
+            # `route_request` is the real AstraRouter's full-pipeline
+            # entry point (routing/failover/checkpoint/recovery/
+            # supervision all run exactly as before — this only adds the
+            # contract on top, per _maybe_supervise_result in
+            # astra/ai/router.py). Callers that pass a router duck-typed
+            # object without `route_request` (only the legacy `.route()`
+            # tuple interface) keep working exactly as before this change
+            # — the contract is additive, never a requirement to plan at
+            # all.
+            if hasattr(self.router, "route_request"):
+                contract = build_task_completion_contract(
+                    user_request=enriched_goal,
+                    goal="Produce a valid ordered step plan (JSON) for the "
+                         "user's goal, or an \"answer\" step if no tool fits.",
+                    require_json=True, required_fields=("steps",))
+                req = RoutingRequest(
+                    messages=[{"role": "user", "content": prompt}],
+                    task_contract=contract)
+                rr = self.router.route_request(req)
+                self.last_completion_status = rr.completion_status
+                if not rr.ok or not rr.text:
+                    return None
+                text = rr.text
+            else:
+                _, _, text = self.router.route([{"role": "user", "content": prompt}])
+                if not text:
+                    return None
             data = json.loads(text.strip().strip("`"))
             steps = []
             issued: set[str] = set()
@@ -148,3 +213,4 @@ def _fallback_text() -> str:
     return ("Ei command ta ami bodhokorar chesta korlam, kintu kono AI Provider "
             "configure kora nai. 'help' likhe dekhte paren, ba ekta Provider "
             "(jemon GEMINI_API_KEYS / GROQ_API_KEYS) config korun.")
+

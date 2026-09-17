@@ -588,6 +588,12 @@ class AstraAIGateway:
         # WHO to execute against). See gateway_supervision.py.
         from astra.ai.gateway_supervision import GatewayResultSupervision
         self.result_supervision = GatewayResultSupervision(events=events)
+        # §1-§8: Task Completion Contract + evidence/semantic verification
+        # + correction, distinct from result_supervision above (which only
+        # ever checks deterministic response *shape* — non-empty/JSON/
+        # required fields). See gateway_task_completion.py.
+        from astra.ai.gateway_task_completion import GatewayTaskCompletionSupervisor
+        self.task_completion = GatewayTaskCompletionSupervisor(events=events)
 
     def attach_events(self, events) -> None:
         self.events = events
@@ -936,6 +942,21 @@ class AstraAIGateway:
         return self.result_supervision.supervise(
             port, target, messages, result, max_tokens=max_tokens,
             require_json=require_json, required_fields=required_fields)
+
+    def supervise_task(self, port, target, messages, result, contract, *,
+                       evidence: dict | None = None, semantic_verifier=None,
+                       max_tokens: int = 500):
+        """Validate `result` (a ProviderExecutionResult) against a
+        `TaskCompletionContract` (§1-§8): deterministic shape, then
+        evidence, then an optional semantic verifier. If not COMPLETE,
+        sends a precise correction back through `port` to `target` and
+        re-verifies (bounded — astra.core.correction.MAX_CORRECTION_ATTEMPTS).
+        Returns `(ProviderExecutionResult, TaskVerificationOutcome, attempts)`.
+        Never claims COMPLETE unless the final verification actually said so.
+        """
+        return self.task_completion.supervise(
+            port, target, messages, result, contract, evidence=evidence,
+            semantic_verifier=semantic_verifier, max_tokens=max_tokens)
 
 
 def build_astra_ai_gateway(config=None, store=None,

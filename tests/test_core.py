@@ -307,18 +307,22 @@ class _FakeGatewayIntelligenceCall:
 
 
 class _FakeRouterCapturesPrompt:
-    """Stand-in for AstraRouter.route(): records the prompt text it
-    received, so tests can inspect exactly what the (fake) Provider system
-    was handed — without touching any real Provider adapter."""
+    """Stand-in for AstraRouter.route_request() — the sole AI-backed
+    planning entry point (zero-bypass: no `.route()` legacy tuple path).
+    Records the prompt text it received, so tests can inspect exactly what
+    the (fake) Provider system was handed — without touching any real
+    Provider adapter."""
 
     def __init__(self, reply_json):
         self.reply_json = reply_json
         self.received_prompts = []
 
-    def route(self, messages):
-        prompt = messages[0]["content"]
+    def route_request(self, req):
+        from astra.ai.router import RoutingResult
+        prompt = req.messages[0]["content"]
         self.received_prompts.append(prompt)
-        return ("fake-provider", "fake-model", self.reply_json)
+        return RoutingResult(provider="fake-provider", model="fake-model",
+                             text=self.reply_json, ok=True)
 
 
 class TestPlannerGatewayIntelligence(unittest.TestCase):

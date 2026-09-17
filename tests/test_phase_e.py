@@ -255,7 +255,8 @@ class _FakeDependencyRouter:
     Planner any more — dependency-bearing plans now only ever come from the
     Provider AI's JSON response, which is what this fake stands in for."""
 
-    def route(self, messages):
+    def route_request(self, req):
+        from astra.ai.router import RoutingResult
         plan = {
             "steps": [
                 {"id": "s1", "tool": "list_tasks", "params": {"status": "pending"},
@@ -264,7 +265,8 @@ class _FakeDependencyRouter:
                  "description": "List ready tasks", "depends_on": ["s1"]},
             ]
         }
-        return ("fake-provider", "fake-model", json.dumps(plan))
+        return RoutingResult(provider="fake-provider", model="fake-model",
+                             text=json.dumps(plan), ok=True)
 
 
 class TestPlannerDependencies(unittest.TestCase):

@@ -43,9 +43,13 @@ Task Completion Contract (§1-§12 of the Gateway spec, astra.ai.
 gateway_task_completion): every planning call now builds a minimal
 contract — "produce a valid step plan, as JSON, with a 'steps' field" —
 and routes through `AstraRouter.route_request()` with that contract
-attached, instead of the old bare `route()` tuple call. This is a pure
-promotion of a check the planner already did by hand (json.loads + a
-"steps" key) into the Gateway's own verify -> correct -> re-verify loop:
+attached. `route_request()` is the ONLY AI-backed planning path — there is
+no fallback to the legacy bare `route()` tuple call. A router object that
+does not implement `route_request()` cannot plan at all (`_ai_steps`
+returns None -> `plan()` falls back to a plain "answer" step, never
+another AI execution path). This is a pure promotion of a check the
+planner already did by hand (json.loads + a "steps" key) into the
+Gateway's own verify -> correct -> re-verify loop:
 a malformed/incomplete plan now gets ONE bounded correction round-trip to
 the SAME provider/model before falling back to "no usable plan", instead
 of silently giving up on the first bad JSON. No semantic verifier is
@@ -152,29 +156,35 @@ class Planner:
             # entry point (routing/failover/checkpoint/recovery/
             # supervision all run exactly as before — this only adds the
             # contract on top, per _maybe_supervise_result in
-            # astra/ai/router.py). Callers that pass a router duck-typed
-            # object without `route_request` (only the legacy `.route()`
-            # tuple interface) keep working exactly as before this change
-            # — the contract is additive, never a requirement to plan at
-            # all.
-            if hasattr(self.router, "route_request"):
-                contract = build_task_completion_contract(
-                    user_request=enriched_goal,
-                    goal="Produce a valid ordered step plan (JSON) for the "
-                         "user's goal, or an \"answer\" step if no tool fits.",
-                    require_json=True, required_fields=("steps",))
-                req = RoutingRequest(
-                    messages=[{"role": "user", "content": prompt}],
-                    task_contract=contract)
-                rr = self.router.route_request(req)
-                self.last_completion_status = rr.completion_status
-                if not rr.ok or not rr.text:
-                    return None
-                text = rr.text
-            else:
-                _, _, text = self.router.route([{"role": "user", "content": prompt}])
-                if not text:
-                    return None
+            # astra/ai/router.py). Zero-bypass: this is the ONLY AI
+            # execution path for planning. A router duck-typed object that
+            # only exposes the legacy `.route()` tuple interface is no
+            # longer an alternate path to fall through to — it fails
+            # planning clearly instead of silently taking another AI
+            # route.
+            if not hasattr(self.router, "route_request"):
+                # Zero-bypass: `route_request()` (Gateway Request
+                # Intelligence -> AstraRouter.route_request() -> Astra AI
+                # Gateway -> Existing Provider -> AI Model) is the only
+                # supported AI-backed planning path. A router object that
+                # doesn't implement it is not a silently-degraded provider
+                # to fall through to via the legacy `.route()` tuple
+                # interface — it's a misconfiguration, and planning fails
+                # clearly (no plan) rather than taking another AI path.
+                return None
+            contract = build_task_completion_contract(
+                user_request=enriched_goal,
+                goal="Produce a valid ordered step plan (JSON) for the "
+                     "user's goal, or an \"answer\" step if no tool fits.",
+                require_json=True, required_fields=("steps",))
+            req = RoutingRequest(
+                messages=[{"role": "user", "content": prompt}],
+                task_contract=contract)
+            rr = self.router.route_request(req)
+            self.last_completion_status = rr.completion_status
+            if not rr.ok or not rr.text:
+                return None
+            text = rr.text
             data = json.loads(text.strip().strip("`"))
             return self.parse_plan_json(data, max_steps=max_steps) or None
         except Exception:

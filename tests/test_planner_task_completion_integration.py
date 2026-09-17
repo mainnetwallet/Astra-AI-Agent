@@ -151,11 +151,13 @@ class TestPlannerSuppliesTaskContract(unittest.TestCase):
         self.assertEqual(steps[0]["tool"], "answer")
         self.assertTrue(steps[0].get("is_answer"))
 
-    def test_router_without_route_request_still_works(self):
-        """A duck-typed router that only implements the legacy `.route()`
-        tuple interface (no Task Completion Contract support) keeps
-        working exactly as before — the contract is additive, never a
-        hard requirement to plan at all."""
+    def test_router_without_route_request_fails_clearly_not_via_legacy_route(self):
+        """Zero-bypass: a duck-typed router that only implements the
+        legacy `.route()` tuple interface (no `route_request`, so no Task
+        Completion Contract support) is NOT a silent alternate AI path
+        any more. Planning must fail clearly (fall back to the plain
+        "no Provider configured" answer, never a picked tool) instead of
+        quietly routing through `.route()`."""
         class _LegacyRouter:
             def __init__(self):
                 self.calls = 0
@@ -169,8 +171,9 @@ class TestPlannerSuppliesTaskContract(unittest.TestCase):
         legacy = _LegacyRouter()
         planner = Planner(router=legacy, tools=["answer"])
         steps = planner.plan("say hi")
-        self.assertEqual(legacy.calls, 1)
+        self.assertEqual(legacy.calls, 0)   # legacy .route() never invoked
         self.assertEqual(steps[0]["tool"], "answer")
+        self.assertTrue(steps[0].get("is_answer"))
         self.assertEqual(planner.last_completion_status, "")   # no contract ran
 
 

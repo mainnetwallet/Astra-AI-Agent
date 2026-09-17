@@ -554,7 +554,9 @@ class Orchestrator:
         from astra.ai.gateway_task_completion import (
             COMPLETE, FAILED, build_task_completion_contract,
             build_task_completion_messages, verify_task_completion)
+        from astra.ai.router import RoutingRequest
         from astra.core.correction import MAX_CORRECTION_ATTEMPTS
+        from astra.core.exceptions import ProviderError
 
         if not any(s.get("tool") != "answer" for s in plan):
             return results, "", ""   # pure conversation: nothing to verify
@@ -603,7 +605,7 @@ class Orchestrator:
         attempts = 0
         while outcome.correctable and attempts < MAX_CORRECTION_ATTEMPTS:
             if not (self.router and self.planner and
-                    hasattr(self.router, "route")):
+                    hasattr(self.router, "route_request")):
                 break   # no Existing-Provider path available to correct through
             attempts += 1
             self._emit_gv("gateway.final_verification_correction_requested",
@@ -615,11 +617,26 @@ class Orchestrator:
                 # §6/§10 in spirit: goes back through the Existing Provider
                 # System (the router's own selection/failover), asking it
                 # to continue from exactly what's missing — never a blind
-                # "try again". A real provider/network failure here is a
-                # FAILED verification outcome, distinct from INCOMPLETE
+                # "try again". Zero-bypass: uses `route_request()` (never
+                # the legacy `.route()` tuple call). No `task_contract` is
+                # attached here — this call is already inside the outer
+                # Gateway final-task-completion correction loop (this
+                # whole method only runs with a Gateway attached, see the
+                # UNVERIFIED check above, and the raw JSON reply is
+                # re-verified by `verify_task_completion` right below);
+                # attaching a second, inner contract here would stack a
+                # second Gateway supervision/correction loop underneath
+                # this one for every outer attempt, needlessly multiplying
+                # provider calls per bounded attempt instead of keeping
+                # correction bounded at exactly MAX_CORRECTION_ATTEMPTS
+                # provider calls. A real provider/network failure here is
+                # a FAILED verification outcome, distinct from INCOMPLETE
                 # (§7: recovery/failover concerns stay separate from
                 # content correction), and stops the loop immediately.
-                _, _, text = self.router.route(messages)
+                rr = self.router.route_request(RoutingRequest(messages=messages))
+                if not rr.ok:
+                    raise ProviderError(rr.error or "correction routing failed")
+                text = rr.text
             except Exception as e:
                 outcome_status, outcome_reason = FAILED, str(e)
                 self._emit_gv("gateway.final_verification_correction_failed",

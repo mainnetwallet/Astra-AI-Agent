@@ -323,11 +323,19 @@ class AstraRouter:
         out = []
         for adapter in self.providers:
             name = getattr(adapter, "name", "")
-            if name in self._down:
-                continue
             if not self._provider_usable(adapter):
                 self._down.add(name)
                 continue
+            if name in self._down:
+                # Self-heal: it was down (cooldown/rate-limit/transient
+                # failure) but is usable again right now — clear the flag
+                # instead of leaving it excluded forever. Previously,
+                # anything in `_down` was skipped before this check ever
+                # ran, so a provider could never recover on its own once
+                # marked down.
+                self._down.discard(name)
+                self._emit("provider.health_changed", provider=name,
+                           healthy=True, reason="recovered")
             adapter.health_info = self._provider_info(adapter)
             for model in self._adapter_models(adapter) or []:
                 out.append((adapter, model))

@@ -240,6 +240,10 @@ $("#chat-form").addEventListener("submit", async (e) => {
     }
     typingRow.remove();
     hideUploadIndicator();
+    if (!r.ok || !r.data) {
+      chatBubble("ai", "Server e problem — `" + (r.error || "unknown error") + "`");
+      return;
+    }
     chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts);
     if (r.data.action === "dashboard") loaders.dashboard();
   } catch (err) {

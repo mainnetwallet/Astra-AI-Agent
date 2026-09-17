@@ -167,6 +167,78 @@ def _json_err(handler: "AstraHandler", message: str, code: int = 400,
                     "request_id": getattr(handler, "_rid", "")}, code)
 
 
+def _parse_multipart_body(raw: bytes, content_type: str) -> tuple[dict, list]:
+    """Minimal multipart/form-data parser (stdlib `cgi` was removed in
+    Python 3.13, so this replaces `cgi.FieldStorage` for our purposes).
+
+    Returns (fields_dict, files_list) where each file is
+    {filename, data (bytes), content_type}."""
+    fields: dict = {}
+    files: list = []
+    if not raw or "boundary=" not in content_type:
+        return fields, files
+
+    boundary = content_type.split("boundary=", 1)[1].strip()
+    if boundary.startswith('"') and boundary.endswith('"'):
+        boundary = boundary[1:-1]
+    boundary = boundary.encode("utf-8")
+    delimiter = b"--" + boundary
+    # Split on the delimiter; drop preamble/epilogue and the closing "--".
+    parts = raw.split(delimiter)
+    for part in parts:
+        if not part or part in (b"--", b"--\r\n"):
+            continue
+        # Each part looks like: \r\n<headers>\r\n\r\n<body>\r\n
+        part = part.strip(b"\r\n")
+        if not part:
+            continue
+        if b"\r\n\r\n" in part:
+            header_block, body = part.split(b"\r\n\r\n", 1)
+        elif b"\n\n" in part:
+            header_block, body = part.split(b"\n\n", 1)
+        else:
+            continue
+        # Trailing CRLF before the next boundary belongs to the delimiter.
+        if body.endswith(b"\r\n"):
+            body = body[:-2]
+        elif body.endswith(b"\n"):
+            body = body[:-1]
+
+        headers = {}
+        for line in header_block.split(b"\r\n"):
+            if b":" not in line:
+                continue
+            name, _, value = line.partition(b":")
+            headers[name.strip().lower().decode("latin-1")] = \
+                value.strip().decode("latin-1")
+
+        disposition = headers.get("content-disposition", "")
+        if "form-data" not in disposition:
+            continue
+        field_name = None
+        filename = None
+        for piece in disposition.split(";"):
+            piece = piece.strip()
+            if piece.startswith("name="):
+                field_name = piece[len("name="):].strip('"')
+            elif piece.startswith("filename="):
+                filename = piece[len("filename="):].strip('"')
+        if field_name is None:
+            continue
+
+        if filename:
+            files.append({
+                "filename": filename,
+                "data": body,
+                "content_type": headers.get("content-type",
+                                             "application/octet-stream"),
+            })
+        else:
+            fields[field_name] = body.decode("utf-8", errors="replace")
+
+    return fields, files
+
+
 def _route_matcher(route_parts, path_parts):
     """Match a route pattern like ("api","wallets","<id>") against real path
     segments. Returns a params dict (id -> int) or None."""
@@ -227,9 +299,9 @@ class AstraHandler(BaseHTTPRequestHandler):
 
     def _read_multipart(self) -> tuple[dict, list]:
         """Parse multipart/form-data. Returns (fields_dict, files_list).
-        Each file in files_list is {filename, data (bytes), content_type}."""
-        import cgi
-        import io
+        Each file in files_list is {filename, data (bytes), content_type}.
+
+        Implemented by hand (no `cgi` module — removed in Python 3.13)."""
         max_bytes = self.server.max_body_bytes
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -240,40 +312,11 @@ class AstraHandler(BaseHTTPRequestHandler):
             raise ApiError("payload_too_large",
                            f"request body exceeds {max_bytes} bytes limit", 413)
         ct = self.headers.get("Content-Type", "")
-        environ = {
-            "REQUEST_METHOD": "POST",
-            "CONTENT_TYPE": ct,
-            "CONTENT_LENGTH": str(length),
-        }
         raw = self.rfile.read(length) if length > 0 else b""
-        fp = io.BytesIO(raw)
         try:
-            form = cgi.FieldStorage(fp=fp, headers=self.headers, environ=environ)
+            return _parse_multipart_body(raw, ct)
         except Exception:
             return {}, []
-        fields = {}
-        files = []
-        for key in form.keys():
-            item = form[key]
-            if isinstance(item, list):
-                for sub in item:
-                    if sub.filename:
-                        files.append({
-                            "filename": sub.filename,
-                            "data": sub.file.read(),
-                            "content_type": sub.type or "application/octet-stream",
-                        })
-                    else:
-                        fields[key] = sub.value
-            elif item.filename:
-                files.append({
-                    "filename": item.filename,
-                    "data": item.file.read(),
-                    "content_type": item.type or "application/octet-stream",
-                })
-            else:
-                fields[key] = item.value
-        return fields, files
 
     # -- security helpers ------------------------------------------------
     def _drain(self, length: int) -> None:

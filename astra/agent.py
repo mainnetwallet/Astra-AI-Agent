@@ -134,22 +134,26 @@ class Agent:
                 extract_artifacts, detect_output_type)
             from astra.core.artifacts import make_artifact_dir
             import tempfile
-            requested = detect_output_type(message)
-            if not requested:
-                return []
-            artifact_dir = make_artifact_dir(
-                tempfile.gettempdir() + "/astra")
             artifacts = []
             for sid, out in results.items():
-                text = ""
                 output = out.get("output") or {}
-                if isinstance(output, dict):
-                    text = output.get("text", "")
-                elif isinstance(output, str):
-                    text = output
-                if text:
-                    found = extract_artifacts(text, artifact_dir, requested)
-                    artifacts.extend(found)
+                if isinstance(output, dict) and output.get("artifact"):
+                    artifacts.append(output["artifact"])
+            requested = detect_output_type(message)
+            if requested:
+                artifact_dir = make_artifact_dir(
+                    tempfile.gettempdir() + "/astra")
+                for sid, out in results.items():
+                    text = ""
+                    output = out.get("output") or {}
+                    if isinstance(output, dict):
+                        text = output.get("text", "")
+                    elif isinstance(output, str):
+                        text = output
+                    if text:
+                        found = extract_artifacts(text, artifact_dir,
+                                                   requested)
+                        artifacts.extend(found)
             return artifacts
         except Exception:
             return []

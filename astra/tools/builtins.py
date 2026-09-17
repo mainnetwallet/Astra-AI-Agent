@@ -254,6 +254,48 @@ def search_files(args: dict, ctx=None) -> dict:
     return {"results": results, "count": len(results)}
 
 
+# ── document generation ───────────────────────────────────────────────────────
+
+def generate_document(args: dict, ctx=None) -> dict:
+    """Generate a real document file (PDF, DOCX, XLSX, PPTX) from content."""
+    from astra.tools.document_gen import (
+        generate_pdf, generate_docx, generate_xlsx, generate_pptx)
+    from astra.core.artifacts import store_artifact, validate_artifact, make_artifact_dir
+    import tempfile
+
+    content = args.get("content", "").strip()
+    if not content:
+        raise ValidationError("content required")
+    format_type = args.get("format", "pdf").lower()
+    title = args.get("title", "Document")
+
+    generators = {
+        "pdf": (generate_pdf, "document", ".pdf"),
+        "docx": (generate_docx, "document", ".docx"),
+        "xlsx": (generate_xlsx, "spreadsheet", ".xlsx"),
+        "pptx": (generate_pptx, "presentation", ".pptx"),
+    }
+
+    if format_type not in generators:
+        return {"ok": False, "error": f"Unsupported format: {format_type}. "
+                "Supported: pdf, docx, xlsx, pptx"}
+
+    gen_fn, art_type, ext = generators[format_type]
+    data = gen_fn(content, title)
+
+    artifact_dir = make_artifact_dir(tempfile.gettempdir() + "/astra")
+    filename = f"{title.replace(' ', '_')}{ext}"
+    art = store_artifact(data, filename, art_type, artifact_dir)
+    ok, err = validate_artifact(art)
+
+    if not ok:
+        return {"ok": False,
+                "error": f"Generated {format_type} failed validation: {err}"}
+
+    return {"ok": True, "artifact": art.to_dict(), "format": format_type,
+            "size": art.size, "filename": filename}
+
+
 # ── diagnostics ─────────────────────────────────────────────────────────────────
 
 def get_health(args: dict, ctx=None) -> dict:
@@ -290,6 +332,7 @@ BUILTIN_TOOLS = [
     ("write_file",     write_file,     "files",   Level.LOW_RISK_WRITE, True,  False),
     ("search_files",   search_files,   "files",   Level.READ,           False, True),
     ("get_health",     get_health,     "system",  Level.READ,           False, True),
+    ("generate_document", generate_document, "files", Level.LOW_RISK_WRITE, False, True),
 ]
 
 

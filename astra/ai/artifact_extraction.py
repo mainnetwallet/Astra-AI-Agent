@@ -31,6 +31,10 @@ def extract_artifacts(response_text: str, artifact_dir: str,
     if img:
         artifacts.append(img)
 
+    audio = _extract_base64_audio(response_text, artifact_dir)
+    if audio:
+        artifacts.append(audio)
+
     code_blocks = _extract_code_artifacts(response_text, artifact_dir,
                                            requested_output)
     artifacts.extend(code_blocks)
@@ -56,6 +60,30 @@ def _extract_base64_image(text: str, artifact_dir: str) -> dict | None:
            "image/gif": ".gif", "image/webp": ".webp"}.get(mime, ".png")
     filename = f"generated{ext}"
     art = store_artifact(raw, filename, "image", artifact_dir)
+    ok, _ = validate_artifact(art)
+    if not ok:
+        return None
+    return art.to_dict()
+
+
+def _extract_base64_audio(text: str, artifact_dir: str) -> dict | None:
+    """Detect and extract base64-encoded audio from the response."""
+    pattern = r'data:(audio/(?:mpeg|mp3|wav|ogg|flac));base64,([A-Za-z0-9+/=\s]+)'
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    mime = match.group(1)
+    b64data = match.group(2).replace("\n", "").replace("\r", "").replace(" ", "")
+    try:
+        raw = base64.b64decode(b64data)
+    except Exception:
+        return None
+    if len(raw) < 100:
+        return None
+    ext = {"audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav",
+           "audio/ogg": ".ogg", "audio/flac": ".flac"}.get(mime, ".mp3")
+    filename = f"generated{ext}"
+    art = store_artifact(raw, filename, "audio", artifact_dir)
     ok, _ = validate_artifact(art)
     if not ok:
         return None

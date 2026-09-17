@@ -283,6 +283,46 @@ class BedrockAdapter(AIProvider):
             self.events.emit("ai.completed", agent="provider", provider=self.name,
                              length=len(full))
 
+    def generate_image(self, prompt: str, model: str | None = None,
+                       size: str = "1024x1024", n: int = 1) -> str:
+        """Generate an image via Bedrock InvokeModel (Titan/Stability)."""
+        model = model or (self.models[0] if self.models else "")
+        if not model:
+            raise ProviderError("bedrock: no model configured for image generation")
+        cred = self.pool.pick()
+        if cred is None:
+            raise ProviderError("bedrock: no healthy credential configured")
+        try:
+            w, h = (int(x) for x in size.split("x"))
+        except (ValueError, AttributeError):
+            w, h = 1024, 1024
+        low = model.lower()
+        if "titan" in low:
+            body = {
+                "taskType": "TEXT_IMAGE",
+                "textToImageParams": {"text": prompt},
+                "imageGenerationConfig": {
+                    "numberOfImages": min(n, 1),
+                    "width": w, "height": h,
+                },
+            }
+        else:
+            body = {
+                "text_prompts": [{"text": prompt}],
+                "cfg_scale": 7, "steps": 30,
+                "width": w, "height": h,
+            }
+        url = f"{self.base_url}/model/{model}/invoke"
+        data = self._post(url, body, cred)
+        b64 = ""
+        if "images" in data and data["images"]:
+            b64 = data["images"][0]
+        elif "artifacts" in data and data["artifacts"]:
+            b64 = data["artifacts"][0].get("base64", "")
+        if not b64:
+            raise ProviderError("bedrock: image generation returned no image data")
+        return f"data:image/png;base64,{b64}"
+
     def health_check(self) -> bool:
         return self.pool.healthy_count > 0
 

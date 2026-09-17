@@ -218,6 +218,13 @@ class Planner:
             rr = self.router.route_request(req)
             self.last_completion_status = rr.completion_status
             if not rr.ok or not rr.text:
+                if required_output_mods and "no eligible" in (rr.error or ""):
+                    cap_names = ", ".join(required_output_mods)
+                    return [self._answer(g,
+                        f"Ei request er jonno {cap_names} generation dorkar, "
+                        f"kintu kono configured Provider/Model ei capability "
+                        f"support kore na. Apni ekta compatible model configure "
+                        f"korun (jemon: dall-e-3 for image, tts-1 for audio).")]
                 return None
             text = rr.text
             # Lenient parse: the Gateway's own JSON check already passed

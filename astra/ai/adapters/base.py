@@ -183,6 +183,63 @@ class CompatibleAdapter(AIProvider):
             self.events.emit("ai.completed", agent="provider", provider=self.name,
                              length=len(full))
 
+    def generate_image(self, prompt: str, model: str | None = None,
+                       size: str = "1024x1024", n: int = 1) -> str:
+        """Generate an image via /v1/images/generations (OpenAI-compatible)."""
+        import base64 as b64mod
+        cred = self._pick()
+        if cred is None:
+            raise ProviderError(f"{self.name}: no healthy credential configured")
+        body = {
+            "model": model or (self.models[0] if self.models else "dall-e-3"),
+            "prompt": prompt,
+            "n": n,
+            "size": size,
+            "response_format": "b64_json",
+        }
+        t0 = time.perf_counter()
+        data = self._post(f"{self.base_url}/images/generations", body, cred)
+        self._done(cred)
+        self._last_latency_ms = int((time.perf_counter() - t0) * 1000)
+        try:
+            b64_json = data["data"][0]["b64_json"]
+        except (KeyError, IndexError, TypeError):
+            raise ProviderError(f"{self.name}: image generation returned no data")
+        return f"data:image/png;base64,{b64_json}"
+
+    def text_to_speech(self, text: str, model: str | None = None,
+                       voice: str = "alloy") -> str:
+        """Generate audio via /v1/audio/speech (OpenAI-compatible). Returns base64 data URI."""
+        import base64 as b64mod
+        cred = self._pick()
+        if cred is None:
+            raise ProviderError(f"{self.name}: no healthy credential configured")
+        body = {
+            "model": model or "tts-1",
+            "input": text,
+            "voice": voice,
+        }
+        payload = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/audio/speech",
+            data=payload, headers=self._headers(cred))
+        t0 = time.perf_counter()
+        try:
+            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+                audio_bytes = resp.read()
+        except urllib.error.HTTPError as e:
+            self._classify_http(e, cred)
+            raise
+        except urllib.error.URLError as e:
+            self._done(cred, True, reason=f"network: {getattr(e, 'reason', e)}")
+            raise ProviderError(f"{self.name} network error: {getattr(e, 'reason', e)}") from e
+        self._done(cred)
+        self._last_latency_ms = int((time.perf_counter() - t0) * 1000)
+        if not audio_bytes or len(audio_bytes) < 100:
+            raise ProviderError(f"{self.name}: TTS returned empty audio")
+        b64 = b64mod.b64encode(audio_bytes).decode("ascii")
+        return f"data:audio/mpeg;base64,{b64}"
+
     def count_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
 

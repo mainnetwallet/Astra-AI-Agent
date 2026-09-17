@@ -31,6 +31,12 @@ class AIProvider:
         """Yield text chunks. Default: one yield with the full reply."""
         yield self.chat(messages, model)
 
+    def generate_image(self, prompt: str, model: str | None = None, **kw) -> str:
+        raise ProviderError(f"{self.name} does not support image generation")
+
+    def text_to_speech(self, text: str, model: str | None = None, **kw) -> str:
+        raise ProviderError(f"{self.name} does not support text-to-speech")
+
     def health_check(self) -> bool:
         return True
 

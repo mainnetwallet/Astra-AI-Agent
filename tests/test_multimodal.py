@@ -698,5 +698,291 @@ class TestOutputCapabilityDetection(unittest.TestCase):
         self.assertNotIn(OUTPUT_AUDIO, caps)
 
 
+class TestRealImageGeneration(unittest.TestCase):
+    """Image generation adapter has the real API method."""
+
+    def test_compatible_adapter_has_generate_image(self):
+        from astra.ai.adapters.base import CompatibleAdapter
+        adapter = CompatibleAdapter.__new__(CompatibleAdapter)
+        self.assertTrue(hasattr(adapter, "generate_image"))
+
+    def test_bedrock_adapter_has_generate_image(self):
+        from astra.ai.adapters.bedrock import BedrockAdapter
+        adapter = BedrockAdapter.__new__(BedrockAdapter)
+        self.assertTrue(hasattr(adapter, "generate_image"))
+
+    def test_base_provider_raises_not_supported(self):
+        from astra.ai.provider import AIProvider
+        p = AIProvider()
+        with self.assertRaises(Exception) as ctx:
+            p.generate_image("test prompt")
+        self.assertIn("not support", str(ctx.exception).lower())
+
+    def test_dall_e_model_has_image_output(self):
+        meta = metadata_for("dall-e-3", "openai")
+        self.assertIn("image", meta.get("output_modalities", []))
+
+    def test_stable_diffusion_model_has_image_output(self):
+        meta = metadata_for("stable-diffusion-xl-v1", "bedrock")
+        self.assertIn("image", meta.get("output_modalities", []))
+
+    def test_tts_model_has_audio_output(self):
+        meta = metadata_for("tts-1", "openai")
+        self.assertIn("audio", meta.get("output_modalities", []))
+
+    def test_text_model_no_image_output(self):
+        meta = metadata_for("llama-3.1-70b", "groq")
+        self.assertNotIn("image", meta.get("output_modalities", ["text"]))
+
+
+class TestRealAudioIO(unittest.TestCase):
+    """Audio input processing and TTS output."""
+
+    def test_compatible_adapter_has_tts(self):
+        from astra.ai.adapters.base import CompatibleAdapter
+        adapter = CompatibleAdapter.__new__(CompatibleAdapter)
+        self.assertTrue(hasattr(adapter, "text_to_speech"))
+
+    def test_base_provider_tts_raises(self):
+        from astra.ai.provider import AIProvider
+        p = AIProvider()
+        with self.assertRaises(Exception):
+            p.text_to_speech("hello")
+
+    def test_audio_input_detection(self):
+        from astra.ai.capabilities import capabilities_for, INPUT_AUDIO
+        caps = capabilities_for("gemini", "gemini-2.0-flash")
+        self.assertIn(INPUT_AUDIO, caps)
+
+    def test_audio_output_detection(self):
+        from astra.ai.capabilities import capabilities_for, OUTPUT_AUDIO
+        caps = capabilities_for("openai", "tts-1")
+        self.assertIn(OUTPUT_AUDIO, caps)
+
+    def test_audio_artifact_extraction(self):
+        from astra.ai.artifact_extraction import extract_artifacts
+        import base64
+        audio_data = b"ID3" + b"\x00" * 200  # MP3 header
+        b64 = base64.b64encode(audio_data).decode()
+        text = f"Here is the audio: data:audio/mpeg;base64,{b64}"
+        with tempfile.TemporaryDirectory() as tmp:
+            arts = extract_artifacts(text, tmp)
+            self.assertEqual(len(arts), 1)
+            self.assertEqual(arts[0].get("artifact_type"), "audio")
+
+
+class TestRealVideoIO(unittest.TestCase):
+    """Video capability detection — honestly unsupported for generation."""
+
+    def test_video_input_detected_for_gemini(self):
+        from astra.ai.capabilities import capabilities_for, INPUT_VIDEO
+        caps = capabilities_for("gemini", "gemini-2.0-flash")
+        self.assertIn(INPUT_VIDEO, caps)
+
+    def test_no_video_output_capability(self):
+        from astra.ai.capabilities import capabilities_for, OUTPUT_VIDEO
+        for fam in ("claude", "gemini", "openai", "gpt", "groq", "llama"):
+            caps = capabilities_for(fam, f"{fam}-test")
+            self.assertNotIn(OUTPUT_VIDEO, caps,
+                             f"{fam} should not claim video output")
+
+
+class TestRealDocumentGeneration(unittest.TestCase):
+    """Document generation produces real, valid files."""
+
+    def test_pdf_generation(self):
+        from astra.tools.document_gen import generate_pdf
+        data = generate_pdf("Hello World\nLine 2", "Test")
+        self.assertTrue(data.startswith(b"%PDF-"))
+        self.assertGreater(len(data), 100)
+
+    def test_docx_generation(self):
+        from astra.tools.document_gen import generate_docx
+        import zipfile, io
+        data = generate_docx("Hello World", "Test")
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            self.assertIn("[Content_Types].xml", zf.namelist())
+            self.assertIn("word/document.xml", zf.namelist())
+
+    def test_xlsx_generation(self):
+        from astra.tools.document_gen import generate_xlsx
+        import zipfile, io
+        data = generate_xlsx("Name,Age\nAlice,30", "Test")
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            self.assertIn("xl/workbook.xml", zf.namelist())
+            self.assertIn("xl/worksheets/sheet1.xml", zf.namelist())
+
+    def test_pptx_generation(self):
+        from astra.tools.document_gen import generate_pptx
+        import zipfile, io
+        data = generate_pptx("Title\nContent\n\nSlide 2\nMore", "Test")
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            self.assertIn("ppt/presentation.xml", zf.namelist())
+            self.assertIn("ppt/slides/slide1.xml", zf.namelist())
+
+    def test_pdf_artifact_validation(self):
+        from astra.tools.document_gen import generate_pdf
+        from astra.core.artifacts import store_artifact, validate_artifact
+        data = generate_pdf("Test content", "Test")
+        with tempfile.TemporaryDirectory() as tmp:
+            art = store_artifact(data, "test.pdf", "document", tmp)
+            ok, err = validate_artifact(art)
+            self.assertTrue(ok, f"PDF validation failed: {err}")
+
+    def test_docx_artifact_validation(self):
+        from astra.tools.document_gen import generate_docx
+        from astra.core.artifacts import store_artifact, validate_artifact
+        data = generate_docx("Test content", "Test")
+        with tempfile.TemporaryDirectory() as tmp:
+            art = store_artifact(data, "test.docx", "document", tmp)
+            ok, err = validate_artifact(art)
+            self.assertTrue(ok, f"DOCX validation failed: {err}")
+
+    def test_xlsx_artifact_validation(self):
+        from astra.tools.document_gen import generate_xlsx
+        from astra.core.artifacts import store_artifact, validate_artifact
+        data = generate_xlsx("A,B\n1,2", "Test")
+        with tempfile.TemporaryDirectory() as tmp:
+            art = store_artifact(data, "test.xlsx", "spreadsheet", tmp)
+            ok, err = validate_artifact(art)
+            self.assertTrue(ok, f"XLSX validation failed: {err}")
+
+    def test_pptx_artifact_validation(self):
+        from astra.tools.document_gen import generate_pptx
+        from astra.core.artifacts import store_artifact, validate_artifact
+        data = generate_pptx("Title\nContent", "Test")
+        with tempfile.TemporaryDirectory() as tmp:
+            art = store_artifact(data, "test.pptx", "presentation", tmp)
+            ok, err = validate_artifact(art)
+            self.assertTrue(ok, f"PPTX validation failed: {err}")
+
+    def test_generate_document_tool(self):
+        from astra.tools.builtins import generate_document
+        result = generate_document({"content": "Hello World", "format": "pdf"})
+        self.assertTrue(result.get("ok"))
+        self.assertIn("artifact", result)
+        self.assertTrue(result["artifact"].get("validated"))
+
+    def test_generate_document_unsupported_format(self):
+        from astra.tools.builtins import generate_document
+        result = generate_document({"content": "Hello", "format": "odt"})
+        self.assertFalse(result.get("ok"))
+        self.assertIn("Unsupported", result.get("error", ""))
+
+
+class TestRouterMultimodalDispatch(unittest.TestCase):
+    """Router dispatches to generate_image/text_to_speech methods."""
+
+    def test_extract_prompt_from_text(self):
+        from astra.ai.router import AstraRouter
+        msgs = [{"role": "user", "content": "draw a cat"}]
+        self.assertEqual(AstraRouter._extract_prompt(msgs), "draw a cat")
+
+    def test_extract_prompt_from_content_parts(self):
+        from astra.ai.router import AstraRouter
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:..."}}
+        ]}]
+        self.assertEqual(
+            AstraRouter._extract_prompt(msgs), "describe this image")
+
+    def test_extract_prompt_empty(self):
+        from astra.ai.router import AstraRouter
+        self.assertEqual(AstraRouter._extract_prompt([]), "")
+
+
+class TestCapabilityMismatchRejection(unittest.TestCase):
+    """Models lacking required capabilities are rejected."""
+
+    def test_image_gen_rejected_for_text_model(self):
+        from astra.ai.routing_policy import meets_hard_requirements
+        model = Model("groq", "llama-70b", capabilities=["chat"],
+                       input_modalities=["text"],
+                       output_modalities=["text"])
+        req = RoutingRequest(required_output_modalities=["image"])
+        self.assertFalse(meets_hard_requirements(model, req))
+
+    def test_audio_gen_rejected_for_text_model(self):
+        from astra.ai.routing_policy import meets_hard_requirements
+        model = Model("groq", "llama-70b", capabilities=["chat"],
+                       input_modalities=["text"],
+                       output_modalities=["text"])
+        req = RoutingRequest(required_output_modalities=["audio"])
+        self.assertFalse(meets_hard_requirements(model, req))
+
+    def test_video_gen_rejected_for_all(self):
+        from astra.ai.routing_policy import meets_hard_requirements
+        for provider in ("groq", "gemini", "openai", "bedrock"):
+            model = Model(provider, f"{provider}-test", capabilities=["chat"],
+                           input_modalities=["text"],
+                           output_modalities=["text"])
+            req = RoutingRequest(required_output_modalities=["video"])
+            self.assertFalse(meets_hard_requirements(model, req),
+                             f"{provider} should reject video output")
+
+    def test_image_gen_accepted_for_dall_e(self):
+        from astra.ai.routing_policy import meets_hard_requirements
+        model = Model("openai", "dall-e-3", capabilities=["chat"],
+                       input_modalities=["text"],
+                       output_modalities=["text", "image"])
+        req = RoutingRequest(required_output_modalities=["image"])
+        self.assertTrue(meets_hard_requirements(model, req))
+
+
+class TestToolArtifactExtraction(unittest.TestCase):
+    """Agent extracts artifacts from tool output."""
+
+    def test_tool_generated_artifact_extracted(self):
+        from astra.agent import Agent
+        a = Agent.__new__(Agent)
+        a.plugins = []
+        results = {
+            "s1": {
+                "tool": "generate_document",
+                "ok": True,
+                "output": {
+                    "ok": True,
+                    "artifact": {"id": "abc", "filename": "test.pdf",
+                                 "validated": True, "artifact_type": "document"},
+                    "format": "pdf"
+                }
+            }
+        }
+        arts = a._extract_response_artifacts("generate a pdf report", results)
+        self.assertEqual(len(arts), 1)
+        self.assertEqual(arts[0]["filename"], "test.pdf")
+
+
+class TestGatewayZeroBypass(unittest.TestCase):
+    """Multimodal additions preserve zero-bypass invariants."""
+
+    def test_no_direct_provider_calls_in_agent(self):
+        import inspect
+        from astra.agent import Agent
+        src = inspect.getsource(Agent)
+        self.assertNotIn("ProviderRegistry", src)
+        self.assertNotIn("self.llm(", src)
+        self.assertNotIn("provider.chat(", src)
+
+    def test_no_direct_provider_calls_in_planner(self):
+        import inspect
+        from astra.core.planner import Planner
+        src = inspect.getsource(Planner)
+        lines = [l for l in src.split("\n")
+                 if not l.strip().startswith("#") and not l.strip().startswith("'")
+                 and not l.strip().startswith('"')]
+        code = "\n".join(lines)
+        self.assertNotIn("ProviderRegistry(", code)
+        self.assertNotIn("adapter.chat(", code)
+
+    def test_image_gen_through_router_not_direct(self):
+        import inspect
+        from astra.ai.router import AstraRouter
+        src = inspect.getsource(AstraRouter._attempt)
+        self.assertIn("generate_image", src)
+        self.assertNotIn("ProviderRegistry", src)
+
+
 if __name__ == "__main__":
     unittest.main()

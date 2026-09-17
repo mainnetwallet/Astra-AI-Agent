@@ -48,6 +48,13 @@ _FAMILIES: dict[str, tuple[str, list[str], int, str, str, list[str]]] = {
     "lfm":      ("liquid", ["chat"], 64000, "mid", "cheap", []),
     "mercury":  ("xai", ["chat", "tools"], 200000, "high", "premium", ["stream"]),
     "nova-lite":("bedrock", ["chat", "tools", "json"], 200000, "mid", "cheap", ["stream"]),
+    "dall-e":   ("openai",  ["chat"], 4096, "high", "premium", []),
+    "gpt-image":("openai",  ["chat"], 4096, "high", "premium", []),
+    "stable-diffusion": ("bedrock", ["chat"], 4096, "high", "premium", []),
+    "stability":("bedrock", ["chat"], 4096, "high", "premium", []),
+    "titan-image":("bedrock", ["chat"], 4096, "mid", "mid", []),
+    "imagen":   ("gemini",  ["chat"], 4096, "high", "premium", []),
+    "tts":      ("openai",  ["chat"], 4096, "mid", "mid", []),
 }
 
 # Multimodal capability mapping: which (provider, model_family) pairs support
@@ -62,7 +69,13 @@ _MULTIMODAL_INPUT: dict[str, list[str]] = {
     "gpt":     ["image"],
 }
 _MULTIMODAL_OUTPUT: dict[str, list[str]] = {
-    # Conservative: only families with verified generation capability
+    "dall-e": ["image"],
+    "gpt-image": ["image"],
+    "stable-diffusion": ["image"],
+    "stability": ["image"],
+    "titan-image": ["image"],
+    "imagen": ["image"],
+    "tts": ["audio"],
 }
 
 _FAST_WORDS = ("flash", "lightning", "lite", "nano", "small", "mini", "micro",

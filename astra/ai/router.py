@@ -725,7 +725,19 @@ class AstraRouter:
                 self._emit("router.retry", provider=name, model=model.model_id,
                            attempt=attempt)
             try:
-                if req.required_tools or req.structured_output:
+                # Multimodal dispatch: use specialized adapter methods
+                # for non-chat output modalities (image generation, TTS)
+                # before falling through to the normal chat path.
+                out_mods = req.required_output_modalities or []
+                if "image" in out_mods and hasattr(adapter, "generate_image"):
+                    prompt = self._extract_prompt(req.messages)
+                    text = adapter.generate_image(prompt, model=model.model_id)
+                    streamed = False
+                elif "audio" in out_mods and hasattr(adapter, "text_to_speech"):
+                    prompt = self._extract_prompt(req.messages)
+                    text = adapter.text_to_speech(prompt, model=model.model_id)
+                    streamed = False
+                elif req.required_tools or req.structured_output:
                     text = adapter.chat(req.messages, model=model.model_id,
                                         max_tokens=req.max_tokens)
                     streamed = False
@@ -770,6 +782,19 @@ class AstraRouter:
         self._mark_down(name, last_error)
         return RoutingResult(ok=False, error=f"{name}: {last_error}",
                              attempts=0)
+
+    @staticmethod
+    def _extract_prompt(messages: list) -> str:
+        """Extract the user's text prompt from messages for non-chat APIs."""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    return " ".join(
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text")
+                return str(content)
+        return ""
 
     def _mark_down(self, name: str, error: str) -> None:
         """Flag a provider down only when it's genuinely down (not merely a

@@ -34,12 +34,12 @@ that port is implemented on the Existing Provider side
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 
 from astra.ai.gateway_contract import (ProviderExecutionPort,
                                        ProviderExecutionResult,
                                        ProviderExecutionTarget)
+from astra.ai.json_extract import loads_lenient
 from astra.core.correction import MAX_CORRECTION_ATTEMPTS
 
 
@@ -78,7 +78,13 @@ def validate_execution_result(result: ProviderExecutionResult, *,
 
     if require_json:
         try:
-            parsed = json.loads(text)
+            # Lenient on purpose: many chat-tuned models (Cohere's
+            # c4ai-aya-expanse-* family included) wrap valid JSON in a
+            # ```json fence or add a short preamble even when told to
+            # return ONLY JSON. A bare json.loads() rejects that and was
+            # driving the correction loop to exhaustion on otherwise-good
+            # responses. See astra/ai/json_extract.py.
+            parsed = loads_lenient(text)
         except ValueError:
             return ExecutionValidationOutcome(
                 "invalid", "response is not valid JSON")

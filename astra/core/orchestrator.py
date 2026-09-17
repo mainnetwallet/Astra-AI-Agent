@@ -702,8 +702,13 @@ class Orchestrator:
 
     @staticmethod
     def _safe_json(text: str) -> dict:
+        # Lenient on purpose (see astra/ai/json_extract.py): a plain
+        # .strip("`") only trims backtick characters off the ends and
+        # still fails on a ```json fence or any surrounding prose, which
+        # was making a good corrective AI reply look empty/unusable here.
+        from astra.ai.json_extract import loads_lenient
         try:
-            return json.loads((text or "").strip().strip("`"))
+            return loads_lenient(text)
         except Exception:
             return {}
 

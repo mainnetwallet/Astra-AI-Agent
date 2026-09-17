@@ -61,9 +61,8 @@ yet), so the contract carries none — nothing is invented.
 """
 from __future__ import annotations
 
-import json
-
 from astra.ai.gateway_task_completion import build_task_completion_contract
+from astra.ai.json_extract import loads_lenient
 from astra.ai.router import RoutingRequest
 
 
@@ -185,7 +184,13 @@ class Planner:
             if not rr.ok or not rr.text:
                 return None
             text = rr.text
-            data = json.loads(text.strip().strip("`"))
+            # Lenient parse: the Gateway's own JSON check already passed
+            # (or the router wouldn't report ok+text), but that check now
+            # tolerates a ```json fence/preamble too (see
+            # astra/ai/json_extract.py), so we must parse the same way
+            # here rather than a bare json.loads that only trims stray
+            # backtick characters.
+            data = loads_lenient(text)
             return self.parse_plan_json(data, max_steps=max_steps) or None
         except Exception:
             return None

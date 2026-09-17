@@ -99,35 +99,94 @@ $("#dash-blocks").addEventListener("click", (e) => {
 });
 
 /* ----------------------------- assistant chat ------------------------------- */
-loaders.assistant = function () {};
+loaders.assistant = function () {
+  if (Astra.plugins._chatWired) return;
+  Astra.plugins._chatWired = true;
+  wireChatComposer();
+};
+
 function chatBubble(who, text) {
-  const el = document.createElement("div");
-  el.className = "bubble " + who;
-  el.innerHTML = String(text || "").replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+  hideChatEmpty();
+  const row = document.createElement("div");
+  row.className = "msg " + (who === "me" ? "user" : "assistant");
+  const content = document.createElement("div");
+  content.className = "msg-content";
+  if (who !== "me") {
+    const avatar = document.createElement("div");
+    avatar.className = "msg-avatar";
+    avatar.textContent = "🚀";
+    row.appendChild(avatar);
+  }
+  const textEl = document.createElement("div");
+  textEl.className = "msg-text";
+  textEl.innerHTML = String(text || "").replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
     .replace(/`(.+?)`/g, "<code>$1</code>").replace(/\n/g, "<br>");
-  $("#chat-log").appendChild(el);
+  content.appendChild(textEl);
+  row.appendChild(content);
+  $("#chat-log").appendChild(row);
   $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+  return row;
+}
+function chatTyping() {
+  hideChatEmpty();
+  const row = document.createElement("div");
+  row.className = "msg assistant";
+  row.innerHTML = `<div class="msg-avatar">🚀</div>
+    <div class="msg-content"><div class="typing"><span></span><span></span><span></span></div></div>`;
+  $("#chat-log").appendChild(row);
+  $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
+  return row;
+}
+function hideChatEmpty() {
+  const empty = $("#chat-empty");
+  if (empty) empty.remove();
+}
+function wireChatComposer() {
+  const input = $("#chat-input");
+  const sendBtn = $("#chat-send");
+  const autosize = () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 160) + "px";
+    sendBtn.disabled = !input.value.trim();
+  };
+  input.addEventListener("input", autosize);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("#chat-form").requestSubmit();
+    }
+  });
+  $("#chat-suggestions")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".suggestion");
+    if (!btn) return;
+    input.value = btn.dataset.text || "";
+    autosize();
+    input.focus();
+  });
+  autosize();
 }
 $("#chat-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const msg = $("#chat-input").value.trim();
+  const input = $("#chat-input");
+  const msg = input.value.trim();
   if (!msg) return;
   chatBubble("me", msg);
-  $("#chat-input").value = "";
-  const t = setTimeout(() => chatBubble("ai", "…"), 300);
+  input.value = "";
+  input.style.height = "auto";
+  $("#chat-send").disabled = true;
+  const typingRow = chatTyping();
   try {
     const r = await post("/api/chat", { message: msg });
-    clearTimeout(t);
-    const last = $("#chat-log").lastElementChild;
-    if (last && last.textContent === "…") last.remove();
+    typingRow.remove();
     chatBubble("ai", r.data.reply);
     if (r.data.action && r.data.action !== "none") showTab(r.data.action);
     if (r.data.action === "dashboard") loaders.dashboard();
   } catch (err) {
-    clearTimeout(t);
+    typingRow.remove();
     chatBubble("ai", "Server e problem — `" + err + "`");
   }
 });
+
 
 /* -------------------------------- backup ------------------------------------ */
 $("#btn-export").addEventListener("click", async () => {

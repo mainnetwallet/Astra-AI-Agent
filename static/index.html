@@ -71,12 +71,29 @@
 
   <!-- ======== ASSISTANT (core) ======== -->
   <section id="tab-assistant" class="tabview">
-    <div class="panel chat-panel">
-      <div id="chat-log" class="chat-log"></div>
-      <div class="chips" id="chips"></div>
-      <form id="chat-form" class="chat-form">
-        <input id="chat-input" placeholder="Ami ja korte chai..." autocomplete="off">
-        <button type="submit" class="btn primary">➤</button>
+    <div class="chat-shell">
+      <div id="chat-log" class="chat-log">
+        <div class="chat-empty" id="chat-empty">
+          <div class="chat-empty-mark">🚀</div>
+          <div class="chat-empty-title">Ki korte chan?</div>
+          <div class="chat-empty-sub">Airdrop, task, wallet, deadline — shob Banglish e likhun.</div>
+          <div class="suggestions" id="chat-suggestions">
+            <button type="button" class="suggestion" data-text="add airdrop Hamster deadline 15 oct reward token value 500">🪂 Notun airdrop track korun</button>
+            <button type="button" class="suggestion" data-text="deadlines this week">⏰ Ei shoptaher deadline</button>
+            <button type="button" class="suggestion" data-text="list wallets">👛 Wallet gula dekhun</button>
+            <button type="button" class="suggestion" data-text="progress">📊 Overall progress</button>
+          </div>
+        </div>
+      </div>
+      <form id="chat-form" class="chat-composer">
+        <textarea id="chat-input" class="chat-textarea" rows="1"
+          placeholder="Astra ke message korun…" autocomplete="off"></textarea>
+        <button type="submit" class="chat-send" id="chat-send" aria-label="Send message" disabled>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+            <path d="M12 19V5M12 5l-6 6M12 5l6 6" stroke="currentColor" stroke-width="2.2"
+              stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </form>
     </div>
   </section>

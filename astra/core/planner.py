@@ -224,7 +224,7 @@ class Planner:
                         f"Ei request er jonno {cap_names} generation dorkar, "
                         f"kintu kono configured Provider/Model ei capability "
                         f"support kore na. Apni ekta compatible model configure "
-                        f"korun (jemon: dall-e-3 for image, tts-1 for audio).")]
+                        f"korun (jemon: stable-diffusion-xl on Bedrock for image).")]
                 return None
             text = rr.text
             # Lenient parse: the Gateway's own JSON check already passed

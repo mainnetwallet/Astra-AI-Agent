@@ -645,7 +645,7 @@ class TestOutputModalityRouting(unittest.TestCase):
 
     def test_accepts_image_gen_model(self):
         from astra.ai.routing_policy import meets_hard_requirements
-        model = Model("openai", "dall-e-3", capabilities=["chat"],
+        model = Model("bedrock", "stability.stable-diffusion-xl-v1", capabilities=["chat"],
                        input_modalities=["text"],
                        output_modalities=["text", "image"])
         req = RoutingRequest(required_output_modalities=["image"])
@@ -718,17 +718,17 @@ class TestRealImageGeneration(unittest.TestCase):
             p.generate_image("test prompt")
         self.assertIn("not support", str(ctx.exception).lower())
 
-    def test_dall_e_model_has_image_output(self):
+    def test_no_openai_adapter_so_dall_e_has_no_image_output(self):
         meta = metadata_for("dall-e-3", "openai")
-        self.assertIn("image", meta.get("output_modalities", []))
+        self.assertNotIn("image", meta.get("output_modalities", ["text"]))
 
     def test_stable_diffusion_model_has_image_output(self):
         meta = metadata_for("stable-diffusion-xl-v1", "bedrock")
         self.assertIn("image", meta.get("output_modalities", []))
 
-    def test_tts_model_has_audio_output(self):
+    def test_no_openai_adapter_so_tts_has_no_audio_output(self):
         meta = metadata_for("tts-1", "openai")
-        self.assertIn("audio", meta.get("output_modalities", []))
+        self.assertNotIn("audio", meta.get("output_modalities", ["text"]))
 
     def test_text_model_no_image_output(self):
         meta = metadata_for("llama-3.1-70b", "groq")
@@ -754,10 +754,10 @@ class TestRealAudioIO(unittest.TestCase):
         caps = capabilities_for("gemini", "gemini-2.0-flash")
         self.assertIn(INPUT_AUDIO, caps)
 
-    def test_audio_output_detection(self):
+    def test_no_audio_output_without_adapter(self):
         from astra.ai.capabilities import capabilities_for, OUTPUT_AUDIO
         caps = capabilities_for("openai", "tts-1")
-        self.assertIn(OUTPUT_AUDIO, caps)
+        self.assertNotIn(OUTPUT_AUDIO, caps)
 
     def test_audio_artifact_extraction(self):
         from astra.ai.artifact_extraction import extract_artifacts
@@ -921,9 +921,9 @@ class TestCapabilityMismatchRejection(unittest.TestCase):
             self.assertFalse(meets_hard_requirements(model, req),
                              f"{provider} should reject video output")
 
-    def test_image_gen_accepted_for_dall_e(self):
+    def test_image_gen_accepted_for_bedrock_stability(self):
         from astra.ai.routing_policy import meets_hard_requirements
-        model = Model("openai", "dall-e-3", capabilities=["chat"],
+        model = Model("bedrock", "stability.stable-diffusion-xl-v1", capabilities=["chat"],
                        input_modalities=["text"],
                        output_modalities=["text", "image"])
         req = RoutingRequest(required_output_modalities=["image"])

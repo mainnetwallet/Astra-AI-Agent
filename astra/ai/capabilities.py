@@ -90,26 +90,23 @@ KNOWN_CAPABILITIES: dict[str, frozenset[str]] = {
 }
 
 # Models that support image generation (exact model_id substrings)
+# Only Bedrock families have a real adapter with generate_image()
 _IMAGE_GEN_MODELS = (
-    "gemini-2.0-flash-exp",
-    "dall-e",
-    "gpt-image",
-    "imagen",
     "stable-diffusion",
+    "stability",
+    "titan-image",
 )
 
 # Models that support audio input/transcription
+# Only Gemini families have a real adapter that passes audio to the API
 _AUDIO_INPUT_MODELS = (
     "gemini-2.0",
     "gemini-1.5",
-    "gpt-4o-audio",
-    "whisper",
 )
 
 # Models that support audio generation
+# No adapter currently has a real TTS execution path
 _AUDIO_GEN_MODELS = (
-    "tts",
-    "gpt-4o-audio",
 )
 
 # Models that support video input/analysis

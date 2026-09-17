@@ -636,8 +636,11 @@ class AstraAIGateway:
             self.last_attempts = attempts
             try:
                 call_model = model
-                if call_model and (conn.models or []) and \
-                        call_model not in conn.models:
+                if call_model and not conn.models:
+                    # no models configured for this connection at all —
+                    # treat it as disabled, never attempt a call.
+                    continue
+                if call_model and call_model not in conn.models:
                     # this connection doesn't serve the requested model —
                     # skip it rather than fail it (fallback intent is a
                     # different model on the next service).
@@ -773,8 +776,11 @@ class AstraAIGateway:
             for conn in self.connections:
                 try:
                     call_model = model
-                    if call_model and (conn.models or []) and \
-                            call_model not in conn.models:
+                    if call_model and not conn.models:
+                        # no models configured for this connection at all —
+                        # treat it as disabled, never attempt a call.
+                        continue
+                    if call_model and call_model not in conn.models:
                         continue
                     for chunk in conn.stream(messages, model=call_model,
                                              max_tokens=max_tokens):

@@ -476,6 +476,34 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         self.assertEqual(gateway.last_connection, "")
         self.assertEqual(gateway.last_attempts, 2)
 
+    # 12d. explicit-model requests must never be sent to a connection with
+    #      no models configured at all — an unconfigured model list means
+    #      that connection is disabled, same as a missing API key.
+    def test_gateway_explicit_model_skips_connection_with_no_models(self):
+        from astra.ai.gateway import AstraAIGateway
+        unconfigured = _FakeGatewayConn(name="astra-gw-gemini")
+        unconfigured.models = []  # GW_GEMINI_MODELS not set
+        serving = _FakeGatewayConn(name="astra-gw-groq", models=["target-model"])
+        gateway = AstraAIGateway(connections=[unconfigured, serving])
+        text = gateway.chat([{"role": "user", "content": "hi"}],
+                            model="target-model")
+        self.assertEqual(text, "reply-from-astra-gw-groq")
+        self.assertEqual(gateway.last_connection, "astra-gw-groq")
+        self.assertEqual(unconfigured._calls, 0)  # never attempted
+
+    def test_gateway_explicit_model_all_unconfigured_fails_without_calls(self):
+        from astra.ai.gateway import AstraAIGateway
+        from astra.core.exceptions import ProviderError
+        a = _FakeGatewayConn(name="astra-gw-gemini")
+        a.models = []
+        b = _FakeGatewayConn(name="astra-gw-groq")
+        b.models = []
+        gateway = AstraAIGateway(connections=[a, b])
+        with self.assertRaises(ProviderError):
+            gateway.chat([{"role": "user", "content": "hi"}], model="anything")
+        self.assertEqual(a._calls, 0)
+        self.assertEqual(b._calls, 0)
+
     # 13. Gateway connections carry the independent GW_* config, never the
     #     provider adapters' GEMINI_*/GROQ_* envs (configuration separation).
     def test_gateway_config_fully_separate_from_provider_config(self):

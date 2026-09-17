@@ -99,25 +99,7 @@ $("#dash-blocks").addEventListener("click", (e) => {
 });
 
 /* ----------------------------- assistant chat ------------------------------- */
-loaders.assistant = function () {
-  if (!$("#chips").children.length && !$("#chat-log").children.length) welcome();
-};
-function welcome() {
-  const msg = `Asthagato! 👋 Ami apnar Astra AI Agent.
-
-Banglish normal bhashay likhun — ami bujhte parbo.
-Chinta korar dorkar nai: plugin jeiba ache & fresh feature add korle AMI
-apnakei agami dashboard e dekhabo.
-
-Uporer airdrop plugin er example:
-• "add airdrop Hamster deadline 15 oct reward token value 500"
-• "add task \\"join tg\\" to Hamster"
-• "mark \\"join tg\\" in Hamster done"
-• "deadlines this week", "progress", "list wallets"
-
-'help' likhe full plugin list pao. Puro control UI teo ache.`;
-  chatBubble("ai", msg);
-}
+loaders.assistant = function () {};
 function chatBubble(who, text) {
   const el = document.createElement("div");
   el.className = "bubble " + who;

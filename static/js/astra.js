@@ -129,7 +129,7 @@ loaders.assistant = function () {
   wireChatComposer();
 };
 
-function chatBubble(who, text, action) {
+function chatBubble(who, text, action, attachedFiles, artifacts) {
   hideChatEmpty();
   const row = document.createElement("div");
   row.className = "msg " + (who === "me" ? "user" : "assistant");
@@ -141,14 +141,28 @@ function chatBubble(who, text, action) {
     avatar.textContent = "🚀";
     row.appendChild(avatar);
   }
+  if (attachedFiles && attachedFiles.length) {
+    const strip = document.createElement("div");
+    strip.className = "msg-attachments";
+    attachedFiles.forEach((f) => {
+      const chip = document.createElement("span");
+      chip.className = "msg-attach-chip";
+      chip.textContent = _fileIcon(f.name) + " " + f.name;
+      strip.appendChild(chip);
+    });
+    content.appendChild(strip);
+  }
   const textEl = document.createElement("div");
   textEl.className = "msg-text";
   textEl.innerHTML = String(text || "").replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
     .replace(/`(.+?)`/g, "<code>$1</code>").replace(/\n/g, "<br>");
   content.appendChild(textEl);
-  // A background action (e.g. a tool ran, or something needs approval)
-  // never yanks the person out of the chat they're in — it's offered as
-  // a link they can choose to follow instead.
+  if (artifacts && artifacts.length) {
+    const artWrap = document.createElement("div");
+    artWrap.className = "msg-artifacts";
+    artifacts.forEach((a) => { artWrap.appendChild(renderArtifact(a)); });
+    content.appendChild(artWrap);
+  }
   if (action && action !== "none") {
     const link = document.createElement("button");
     link.type = "button";
@@ -204,22 +218,33 @@ $("#chat-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const input = $("#chat-input");
   const msg = input.value.trim();
-  if (!msg) return;
-  chatBubble("me", msg);
+  const hasAttachments = _pendingAttachments.length > 0;
+  if (!msg && !hasAttachments) return;
+  chatBubble("me", msg, null, _pendingAttachments.map((a) => a.file));
   input.value = "";
   input.style.height = "auto";
   $("#chat-send").disabled = true;
   const typingRow = chatTyping();
+  showUploadIndicator(hasAttachments);
   try {
-    const r = await post("/api/chat", { message: msg });
+    let r;
+    if (hasAttachments) {
+      const fd = new FormData();
+      fd.append("message", msg);
+      _pendingAttachments.forEach((a) => fd.append("files", a.file));
+      clearAttachments();
+      const res = await fetch("/api/chat", { method: "POST", body: fd });
+      r = await res.json();
+    } else {
+      r = await post("/api/chat", { message: msg });
+    }
     typingRow.remove();
-    chatBubble("ai", r.data.reply, r.data.action);
-    // Refresh dashboard data quietly in the background so it's current
-    // whenever the person does switch there — never force-navigate away
-    // from the chat they're in.
+    hideUploadIndicator();
+    chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts);
     if (r.data.action === "dashboard") loaders.dashboard();
   } catch (err) {
     typingRow.remove();
+    hideUploadIndicator();
     chatBubble("ai", "Server e problem — `" + err + "`");
   }
 });
@@ -610,6 +635,158 @@ function feedText(d) {
 }
 function renderEvents(rows) {
   rows.forEach(feedLine);
+}
+
+/* ------------------------------ attachments (multimodal) --------------------- */
+const _pendingAttachments = [];
+let _attachIdCounter = 0;
+
+function _fileIcon(name) {
+  const ext = (name || "").split(".").pop().toLowerCase();
+  const map = {
+    pdf: "📄", doc: "📄", docx: "📄", txt: "📝", md: "📝",
+    csv: "📊", tsv: "📊", xls: "📊", xlsx: "📊",
+    ppt: "📽️", pptx: "📽️",
+    json: "🔧", xml: "🔧", yaml: "🔧", toml: "🔧",
+    png: "🖼️", jpg: "🖼️", jpeg: "🖼️", webp: "🖼️", gif: "🖼️",
+    mp3: "🎵", wav: "🎵", m4a: "🎵", aac: "🎵", ogg: "🎵", flac: "🎵", opus: "🎵",
+    mp4: "🎬", webm: "🎬", mov: "🎬", avi: "🎬", mkv: "🎬", m4v: "🎬",
+    zip: "📦", tar: "📦", tgz: "📦", gz: "📦",
+  };
+  return map[ext] || "📎";
+}
+
+function _humanSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / 1048576).toFixed(1) + " MB";
+}
+
+function attachFiles(files) {
+  for (const f of files) {
+    _pendingAttachments.push({ id: ++_attachIdCounter, file: f });
+  }
+  renderAttachmentPreviews();
+  updateSendBtnState();
+}
+
+function removeAttachment(id) {
+  const idx = _pendingAttachments.findIndex((a) => a.id === id);
+  if (idx >= 0) _pendingAttachments.splice(idx, 1);
+  renderAttachmentPreviews();
+  updateSendBtnState();
+}
+
+function clearAttachments() {
+  _pendingAttachments.length = 0;
+  renderAttachmentPreviews();
+}
+
+function updateSendBtnState() {
+  const input = $("#chat-input");
+  const sendBtn = $("#chat-send");
+  if (sendBtn) sendBtn.disabled = !input.value.trim() && !_pendingAttachments.length;
+}
+
+function renderAttachmentPreviews() {
+  const bar = $("#attachments-bar");
+  if (!bar) return;
+  if (!_pendingAttachments.length) { bar.hidden = true; bar.innerHTML = ""; return; }
+  bar.hidden = false;
+  bar.innerHTML = _pendingAttachments.map((a) => {
+    const f = a.file;
+    const icon = _fileIcon(f.name);
+    let preview = "";
+    if (f.type.startsWith("image/")) {
+      // NOTE: blob: URLs require CSP img-src to include blob: (updated in web.py)
+      const url = URL.createObjectURL(f);
+      preview = `<img src="${url}" alt="${esc(f.name)}" onload="URL.revokeObjectURL(this.src)">`;
+    } else if (f.type.startsWith("audio/")) {
+      preview = `<span class="attachment-type-icon">🎵</span>`;
+    } else if (f.type.startsWith("video/")) {
+      preview = `<span class="attachment-type-icon">🎬</span>`;
+    } else {
+      preview = `<span class="attachment-type-icon">${icon}</span>`;
+    }
+    return `<div class="attachment-preview" data-id="${a.id}">
+      ${preview}
+      <div class="attachment-info">
+        <span class="attachment-name">${esc(f.name)}</span>
+        <span class="attachment-size">${_humanSize(f.size)}</span>
+      </div>
+      <button type="button" class="attachment-remove" data-id="${a.id}" aria-label="Remove">✕</button>
+    </div>`;
+  }).join("");
+}
+
+// wire attach button + file input
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#chat-attach")) {
+    $("#chat-file-input").click();
+  }
+  const rmBtn = e.target.closest(".attachment-remove");
+  if (rmBtn) removeAttachment(Number(rmBtn.dataset.id));
+});
+const _fileInput = $("#chat-file-input");
+if (_fileInput) _fileInput.addEventListener("change", (e) => {
+  if (e.target.files.length) attachFiles(e.target.files);
+  e.target.value = "";
+});
+
+// drag-and-drop on chat area
+const _chatShell = $(".chat-shell");
+if (_chatShell) {
+  _chatShell.addEventListener("dragover", (e) => { e.preventDefault(); _chatShell.classList.add("drag-over"); });
+  _chatShell.addEventListener("dragleave", (e) => { if (!_chatShell.contains(e.relatedTarget)) _chatShell.classList.remove("drag-over"); });
+  _chatShell.addEventListener("drop", (e) => {
+    e.preventDefault(); _chatShell.classList.remove("drag-over");
+    if (e.dataTransfer.files.length) attachFiles(e.dataTransfer.files);
+  });
+}
+
+/* ------------------------------ artifact display ----------------------------- */
+function renderArtifact(a) {
+  const el = document.createElement("div");
+  el.className = "artifact-card";
+  const url = `/api/v1/artifacts/${encodeURIComponent(a.id)}/${encodeURIComponent(a.filename)}`;
+  const type = (a.type || a.mime || "").split("/")[0];
+  if (type === "image") {
+    el.innerHTML = `<img class="artifact-image" src="${esc(url)}" alt="${esc(a.filename)}">
+      <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>`;
+  } else if (type === "audio") {
+    el.innerHTML = `<audio class="artifact-audio" controls src="${esc(url)}"></audio>
+      <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>`;
+  } else if (type === "video") {
+    el.innerHTML = `<video class="artifact-video" controls src="${esc(url)}"></video>
+      <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>`;
+  } else {
+    el.className = "artifact-card artifact-file";
+    el.innerHTML = `<span class="artifact-file-icon">${_fileIcon(a.filename)}</span>
+      <div class="artifact-file-info">
+        <span class="artifact-file-name">${esc(a.filename)}</span>
+        ${a.size ? `<span class="artifact-file-size">${_humanSize(a.size)}</span>` : ""}
+      </div>
+      <a class="btn mini" href="${esc(url)}" download="${esc(a.filename)}">Download</a>`;
+  }
+  return el;
+}
+
+/* ------------------------------ upload indicator ----------------------------- */
+function showUploadIndicator(hasFiles) {
+  if (!hasFiles) return;
+  let el = $("#upload-indicator");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "upload-indicator";
+    el.className = "upload-indicator";
+    el.innerHTML = `<span class="upload-spinner"></span> Uploading & processing…`;
+    $(".chat-shell")?.insertBefore(el, $("#chat-form")?.nextSibling || null);
+  }
+  el.hidden = false;
+}
+function hideUploadIndicator() {
+  const el = $("#upload-indicator");
+  if (el) el.hidden = true;
 }
 
 /* ---------------------------------- boot ------------------------------------ */

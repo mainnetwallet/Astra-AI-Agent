@@ -100,6 +100,13 @@ def meets_hard_requirements(model: Model, request) -> bool:
     ctx = int(request.context_tokens or 0)
     if ctx > model.context_window:
         return False
+    # Multimodal input modality check: if the request requires specific
+    # input modalities (e.g. image, audio), the model must support them.
+    req_input_mods = set(getattr(request, "required_input_modalities", []) or [])
+    if req_input_mods:
+        model_input = set(getattr(model, "input_modalities", ["text"]))
+        if not req_input_mods.issubset(model_input):
+            return False
     return True
 
 

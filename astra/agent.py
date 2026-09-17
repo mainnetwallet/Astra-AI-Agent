@@ -39,28 +39,30 @@ class Agent:
         # that lets a normal AI request skip the Gateway. It has been
         # removed on purpose — do not re-add a direct model call here.
 
-    def handle(self, message: str, context: str = "") -> dict:
-        """Returns {reply, action, data, ok} exactly as the old single-domain
-        agent did, so callers/UI stay compatible.
+    def handle(self, message: str, context: str = "",
+               attachments: list | None = None) -> dict:
+        """Returns {reply, action, data, ok, artifacts} exactly as the old
+        single-domain agent did, so callers/UI stay compatible.
 
-        `context` is optional recent conversation the caller already has
-        (e.g. the client's own chat history) — passed through unchanged to
-        the orchestrator/Planner's Astra AI Gateway preprocessing so a
-        short follow-up message can be understood in context. Plugins
-        never see it; it only ever reaches the free-form AI path below.
+        `context` is optional recent conversation the caller already has.
+        `attachments` is an optional list of processed Attachment dicts
+        from the multimodal upload layer. When present, the request is
+        multimodal and capability-aware routing is required.
         """
         msg = " ".join(str(message).split()).strip()
-        if not msg:
+        if not msg and not attachments:
             return {"reply": "Ki korte paren? 'help' likhun.", "action": "none",
                     "data": {}, "ok": False}
+        if not msg and attachments:
+            msg = f"[{len(attachments)} file(s) attached]"
         for p in self.plugins:
+            if attachments:
+                break
             try:
                 r = p.process(msg)
-            except Exception:        # one plugin must never kill the agent
+            except Exception:
                 continue
             if r:
-                # plugins return (handled, reply, action, data) or
-                # (handled, reply, action, data, ok)
                 if len(r) == 5:
                     handled, reply, action, data, ok = r
                 else:
@@ -69,18 +71,14 @@ class Agent:
                 if handled:
                     return {"reply": reply, "action": action, "data": data or {},
                             "ok": ok}
-        # nobody claimed it -> orchestrator (Planner -> Astra AI Gateway ->
-        # Existing Provider System) -> fallback. There is no direct-LLM
-        # branch here: an orchestrator failure/absence degrades straight to
-        # the local, non-AI FALLBACK text rather than to any raw model
-        # call, so a normal chat request can never reach an AI model
-        # without passing through the Gateway first.
         if self.orchestrator:
             try:
-                report = self.orchestrator.submit(msg, sync=True, context=context)
+                report = self.orchestrator.submit(
+                    msg, sync=True, context=context,
+                    attachments=attachments or None)
                 return self._reply_from_report(msg, report)
             except Exception:
-                pass  # orchestrator failed silently -> local fallback
+                pass
         return {"reply": FALLBACK, "action": "none", "data": {}, "ok": False}
 
     def _reply_from_report(self, message: str, report: dict) -> dict:

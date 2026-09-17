@@ -15,6 +15,8 @@ from astra.core.config import Config
 
 # families: (name, base_provider, caps, context, quality, cost_speed)
 # quality: high|mid|fast   cost_class: cheap|mid|premium
+# families: (name, base_provider, caps, context, quality, cost_speed, input_mod, output_mod)
+# input_mod/output_mod: modalities beyond text that the family supports natively
 _FAMILIES: dict[str, tuple[str, list[str], int, str, str, list[str]]] = {
     "claude":   ("bedrock", ["chat", "tools", "json", "vision", "reasoning", "coding"], 200000, "high", "premium", ["stream"]),
     "gemini":   ("gemini",  ["chat", "tools", "json", "vision", "reasoning"], 1048576, "mid",  "cheap",   ["stream"]),
@@ -46,6 +48,21 @@ _FAMILIES: dict[str, tuple[str, list[str], int, str, str, list[str]]] = {
     "lfm":      ("liquid", ["chat"], 64000, "mid", "cheap", []),
     "mercury":  ("xai", ["chat", "tools"], 200000, "high", "premium", ["stream"]),
     "nova-lite":("bedrock", ["chat", "tools", "json"], 200000, "mid", "cheap", ["stream"]),
+}
+
+# Multimodal capability mapping: which (provider, model_family) pairs support
+# which input/output modalities beyond text. Extends the Model's
+# input_modalities and output_modalities lists.
+_MULTIMODAL_INPUT: dict[str, list[str]] = {
+    "claude":  ["image"],
+    "gemini":  ["image", "audio", "video", "document"],
+    "openai":  ["image"],
+    "pixtral": ["image"],
+    "command": ["image"],
+    "gpt":     ["image"],
+}
+_MULTIMODAL_OUTPUT: dict[str, list[str]] = {
+    # Conservative: only families with verified generation capability
 }
 
 _FAST_WORDS = ("flash", "lightning", "lite", "nano", "small", "mini", "micro",
@@ -196,12 +213,21 @@ def metadata_for(model_id: str, provider: str | None = None) -> dict:
     # that lists "json" and isn't a fast/lite variant (those are more
     # likely to drop strict structured-output adherence under load).
     struct = bool(info) and "json" in caps and "flash" not in low and "lite" not in low
+    # Multimodal modalities from the family mapping
+    input_mods = ["text"]
+    output_mods = ["text"]
+    if fam in _MULTIMODAL_INPUT:
+        input_mods = ["text"] + [m for m in _MULTIMODAL_INPUT[fam] if m not in input_mods]
+    if fam in _MULTIMODAL_OUTPUT:
+        output_mods = ["text"] + [m for m in _MULTIMODAL_OUTPUT[fam] if m not in output_mods]
     return {
         "provider": provider or base_provider or fam or "unknown",
         "capabilities": caps, "context_window": ctx,
         "quality_class": q, "cost_class": cost,
         "supports_vision": vision, "supports_json": bool(struct),
         "supports_tools": "tools" in caps,
+        "input_modalities": input_mods,
+        "output_modalities": output_mods,
     }
 
 

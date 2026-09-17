@@ -69,6 +69,7 @@ import hmac
 import json
 import os
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -88,6 +89,20 @@ CONTENT_TYPES = {
     "json": "application/json; charset=utf-8",
     "svg": "image/svg+xml",
     "png": "image/png",
+    "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "gif": "image/gif", "webp": "image/webp",
+    "mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg",
+    "m4a": "audio/mp4", "aac": "audio/aac", "flac": "audio/flac",
+    "opus": "audio/opus",
+    "mp4": "video/mp4", "webm": "video/webm", "mov": "video/quicktime",
+    "pdf": "application/pdf",
+    "csv": "text/csv", "tsv": "text/tab-separated-values",
+    "txt": "text/plain; charset=utf-8", "md": "text/plain; charset=utf-8",
+    "xml": "application/xml", "yaml": "application/x-yaml",
+    "zip": "application/zip",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 
 CORE_TABS = [
@@ -114,7 +129,8 @@ SECURITY_HEADERS = [
     ("X-XSS-Protection", "0"),  # modern browsers: this header is deprecated
     ("Cross-Origin-Opener-Policy", "same-origin"),
     ("Content-Security-Policy",
-     "default-src 'self'; img-src 'self' data:; "
+     "default-src 'self'; img-src 'self' data: blob:; "
+     "media-src 'self' blob:; "
      "style-src 'self' 'unsafe-inline'; script-src 'self'; "
      "connect-src 'self'; frame-ancestors 'self'"),
 ]
@@ -193,8 +209,6 @@ class AstraHandler(BaseHTTPRequestHandler):
         if length <= 0:
             return {}
         if length > max_bytes:
-            # drain (bounded) so the client finishes sending and can read the
-            # 413 response instead of hitting a broken pipe
             self._drain(min(length, 64 * 1024 * 1024))
             raise ApiError("payload_too_large",
                            f"request body exceeds {max_bytes} bytes limit", 413)
@@ -206,6 +220,60 @@ class AstraHandler(BaseHTTPRequestHandler):
             return json.loads(raw.decode("utf-8"))
         except Exception:
             return {}
+
+    def _is_multipart(self) -> bool:
+        ct = self.headers.get("Content-Type", "")
+        return "multipart/form-data" in ct
+
+    def _read_multipart(self) -> tuple[dict, list]:
+        """Parse multipart/form-data. Returns (fields_dict, files_list).
+        Each file in files_list is {filename, data (bytes), content_type}."""
+        import cgi
+        import io
+        max_bytes = self.server.max_body_bytes
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > max_bytes:
+            self._drain(min(length, 64 * 1024 * 1024))
+            raise ApiError("payload_too_large",
+                           f"request body exceeds {max_bytes} bytes limit", 413)
+        ct = self.headers.get("Content-Type", "")
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": ct,
+            "CONTENT_LENGTH": str(length),
+        }
+        raw = self.rfile.read(length) if length > 0 else b""
+        fp = io.BytesIO(raw)
+        try:
+            form = cgi.FieldStorage(fp=fp, headers=self.headers, environ=environ)
+        except Exception:
+            return {}, []
+        fields = {}
+        files = []
+        for key in form.keys():
+            item = form[key]
+            if isinstance(item, list):
+                for sub in item:
+                    if sub.filename:
+                        files.append({
+                            "filename": sub.filename,
+                            "data": sub.file.read(),
+                            "content_type": sub.type or "application/octet-stream",
+                        })
+                    else:
+                        fields[key] = sub.value
+            elif item.filename:
+                files.append({
+                    "filename": item.filename,
+                    "data": item.file.read(),
+                    "content_type": item.type or "application/octet-stream",
+                })
+            else:
+                fields[key] = item.value
+        return fields, files
 
     # -- security helpers ------------------------------------------------
     def _drain(self, length: int) -> None:
@@ -307,6 +375,81 @@ class AstraHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # -- multimodal ----------------------------------------------------------
+    def _process_uploads(self, files: list) -> list[dict]:
+        """Process uploaded files into attachment dicts for the agent."""
+        if not files:
+            return []
+        upload_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        attachments = []
+        for f in files[:10]:
+            try:
+                from astra.core.attachments import process_upload
+                att = process_upload(f["data"], f["filename"], upload_dir)
+                attachments.append(att.to_dict())
+            except Exception as e:
+                attachments.append({
+                    "filename": f.get("filename", "unknown"),
+                    "error": str(e),
+                    "processed": False,
+                })
+        return attachments
+
+    def _serve_upload(self, filename: str) -> None:
+        """Serve an uploaded file for preview."""
+        upload_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "uploads")
+        path = os.path.abspath(os.path.join(upload_dir, filename))
+        root = os.path.abspath(upload_dir)
+        if not path.startswith(root + os.sep):
+            _json_err(self, "forbidden", 403)
+            return
+        if not os.path.isfile(path):
+            _json_err(self, "file not found", 404)
+            return
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        ctype = CONTENT_TYPES.get(ext, "application/octet-stream")
+        with open(path, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
+        self.apply_security_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_artifact(self, artifact_id: str, filename: str) -> None:
+        """Serve a stored artifact file."""
+        artifact_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "artifacts")
+        path = os.path.abspath(os.path.join(artifact_dir, artifact_id, filename))
+        root = os.path.abspath(artifact_dir)
+        if not path.startswith(root + os.sep):
+            _json_err(self, "forbidden", 403)
+            return
+        if not os.path.isfile(path):
+            _json_err(self, "artifact not found", 404)
+            return
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        ctype = CONTENT_TYPES.get(ext, "application/octet-stream")
+        with open(path, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition",
+                         f'inline; filename="{filename}"')
+        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
+        self.apply_security_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
     # -- dispatch ------------------------------------------------------------
     def _dispatch(self, method: str) -> None:
         self._rid = make_request_id()
@@ -316,7 +459,8 @@ class AstraHandler(BaseHTTPRequestHandler):
             return
         server.note_request(method, path)
         try:
-            q, body = self._query(), self._read_json()
+            q = self._query()
+            body = {} if self._is_multipart() else self._read_json()
             if not path:
                 return self._send_static("index.html")
             if path[0] == "static":
@@ -330,8 +474,17 @@ class AstraHandler(BaseHTTPRequestHandler):
             if path == ["api", "manifest"]:
                 return _json_ok(self, {"ok": True, "data": server.manifest()})
             if path == ["api", "chat"] and method == "POST":
-                reply = server.agent.handle(body.get("message", ""),
-                                            context=body.get("context", "") or "")
+                if self._is_multipart():
+                    fields, files = self._read_multipart()
+                    msg = fields.get("message", "")
+                    ctx = fields.get("context", "")
+                    attachments = self._process_uploads(files)
+                    reply = server.agent.handle(
+                        msg, context=ctx, attachments=attachments or None)
+                else:
+                    reply = server.agent.handle(
+                        body.get("message", ""),
+                        context=body.get("context", "") or "")
                 return _json_ok(self, {"ok": True, "data": reply})
             if path == ["api", "dashboard"] and method == "GET":
                 return _json_ok(self, {"ok": True, "data": server.agent.dashboard()})
@@ -456,6 +609,15 @@ class AstraHandler(BaseHTTPRequestHandler):
                 row = sc.set_enabled(int(path[2]), bool(enabled))
                 return _json_ok(self, {"ok": True, "data": row}) if row else \
                     _json_err(self, "schedule not found", 404)
+
+            # artifact serving: /api/v1/artifacts/{id}/{filename}
+            if (len(path) == 4 and path[:2] == ["api", "artifacts"]
+                    and method == "GET"):
+                return self._serve_artifact(path[2], path[3])
+            # upload serving: /api/v1/uploads/{filename}
+            if (len(path) == 3 and path[:2] == ["api", "uploads"]
+                    and method == "GET"):
+                return self._serve_upload(path[2])
 
             # /api/v1 endpoints (v1 prefix already stripped by _resolve_v1)
             if self._handle_v1(path, method, q, body):
@@ -794,8 +956,8 @@ class AstraServer(ThreadingHTTPServer):
         self.env = (cfg.get("ENV") if cfg else None) or os.environ.get("ENV", "development")
         self.operator_token = (cfg.get("ASTRA_TOKEN") if cfg else None) \
             or os.environ.get("ASTRA_TOKEN") or os.environ.get("ASTRA_API_KEY", "")
-        self.max_body_bytes = int((cfg.getint("ASTRA_MAX_BODY_MB", 10)
-                                   if cfg else 10) * 1024 * 1024)
+        self.max_body_bytes = int((cfg.getint("ASTRA_MAX_BODY_MB", 50)
+                                   if cfg else 50) * 1024 * 1024)
         try:
             rl = (cfg.getint("ASTRA_API_RATE_LIMIT", 300) if cfg else 300)
         except Exception:

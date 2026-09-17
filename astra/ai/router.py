@@ -67,14 +67,9 @@ CREATE TABLE IF NOT EXISTS routing_stats (
 
 TASK_TYPES = ("simple_chat", "reasoning", "research", "coding", "vision",
               "browser", "structured_output", "translation", "summarization",
-              "planning", "tool_selection", "web3")
+              "planning", "tool_selection", "web3",
+              "audio", "video", "image_generation", "multimodal")
 
-# task_type -> capability that a candidate MUST declare (hard filter). Left
-# out: "reasoning" and general task-quality signals, which are a spectrum
-# (handled as a soft score preference via quality_class plus the
-# capability-name coincidence RoutingDecisionPolicy.score already picks up
-# from the task_type fallback) rather than a binary supported/unsupported
-# flag, so hard-excluding on them would be too blunt.
 TASK_HARD_CAPABILITIES = {
     "coding": ("coding",),
     "vision": ("vision",),
@@ -99,7 +94,9 @@ class RoutingRequest:
                  vision: bool = False, reasoning_level: str = "auto",
                  user_preference: str | None = None, max_tokens: int = 500,
                  no_fallback: bool = False, task_contract=None,
-                 evidence: dict | None = None, semantic_verifier=None):
+                 evidence: dict | None = None, semantic_verifier=None,
+                 required_input_modalities: list | None = None,
+                 required_output_modalities: list | None = None):
         self.task_type = task_type
         self.messages = messages or []
         self.preferred_model = preferred_model
@@ -115,18 +112,12 @@ class RoutingRequest:
         self.reasoning_level = reasoning_level
         self.user_preference = user_preference or "balanced"
         self.max_tokens = int(max_tokens or 500)
-        # §11: when True and `preferred_model` is set, a recoverable
-        # failure on that exact target must fail honestly rather than
-        # silently falling back to a different model.
         self.no_fallback = bool(no_fallback)
-        # §1-§8: an OPTIONAL Task Completion Contract (astra.ai.
-        # gateway_task_completion.TaskCompletionContract). None (the
-        # default) means nothing changes about routing/supervision — this
-        # is purely additive and opt-in; a caller who never sets it gets
-        # exactly today's behavior (§9/§36).
         self.task_contract = task_contract
         self.evidence = evidence
         self.semantic_verifier = semantic_verifier
+        self.required_input_modalities = list(required_input_modalities or [])
+        self.required_output_modalities = list(required_output_modalities or [])
 
     def __repr__(self):
         return (f"RoutingRequest(task_type={self.task_type!r}, "
@@ -186,6 +177,14 @@ def classify(text: str) -> str:
     """Task-type classification for a user message (deterministic)."""
     import re
     low = text.lower()
+    if re.search(r"generate\s+(an?\s+)?image|create\s+(an?\s+)?image|draw\s|make\s+(an?\s+)?picture", low):
+        return "image_generation"
+    if re.search(r"generate\s+(an?\s+)?audio|create\s+(an?\s+)?audio|text.to.speech|tts\b", low):
+        return "audio"
+    if re.search(r"generate\s+(an?\s+)?video|create\s+(an?\s+)?video", low):
+        return "video"
+    if re.search(r"\[.*file.*attached\]|\[.*attachment", low):
+        return "multimodal"
     if re.search(r"read|analyse|analyze|research|compare|report|what is|about", low):
         return "research"
     if re.search(r"\b(code|fix|test|debug|refactor|github|repo)\b", low):
@@ -360,9 +359,7 @@ class AstraRouter:
     # -- execution ------------------------------------------------------------
     def _normalize_requirements(self, req: RoutingRequest) -> None:
         """Fill in hard capability requirements implied by task_type, without
-        overriding anything the caller already set explicitly. This is what
-        makes e.g. a vision task_type actually hard-exclude text-only models
-        instead of merely scoring them lower (see TASK_HARD_CAPABILITIES)."""
+        overriding anything the caller already set explicitly."""
         if req.task_type == "vision":
             req.vision = True
         if req.task_type == "structured_output":

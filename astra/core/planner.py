@@ -94,21 +94,23 @@ class Planner:
             return [self._answer(g, "Kichu bollen na. 'help' likhen.")]
         budget_goal = g[:max_goal_chars] if len(g) > max_goal_chars else g
         convo_context = (ctx or {}).get("conversation_context", "")
-        # Every normal request goes through the Gateway -> Provider path.
-        # There is no deterministic/offline tool-matching step here — the
-        # Provider AI is the one that decides which tool(s), if any, the
-        # request needs.
+        attachments = (ctx or {}).get("attachments") or []
+        if attachments:
+            att_desc = ", ".join(
+                f"{a.get('original_filename', a.get('filename', '?'))} "
+                f"({a.get('family', a.get('detected_type', '?'))})"
+                for a in attachments[:10])
+            budget_goal = f"{budget_goal}\n\n[Attached files: {att_desc}]"
         steps = self._ai_steps(budget_goal, max_steps=max_steps,
-                               context=convo_context)
+                               context=convo_context,
+                               attachments=attachments)
         if not steps:
-            # No Provider configured, or the Provider returned nothing
-            # usable even after Gateway verification/correction — a plain
-            # fallback reply, never a picked tool.
             steps = [self._answer(budget_goal)]
         return steps[:max_steps]
 
     # -- LLM-driven planning --------------------------------------------------
-    def _ai_steps(self, g: str, max_steps: int = 6, context: str = "") -> list | None:
+    def _ai_steps(self, g: str, max_steps: int = 6, context: str = "",
+                  attachments: list | None = None) -> list | None:
         if not self.router:
             return None
         # Astra AI Gateway: Request Understanding/Enrichment happens here,
@@ -176,9 +178,19 @@ class Planner:
                 goal="Produce a valid ordered step plan (JSON) for the "
                      "user's goal, or an \"answer\" step if no tool fits.",
                 require_json=True, required_fields=("steps",))
+            required_caps = []
+            if attachments:
+                try:
+                    from astra.ai.capabilities import detect_required_input_capabilities
+                    required_caps = detect_required_input_capabilities(attachments)
+                except ImportError:
+                    pass
             req = RoutingRequest(
                 messages=[{"role": "user", "content": prompt}],
-                task_contract=contract)
+                task_contract=contract,
+                required_capabilities=required_caps or None,
+                vision=any(a.get("family") == "image"
+                           for a in (attachments or [])))
             rr = self.router.route_request(req)
             self.last_completion_status = rr.completion_status
             if not rr.ok or not rr.text:

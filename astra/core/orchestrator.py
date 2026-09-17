@@ -114,17 +114,15 @@ class Orchestrator:
             self.store.install(EXEC_SCHEMA)
 
     # -- lifecycle -----------------------------------------------------------
-    def submit(self, goal: str, sync: bool = False, context: str = "") -> dict:
+    def submit(self, goal: str, sync: bool = False, context: str = "",
+               attachments: list | None = None) -> dict:
         """Start (or directly run) an execution. Returns control record.
 
         `context`, when the caller has it (e.g. the client's own recent
         chat history), is recent Assistant conversation relevant to `goal`.
-        It is stored alongside the execution and handed to the Planner's
-        Astra AI Gateway preprocessing — see Planner.plan/_ai_steps and
-        GatewayRequestIntelligence.process — purely so a short follow-up
-        message can be understood in context. It is never itself treated
-        as a new goal. Optional and empty by default: existing callers are
-        unaffected.
+        `attachments`, when present, is a list of processed attachment dicts
+        from the multimodal upload layer — stored in memory per execution
+        and forwarded to the Planner for capability-aware routing.
         """
         eid = "exec-" + uuid.uuid4().hex[:8]
         self.store.insert("astra_executions", execution_id=eid, goal=goal,
@@ -132,9 +130,13 @@ class Orchestrator:
                           pending_step="", error="",
                           conversation_context=context or "",
                           created_at=_now(), started_at="", completed_at="")
+        if attachments:
+            self._attachments = getattr(self, "_attachments", {})
+            self._attachments[eid] = attachments
         if self.events:
             self.events.emit("agent.started", agent="orchestrator",
-                             execution=eid, goal=goal)
+                             execution=eid, goal=goal,
+                             attachments=len(attachments or []))
         if sync:
             return self.run(eid)
         t = threading.Thread(target=self.run, args=(eid,), daemon=True)
@@ -171,14 +173,16 @@ class Orchestrator:
             agent = self.agents.select(goal, task_type)
             selected_agent = agent.name
 
+        attachments = getattr(self, "_attachments", {}).get(execution_id)
+
         if replan:
-            # dynamic replanning: feed the failure back and drop the dead step
             if self.events:
                 self.events.emit("agent.planning", agent="orchestrator",
                                  execution=execution_id, goal=goal,
                                  replan=True, error=replan_for)
             plan = self.planner.plan(goal, ctx={"replan_for": replan_for,
-                                                "conversation_context": convo_context})
+                                                "conversation_context": convo_context,
+                                                "attachments": attachments})
             plan = [s for s in plan
                     if not (s["id"] in results and results[s["id"]].get("ok"))]
             if not plan:
@@ -189,7 +193,8 @@ class Orchestrator:
                                  execution=execution_id, goal=goal,
                                  specialist=selected_agent or None,
                                  task_type=task_type)
-            plan = self.planner.plan(goal, ctx={"conversation_context": convo_context})
+            plan = self.planner.plan(goal, ctx={"conversation_context": convo_context,
+                                                "attachments": attachments})
             if self.agents:
                 plan = self.agents.decorate(goal, plan, task_type)
             # plan in dependency order so `depends_on` steps run first

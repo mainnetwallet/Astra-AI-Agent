@@ -212,8 +212,9 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
             deadline_callback=lambda: _deadline_events(plugins))
         scheduler.start()
 
-    # chat agent (plugins first, then orchestrator)
-    agent = Agent(plugins, llm=None, orchestrator=orchestrator)
+    # chat agent (plugins first, then orchestrator -> Planner -> Astra AI
+    # Gateway -> Existing Provider System; no direct/raw LLM path exists)
+    agent = Agent(plugins, orchestrator=orchestrator)
 
     return {
         "config": config, "store": store, "plugins": plugins,

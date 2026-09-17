@@ -1,9 +1,16 @@
 """Astra Agent: routes chat text to the right plugin, then the orchestrator
-(multi-step), then the LLM, then a gentle Banglish fallback.
+(Planner -> Astra AI Gateway -> Existing Provider System), then a gentle
+Banglish fallback.
 
 The heart of the agent is deliberately tiny: it walks the loaded plugins in
 order and the first plugin that says "handled=True" answers. Extending the
 assistant never requires editing this file.
+
+Every request a plugin does NOT claim is deterministic, non-AI command
+matching (see astra/core plugin base) — the moment a request needs an AI
+model, it goes through `orchestrator`, which is the only path to the
+Astra AI Gateway / Existing Provider System. There is intentionally no
+raw/direct LLM callable on this class; see the constructor docstring.
 """
 from __future__ import annotations
 
@@ -20,10 +27,17 @@ UNHANDLED_OFFLINE = (
 
 
 class Agent:
-    def __init__(self, plugins: list[Plugin], llm=None, orchestrator=None):
+    def __init__(self, plugins: list[Plugin], orchestrator=None):
         self.plugins = plugins
-        self.llm = llm  # optional callable(message) -> str
         self.orchestrator = orchestrator  # optional multi-step executor
+        # NOTE: there is deliberately no raw/direct LLM callable here. Any
+        # normal request not claimed by a plugin MUST go through
+        # `orchestrator` (Orchestrator -> Planner -> Astra AI Gateway ->
+        # Existing Provider System). A prior version accepted an optional
+        # `llm` callable and would call it directly on orchestrator
+        # failure/absence, which is exactly the kind of legacy bypass path
+        # that lets a normal AI request skip the Gateway. It has been
+        # removed on purpose — do not re-add a direct model call here.
 
     def handle(self, message: str, context: str = "") -> dict:
         """Returns {reply, action, data, ok} exactly as the old single-domain
@@ -55,19 +69,18 @@ class Agent:
                 if handled:
                     return {"reply": reply, "action": action, "data": data or {},
                             "ok": ok}
-        # nobody claimed it -> orchestrator (multi-step) -> LLM -> fallback
+        # nobody claimed it -> orchestrator (Planner -> Astra AI Gateway ->
+        # Existing Provider System) -> fallback. There is no direct-LLM
+        # branch here: an orchestrator failure/absence degrades straight to
+        # the local, non-AI FALLBACK text rather than to any raw model
+        # call, so a normal chat request can never reach an AI model
+        # without passing through the Gateway first.
         if self.orchestrator:
             try:
                 report = self.orchestrator.submit(msg, sync=True, context=context)
                 return self._reply_from_report(msg, report)
             except Exception:
-                pass  # orchestrator failed silently -> llm / fallback
-        if self.llm:
-            try:
-                return {"reply": self.llm(msg), "action": "none", "data": {},
-                        "ok": True}
-            except Exception:
-                pass  # LLM unavailable/broken -> local fallback
+                pass  # orchestrator failed silently -> local fallback
         return {"reply": FALLBACK, "action": "none", "data": {}, "ok": False}
 
     def _reply_from_report(self, message: str, report: dict) -> dict:

@@ -698,13 +698,24 @@ class TestAdapterConfiguration(unittest.TestCase):
         self.assertIsNone(build_providers(config=cfg).get("astra_ai_gateway"))
         self.assertNotIn("astra_ai_gateway", build_providers(config=cfg).names())
 
-    def test_astra_ai_gateway_builder_absent_when_unconfigured(self):
+    def test_astra_ai_gateway_builder_always_returns_the_control_layer(self):
+        """Mandatory-entry fix: the builder must NEVER return None, even
+        fully unconfigured — the Gateway's control/governance layer
+        (routing decisions + Task Completion Contract verification) does
+        not depend on any GW_* connection existing (see the builder's
+        docstring). Only the connection list itself is empty."""
         from astra.ai.gateway import build_astra_ai_gateway
-        self.assertIsNone(build_astra_ai_gateway(config=self._config()))
-        # provider-only credentials do NOT enable the gateway
+        gw = build_astra_ai_gateway(config=self._config())
+        self.assertIsNotNone(gw)
+        self.assertEqual(gw.connections, [])
+        self.assertFalse(gw.is_usable())        # enrichment still fails open
+        self.assertTrue(hasattr(gw, "supervise_task"))   # control layer intact
+        # provider-only credentials still do NOT populate GW_* connections
         cfg = self._config(GEMINI_API_KEYS="fake-key-for-test",
                            GEMINI_MODELS="provider-model")
-        self.assertIsNone(build_astra_ai_gateway(config=cfg))
+        gw2 = build_astra_ai_gateway(config=cfg)
+        self.assertIsNotNone(gw2)
+        self.assertEqual(gw2.connections, [])
 
     def test_astra_ai_gateway_attached_for_reporting_only_not_a_provider(self):
         """The gateway, when configured, is reachable only via

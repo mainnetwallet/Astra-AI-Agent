@@ -960,24 +960,57 @@ class AstraAIGateway:
 
 
 def build_astra_ai_gateway(config=None, store=None,
-                          events=None) -> AstraAIGateway | None:
-    """Build the Astra AI Gateway iff at least one connection is configured.
+                          events=None) -> "AstraAIGateway":
+    """Build the Astra AI Gateway — always, unconditionally.
 
-    Returns None when no GW_* connection credentials are set, mirroring the
-    old "unconfigured means absent" convention. The returned object is the
-    router's `gateway`; it is never added to ProviderRegistry.
+    Mandatory-entry fix: this used to return `None` when no GW_* connection
+    credentials were configured, which silently removed the ENTIRE Gateway
+    control layer from the router (`AstraRouter.gateway is None` skips
+    `_route_via_gateway` completely — no target selection/recovery, no
+    Task Completion Contract verification/correction at all, for every
+    request, forever, on a totally ordinary "nobody set GW_GEMINI_API_KEYS"
+    deployment). That conflated two independent things:
 
-    `store`, when given, is the project's existing SQLite Store — used only
-    to persist last-successful-target and per-model health (§14) across
-    restarts; no new database is introduced, and no credentials are ever
-    written to it.
+      1. The Gateway's own GW_* AI connections — used ONLY by
+         `GatewayRequestIntelligence` to enrich/rewrite the raw request
+         text. Genuinely optional: enrichment fails open to the original
+         text when no connection is configured (see `process()` below),
+         because improving wording needs an actual model call.
+      2. The Gateway's control/governance layer — `select_execution_target`/
+         `recover_execution_target` (routing decisions) and `supervise_task`
+         (Task Completion Contract verify/correct/re-verify). NONE of this
+         needs a GW_* connection: it is deterministic contract logic plus
+         calls back through the CALLER's own `ProviderExecutionPort` into
+         the Existing Provider System (`self.connections` is never touched
+         by any of `execution_recovery`/`result_supervision`/
+         `task_completion` — see `AstraAIGateway.__init__` below).
+
+    So (2) — the actual "Astra AI Gateway is the mandatory entry/control
+    point for every normal user request" requirement — must never depend
+    on whether anyone happened to configure (1). This builder therefore
+    always returns a real `AstraAIGateway` instance; `gw.connections` is
+    simply `[]` when unconfigured, `gw.is_usable()` is `False` (so request
+    enrichment still, correctly, passes text through unchanged), and
+    `gateway_health()` still reports `"not_configured"` for zero
+    connections exactly as before this fix — but `AstraRouter.gateway` is
+    never `None`, so `route_request()` always goes through
+    `_route_via_gateway` and any request carrying a `task_contract` always
+    gets real Gateway-owned verification. See `AstraRouter.route_request`
+    for the second half of this fix (a `task_contract` with no Gateway at
+    all now fails closed instead of silently skipping verification — that
+    combination is what actually cannot happen once this builder never
+    returns `None`, but the check stays there as a defense-in-depth
+    safety net for any future caller that constructs `AstraRouter` without
+    wiring this builder's result in).
+
+    `store`, when given, is the project's existing SQLite Store — used
+    only to persist last-successful-target and per-model health (§14)
+    across restarts; no new database is introduced, and no credentials
+    are ever written to it.
     """
     from astra.core.config import Config
     config = config or Config()
-    gw = AstraAIGateway(config=config, store=store, events=events)
-    if not gw.connections:
-        return None
-    return gw
+    return AstraAIGateway(config=config, store=store, events=events)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

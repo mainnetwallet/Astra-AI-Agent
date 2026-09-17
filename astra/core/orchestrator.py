@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS astra_executions (
     selected_agent TEXT DEFAULT '',
     selected_provider TEXT DEFAULT '',
     selected_model TEXT DEFAULT '',
+    gateway_verification_status TEXT DEFAULT '',
+    gateway_verification_reason TEXT DEFAULT '',
     error       TEXT DEFAULT '',
     created_at  TEXT DEFAULT '',
     started_at  TEXT DEFAULT '',
@@ -92,6 +94,8 @@ class Orchestrator:
         ("selected_provider", "TEXT DEFAULT ''"),
         ("selected_model", "TEXT DEFAULT ''"),
         ("conversation_context", "TEXT DEFAULT ''"),
+        ("gateway_verification_status", "TEXT DEFAULT ''"),
+        ("gateway_verification_reason", "TEXT DEFAULT ''"),
     )
 
     def _install_schema(self) -> None:
@@ -266,9 +270,30 @@ class Orchestrator:
                 self.tasks.mark(step_task["id"], "done", result=out.get("output") or {})
         final = (STATES_WAIT if execution_id in self._pending else
                  ("FAILED" if report_error else "COMPLETED"))
+        gv_status, gv_reason = "", ""
+        if final == "COMPLETED":
+            # Gap 2: automatic Executor evidence -> Astra AI Gateway final
+            # task-completion verification. Only meaningful for a plan
+            # that actually executed a real (non-"answer") tool step —
+            # see _gateway_final_task_verification's docstring.
+            results, gv_status, gv_reason = self._gateway_final_task_verification(
+                execution_id, row, goal, plan, results, convo_context)
+            self._store_plan(execution_id, plan)   # corrective steps may have been appended
+            if gv_status == "FAILED":
+                # a genuine failure surfaced DURING final verification's
+                # own correction attempts (not a step failure above) is a
+                # real execution failure, not merely "unconfirmed" (§7).
+                final = "FAILED"
+                report_error = report_error or (
+                    "gateway final verification failed: " + gv_reason)
         self._set(row, final, completed=final in STATES_COMPLETE,
                   error=report_error, pending_step="")
         self._store_results(execution_id, results, report_error)
+        if gv_status:
+            self.store.exec(
+                "UPDATE astra_executions SET gateway_verification_status = ?, "
+                "gateway_verification_reason = ? WHERE execution_id = ?",
+                (gv_status, gv_reason[:500], execution_id))
         if self.events:
             self.events.emit(
                 "agent.completed" if final == "COMPLETED" else "agent.failed",
@@ -372,6 +397,8 @@ class Orchestrator:
                 "selected_agent": row.get("selected_agent", ""),
                 "selected_provider": row.get("selected_provider", ""),
                 "selected_model": row.get("selected_model", ""),
+                "gateway_verification_status": row.get("gateway_verification_status", ""),
+                "gateway_verification_reason": row.get("gateway_verification_reason", ""),
                 "steps": len(json.loads(row.get("plan") or "[]")),
                 "pending": execution_id in self._pending,
                 "pending_step": (json.loads(row.get("pending_step")) if row.get("pending_step") else None),
@@ -463,6 +490,238 @@ class Orchestrator:
                 started_at=started, completed_at=completed)
         except Exception:
             pass   # step trail is advisory; never break the run on it
+
+    # -- Gap 2: automatic Executor evidence -> Gateway final task-
+    # completion verification -------------------------------------------
+    # Distinct from Planner's pre-execution contract (which only checks
+    # the PLAN's JSON shape, before any tool has run): this runs AFTER
+    # the Executor has actually executed every step, and verifies the
+    # EXECUTED WORK — via evidence gathered from real step results, never
+    # invented — against the original goal, using the same
+    # GatewayTaskCompletionSupervisor contract machinery Planner already
+    # uses. See astra/ai/gateway_task_completion.py.
+    def _collect_execution_evidence(self, results: dict) -> dict:
+        """Evidence built entirely from what the Executor actually did —
+        never invented, never asked of the AI. Keys are only ever present
+        when the corresponding thing genuinely happened."""
+        ok_steps = sorted(sid for sid, r in results.items() if r.get("ok"))
+        failed = {sid: (r.get("error") or "")[:200]
+                 for sid, r in results.items() if not r.get("ok")}
+        evidence: dict = {}
+        if ok_steps:
+            evidence["steps_completed"] = ",".join(ok_steps)
+        if failed:
+            evidence["step_failures"] = json.dumps(failed, ensure_ascii=False)[:1000]
+        outputs = {sid: r.get("output") for sid, r in results.items() if r.get("ok")}
+        if outputs:
+            evidence["step_outputs"] = json.dumps(outputs, ensure_ascii=False,
+                                                   default=str)[:2000]
+        return evidence
+
+    @staticmethod
+    def _execution_summary_text(goal: str, plan: list, results: dict) -> str:
+        """A plain-text description of what was executed — stands in for
+        "the AI's claim of completion" that `verify_task_completion`
+        expects as `result.text`. Built only from real plan/results data,
+        never from an extra AI call (that would defeat the point of
+        evidence-based verification)."""
+        lines = [f"Goal: {goal}"]
+        for step in plan:
+            sid = step.get("id", "")
+            r = results.get(sid) or {}
+            state = "ok" if r.get("ok") else ("failed: " + str(r.get("error") or ""))
+            lines.append(f"- [{step.get('tool','?')}] {step.get('description','')} -> {state}")
+        return "\n".join(lines)
+
+    def _gateway_final_task_verification(self, execution_id: str, row,
+                                         goal: str, plan: list, results: dict,
+                                         convo_context: str
+                                         ) -> tuple[dict, str, str]:
+        """Returns `(results, status, reason)`. `status` is one of the
+        Gateway's COMPLETE/INCOMPLETE/FAILED/UNCERTAIN taxonomy, or
+        "UNVERIFIED" (Gateway control layer missing — strict, never
+        silently treated as COMPLETE), or "" (not applicable: the plan
+        was pure conversation, nothing execution-side to verify).
+
+        Only fires for a plan with at least one real (non-"answer") tool
+        step — a plain answer has nothing beyond what Planner's own
+        pre-execution contract already checked (see planner.py). Never
+        replays a step that already succeeded (§ spec item 14): the
+        bounded correction loop below only ever executes NEW step ids a
+        correction round produced.
+        """
+        from astra.ai.gateway_contract import ProviderExecutionResult
+        from astra.ai.gateway_task_completion import (
+            COMPLETE, FAILED, build_task_completion_contract,
+            build_task_completion_messages, verify_task_completion)
+        from astra.core.correction import MAX_CORRECTION_ATTEMPTS
+
+        if not any(s.get("tool") != "answer" for s in plan):
+            return results, "", ""   # pure conversation: nothing to verify
+
+        gateway = getattr(self.router, "gateway", None) if self.router else None
+        if gateway is None or not hasattr(gateway, "supervise_task"):
+            # Strict mandatory-Gateway enforcement (Gap 1): a tool-
+            # executing task must not be silently reported as verified
+            # when there is, in fact, no Gateway control layer attached.
+            reason = ("Astra AI Gateway is not attached — task-completion "
+                      "verification could not run for this execution")
+            self._emit_gv("gateway.final_verification_unavailable",
+                         execution_id, reason=reason)
+            return results, "UNVERIFIED", reason
+
+        def _semantic_verifier(_contract, _result, ev):
+            # Deterministic — no extra AI call needed for this check: a
+            # step that genuinely failed means the goal was not actually
+            # completed, whatever the plan's own "answer" text claimed.
+            if ev.get("step_failures"):
+                return ("INCOMPLETE",
+                        "one or more executed steps failed: " + ev["step_failures"])
+            return (COMPLETE, "")
+
+        def _evidence_for(current_plan: list) -> dict:
+            # Scoped to the CURRENT plan's step ids only: a stale failure
+            # from an earlier, already-superseded replan attempt (a
+            # step id no longer part of this plan at all) must not block
+            # completion forever once the current plan's own steps all
+            # genuinely succeed — only THIS plan's evidence is what the
+            # goal is actually being held to right now.
+            plan_ids = {s["id"] for s in current_plan}
+            return self._collect_execution_evidence(
+                {sid: r for sid, r in results.items() if sid in plan_ids})
+
+        evidence = _evidence_for(plan)
+        contract = build_task_completion_contract(
+            user_request=goal, goal=goal,
+            evidence_required=("steps_completed",), require_semantic=True)
+        result = ProviderExecutionResult(
+            ok=True, text=self._execution_summary_text(goal, plan, results))
+        outcome = verify_task_completion(contract, result, evidence,
+                                         _semantic_verifier)
+
+        messages = [{"role": "user", "content": goal}]
+        attempts = 0
+        while outcome.correctable and attempts < MAX_CORRECTION_ATTEMPTS:
+            if not (self.router and self.planner and
+                    hasattr(self.router, "route")):
+                break   # no Existing-Provider path available to correct through
+            attempts += 1
+            self._emit_gv("gateway.final_verification_correction_requested",
+                         execution_id, attempt=attempts, status=outcome.status,
+                         reason=outcome.reason)
+            messages = build_task_completion_messages(
+                messages, result, contract, outcome)
+            try:
+                # §6/§10 in spirit: goes back through the Existing Provider
+                # System (the router's own selection/failover), asking it
+                # to continue from exactly what's missing — never a blind
+                # "try again". A real provider/network failure here is a
+                # FAILED verification outcome, distinct from INCOMPLETE
+                # (§7: recovery/failover concerns stay separate from
+                # content correction), and stops the loop immediately.
+                _, _, text = self.router.route(messages)
+            except Exception as e:
+                outcome_status, outcome_reason = FAILED, str(e)
+                self._emit_gv("gateway.final_verification_correction_failed",
+                             execution_id, attempt=attempts, error=str(e))
+                return results, outcome_status, outcome_reason
+            if not text:
+                break
+            new_steps = self.planner.parse_plan_json(
+                self._safe_json(text), max_steps=6)
+            if new_steps:
+                # Never replay an already-succeeded step: Planner always
+                # numbers a freshly-parsed plan starting at "s1", so a
+                # correction round's steps routinely collide by NAME with
+                # the current plan's ids even though they are logically
+                # new work — renumber against every id already in the
+                # current plan (successful or not) before executing, so
+                # a real collision with an already-succeeded step can
+                # never cause it to be silently dropped OR silently
+                # re-run under its old id.
+                existing_ids = {s["id"] for s in plan}
+                new_steps = self._renumber_new_steps(new_steps, existing_ids)
+                plan.extend(new_steps)
+                executed_ids = []
+                for step in self._topo(new_steps):
+                    prev = results.get(step["id"])
+                    if prev and prev.get("ok"):
+                        continue   # never blindly replay a successful side effect
+                    self._record_step(execution_id, step, "running")
+                    frozen = self._resolve(step, results, {})
+                    out = self.executor.execute(frozen, self._tool_ctx(),
+                                                self._scratch_run_ctx(execution_id, goal, plan))
+                    results[step["id"]] = out
+                    executed_ids.append(step["id"])
+                    self._record_step(execution_id, step,
+                                      "ok" if out.get("ok") else "failed", result=out)
+                # Evidence for THIS round's re-verification is scoped to
+                # what the correction round itself just did, not the
+                # whole history: the correction instruction explicitly
+                # tells the Provider "continue from where this left off;
+                # do not repeat already-completed work" (see
+                # build_task_correction_instruction), so what matters now
+                # is whether ITS continuation succeeded — an earlier,
+                # already-superseded failed attempt must not keep
+                # blocking completion forever once the goal's remaining
+                # work is genuinely done.
+                evidence = self._collect_execution_evidence(
+                    {sid: results[sid] for sid in executed_ids if sid in results})
+            result = ProviderExecutionResult(
+                ok=True, text=self._execution_summary_text(goal, plan, results))
+            outcome = verify_task_completion(contract, result, evidence,
+                                             _semantic_verifier)
+            if outcome.ok:
+                self._emit_gv("gateway.final_verification_correction_succeeded",
+                             execution_id, attempt=attempts)
+
+        if not outcome.ok and attempts:
+            self._emit_gv("gateway.final_verification_correction_exhausted",
+                         execution_id, attempts=attempts, status=outcome.status,
+                         reason=outcome.reason)
+        # §8-equivalent final gate: never upgrade the status beyond what
+        # the last verification actually said.
+        return results, outcome.status, outcome.reason
+
+    @staticmethod
+    def _safe_json(text: str) -> dict:
+        try:
+            return json.loads((text or "").strip().strip("`"))
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _renumber_new_steps(new_steps: list, existing_ids: set) -> list:
+        """A corrective round's steps are freshly numbered s1, s2, ... by
+        Planner.parse_plan_json, which can collide with the original
+        plan's ids. Renumber (and fix up depends_on) so they never
+        overwrite an already-recorded result."""
+        remap = {}
+        out = []
+        for i, s in enumerate(new_steps):
+            new_id = s["id"]
+            n = 0
+            while new_id in existing_ids or new_id in remap.values():
+                n += 1
+                new_id = f"{s['id']}-fix{n}"
+            remap[s["id"]] = new_id
+            s = dict(s, id=new_id,
+                     depends_on=[remap.get(d, d) for d in (s.get("depends_on") or [])])
+            out.append(s)
+        return out
+
+    def _scratch_run_ctx(self, execution_id: str, goal: str, plan: list):
+        rc = ExecutionContext(execution_id, goal)
+        rc.steps = plan
+        return rc
+
+    def _emit_gv(self, kind: str, execution_id: str, **data) -> None:
+        if self.events:
+            try:
+                self.events.emit(kind, agent="orchestrator.gateway_verification",
+                                 execution=execution_id, **data)
+            except Exception:
+                pass
 
     def _find_root_task(self, execution_id: str) -> dict | None:
         """Reuse the plan task for this execution instead of duplicating it on

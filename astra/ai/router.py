@@ -375,6 +375,27 @@ class AstraRouter:
     def route_request(self, req: RoutingRequest) -> RoutingResult:
         self._normalize_requirements(req)
         self._emit("router.request", task=req.task_type)
+        # Strict mandatory-Gateway enforcement (Gap 1 defense-in-depth):
+        # `req.task_contract` is how a caller (Planner, or the post-
+        # execution final-verification pass in Orchestrator) declares
+        # "this is a normal AI request that MUST be Gateway-verified."
+        # `build_astra_ai_gateway` now always returns a real Gateway
+        # instance in production (see its docstring), so `self.gateway`
+        # being None here should never actually happen for a real
+        # deployment — but if some caller ever constructs an AstraRouter
+        # without wiring a Gateway in at all, a contract-bearing request
+        # must fail closed and say so, not silently fall through to the
+        # plain loop below and report a false, unverified "ok=True".
+        # A plain request with no contract (task_contract is None) is
+        # completely unaffected — that is today's behavior, unchanged.
+        if req.task_contract is not None and self.gateway is None:
+            return RoutingResult(
+                ok=False,
+                error="Astra AI Gateway is not attached to this router: a "
+                      "task-completion-verified request cannot be routed "
+                      "without the mandatory Gateway control layer",
+                requested_provider=req.preferred_provider or "",
+                requested_model=req.preferred_model or "")
         candidates = self._candidates(req)
         if not candidates:
             return RoutingResult(ok=False, error="no eligible provider/model available",

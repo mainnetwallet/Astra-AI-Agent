@@ -176,22 +176,32 @@ class Planner:
                 if not text:
                     return None
             data = json.loads(text.strip().strip("`"))
-            steps = []
-            issued: set[str] = set()
-            for s in data.get("steps", [])[:max_steps]:
-                tool = s.get("tool") or "answer"
-                if tool not in (self.tools or []) + ["answer"]:
-                    tool = "answer"
-                deps = [d for d in (s.get("depends_on") or [])
-                        if isinstance(d, str) and d in issued]
-                steps.append(self._step("s%d" % (len(issued) + 1), tool,
-                                        s.get("params") or {},
-                                        s.get("description", ""),
-                                        depends_on=deps))
-                issued.add(steps[-1]["id"])
-            return steps or None
+            return self.parse_plan_json(data, max_steps=max_steps) or None
         except Exception:
             return None
+
+    def parse_plan_json(self, data: dict, max_steps: int = 6) -> list[dict]:
+        """Turn an already-JSON-decoded `{"steps":[...]}` payload into
+        executor-ready step dicts (tool allowlist, dependency filtering,
+        id issuance) — the same logic `_ai_steps` uses for the initial
+        plan, factored out so a post-execution Gateway correction
+        round-trip (Orchestrator._gateway_final_task_verification) can
+        turn a corrective AI reply into additional steps without
+        duplicating this parsing."""
+        steps = []
+        issued: set[str] = set()
+        for s in (data.get("steps", []) if isinstance(data, dict) else [])[:max_steps]:
+            tool = s.get("tool") or "answer"
+            if tool not in (self.tools or []) + ["answer"]:
+                tool = "answer"
+            deps = [d for d in (s.get("depends_on") or [])
+                    if isinstance(d, str) and d in issued]
+            steps.append(self._step("s%d" % (len(issued) + 1), tool,
+                                    s.get("params") or {},
+                                    s.get("description", ""),
+                                    depends_on=deps))
+            issued.add(steps[-1]["id"])
+        return steps
 
     # -- step factory ---------------------------------------------------------
     @staticmethod

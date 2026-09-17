@@ -179,18 +179,42 @@ class Planner:
                      "user's goal, or an \"answer\" step if no tool fits.",
                 require_json=True, required_fields=("steps",))
             required_caps = []
+            required_output_mods = []
+            has_vision = False
             if attachments:
                 try:
                     from astra.ai.capabilities import detect_required_input_capabilities
                     required_caps = detect_required_input_capabilities(attachments)
                 except ImportError:
                     pass
+                has_vision = any(a.get("family") == "image"
+                                 for a in attachments)
+            try:
+                from astra.ai.capabilities import detect_required_output_capabilities
+                from astra.ai.capabilities import OUTPUT_TEXT
+                out_caps = detect_required_output_capabilities(enriched_goal)
+                required_output_mods = [
+                    c.replace("_generation", "")
+                    for c in out_caps if c != OUTPUT_TEXT]
+            except ImportError:
+                pass
+            msg_content = prompt
+            if attachments:
+                try:
+                    from astra.ai.multimodal_messages import (
+                        build_multimodal_content, has_inline_content)
+                    if has_inline_content(attachments):
+                        msg_content = build_multimodal_content(prompt, attachments)
+                except ImportError:
+                    pass
             req = RoutingRequest(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": msg_content}],
                 task_contract=contract,
                 required_capabilities=required_caps or None,
-                vision=any(a.get("family") == "image"
-                           for a in (attachments or [])))
+                required_input_modalities=(
+                    ["image"] if has_vision else []),
+                required_output_modalities=required_output_mods or None,
+                vision=has_vision)
             rr = self.router.route_request(req)
             self.last_completion_status = rr.completion_status
             if not rr.ok or not rr.text:

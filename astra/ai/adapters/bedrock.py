@@ -185,8 +185,9 @@ class BedrockAdapter(AIProvider):
 
     # -- Converse shapes ------------------------------------------------------
     def _converse_body(self, messages, model, max_tokens) -> dict:
-        system = "\n".join(m.get("content", "") for m in messages
-                           if m.get("role") == "system")
+        system = "\n".join(
+            m.get("content", "") for m in messages
+            if m.get("role") == "system" and isinstance(m.get("content"), str))
         convo = []
         for m in messages:
             if m.get("role") == "system":
@@ -194,8 +195,7 @@ class BedrockAdapter(AIProvider):
             role = "assistant" if m.get("role") == "assistant" else "user"
             content = m.get("content", "")
             if isinstance(content, list):
-                blocks = [{"text": (b.get("text") if isinstance(b, dict) else str(b))}
-                          for b in content]
+                blocks = self._converse_content_blocks(content)
             else:
                 blocks = [{"text": str(content)}]
             convo.append({"role": role, "content": blocks})
@@ -204,6 +204,35 @@ class BedrockAdapter(AIProvider):
         if system:
             body["system"] = [{"text": system}]
         return body
+
+    @staticmethod
+    def _converse_content_blocks(content_parts: list) -> list:
+        blocks = []
+        for part in content_parts:
+            if not isinstance(part, dict):
+                blocks.append({"text": str(part)})
+                continue
+            if part.get("type") == "text":
+                blocks.append({"text": part.get("text", "")})
+            elif part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+                if url.startswith("data:"):
+                    import base64 as b64mod
+                    header, _, b64data = url.partition(",")
+                    mime = header.split(";")[0].replace("data:", "")
+                    fmt = "png" if "png" in mime else "jpeg" if "jpeg" in mime else \
+                          "gif" if "gif" in mime else "webp" if "webp" in mime else "png"
+                    try:
+                        raw = b64mod.b64decode(b64data)
+                        blocks.append({"image": {"format": fmt,
+                                                  "source": {"bytes": raw}}})
+                    except Exception:
+                        blocks.append({"text": "[image decode failed]"})
+                else:
+                    blocks.append({"text": f"[image: {url}]"})
+            else:
+                blocks.append({"text": part.get("text", str(part))})
+        return blocks or [{"text": ""}]
 
     def chat(self, messages, model=None, max_tokens=500) -> str:
         model = model or (self.models[0] if self.models else "")

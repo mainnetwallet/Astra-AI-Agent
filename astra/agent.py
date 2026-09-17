@@ -82,9 +82,13 @@ class Agent:
         return {"reply": FALLBACK, "action": "none", "data": {}, "ok": False}
 
     def _reply_from_report(self, message: str, report: dict) -> dict:
-        """Turn an orchestration report into {reply, action, data, ok} like a
-        plugin would. Real tool steps -> ok True + compact summary; a pure
-        'answer' step -> its text with ok False (unhandled by plugins)."""
+        """Turn an orchestration report into {reply, action, data, ok, artifacts}
+        like a plugin would. Real tool steps -> ok True + compact summary; a
+        pure 'answer' step -> its text with ok False (unhandled by plugins).
+
+        When the response contains generated artifacts (images, code blocks,
+        data files), they are extracted, stored, validated, and returned in
+        the 'artifacts' list for the frontend to render."""
         results = report.get("results") or {}
         real, lines = 0, []
         for sid, out in results.items():
@@ -108,16 +112,47 @@ class Agent:
             status = "COMPLETED" if report.get("status") == "COMPLETED" else \
                 ("FAILED" if report.get("status") == "FAILED" else report.get("status"))
             head = f"📋 Plan complete ({status}) — {report.get('steps', 0)} step:\n"
-            return {"reply": head + "\n".join(lines), "action": "live",
-                    "data": report, "ok": status == "COMPLETED"}
-        # pure answer step -> keep the gentle unknown-fallback contract
+            reply = head + "\n".join(lines)
+            artifacts = self._extract_response_artifacts(message, results)
+            return {"reply": reply, "action": "live",
+                    "data": report, "ok": status == "COMPLETED",
+                    "artifacts": artifacts}
         for sid, out in results.items():
             if out.get("tool") == "answer":
                 text = (out.get("output") or {}).get("text", "") or UNHANDLED_OFFLINE
+                artifacts = self._extract_response_artifacts(message, results)
                 return {"reply": text, "action": "none", "data": report,
-                        "ok": False}
+                        "ok": False, "artifacts": artifacts}
         return {"reply": UNHANDLED_OFFLINE, "action": "none", "data": report,
-                "ok": False}
+                "ok": False, "artifacts": []}
+
+    def _extract_response_artifacts(self, message: str,
+                                     results: dict) -> list[dict]:
+        """Extract artifacts from provider responses when applicable."""
+        try:
+            from astra.ai.artifact_extraction import (
+                extract_artifacts, detect_output_type)
+            from astra.core.artifacts import make_artifact_dir
+            import tempfile
+            requested = detect_output_type(message)
+            if not requested:
+                return []
+            artifact_dir = make_artifact_dir(
+                tempfile.gettempdir() + "/astra")
+            artifacts = []
+            for sid, out in results.items():
+                text = ""
+                output = out.get("output") or {}
+                if isinstance(output, dict):
+                    text = output.get("text", "")
+                elif isinstance(output, str):
+                    text = output
+                if text:
+                    found = extract_artifacts(text, artifact_dir, requested)
+                    artifacts.extend(found)
+            return artifacts
+        except Exception:
+            return []
 
     def help_text(self) -> str:
         """Concatenated help from every plugin that offers one."""

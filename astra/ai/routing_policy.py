@@ -107,6 +107,13 @@ def meets_hard_requirements(model: Model, request) -> bool:
         model_input = set(getattr(model, "input_modalities", ["text"]))
         if not req_input_mods.issubset(model_input):
             return False
+    # Multimodal output modality check: if the request requires specific
+    # output modalities (e.g. image generation), the model must support them.
+    req_output_mods = set(getattr(request, "required_output_modalities", []) or [])
+    if req_output_mods:
+        model_output = set(getattr(model, "output_modalities", ["text"]))
+        if not req_output_mods.issubset(model_output):
+            return False
     return True
 
 

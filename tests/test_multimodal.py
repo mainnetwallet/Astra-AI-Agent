@@ -538,5 +538,165 @@ class TestRoutingPolicyModality(unittest.TestCase):
         self.assertTrue(meets_hard_requirements(model, req))
 
 
+class TestMultimodalMessages(unittest.TestCase):
+    """Multimodal message builder produces correct content parts."""
+
+    def test_text_only_returns_string(self):
+        from astra.ai.multimodal_messages import build_multimodal_content
+        result = build_multimodal_content("hello", [])
+        self.assertEqual(result, "hello")
+
+    def test_image_attachment_produces_image_url_part(self):
+        from astra.ai.multimodal_messages import build_multimodal_content
+        data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(data)
+            path = f.name
+        try:
+            att = [{"family": "image", "storage_path": path,
+                    "detected_type": "image/png", "filename": "test.png"}]
+            result = build_multimodal_content("describe this", att)
+            self.assertIsInstance(result, list)
+            types = [p["type"] for p in result]
+            self.assertIn("text", types)
+            self.assertIn("image_url", types)
+            img_part = [p for p in result if p["type"] == "image_url"][0]
+            self.assertTrue(
+                img_part["image_url"]["url"].startswith("data:image/png;base64,"))
+        finally:
+            os.unlink(path)
+
+    def test_text_document_inlined(self):
+        from astra.ai.multimodal_messages import build_multimodal_content
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
+            f.write("Hello world content")
+            path = f.name
+        try:
+            att = [{"family": "text", "storage_path": path,
+                    "detected_type": "text/plain", "filename": "doc.txt",
+                    "extension": ".txt", "original_filename": "doc.txt"}]
+            result = build_multimodal_content("read this", att)
+            self.assertIsInstance(result, list)
+            texts = [p["text"] for p in result if p.get("type") == "text"]
+            combined = " ".join(texts)
+            self.assertIn("Hello world content", combined)
+        finally:
+            os.unlink(path)
+
+    def test_has_inline_content_checks_file(self):
+        from astra.ai.multimodal_messages import has_inline_content
+        self.assertFalse(has_inline_content([]))
+        self.assertFalse(has_inline_content(
+            [{"storage_path": "/nonexistent/file.png"}]))
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"data")
+            path = f.name
+        try:
+            self.assertTrue(has_inline_content([{"storage_path": path}]))
+        finally:
+            os.unlink(path)
+
+
+class TestArtifactExtraction(unittest.TestCase):
+    """Artifact extraction from provider responses."""
+
+    def test_extract_base64_image(self):
+        from astra.ai.artifact_extraction import extract_artifacts
+        import base64
+        img_data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+        b64 = base64.b64encode(img_data).decode()
+        text = f"Here is the image: data:image/png;base64,{b64}"
+        with tempfile.TemporaryDirectory() as tmp:
+            arts = extract_artifacts(text, tmp)
+            self.assertEqual(len(arts), 1)
+            self.assertTrue(arts[0].get("validated"))
+
+    def test_extract_json_code_block(self):
+        from astra.ai.artifact_extraction import extract_artifacts
+        text = '```json\n{"key": "value", "count": 42}\n```'
+        with tempfile.TemporaryDirectory() as tmp:
+            arts = extract_artifacts(text, tmp, requested_output="data")
+            self.assertEqual(len(arts), 1)
+
+    def test_no_artifacts_for_plain_text(self):
+        from astra.ai.artifact_extraction import extract_artifacts
+        with tempfile.TemporaryDirectory() as tmp:
+            arts = extract_artifacts("Just a normal response", tmp)
+            self.assertEqual(len(arts), 0)
+
+    def test_detect_output_type(self):
+        from astra.ai.artifact_extraction import detect_output_type
+        self.assertEqual(detect_output_type("generate an image of a cat"), "image")
+        self.assertEqual(detect_output_type("create audio narration"), "audio")
+        self.assertEqual(detect_output_type("export a xlsx report"), "spreadsheet")
+        self.assertEqual(detect_output_type("hello"), "")
+
+
+class TestOutputModalityRouting(unittest.TestCase):
+    """Output modality filtering in routing policy."""
+
+    def test_rejects_text_only_for_image_generation(self):
+        from astra.ai.routing_policy import meets_hard_requirements
+        model = Model("groq", "llama-70b", capabilities=["chat"],
+                       input_modalities=["text"],
+                       output_modalities=["text"])
+        req = RoutingRequest(required_output_modalities=["image"])
+        self.assertFalse(meets_hard_requirements(model, req))
+
+    def test_accepts_image_gen_model(self):
+        from astra.ai.routing_policy import meets_hard_requirements
+        model = Model("openai", "dall-e-3", capabilities=["chat"],
+                       input_modalities=["text"],
+                       output_modalities=["text", "image"])
+        req = RoutingRequest(required_output_modalities=["image"])
+        self.assertTrue(meets_hard_requirements(model, req))
+
+
+class TestBedrockMultimodalConverse(unittest.TestCase):
+    """Bedrock adapter converts multimodal content to Converse format."""
+
+    def test_text_only_unchanged(self):
+        from astra.ai.adapters.bedrock import BedrockAdapter
+        adapter = BedrockAdapter.__new__(BedrockAdapter)
+        body = adapter._converse_body(
+            [{"role": "user", "content": "hello"}], "model", 500)
+        self.assertEqual(body["messages"][0]["content"], [{"text": "hello"}])
+
+    def test_image_content_parts(self):
+        from astra.ai.adapters.bedrock import BedrockAdapter
+        import base64
+        img = b"\x89PNG" + b"\x00" * 50
+        b64 = base64.b64encode(img).decode()
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {
+                "url": f"data:image/png;base64,{b64}"}}
+        ]}]
+        adapter = BedrockAdapter.__new__(BedrockAdapter)
+        body = adapter._converse_body(messages, "model", 500)
+        blocks = body["messages"][0]["content"]
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(blocks[0], {"text": "describe"})
+        self.assertIn("image", blocks[1])
+        self.assertEqual(blocks[1]["image"]["format"], "png")
+
+
+class TestOutputCapabilityDetection(unittest.TestCase):
+    """Output capability detection feeds into routing."""
+
+    def test_image_generation_detected(self):
+        caps = detect_required_output_capabilities("generate an image of a sunset")
+        self.assertIn(OUTPUT_IMAGE, caps)
+
+    def test_audio_generation_detected(self):
+        caps = detect_required_output_capabilities("create audio narration")
+        self.assertIn(OUTPUT_AUDIO, caps)
+
+    def test_plain_text_no_special_output(self):
+        caps = detect_required_output_capabilities("what is the weather today")
+        self.assertNotIn(OUTPUT_IMAGE, caps)
+        self.assertNotIn(OUTPUT_AUDIO, caps)
+
+
 if __name__ == "__main__":
     unittest.main()

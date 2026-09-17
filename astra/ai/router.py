@@ -98,7 +98,8 @@ class RoutingRequest:
                  structured_output: bool = False, streaming: bool = False,
                  vision: bool = False, reasoning_level: str = "auto",
                  user_preference: str | None = None, max_tokens: int = 500,
-                 no_fallback: bool = False):
+                 no_fallback: bool = False, task_contract=None,
+                 evidence: dict | None = None, semantic_verifier=None):
         self.task_type = task_type
         self.messages = messages or []
         self.preferred_model = preferred_model
@@ -118,6 +119,14 @@ class RoutingRequest:
         # failure on that exact target must fail honestly rather than
         # silently falling back to a different model.
         self.no_fallback = bool(no_fallback)
+        # §1-§8: an OPTIONAL Task Completion Contract (astra.ai.
+        # gateway_task_completion.TaskCompletionContract). None (the
+        # default) means nothing changes about routing/supervision — this
+        # is purely additive and opt-in; a caller who never sets it gets
+        # exactly today's behavior (§9/§36).
+        self.task_contract = task_contract
+        self.evidence = evidence
+        self.semantic_verifier = semantic_verifier
 
     def __repr__(self):
         return (f"RoutingRequest(task_type={self.task_type!r}, "
@@ -135,7 +144,7 @@ class RoutingResult:
                  fallback_used: bool = False, route_reason: dict | None = None,
                  ok: bool = False, error: str = "", _reason: str = "",
                  requested_provider: str = "", requested_model: str = "",
-                 fallback_reason: str = ""):
+                 fallback_reason: str = "", completion_status: str = ""):
         self.provider = provider
         self.model = model
         self.text = text
@@ -154,6 +163,12 @@ class RoutingResult:
         self.requested_provider = requested_provider
         self.requested_model = requested_model
         self.fallback_reason = fallback_reason
+        # §8 final result gate: set only when a Task Completion Contract
+        # was supplied (RoutingRequest.task_contract) and Gateway task
+        # supervision actually ran; empty otherwise (no behavior change
+        # for existing callers). One of COMPLETE/INCOMPLETE/FAILED/
+        # UNCERTAIN from astra.ai.gateway_task_completion.
+        self.completion_status = completion_status
 
     def to_dict(self) -> dict:
         return {"provider": self.provider, "model": self.model, "text": self.text,
@@ -163,7 +178,8 @@ class RoutingResult:
                 "route_reason": self.route_reason, "ok": self.ok, "error": self.error,
                 "requested_provider": self.requested_provider,
                 "requested_model": self.requested_model,
-                "fallback_reason": self.fallback_reason}
+                "fallback_reason": self.fallback_reason,
+                "completion_status": self.completion_status}
 
 
 def classify(text: str) -> str:
@@ -606,6 +622,30 @@ class AstraRouter:
         `_attempt` produced it — a Gateway bug must never turn an
         already-successful response into a failure.
         """
+        # §1-§8: when the caller supplied a Task Completion Contract, that
+        # path takes over entirely (it already does its own deterministic
+        # shape check, plus evidence/semantic checks) — never run both
+        # supervisors over the same response.
+        if req.task_contract is not None and hasattr(self.gateway, "supervise_task"):
+            try:
+                from astra.ai.gateway_contract import ProviderExecutionResult
+                port = _RouterExecutionPort(self, by_key, req)
+                result = ProviderExecutionResult(ok=True, text=rr.text)
+                supervised, outcome, attempts = self.gateway.supervise_task(
+                    port, target, req.messages, result, req.task_contract,
+                    evidence=req.evidence, semantic_verifier=req.semantic_verifier,
+                    max_tokens=req.max_tokens)
+                if supervised.text != rr.text:
+                    rr.text = supervised.text
+                rr.completion_status = outcome.status
+                self._emit("router.gateway_task_completion", task=req.task_type,
+                           provider=target.provider_id, model=target.model_id,
+                           status=outcome.status, reason=outcome.reason,
+                           attempts=attempts)
+            except Exception:
+                pass
+            return
+
         if not hasattr(self.gateway, "supervise_execution"):
             return
         needs_check = req.structured_output or not (rr.text or "").strip()

@@ -445,17 +445,8 @@ class AirdropPlugin(Plugin):
         msg = text.strip()
         low = msg.lower()
         if low in ("help", "help me", "ki paro", "commands", "?"):
-            return (True, self.help_text() + "\n\n'Sab types bolar jonno: hi",
+            return (True, self.help_text() + "\n\n'Dashboard dekhar jonno: progress",
                     "none", {})
-        if low in ("hi", "hallo", "oi", "hey") or low.startswith(("hi ", "hey ")):
-            d = self.dashboard()
-            return (True, (
-                "Hey boss! 👋 Welcome back.\n\n"
-                f"  • Airdrops: {d['total_airdrops']} (active: {d['active']})\n"
-                f"  • Deadline (7d vitore): {len(d['deadlines_next_7d'])}\n"
-                f"  • Pending tasks: {d['pending_tasks']}\n"
-                f"  • Wallets: {d['wallet_count']}\n\n"
-                "'help' likhen full command list paoar jonno."), "dashboard", d, True)
         if re.search(r"\b(add|new|register|notun)\b.*airdrop", low):
             return (True, *self._add_airdrop(msg))
         if re.search(r"\b(remove|delete|dur)\b.*\bairdrop", low):

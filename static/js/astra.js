@@ -731,9 +731,13 @@ function feedLine(e) {
   const isErr = cats.includes("errors");
   const isOk = !isErr && cats.includes("success");
 
-  // running counters shown in the stats strip above the log list
+  // running counters shown in the stats strip above the log list.
+  // "API calls" should count distinct calls, not log lines — each call
+  // fires a start/request event AND a terminal (success/error) event, so
+  // only the terminal one is counted here to avoid double-counting.
   LOGS.counts.total++;
-  if (cats.includes("api") || cats.includes("gateway")) LOGS.counts.api++;
+  if ((cats.includes("api") || cats.includes("gateway")) && (isErr || isOk))
+    LOGS.counts.api++;
   if (isErr) LOGS.counts.errors++;
   else if (isOk) LOGS.counts.success++;
   renderLogStats();

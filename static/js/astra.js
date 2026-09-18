@@ -333,10 +333,34 @@ loaders.logs = async function () {
   if (!Astra.plugins._logsLoaded) {
     Astra.plugins._logsLoaded = true;
     initLogsToolbar();
-    if (window.EventSource) openSse();
+    const lastId = await loadLogsHistory();
+    if (window.EventSource) openSse(lastId);
     else setInterval(eventsPoll, 3000);   // fallback for older browsers
   }
 };
+
+// Everything that already happened before the Logs tab/SSE connection
+// opened lives in the events table — load it once up front so the panel
+// shows the full picture, not just events from this moment forward.
+// Returns the newest id loaded (0 if none), so the live SSE stream can
+// pick up from exactly there with no gap and no duplicates.
+async function loadLogsHistory() {
+  const feed = $("#live-feed");
+  try {
+    const r = await api("/api/events?limit=300");
+    const rows = (r && r.ok && r.data) ? r.data : [];
+    if (!rows.length) return 0;
+    if (feed && feed.firstElementChild && feed.firstElementChild.classList.contains("empty"))
+      feed.innerHTML = "";
+    // rows arrive newest-first; feedLine() always prepends, so process
+    // oldest-first to end up with the same newest-on-top order live
+    // events get.
+    [...rows].reverse().forEach(feedLine);
+    return rows[0].id || 0;
+  } catch (_) {
+    return 0;
+  }
+}
 
 /* ------------------------------ logs toolbar --------------------------------
  * Category filters, search, pause/resume and clear for the Live activity
@@ -638,14 +662,16 @@ async function eventsPoll() {
   renderEvents((r.data || []).slice(-10));
 }
 
-function openSse() {
-  const es = new EventSource("/api/events/stream");
+function openSse(afterId) {
+  const url = afterId ? `/api/events/stream?after_id=${encodeURIComponent(afterId)}`
+                       : "/api/events/stream";
+  const es = new EventSource(url);
   es.onmessage = (ev) => {
     let e = {};
     try { e = JSON.parse(ev.data); } catch (_) { return; }
     feedLine(e);
   };
-  es.onerror = () => { /* browser auto-reconnects */ };
+  es.onerror = () => { /* browser auto-reconnects, resuming via Last-Event-ID */ };
 }
 
 const LOG_BADGES = { "task.started": "▶️", "task.completed": "✅",

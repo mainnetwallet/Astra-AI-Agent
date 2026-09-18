@@ -963,7 +963,21 @@ class AstraHandler(BaseHTTPRequestHandler):
         self.apply_security_headers()
         self.apply_cors_headers()
         self.end_headers()
-        after = int(self._query().get("after_id") or self.server.events().last_id())
+        after_q = self._query().get("after_id")
+        after_header = self.headers.get("Last-Event-ID")
+        # Last-Event-ID (sent automatically by EventSource on its own
+        # reconnects) takes priority so a dropped/45s-recycled connection
+        # resumes exactly where it left off instead of skipping or
+        # replaying events. ?after_id= is what the frontend passes on the
+        # very first connect, right after it has loaded history via
+        # GET /api/events, so nothing between "history" and "live" is
+        # missed. With neither, default to "now" (last_id()).
+        if after_header:
+            after = int(after_header)
+        elif after_q:
+            after = int(after_q)
+        else:
+            after = self.server.events().last_id()
         written, idle, deadline = 0, 0, time.time() + 45
         try:
             while time.time() < deadline:

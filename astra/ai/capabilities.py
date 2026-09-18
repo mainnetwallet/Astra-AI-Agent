@@ -164,7 +164,11 @@ def detect_required_input_capabilities(attachments: list) -> list[str]:
 
 _OUTPUT_PATTERNS = {
     OUTPUT_IMAGE: re.compile(
-        r"\b(generate|create|draw|make|design)\s+(an?\s+)?(image|picture|photo|illustration|diagram|logo|icon|art)\b",
+        r"\b(generate|create|draw|make|design)\s+(an?\s+)?"
+        r"(image|picture|photo|illustration|diagram|logo|icon|art)\b"
+        r"|\b(image|picture|photo|photograph|illustration|logo|icon|art|"
+        r"chobi|chhobi)\b"
+        r".{0,20}\b(generate|create|draw|make|design|banao|banan|toiri)\b",
         re.IGNORECASE,
     ),
     OUTPUT_AUDIO: re.compile(

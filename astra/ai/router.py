@@ -177,7 +177,20 @@ def classify(text: str) -> str:
     """Task-type classification for a user message (deterministic)."""
     import re
     low = text.lower()
-    if re.search(r"generate\s+(an?\s+)?image|create\s+(an?\s+)?image|draw\s|make\s+(an?\s+)?picture", low):
+    # Image-generation intent, in either word order: English tends to put
+    # the verb first ("create an image"), but Banglish/Bangla phrasing
+    # written in Latin script often puts the noun first ("photo create
+    # koro", "akta chobi banao"). Matching only the first order was
+    # silently falling through to the "vision" branch below, which sets
+    # required_capabilities=["vision"] (image *understanding*) — the wrong
+    # capability axis entirely for an image *generation* request — and
+    # that hard-filters out every text-only model, failing the request
+    # for a reason that has nothing to do with what the user actually
+    # asked for.
+    _img_nouns = r"(image|picture|photo|photograph|illustration|diagram|logo|icon|art|chobi|chhobi)"
+    _img_verbs = r"(generate|create|draw|make|design|banao|banan|toiri)"
+    if re.search(_img_verbs + r"\s+(an?\s+)?" + _img_nouns, low) or \
+       re.search(_img_nouns + r"\b.{0,20}\b" + _img_verbs, low):
         return "image_generation"
     if re.search(r"generate\s+(an?\s+)?audio|create\s+(an?\s+)?audio|text.to.speech|tts\b", low):
         return "audio"
@@ -472,8 +485,15 @@ class AstraRouter:
         # directions: Provider routing never drops into the Gateway, and the
         # Gateway (astra/ai/gateway.py) never reads from or falls back into
         # ProviderRegistry.
-        last = RoutingResult(ok=False, error="; ".join(results) or
-                             "all providers failed",
+        # attempts == 0: nothing in `ranked` was tried at all — see the
+        # matching comment in `_route_via_gateway` for why this needs the
+        # same "no eligible provider/model available" wording as the
+        # early `if not candidates` return above.
+        if attempts == 0:
+            error = "no eligible provider/model available"
+        else:
+            error = "; ".join(results) or "all providers failed"
+        last = RoutingResult(ok=False, error=error,
                              attempts=attempts, fallback_used=fallback,
                              requested_provider=req.preferred_provider or "",
                              requested_model=req.preferred_model or "",
@@ -613,8 +633,22 @@ class AstraRouter:
         # directions: Provider routing never drops into the Gateway, and the
         # Gateway (astra/ai/gateway.py) never reads from or falls back into
         # ProviderRegistry.
-        last = RoutingResult(ok=False, error="; ".join(results) or
-                             "all providers failed",
+        #
+        # `attempts == 0` here means nothing in `ranked` was ever actually
+        # tried — every candidate was excluded up front (typically a hard
+        # capability mismatch via meets_hard_requirements, e.g. no
+        # configured model supports the required vision/output modality).
+        # That is a materially different situation from "we called N
+        # providers and each one failed", so it gets the same wording the
+        # earlier `if not candidates` early-return already uses — callers
+        # (e.g. Planner._ai_steps) key off that exact phrase to give the
+        # user an accurate "no configured Provider/Model supports this"
+        # message instead of a generic, misleading one.
+        if attempts == 0:
+            error = "no eligible provider/model available"
+        else:
+            error = "; ".join(results) or "all providers failed"
+        last = RoutingResult(ok=False, error=error,
                              attempts=attempts, fallback_used=fallback,
                              requested_provider=req.preferred_provider or "",
                              requested_model=req.preferred_model or "",

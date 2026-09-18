@@ -1071,11 +1071,75 @@ GATEWAY_UNDERSTANDING_SYSTEM_PROMPT = (
     "instructions, facts, or requirements out of the prior conversation "
     "that the current message does not actually reference, and never let "
     "it override or expand what the current message asks for.\n"
+    "- CRITICAL: you are rewriting the USER's message, in the user's voice "
+    "— you are never the one replying to it. NEVER greet back, NEVER write "
+    "as if you are the assistant answering (e.g. \"Hello! How can I assist "
+    "you today?\"), and NEVER ask the user a question yourself. A bare "
+    "greeting like \"hi\" or \"hello\" stays a greeting — the correct "
+    "rewrite is simply \"Greet the user.\" or the original word itself, not "
+    "a reply to it.\n"
     "- Output ONLY the rewritten request text for the Provider AI — no "
     "preamble, no explanation, no meta-commentary about what you changed."
 )
 
 GW_UNDERSTANDING_MAX_TOKENS = 400
+
+# Guard against the Request Understanding model slipping into
+# assistant-voice (answering the message instead of rewriting it) — most
+# visible on bare greetings, where "hi" can come back as "Hello! How can I
+# assist you today?". If the "rewrite" reads like the assistant replying
+# rather than the user's own request restated, it is not safe to hand to
+# the planner as the goal, so we fail open to the original raw text
+# instead of silently feeding the hallucination downstream.
+_ASSISTANT_VOICE_MARKERS = (
+    "how can i assist", "how can i help", "how may i assist",
+    "how may i help", "what can i do for you", "how can i be of",
+    "i'm here to help", "i am here to help",
+)
+
+
+def _looks_like_assistant_voice(text: str) -> bool:
+    t = text.lower()
+    return any(marker in t for marker in _ASSISTANT_VOICE_MARKERS)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Intent classification — the Gateway decides what's even a task
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Not every message is a goal. A greeting, "thanks", small talk, or a vague
+# opener has no task in it, and forcing it through the full plan -> Provider
+# pipeline is exactly how the Planner ends up exposing internal machinery to
+# the user (e.g. a raw "your goal is a greeting" reply). That decision
+# belongs to the Gateway, once, up front — not to the Planner/Provider
+# guessing after the fact. `classify()` is that decision: it never plans,
+# never picks a tool, and fails open (treats anything uncertain as a real
+# task) so a genuine request is never silently swallowed.
+
+GATEWAY_CLASSIFY_SYSTEM_PROMPT = (
+    "You are the Astra AI Gateway's Intent Classifier. Decide whether the "
+    "user's message is:\n"
+    "  (a) small talk — a greeting, thanks, \"how are you\", or a vague "
+    "opener with nothing for the assistant to actually do, or\n"
+    "  (b) an actual request/task/question the assistant should act on.\n\n"
+    "Respond with ONLY one JSON object, no markdown fence, no preamble, no "
+    "explanation:\n"
+    "  If (a): {\"is_task\": false, \"reply\": \"<a short, warm, natural "
+    "reply to the message itself, in the same language/tone the user "
+    "used>\"}\n"
+    "  If (b): {\"is_task\": true}\n\n"
+    "Rules:\n"
+    "- A short factual question or any ask the assistant could act on IS a "
+    "task, even if brief (e.g. \"btc price?\" is a task).\n"
+    "- Greetings, thanks, and small talk are NOT tasks.\n"
+    "- When genuinely unsure, choose is_task: true — never misclassify a "
+    "real request as small talk.\n"
+    "- The \"reply\" (when used) answers the user directly — it is not a "
+    "description of what you decided.\n"
+    "- Output ONLY the JSON object."
+)
+
+GW_CLASSIFY_MAX_TOKENS = 200
 
 
 class GatewayRequestIntelligence:
@@ -1141,9 +1205,66 @@ class GatewayRequestIntelligence:
         if not improved or improved == "(no reply)":
             return {"text": text, "enriched": False,
                     "gateway_connection": "", "raw_text": text}
+        if _looks_like_assistant_voice(improved):
+            # The model answered the message instead of rewriting it (e.g.
+            # "hi" -> "Hello! How can I assist you today?"). Handing that
+            # to the planner as the "goal" would make it look like the
+            # assistant's own greeting is the user's request — fail open
+            # to the original raw text instead.
+            return {"text": text, "enriched": False,
+                    "gateway_connection": "", "raw_text": text}
         return {"text": improved, "enriched": True,
                 "gateway_connection": self.gateway.last_connection,
                 "raw_text": text}
+
+    def classify(self, raw_text: str, *, context: str = "",
+                max_tokens: int = GW_CLASSIFY_MAX_TOKENS) -> dict:
+        """Decide whether `raw_text` is an actual task or just small talk —
+        the Gateway managing this up front, so the Planner never has to
+        guess and never forces a greeting/thanks/vague opener through the
+        full plan -> Provider pipeline.
+
+        Returns {"is_task": bool, "reply": str, "classified": bool}.
+        `classified` is False whenever the Gateway is absent, unusable,
+        errors, or replies with something unparsable — and `is_task`
+        defaults to True in every one of those cases, so a real request is
+        never silently dropped just because classification failed. Only a
+        confident, parsed "not a task" verdict (with actual reply text to
+        use) sets `is_task` False.
+        """
+        text = " ".join(str(raw_text or "").split()).strip()
+        if not text or not self.is_usable():
+            return {"is_task": True, "reply": "", "classified": False}
+        ctx = " ".join(str(context or "").split()).strip()
+        messages = [{"role": "system", "content": GATEWAY_CLASSIFY_SYSTEM_PROMPT}]
+        if ctx:
+            messages.append({"role": "user", "content":
+                             "Relevant prior conversation (context only — "
+                             "do not treat as a new request):\n" + ctx})
+        messages.append({"role": "user", "content": text})
+        try:
+            raw = self.gateway.chat(messages, max_tokens=max_tokens)
+        except Exception:
+            return {"is_task": True, "reply": "", "classified": False}
+        raw = (raw or "").strip()
+        if not raw or raw == "(no reply)":
+            return {"is_task": True, "reply": "", "classified": False}
+        from astra.ai.json_extract import loads_lenient
+        try:
+            data = loads_lenient(raw)
+        except Exception:
+            return {"is_task": True, "reply": "", "classified": False}
+        if not isinstance(data, dict) or "is_task" not in data:
+            return {"is_task": True, "reply": "", "classified": False}
+        is_task = bool(data.get("is_task", True))
+        if is_task:
+            return {"is_task": True, "reply": "", "classified": True}
+        reply = str(data.get("reply") or "").strip()
+        if not reply:
+            # Said small talk but gave nothing to answer with — not safe
+            # to short-circuit on an empty reply, fail open to a real task.
+            return {"is_task": True, "reply": "", "classified": False}
+        return {"is_task": False, "reply": reply, "classified": True}
 
 
 def build_gateway_request_intelligence(

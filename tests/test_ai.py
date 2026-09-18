@@ -1095,6 +1095,115 @@ class TestGatewayRequestIntelligence(unittest.TestCase):
         gi.process("hello", context="   ")
         self.assertEqual(len(conn.last_messages), 2)
 
+    # -- regression: enrichment must never answer AS the assistant -----------
+    def test_assistant_voice_reply_is_discarded_not_used_as_goal(self):
+        """If the understanding model slips into assistant-voice (answering
+        a bare greeting instead of rewriting it, e.g. "hi" -> "Hello! How
+        can I assist you today?"), that text must never be handed to the
+        planner as the enriched goal — it would then look like the
+        assistant's own greeting *is* the user's request. See the bug where
+        a second "hi" produced: "Your goal ('Hello. How can I assist you
+        today?') is a greeting...". process() should fail open to the raw
+        text instead."""
+        from astra.ai.gateway import GatewayRequestIntelligence
+
+        class _AssistantVoiceConn(_FakeGatewayConn):
+            def chat(self, messages, model=None, max_tokens=500):
+                self._calls += 1
+                self.last_messages = messages
+                return "Hello! How can I assist you today?"
+
+        conn = _AssistantVoiceConn(name="astra-gw-gemini")
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.process("hi")
+        self.assertFalse(result["enriched"])
+        self.assertEqual(result["text"], "hi")
+        self.assertEqual(result["raw_text"], "hi")
+
+
+# ── Astra AI Gateway: Intent Classification (task vs small talk) ────────────
+class TestGatewayIntentClassification(unittest.TestCase):
+    """GatewayRequestIntelligence.classify(): the Gateway's own call on
+    whether a message is an actual task or just small talk — so the
+    Planner never has to guess and never forces a greeting through the
+    full plan -> Provider pipeline."""
+
+    def _gw(self, *conns):
+        from astra.ai.gateway import AstraAIGateway
+        return AstraAIGateway(connections=list(conns))
+
+    def _conn_returning(self, name, payload):
+        class _Conn(_FakeGatewayConn):
+            def chat(self, messages, model=None, max_tokens=500):
+                self._calls += 1
+                self.last_messages = messages
+                return payload
+        return _Conn(name=name)
+
+    def test_chitchat_is_classified_not_a_task_with_a_reply(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = self._conn_returning(
+            "astra-gw-gemini",
+            '{"is_task": false, "reply": "Hi there! Kemon acho?"}')
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.classify("hi")
+        self.assertTrue(result["classified"])
+        self.assertFalse(result["is_task"])
+        self.assertEqual(result["reply"], "Hi there! Kemon acho?")
+
+    def test_actual_task_is_classified_as_task(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = self._conn_returning(
+            "astra-gw-groq", '{"is_task": true}')
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.classify("check my BTC wallet balance")
+        self.assertTrue(result["classified"])
+        self.assertTrue(result["is_task"])
+        self.assertEqual(result["reply"], "")
+
+    def test_no_gateway_fails_open_as_a_task(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        gi = GatewayRequestIntelligence(None)
+        result = gi.classify("hi")
+        self.assertFalse(result["classified"])
+        self.assertTrue(result["is_task"])
+
+    def test_unparsable_reply_fails_open_as_a_task(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = self._conn_returning("astra-gw-gemini", "not json at all")
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.classify("hi")
+        self.assertFalse(result["classified"])
+        self.assertTrue(result["is_task"])
+
+    def test_chitchat_verdict_with_empty_reply_fails_open_as_a_task(self):
+        """A classifier that says "not a task" but gives nothing to answer
+        with is not safe to short-circuit on — never show the user an
+        empty reply."""
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = self._conn_returning(
+            "astra-gw-gemini", '{"is_task": false, "reply": ""}')
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.classify("hi")
+        self.assertFalse(result["classified"])
+        self.assertTrue(result["is_task"])
+
+    def test_empty_text_short_circuits_without_calling_gateway(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        conn = _FakeGatewayConn()
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.classify("   ")
+        self.assertFalse(result["classified"])
+        self.assertEqual(conn._calls, 0)
+
+    def test_gateway_error_fails_open_as_a_task(self):
+        from astra.ai.gateway import GatewayRequestIntelligence
+        bad = _FakeGatewayConn(name="astra-gw-gemini", fail_times=999)
+        gi = GatewayRequestIntelligence(self._gw(bad))
+        result = gi.classify("hi")
+        self.assertFalse(result["classified"])
+        self.assertTrue(result["is_task"])
+
 
 if __name__ == "__main__":
     unittest.main()

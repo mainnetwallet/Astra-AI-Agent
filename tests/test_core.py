@@ -421,6 +421,94 @@ class TestPlannerGatewayIntelligence(unittest.TestCase):
         self.assertEqual(plan[0]["tool"], "answer")
 
 
+# ── Planner + Gateway: intent classification (task vs small talk) ──────────
+class _FakeGatewayIntelligenceClassifies(_FakeGatewayIntelligenceCall):
+    """Stand-in for GatewayRequestIntelligence that also implements
+    `classify()` — the older `_FakeGatewayIntelligenceCall` deliberately
+    does NOT, so every pre-existing test using it proves classification is
+    fully opt-in and skipped when a caller's Gateway stand-in lacks it."""
+
+    def __init__(self, is_task=True, reply="", classified=True, **kw):
+        super().__init__(**kw)
+        self.is_task = is_task
+        self.reply = reply
+        self.classified = classified
+        self.classify_calls = []
+
+    def classify(self, raw_text, **kw):
+        self.classify_calls.append(raw_text)
+        return {"is_task": self.is_task, "reply": self.reply,
+                "classified": self.classified}
+
+
+class TestPlannerGatewayClassification(unittest.TestCase):
+    def test_chitchat_short_circuits_before_ai_planning(self):
+        """A Gateway "not a task" verdict must return the Gateway's own
+        reply directly and never reach the AI planning contract/Provider
+        system at all — this is what stops a greeting from ever being
+        treated as a goal."""
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceClassifies(
+            is_task=False, reply="Hi! Kemon acho?", classified=True)
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        plan = planner.plan("hi")
+        self.assertEqual(gw.classify_calls, ["hi"])
+        self.assertEqual(len(router.received_prompts), 0)   # Provider never touched
+        self.assertEqual(plan[0]["tool"], "answer")
+        self.assertEqual(plan[0]["params"]["text"], "Hi! Kemon acho?")
+
+    def test_actual_task_proceeds_to_ai_planning_as_normal(self):
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceClassifies(is_task=True, classified=True)
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        plan = planner.plan("check my btc wallet balance")
+        self.assertEqual(gw.classify_calls, ["check my btc wallet balance"])
+        self.assertEqual(len(router.received_prompts), 1)   # Provider still runs
+        self.assertEqual(plan[0]["tool"], "answer")
+
+    def test_unclassified_verdict_falls_through_to_ai_planning(self):
+        """classified=False (Gateway absent/errored/unparsable) must never
+        short-circuit — the request proceeds exactly as if there were no
+        classifier at all."""
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceClassifies(
+            is_task=True, classified=False)
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        planner.plan("hi")
+        self.assertEqual(len(router.received_prompts), 1)
+
+    def test_classification_skipped_when_gateway_stub_lacks_it(self):
+        """Backward compatibility: a Gateway stand-in that only implements
+        `process()` (no `classify()`) must behave exactly as before —
+        classification is purely additive."""
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceCall()   # no .classify()
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        planner.plan("hi")
+        self.assertEqual(len(router.received_prompts), 1)
+
+    def test_classification_skipped_when_attachments_present(self):
+        """A message with attachments is always worth acting on — never
+        short-circuited as small talk, regardless of its text."""
+        from astra.core.planner import Planner
+        gw = _FakeGatewayIntelligenceClassifies(
+            is_task=False, reply="hey!", classified=True)
+        router = _FakeRouterCapturesPrompt(
+            '{"steps":[{"id":"s1","tool":"answer","params":{"text":"done"}}]}')
+        planner = Planner(router=router, tools=["answer"], gateway_intelligence=gw)
+        planner.plan("hi", ctx={"attachments": [{"filename": "photo.png"}]})
+        self.assertEqual(gw.classify_calls, [])
+        self.assertEqual(len(router.received_prompts), 1)
+
+
 # ── Removal verification: Planner offline/deterministic step is gone ───────
 class TestPlannerOfflineStepsRemoved(unittest.TestCase):
     """Targeted-fix verification: the deterministic/offline tool-matching

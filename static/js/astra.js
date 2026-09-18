@@ -617,6 +617,18 @@ const LOG_BADGES = { "task.started": "▶️", "task.completed": "✅",
   "astra_gateway.error": "🌐❌",
   "ai.started": "📡", "ai.completed": "📨", "ai.failed": "⚠️" };
 
+// "HH:MM:SS" (24h, as sent by the backend) -> "HH:MM:SS AM/PM" for the
+// terminal-style console readout.
+function fmtTime12(hms) {
+  if (!hms) return "";
+  const bits = hms.split(":");
+  const h = parseInt(bits[0], 10);
+  if (Number.isNaN(h)) return hms;
+  const period = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 || 12;
+  return `${String(h12).padStart(2, "0")}:${bits[1] || "00"}:${bits[2] || "00"} ${period}`;
+}
+
 function feedLine(e) {
   if (LOGS.paused) return;   // pause just stops new lines from appearing
   const feed = $("#live-feed");
@@ -636,25 +648,21 @@ function feedLine(e) {
   renderLogStats();
 
   const div = document.createElement("div");
-  div.className = "rowitem log-row" + (isErr ? " err" : isOk ? " ok" : "");
+  div.className = "log-row term-line" + (isErr ? " err" : isOk ? " ok" : "");
   div.dataset.cats = cats.join(",");
-  const when = (e.created_at || "").split(" ")[1] || "";
-  const badge = LOG_BADGES[e.kind] || "•";
-  const text = `${e.kind} ${e.agent || ""} ${feedText(e.data)}`;
-  div.dataset.text = text.toLowerCase();
+  const when = fmtTime12((e.created_at || "").split(" ")[1] || "");
+  const badge = LOG_BADGES[e.kind] || (isErr ? "❌" : isOk ? "✅" : "•");
   const dotClass = isErr ? "bad" : isOk ? "ok" : "info";
   const primaryCat = cats[0] || "general";
+  const msg = `${e.kind}${e.agent ? ` [${e.agent}]` : ""} ${feedText(e.data)}`.trim();
+  const text = `${e.kind} ${e.agent || ""} ${feedText(e.data)}`;
+  div.dataset.text = text.toLowerCase();
   div.innerHTML =
-    `<span class="status-dot ${dotClass}" style="margin-top:4px"></span>` +
-    `<div class="rowmain">` +
-      `<div class="rowtitle"><b>${badge} ${esc(e.kind)}</b>` +
-      (e.agent ? `<span class="tag">${esc(e.agent)}</span>` : "") + `</div>` +
-      `<div class="rowsub">${feedText(e.data) || "<span class=\"muted\">—</span>"}</div>` +
-    `</div>` +
-    `<div class="rowacts">` +
-      `<span class="pill log-cat ${esc(primaryCat)}">${esc(primaryCat)}</span>` +
-      `<span class="log-time mono">${esc(when)}</span>` +
-    `</div>`;
+    `<span class="term-time">[${esc(when)}]</span>` +
+    `<span class="term-badge">${badge}</span>` +
+    `<span class="term-dot ${dotClass}"></span>` +
+    `<span class="term-cat">${esc(primaryCat)}</span>` +
+    `<span class="term-msg">${esc(msg)}</span>`;
   const matchesFilter = LOGS.filter === "all" || cats.includes(LOGS.filter);
   const matchesQuery = !LOGS.query || text.toLowerCase().includes(LOGS.query);
   div.classList.toggle("hidden", !(matchesFilter && matchesQuery));

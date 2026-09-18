@@ -276,27 +276,41 @@ a[class*="hl-"] { pointer-events: none; }
 .cards.mini .card-v { font-size: 20px; }
 .cards.mini .card-k { font-size: 11px; }
 
-/* activity log — structured rows, same visual language as Providers/Router/Wallet lists */
-.log-list { max-height: 42vh; overflow-y: auto; gap: 6px; }
-.log-row {
-  align-items: flex-start; border-left: 3px solid var(--line);
+/* activity log — terminal / console style feed */
+.log-list {
+  display: block; max-height: 46vh; overflow-y: auto; gap: 0;
+  background: radial-gradient(ellipse 70% 60% at 50% 35%, #0e1712 0%, #060907 60%, #050605 100%);
+  border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px 18px;
+}
+.log-list .empty {
+  border: none; text-align: left; color: var(--good); opacity: .5;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  padding: 4px 0;
+}
+.term-line {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px; line-height: 1.7; color: var(--good);
+  padding: 3px 0; border: none; background: none; border-radius: 0;
   transition: opacity .15s;
 }
-.log-row.ok { border-left-color: var(--good); }
-.log-row.err { border-left-color: var(--bad); }
-.log-row .rowtitle { gap: 6px; font-size: 12.5px; }
-.log-row .rowsub { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
-.log-row .rowacts { flex-direction: column; align-items: flex-end; gap: 4px; }
-.log-time { font-size: 11px; color: var(--muted); white-space: nowrap; }
-.log-cat {
-  text-transform: uppercase; letter-spacing: .3px; font-size: 9.5px;
-  border-color: var(--line); color: var(--muted);
+.term-line.err { color: var(--bad); }
+.term-line.ok { color: var(--good); }
+.term-time { opacity: .85; white-space: nowrap; }
+.term-badge { line-height: 1; }
+.term-dot {
+  width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+  background: currentColor; box-shadow: 0 0 6px currentColor;
 }
-.log-cat.router, .log-cat.api { color: var(--accent); border-color: var(--accent); }
-.log-cat.providers { color: var(--accent2); border-color: var(--accent2); }
-.log-cat.errors { color: var(--bad); border-color: var(--bad); }
-.log-cat.success { color: var(--good); border-color: var(--good); }
-.log-cat.fallback { color: var(--warn); border-color: var(--warn); }
+.term-dot.ok { color: var(--good); }
+.term-dot.bad { color: var(--bad); }
+.term-dot.warn { color: var(--warn); }
+.term-dot.info { color: var(--accent); }
+.term-cat {
+  opacity: .55; font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
+}
+.term-msg { color: inherit; word-break: break-word; }
 .log-row.hidden { display: none; }
 
 /* logs toolbar (filters/search/pause/clear) */

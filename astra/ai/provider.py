@@ -149,11 +149,14 @@ class ClaudeProvider(AIProvider):
                         yield text
             if self.events:
                 self.events.emit("ai.completed", agent="provider",
-                                 provider=self.name, length=len(full))
+                                 provider=self.name,
+                                 model=model or self.models[0],
+                                 length=len(full))
         except Exception as e:
             if self.events:
                 self.events.emit("ai.failed", agent="provider",
-                                 provider=self.name, error=str(e))
+                                 provider=self.name,
+                                 model=model or self.models[0], error=str(e))
             raise ProviderError(f"anthropic unavailable: {type(e).__name__}") from e
 
     def health_check(self) -> bool:
@@ -226,11 +229,14 @@ class OpenAICompatibleProvider(AIProvider):
                         yield text
             if self.events:
                 self.events.emit("ai.completed", agent="provider",
-                                 provider=self.name, length=len(full))
+                                 provider=self.name,
+                                 model=model or self.models[0],
+                                 length=len(full))
         except Exception as e:
             if self.events:
                 self.events.emit("ai.failed", agent="provider",
-                                 provider=self.name, error=str(e))
+                                 provider=self.name,
+                                 model=model or self.models[0], error=str(e))
             raise ProviderError(f"{self.name} unavailable: {type(e).__name__}") from e
 
     def health_check(self) -> bool:

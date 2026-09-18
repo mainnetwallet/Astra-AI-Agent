@@ -498,7 +498,7 @@ class AstraRouter:
                              requested_provider=req.preferred_provider or "",
                              requested_model=req.preferred_model or "",
                              fallback_reason=last_failure_category)
-        self._emit("ai.failed", provider=(results[-1] if results else ""))
+        self._emit("ai.failed", aggregate=True, error=error, attempts=attempts)
         return last
 
     # -- Gateway-DRIVEN execution loop (§2-§12, §17-§18) -----------------------
@@ -654,7 +654,7 @@ class AstraRouter:
                              requested_model=req.preferred_model or "",
                              fallback_reason=last_failure_category)
         last.completion_status = last_completion_status
-        self._emit("ai.failed", provider=(results[-1] if results else ""))
+        self._emit("ai.failed", aggregate=True, error=error, attempts=attempts)
         return last
 
     # -- Gateway execution-recovery reporting (§3-§5; additive, fail-open) ----
@@ -877,7 +877,8 @@ class AstraRouter:
             except Exception as e:           # never let a provider kill routing
                 last_error = f"{type(e).__name__}: {e}"
                 self._errors[name] = self._errors.get(name, 0) + 1
-                self._emit("ai.failed", provider=name, error=last_error)
+                self._emit("ai.failed", provider=name, model=model.model_id,
+                           error=last_error, attempt=attempt)
                 if attempt <= self.max_retries:
                     time.sleep(min(self.backoff_s * attempt, 8))
         self._mark_down(name, last_error)

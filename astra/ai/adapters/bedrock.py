@@ -277,11 +277,14 @@ class BedrockAdapter(AIProvider):
                         full += text
                         yield text
         except urllib.error.HTTPError as e:
+            if self.events:
+                self.events.emit("ai.failed", agent="provider", provider=self.name,
+                                 model=model, error=f"http {e.code}")
             raise ProviderError(f"bedrock stream http {e.code}") from e
         self.pool.report_success(cred)
         if self.events:
             self.events.emit("ai.completed", agent="provider", provider=self.name,
-                             length=len(full))
+                             model=model, length=len(full))
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1) -> str:

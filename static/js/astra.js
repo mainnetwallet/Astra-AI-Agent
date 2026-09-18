@@ -344,8 +344,15 @@ loaders.logs = async function () {
 // internal step of a chat turn (agent/task/tool/memory/workflow/router
 // events all fire per chat message and would drown those out).
 const IMPORTANT_EVENT_HEADS = new Set(["astra_gateway", "ai", "provider"]);
-function isImportantEvent(kind) {
-  return IMPORTANT_EVENT_HEADS.has((kind || "").split(".")[0]);
+function isImportantEvent(e) {
+  const kind = (e && e.kind) || "";
+  if (!IMPORTANT_EVENT_HEADS.has(kind.split(".")[0])) return false;
+  // The Gateway's own connections also emit ai.started/completed while
+  // streaming, but every Gateway call is already reported (with its
+  // AI + model) by the astra_gateway.* wrapper events — showing both
+  // would list — and count — the same call twice.
+  if (kind.startsWith("ai.") && e.agent === "gateway") return false;
+  return true;
 }
 
 // Everything that already happened before the Logs tab/SSE connection
@@ -380,13 +387,17 @@ async function loadLogsHistory() {
  * visibility / appends nothing while paused. */
 const LOGS = {
   filter: "all", query: "", paused: false, buffer: [],
-  counts: { total: 0, api: 0, errors: 0, success: 0 },
+  counts: { total: 0, gateway: 0, provider: 0, errors: 0, success: 0 },
 };
 const LOGS_MAX_BUFFER = 300;
 
+// Two separate API-call counters: Gateway (its own 4 AI services) and
+// Provider (the Provider system's providers). Success/Errors count the
+// outcomes of those same calls, so Success + Errors = Gateway + Provider.
 const LOG_STAT_DEFS = [
   { key: "total", label: "Total" },
-  { key: "api", label: "API calls" },
+  { key: "gateway", label: "Gateway API calls" },
+  { key: "provider", label: "Provider API calls" },
   { key: "success", label: "Success" },
   { key: "errors", label: "Errors" },
 ];
@@ -400,20 +411,54 @@ function renderLogStats() {
   if (count) count.textContent = `${LOGS.counts.total} events`;
 }
 
-// event kind (dotted, e.g. "router.decision") -> filter categories it
-// belongs to. A kind can belong to more than one (e.g. an "ai.failed" event
-// is both "api" and "errors").
-function logCategories(kind, data) {
+// Which system an event belongs to: the Astra AI Gateway (its own four AI
+// services) or the Provider system.
+function logSource(e) {
+  const k = (e && e.kind) || "";
+  const head = k.split(".")[0];
+  if (head === "astra_gateway") return "gateway";
+  if (head === "ai") return e.agent === "gateway" ? "gateway" : "provider";
+  if (head === "provider") return "provider";
+  return "";
+}
+
+// "ok" | "err" | "info" — how the line is coloured / filtered.
+function logStatus(e) {
+  const k = (e && e.kind) || "";
+  const d = (e && e.data) || {};
+  if (k === "astra_gateway.success" || k === "ai.completed") return "ok";
+  if (k === "astra_gateway.error" || k === "astra_gateway.stream_interrupted" ||
+      k === "ai.failed" || k === "provider.failed") return "err";
+  if (k === "provider.health_changed") return d.healthy === false ? "err" : "ok";
+  return "info";
+}
+
+// "ok" | "err" | null — set ONLY for the terminal event of one real API
+// call. Every call fires a start/request event and exactly one terminal
+// event, so counting terminals counts calls (not log lines). Aggregate
+// "all providers failed" summaries and stream_interrupted follow-ups are
+// not extra calls.
+function logOutcome(e) {
+  const k = (e && e.kind) || "";
+  const d = (e && e.data) || {};
+  if (k === "astra_gateway.success") return "ok";
+  if (k === "astra_gateway.error") return "err";
+  if (logSource(e) === "provider" && !d.aggregate) {
+    if (k === "ai.completed") return "ok";
+    if (k === "ai.failed") return "err";
+  }
+  return null;
+}
+
+// filter-chip categories for one event: gateway | providers | errors | success
+function logCategories(e) {
   const cats = new Set();
-  const head = (kind || "").split(".")[0];
-  if (head === "router" || head === "credential") cats.add("router");
-  if (head === "astra_gateway") cats.add("gateway");
-  if (head === "provider") cats.add("providers");
-  if (head === "ai") cats.add("api");
-  if (kind === "router.fallback" || (data && data.fallback)) cats.add("fallback");
-  if (/failed|error|\.error$/.test(kind || "")) cats.add("errors");
-  if (/completed|success|\.success$/.test(kind || "") || kind === "router.decision")
-    cats.add("success");
+  const src = logSource(e);
+  if (src === "gateway") cats.add("gateway");
+  if (src === "provider") cats.add("providers");
+  const st = logStatus(e);
+  if (st === "err") cats.add("errors");
+  if (st === "ok") cats.add("success");
   return cats;
 }
 
@@ -451,7 +496,7 @@ function initLogsToolbar() {
     clearBtn.dataset.hooked = "1";
     clearBtn.addEventListener("click", async () => {
       LOGS.buffer = [];
-      LOGS.counts = { total: 0, api: 0, errors: 0, success: 0 };
+      LOGS.counts = { total: 0, gateway: 0, provider: 0, errors: 0, success: 0 };
       renderLogStats();
       $("#live-feed").innerHTML = `<div class="empty">cleared — listening…</div>`;
       // Also wipe the persisted history server-side — otherwise a page
@@ -473,7 +518,7 @@ async function copyLogsToClipboard(btn) {
   const feed = $("#live-feed");
   const lines = $$(".term-line", feed)
     .filter((el) => !el.classList.contains("hidden"))
-    .map((el) => $$(".term-time, .term-msg", el).map((s) => s.textContent).join(" "));
+    .map((el) => $$(".term-time, .term-src, .term-msg", el).map((s) => s.textContent).join(" "));
   const out = lines.join("\n");
   const flash = (label) => {
     if (!btn) return;
@@ -688,17 +733,6 @@ function openSse(afterId) {
   es.onerror = () => { /* browser auto-reconnects, resuming via Last-Event-ID */ };
 }
 
-const LOG_BADGES = { "task.started": "▶️", "task.completed": "✅",
-  "tool.executed": "🔧", "agent.completed": "🏁", "agent.failed": "❌",
-  "memory.saved": "🧠", "workflow.completed": "📋", "scheduler.tick": "⏰",
-  "task.created": "📌", "execution.started": "🧠",
-  "router.request": "🧭", "router.decision": "🎯", "router.fallback": "↩️",
-  "router.retry": "🔁", "credential.rotation": "🔑",
-  "provider.health_changed": "🩺",
-  "astra_gateway.request": "🌐", "astra_gateway.success": "🌐✅",
-  "astra_gateway.error": "🌐❌",
-  "ai.started": "📡", "ai.completed": "📨", "ai.failed": "⚠️" };
-
 // "HH:MM:SS" (24h, as sent by the backend) -> "HH:MM:SS AM/PM" for the
 // terminal-style console readout.
 function fmtTime12(hms) {
@@ -711,9 +745,69 @@ function fmtTime12(hms) {
   return `${String(h12).padStart(2, "0")}:${bits[1] || "00"}:${bits[2] || "00"} ${period}`;
 }
 
+const GW_NAMES = { gemini: "Gemini", groq: "Groq", cloudflare: "Cloudflare",
+                   bedrock: "AWS Bedrock" };
+const SRC_LABEL = { gateway: "GATEWAY", provider: "PROVIDER" };
+
+function fmtMs(ms) {
+  const n = Number(ms);
+  if (ms == null || Number.isNaN(n)) return "";
+  return n >= 1000 ? (n / 1000).toFixed(1) + "s" : Math.round(n) + "ms";
+}
+
+// "Groq → llama-3.3-70b" : exactly which AI/provider and which model.
+function logTarget(src, d) {
+  let name = d.provider || "";
+  if (src === "gateway") name = GW_NAMES[name] || name;
+  if (!name && !d.model) return "";
+  return `<b class="term-target">${esc(name || "?")}${d.model ? " → " + esc(d.model) : ""}</b>`;
+}
+
+function logBadge(e, status) {
+  const k = e.kind || "";
+  if (k === "astra_gateway.request") return "🧭";
+  if (k.endsWith(".started")) return "📡";
+  if (k === "provider.health_changed") return "🩺";
+  return status === "err" ? "❌" : status === "ok" ? "✅" : "•";
+}
+
+// One human-readable message per event: WHAT happened + WHICH AI/provider
+// and model it happened to (html, already escaped).
+function logMessage(e, src) {
+  const k = e.kind || "";
+  const d = e.data || {};
+  const t = logTarget(src, d);
+  const lat = d.latency_ms != null ? ` · ${fmtMs(d.latency_ms)}` : "";
+  const why = d.error || d.reason;
+  const whyTxt = why ? ` · ${esc(String(why))}` : "";
+  switch (k) {
+    case "astra_gateway.request":
+      return d.category === "explicit_model"
+        ? `Routing request · explicit model ${esc(d.model || "?")}`
+        : `Routing request · ${esc(d.category || "?")} · ${d.candidates != null ? d.candidates : "?"} candidate(s)`;
+    case "astra_gateway.success":
+    case "ai.completed":
+      return `API call OK · ${t}${lat}${d.length != null && d.latency_ms == null ? ` · ${d.length} chars` : ""}`;
+    case "astra_gateway.error":
+      return `API call FAILED · ${t}${whyTxt}`;
+    case "astra_gateway.stream_interrupted":
+      return `Stream interrupted · ${t} · partial reply already sent${whyTxt}`;
+    case "ai.started":
+      return `Calling · ${t}`;
+    case "ai.failed":
+      if (d.aggregate)
+        return `All providers failed · ${d.attempts != null ? d.attempts : "?"} attempt(s)${whyTxt}`;
+      return `API call FAILED · ${t}${d.attempt > 1 ? ` · attempt ${d.attempt}` : ""}${whyTxt}`;
+    case "provider.health_changed":
+      return `Health changed · ${esc(d.provider || "?")} → ${d.healthy === false ? "DOWN" : "UP"}${whyTxt}`;
+    default:
+      return `${esc(k)} ${feedText(d)}`.trim();
+  }
+}
+
 function feedLine(e) {
   if (LOGS.paused) return;   // pause just stops new lines from appearing
-  if (!isImportantEvent(e.kind)) return;   // chat/task/tool/etc noise stays out
+  if (!isImportantEvent(e)) return;   // chat/task/tool/etc noise stays out
   const feed = $("#live-feed");
   if (!feed) return;
   if (feed.firstElementChild && feed.firstElementChild.classList.contains("empty"))
@@ -727,39 +821,34 @@ function feedLine(e) {
   const prevScrollTop = feed.scrollTop;
   const prevScrollHeight = feed.scrollHeight;
 
-  const cats = [...logCategories(e.kind, e.data)];
-  const isErr = cats.includes("errors");
-  const isOk = !isErr && cats.includes("success");
+  const src = logSource(e);
+  const status = logStatus(e);
+  const cats = [...logCategories(e)];
 
-  // running counters shown in the stats strip above the log list.
-  // "API calls" should count distinct calls, not log lines — each call
-  // fires a start/request event AND a terminal (success/error) event, so
-  // only the terminal one is counted here to avoid double-counting.
+  // Running counters for the stats strip. Gateway / Provider API calls
+  // are counted once per call (terminal event only — see logOutcome), and
+  // Success/Errors are the outcomes of those same calls.
   LOGS.counts.total++;
-  if ((cats.includes("api") || cats.includes("gateway")) && (isErr || isOk))
-    LOGS.counts.api++;
-  if (isErr) LOGS.counts.errors++;
-  else if (isOk) LOGS.counts.success++;
+  const outcome = logOutcome(e);
+  if (outcome && LOGS.counts[src] != null) {
+    LOGS.counts[src]++;
+    if (outcome === "ok") LOGS.counts.success++; else LOGS.counts.errors++;
+  }
   renderLogStats();
 
   const div = document.createElement("div");
-  div.className = "log-row term-line" + (isErr ? " err" : isOk ? " ok" : "");
+  div.className = "log-row term-line" + (status === "err" ? " err" : status === "ok" ? " ok" : "");
   div.dataset.cats = cats.join(",");
   const when = fmtTime12((e.created_at || "").split(" ")[1] || "");
-  const badge = LOG_BADGES[e.kind] || (isErr ? "❌" : isOk ? "✅" : "•");
-  const dotClass = isErr ? "bad" : isOk ? "ok" : "info";
-  const primaryCat = cats[0] || "general";
-  const msg = `${e.kind}${e.agent ? ` [${e.agent}]` : ""} ${feedText(e.data)}`.trim();
-  const text = `${e.kind} ${e.agent || ""} ${feedText(e.data)}`;
-  div.dataset.text = text.toLowerCase();
   div.innerHTML =
     `<span class="term-time">[${esc(when)}]</span>` +
-    `<span class="term-badge">${badge}</span>` +
-    `<span class="term-dot ${dotClass}"></span>` +
-    `<span class="term-cat">${esc(primaryCat)}</span>` +
-    `<span class="term-msg">${esc(msg)}</span>`;
+    `<span class="term-src ${src === "gateway" ? "gw" : "pv"}">${SRC_LABEL[src] || "SYSTEM"}</span>` +
+    `<span class="term-badge">${logBadge(e, status)}</span>` +
+    `<span class="term-msg">${logMessage(e, src)}</span>`;
+  const text = `${SRC_LABEL[src] || ""} ${div.textContent}`.toLowerCase();
+  div.dataset.text = text;
   const matchesFilter = LOGS.filter === "all" || cats.includes(LOGS.filter);
-  const matchesQuery = !LOGS.query || text.toLowerCase().includes(LOGS.query);
+  const matchesQuery = !LOGS.query || text.includes(LOGS.query);
   div.classList.toggle("hidden", !(matchesFilter && matchesQuery));
   feed.prepend(div);
   while (feed.children.length > LOGS_MAX_BUFFER) feed.removeChild(feed.lastChild);

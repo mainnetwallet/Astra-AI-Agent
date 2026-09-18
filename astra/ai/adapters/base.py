@@ -154,10 +154,11 @@ class CompatibleAdapter(AIProvider):
         cred = self._pick()
         if cred is None:
             raise ProviderError(f"{self.name}: no healthy credential configured")
+        used_model = model or (self.models[0] if self.models else "")
         if self.events:
             self.events.emit("ai.started", agent="provider", provider=self.name,
-                             model=model or (self.models[0] if self.models else ""))
-        body = {"model": model or (self.models[0] if self.models else ""),
+                             model=used_model)
+        body = {"model": used_model,
                 "max_tokens": max_tokens, "messages": messages, "stream": True}
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(f"{self.base_url}/chat/completions",
@@ -173,15 +174,24 @@ class CompatibleAdapter(AIProvider):
                         full += text
                         yield text
         except urllib.error.HTTPError as e:
+            self._emit_stream_failed(used_model, f"http {getattr(e, 'code', '?')}")
             self._classify_http(e, cred)
             raise
         except urllib.error.URLError as e:
+            self._emit_stream_failed(used_model, "stream network error")
             self._done(cred, True, reason="stream network error")
             raise ProviderError(f"{self.name} stream network error") from e
         self._done(cred)
         if self.events:
             self.events.emit("ai.completed", agent="provider", provider=self.name,
-                             length=len(full))
+                             model=used_model, length=len(full))
+
+    def _emit_stream_failed(self, model: str, error: str) -> None:
+        """Terminal event for a failed streamed call (the success path already
+        emits ai.completed) so the Logs panel counts it exactly once."""
+        if self.events:
+            self.events.emit("ai.failed", agent="provider", provider=self.name,
+                             model=model, error=error)
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1) -> str:

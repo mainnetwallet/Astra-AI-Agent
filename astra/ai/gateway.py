@@ -43,6 +43,14 @@ from datetime import datetime, timezone
 from astra.ai.credentials import CredentialPool
 from astra.core.exceptions import ProviderError, TimeoutError
 
+
+def _short_provider(conn) -> str:
+    """Short display id of a Gateway connection (astra-gw-groq -> groq), the
+    same naming the routed path and the Logs panel use."""
+    from astra.ai.gateway_routing import GATEWAY_PROVIDER_SHORT
+    name = getattr(conn, "name", "")
+    return GATEWAY_PROVIDER_SHORT.get(name, name)
+
 GW_DEFAULT_TIMEOUT = 60
 GW_STREAM_TIMEOUT = 120
 
@@ -631,30 +639,42 @@ class AstraAIGateway:
         """
         last_error = ""
         attempts = 0
+        self._emit("astra_gateway.request", category="explicit_model",
+                   model=model or "")
         for conn in self.connections:
             attempts += 1
             self.last_attempts = attempts
+            call_model = model
+            if call_model and not conn.models:
+                # no models configured for this connection at all —
+                # treat it as disabled, never attempt a call.
+                continue
+            if call_model and call_model not in conn.models:
+                # this connection doesn't serve the requested model —
+                # skip it rather than fail it (fallback intent is a
+                # different model on the next service).
+                continue
+            short = _short_provider(conn)
+            used_model = call_model or (conn.models[0] if conn.models else "")
+            start = time.perf_counter()
             try:
-                call_model = model
-                if call_model and not conn.models:
-                    # no models configured for this connection at all —
-                    # treat it as disabled, never attempt a call.
-                    continue
-                if call_model and call_model not in conn.models:
-                    # this connection doesn't serve the requested model —
-                    # skip it rather than fail it (fallback intent is a
-                    # different model on the next service).
-                    continue
                 result = fn(conn, call_model)
-                self.last_connection = conn.name
-                self.last_model = call_model or (conn.models[0] if conn.models else "")
-                return result
             except (ProviderError, TimeoutError) as e:
                 last_error = getattr(e, "message", None) or str(e)
+                self._emit("astra_gateway.error", provider=short,
+                           model=used_model, reason=last_error)
                 continue
             except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
+                self._emit("astra_gateway.error", provider=short,
+                           model=used_model, reason=last_error)
                 continue
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self.last_connection = conn.name
+            self.last_model = used_model
+            self._emit("astra_gateway.success", provider=short,
+                       model=used_model, latency_ms=round(latency_ms, 1))
+            return result
         self.last_connection = ""
         self.last_model = ""
         raise ProviderError(
@@ -773,23 +793,37 @@ class AstraAIGateway:
         if model:
             # Generator fallback: first connection's stream that starts wins
             # (unchanged explicit-model path — §17).
+            self._emit("astra_gateway.request", category="explicit_model",
+                       model=model or "")
             for conn in self.connections:
+                call_model = model
+                if call_model and not conn.models:
+                    # no models configured for this connection at all —
+                    # treat it as disabled, never attempt a call.
+                    continue
+                if call_model and call_model not in conn.models:
+                    continue
+                short = _short_provider(conn)
+                used_model = call_model or (conn.models[0] if conn.models else "")
+                start = time.perf_counter()
                 try:
-                    call_model = model
-                    if call_model and not conn.models:
-                        # no models configured for this connection at all —
-                        # treat it as disabled, never attempt a call.
-                        continue
-                    if call_model and call_model not in conn.models:
-                        continue
                     for chunk in conn.stream(messages, model=call_model,
                                              max_tokens=max_tokens):
                         yield chunk
-                    return
-                except (ProviderError, TimeoutError):
+                except (ProviderError, TimeoutError) as e:
+                    self._emit("astra_gateway.error", provider=short,
+                               model=used_model,
+                               reason=getattr(e, "message", None) or str(e))
                     continue
-                except Exception:
+                except Exception as e:
+                    self._emit("astra_gateway.error", provider=short,
+                               model=used_model,
+                               reason=f"{type(e).__name__}: {e}")
                     continue
+                self._emit("astra_gateway.success", provider=short,
+                           model=used_model,
+                           latency_ms=round((time.perf_counter() - start) * 1000.0, 1))
+                return
             return
 
         category, ranked = self._select_order(messages, max_tokens)

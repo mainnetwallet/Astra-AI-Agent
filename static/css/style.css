@@ -270,10 +270,10 @@ a[class*="hl-"] { pointer-events: none; }
 .tools-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .tool-chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 11px; white-space: nowrap; }
 
-/* mini stat cards above the log list (event counts, errors, success, api calls)
-   — one slim row of 4, not a 2x2 grid, so it stays compact on mobile */
+/* mini stat cards above the log list (total, Gateway API calls, Provider API
+   calls, success, errors) — one slim row of 5 so it stays compact on mobile */
 .cards.mini {
-  grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 12px;
+  grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 12px;
 }
 .cards.mini .card {
   padding: 6px 4px; text-align: center; display: flex; flex-direction: column;
@@ -281,8 +281,8 @@ a[class*="hl-"] { pointer-events: none; }
 }
 .cards.mini .card-v { font-size: 15px; line-height: 1.1; }
 .cards.mini .card-k {
-  font-size: 9px; line-height: 1.15; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+  font-size: 9px; line-height: 1.15; white-space: normal;
+  overflow-wrap: anywhere; max-width: 100%;
 }
 
 /* activity log — terminal / console style feed */
@@ -320,6 +320,15 @@ a[class*="hl-"] { pointer-events: none; }
 .term-cat {
   opacity: .55; font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
 }
+/* which system produced the line: Gateway vs Provider */
+.term-src {
+  font-size: 10px; font-weight: 700; letter-spacing: .5px; padding: 0 6px;
+  border-radius: 4px; border: 1px solid currentColor; line-height: 1.5;
+}
+.term-src.gw { color: var(--accent); }
+.term-src.pv { color: var(--warn); }
+/* "Provider → model" that was actually called */
+.term-target { color: #e8f1ff; font-weight: 700; }
 .term-msg { color: inherit; word-break: break-word; }
 .log-row.hidden { display: none; }
 

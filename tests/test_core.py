@@ -877,6 +877,53 @@ class TestOrchestratorRecovery(unittest.TestCase):
 
 
 # ── inline chat Approve/Reject (Agent.resume, no separate Live tab) ──────────
+class _FakeOrchestratorCapturesSubmit:
+    """Minimal orchestrator stand-in — records every `submit()` call so
+    tests can prove a message reached it (or didn't) without needing the
+    real Planner/Gateway/Provider chain."""
+
+    def __init__(self, report=None):
+        self.submitted = []
+        self._report = report or {"execution_id": "exec-1", "status": "COMPLETED",
+                                  "results": {}, "steps": 0}
+
+    def submit(self, goal, sync=False, context="", attachments=None):
+        self.submitted.append(goal)
+        return self._report
+
+
+class TestAgentNoPluginBypass(unittest.TestCase):
+    """Agent.handle() no longer walks self.plugins and regex-matches chat
+    text — every message goes straight to the orchestrator (Gateway ->
+    Provider), even text that an old-style plugin.process() would have
+    claimed. See astra/agent.py's module docstring for why."""
+
+    def test_plugin_process_is_never_called(self):
+        from astra.agent import Agent
+
+        class _PluginThatWouldHaveMatched:
+            plugins_process_calls = []
+
+            def process(self, text):
+                self.__class__.plugins_process_calls.append(text)
+                return (True, "handled by plugin", "airdrop", {})
+
+        plugin = _PluginThatWouldHaveMatched()
+        orch = _FakeOrchestratorCapturesSubmit()
+        agent = Agent([plugin], orchestrator=orch)
+        reply = agent.handle("add airdrop Notcoin deadline 30 oct")
+        self.assertEqual(_PluginThatWouldHaveMatched.plugins_process_calls, [])
+        self.assertEqual(orch.submitted, ["add airdrop Notcoin deadline 30 oct"])
+        self.assertNotEqual(reply["reply"], "handled by plugin")
+
+    def test_message_reaches_orchestrator_even_with_no_plugins(self):
+        from astra.agent import Agent
+        orch = _FakeOrchestratorCapturesSubmit()
+        agent = Agent([], orchestrator=orch)
+        agent.handle("hi")
+        self.assertEqual(orch.submitted, ["hi"])
+
+
 class TestAgentInlineResume(unittest.TestCase):
     """A WAITING_USER step is approved/rejected straight from the chat
     bubble via Agent.resume() -> POST /api/chat/resume, never a Live-tab

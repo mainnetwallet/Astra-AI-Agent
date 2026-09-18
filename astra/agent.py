@@ -1,16 +1,18 @@
-"""Astra Agent: routes chat text to the right plugin, then the orchestrator
+"""Astra Agent: hands every chat message straight to the orchestrator
 (Planner -> Astra AI Gateway -> Existing Provider System), then a gentle
 Banglish fallback.
 
-The heart of the agent is deliberately tiny: it walks the loaded plugins in
-order and the first plugin that says "handled=True" answers. Extending the
-assistant never requires editing this file.
-
-Every request a plugin does NOT claim is deterministic, non-AI command
-matching (see astra/core plugin base) — the moment a request needs an AI
-model, it goes through `orchestrator`, which is the only path to the
-Astra AI Gateway / Existing Provider System. There is intentionally no
-raw/direct LLM callable on this class; see the constructor docstring.
+Deliberate: there is no deterministic pre-Gateway command matching here
+anymore. Every chat message, whatever it looks like, goes through the same
+Orchestrator -> Planner -> Gateway -> Provider path — the Gateway decides
+what a message needs (task vs small talk, rewrite vs pass-through), not a
+regex layer sitting in front of it. A previous version of this class
+walked `self.plugins` and let the first plugin whose `process(text)`
+matched answer directly, bypassing the Gateway/Provider entirely for
+things like wallet/airdrop commands. That has been removed on purpose —
+see the `plugins` constructor arg below for what still uses `self.plugins`
+and what plugin work remains to reconnect that functionality properly (as
+AI-callable tools via the tool registry, not chat-text regex).
 """
 from __future__ import annotations
 
@@ -28,16 +30,22 @@ UNHANDLED_OFFLINE = (
 
 class Agent:
     def __init__(self, plugins: list[Plugin], orchestrator=None):
+        # `plugins` is kept for the non-chat surfaces below that still use
+        # it directly — help_text(), dashboard(), export_all()/import_all()
+        # — and because HTTP routes / the tool registry are wired from the
+        # same plugin list elsewhere in bootstrap.py. `handle()` itself no
+        # longer reads from it: chat text is never regex-matched against a
+        # plugin here (see module docstring).
         self.plugins = plugins
         self.orchestrator = orchestrator  # optional multi-step executor
         # NOTE: there is deliberately no raw/direct LLM callable here. Any
-        # normal request not claimed by a plugin MUST go through
-        # `orchestrator` (Orchestrator -> Planner -> Astra AI Gateway ->
-        # Existing Provider System). A prior version accepted an optional
-        # `llm` callable and would call it directly on orchestrator
-        # failure/absence, which is exactly the kind of legacy bypass path
-        # that lets a normal AI request skip the Gateway. It has been
-        # removed on purpose — do not re-add a direct model call here.
+        # request MUST go through `orchestrator` (Orchestrator -> Planner ->
+        # Astra AI Gateway -> Existing Provider System). A prior version
+        # accepted an optional `llm` callable and would call it directly on
+        # orchestrator failure/absence, which is exactly the kind of legacy
+        # bypass path that lets a normal AI request skip the Gateway. It
+        # has been removed on purpose — do not re-add a direct model call
+        # here, and do not re-add a plugin.process(text) shortcut either.
 
     def handle(self, message: str, context: str = "",
                attachments: list | None = None) -> dict:
@@ -48,6 +56,9 @@ class Agent:
         `attachments` is an optional list of processed Attachment dicts
         from the multimodal upload layer. When present, the request is
         multimodal and capability-aware routing is required.
+
+        Every message goes straight to `orchestrator` (Gateway ->
+        Provider) — there is no plugin/regex shortcut in front of it.
         """
         msg = " ".join(str(message).split()).strip()
         if not msg and not attachments:
@@ -55,22 +66,6 @@ class Agent:
                     "data": {}, "ok": False}
         if not msg and attachments:
             msg = f"[{len(attachments)} file(s) attached]"
-        for p in self.plugins:
-            if attachments:
-                break
-            try:
-                r = p.process(msg)
-            except Exception:
-                continue
-            if r:
-                if len(r) == 5:
-                    handled, reply, action, data, ok = r
-                else:
-                    handled, reply, action, data = r
-                    ok = True
-                if handled:
-                    return {"reply": reply, "action": action, "data": data or {},
-                            "ok": ok}
         if self.orchestrator:
             try:
                 report = self.orchestrator.submit(

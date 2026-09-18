@@ -128,6 +128,17 @@ class TestPluginStorage(unittest.TestCase):
         self.assertEqual(d["active"], 1)
 
 
+@unittest.skip(
+    "Agent.handle() no longer regex-matches chat text against plugins (see "
+    "astra/agent.py module docstring) — every message goes straight to "
+    "Orchestrator -> Planner -> Gateway -> Provider, with no plugin "
+    "shortcut in front of it. AirdropPlugin's underlying methods "
+    "(create_airdrop, add_wallet, etc. — exercised directly by "
+    "TestPluginStorage above) are unaffected; only this chat-text entry "
+    "point is gone. Re-enable once AirdropPlugin exposes its commands as "
+    "AI-callable tools() (see astra/core Plugin.tools()) so the Provider's "
+    "planner can invoke them from a real chat message, and rewrite these "
+    "to go through that path instead of asserting on Agent.handle() alone.")
 class TestAgentChat(unittest.TestCase):
     def setUp(self):
         self.store, self.p, self.agent = make_agent()

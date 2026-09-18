@@ -339,6 +339,15 @@ loaders.logs = async function () {
   }
 };
 
+// The Logs panel is meant for the stuff that actually matters operationally
+// — Gateway calls, provider/API calls, and provider health — not every
+// internal step of a chat turn (agent/task/tool/memory/workflow/router
+// events all fire per chat message and would drown those out).
+const IMPORTANT_EVENT_HEADS = new Set(["astra_gateway", "ai", "provider"]);
+function isImportantEvent(kind) {
+  return IMPORTANT_EVENT_HEADS.has((kind || "").split(".")[0]);
+}
+
 // Everything that already happened before the Logs tab/SSE connection
 // opened lives in the events table — load it once up front so the panel
 // shows the full picture, not just events from this moment forward.
@@ -347,7 +356,9 @@ loaders.logs = async function () {
 async function loadLogsHistory() {
   const feed = $("#live-feed");
   try {
-    const r = await api("/api/events?limit=300");
+    // fetch more than the display buffer needs since most rows get
+    // filtered out by isImportantEvent() below.
+    const r = await api("/api/events?limit=500");
     const rows = (r && r.ok && r.data) ? r.data : [];
     if (!rows.length) return 0;
     if (feed && feed.firstElementChild && feed.firstElementChild.classList.contains("empty"))
@@ -702,6 +713,7 @@ function fmtTime12(hms) {
 
 function feedLine(e) {
   if (LOGS.paused) return;   // pause just stops new lines from appearing
+  if (!isImportantEvent(e.kind)) return;   // chat/task/tool/etc noise stays out
   const feed = $("#live-feed");
   if (!feed) return;
   if (feed.firstElementChild && feed.firstElementChild.classList.contains("empty"))

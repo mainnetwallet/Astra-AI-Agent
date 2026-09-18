@@ -101,18 +101,15 @@ class Planner:
                 f"({a.get('family', a.get('detected_type', '?'))})"
                 for a in attachments[:10])
             budget_goal = f"{budget_goal}\n\n[Attached files: {att_desc}]"
-        # The Gateway manages whether this is even a task, up front — a
-        # greeting/thanks/vague opener never reaches AI step-planning at
-        # all, so the Planner/Provider can't end up echoing an internal
-        # "your goal is a greeting" message back at the user. Skipped
-        # entirely when there's no classifier (no Gateway configured, or a
-        # caller-supplied stand-in that doesn't implement it) or when
-        # attachments are present (a file is always worth acting on).
-        classify = getattr(self.gateway_intelligence, "classify", None)
-        if callable(classify) and not attachments:
-            verdict = classify(budget_goal, context=convo_context)
-            if verdict.get("classified") and not verdict.get("is_task", True):
-                return [self._answer(budget_goal, verdict.get("reply") or "")]
+        # Every goal — greeting, small talk, or a real task — goes through
+        # the same Assistant -> Gateway -> Provider path (see module
+        # docstring). The Gateway's only decision here is whether the raw
+        # text needs rewriting before the Provider sees it (`process()`,
+        # inside `_ai_steps`) — it does not intercept or answer on the
+        # Planner's behalf. `GatewayRequestIntelligence.classify()` exists
+        # as a separate, opt-in capability but is deliberately not wired
+        # in here: every request, including chit-chat, reaches the
+        # Provider AI, which decides how to respond.
         steps = self._ai_steps(budget_goal, max_steps=max_steps,
                                context=convo_context,
                                attachments=attachments)
@@ -153,7 +150,11 @@ class Planner:
             '"depends_on" lists step ids that must finish first (omit when '
             "none). Available tools: " + ", ".join(self.tools or ["(none)"]) +
             '. If no tool fits, use tool name "answer" with params '
-            '{{"text":"<user_facing_reply>"}}. Goal: "{}"'.format(enriched_goal))
+            '{{"text":"<user_facing_reply>"}}. A greeting, thanks, or small '
+            "talk with no actual task is not an error — reply warmly and "
+            'naturally with a single "answer" step; never ask the user to '
+            "restate it as a specific goal or reject it as too vague. "
+            'Goal: "{}"'.format(enriched_goal))
         try:
             # §1-§12: a minimal Task Completion Contract — "this call must
             # produce a usable step plan, as JSON, with a 'steps' field" —

@@ -1120,6 +1120,41 @@ class TestGatewayRequestIntelligence(unittest.TestCase):
         self.assertEqual(result["text"], "hi")
         self.assertEqual(result["raw_text"], "hi")
 
+    # -- the Gateway decides whether improvement is even needed --------------
+    def test_gateway_decides_no_change_needed_and_passes_raw_text_through(self):
+        """When the message is already clear, the Gateway should say so
+        (via the NO_CHANGE_TOKEN sentinel) rather than manufacturing a
+        rewrite nobody asked for — the original text goes to the Provider
+        unchanged, and this does NOT count as `enriched`."""
+        from astra.ai.gateway import GatewayRequestIntelligence, NO_CHANGE_TOKEN
+        conn = self._conn_returning_text("astra-gw-gemini", NO_CHANGE_TOKEN)
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.process("What is the current price of BTC?")
+        self.assertFalse(result["enriched"])
+        self.assertEqual(result["text"], "What is the current price of BTC?")
+        self.assertEqual(result["raw_text"], "What is the current price of BTC?")
+        self.assertEqual(conn._calls, 1)   # the Gateway still made the call
+
+    def test_no_change_token_tolerates_stray_quoting(self):
+        """A model occasionally wraps the sentinel in quotes/backticks —
+        that should still be recognized as "no change needed", not treated
+        as literal rewritten text."""
+        from astra.ai.gateway import GatewayRequestIntelligence, NO_CHANGE_TOKEN
+        conn = self._conn_returning_text(
+            "astra-gw-gemini", f'"{NO_CHANGE_TOKEN}"')
+        gi = GatewayRequestIntelligence(self._gw(conn))
+        result = gi.process("fetch https://example.com")
+        self.assertFalse(result["enriched"])
+        self.assertEqual(result["text"], "fetch https://example.com")
+
+    def _conn_returning_text(self, name, payload):
+        class _Conn(_FakeGatewayConn):
+            def chat(self, messages, model=None, max_tokens=500):
+                self._calls += 1
+                self.last_messages = messages
+                return payload
+        return _Conn(name=name)
+
 
 # ── Astra AI Gateway: Intent Classification (task vs small talk) ────────────
 class TestGatewayIntentClassification(unittest.TestCase):

@@ -1039,6 +1039,12 @@ def build_astra_ai_gateway(config=None, store=None,
 # and Gateway -> ProviderRegistry are both absent by design, same as the
 # rest of this module.
 
+# Sentinel the Request Understanding model outputs when it decides a
+# message needs no rewrite at all — the common case. This is how the
+# Gateway "decides" up front whether improvement is even needed, instead
+# of always paying for (and risking) a rewrite on every single message.
+NO_CHANGE_TOKEN = "NO_CHANGE_NEEDED"
+
 GATEWAY_UNDERSTANDING_SYSTEM_PROMPT = (
     "You are the Astra AI Gateway's Request Understanding layer. You do NOT "
     "answer the user's request and you do NOT perform the task yourself — a "
@@ -1078,8 +1084,16 @@ GATEWAY_UNDERSTANDING_SYSTEM_PROMPT = (
     "greeting like \"hi\" or \"hello\" stays a greeting — the correct "
     "rewrite is simply \"Greet the user.\" or the original word itself, not "
     "a reply to it.\n"
-    "- Output ONLY the rewritten request text for the Provider AI — no "
-    "preamble, no explanation, no meta-commentary about what you changed."
+    "- FIRST decide: does this message actually need rewriting/structuring "
+    "for the Provider AI, or is it already clear, complete, and unambiguous "
+    "as-is? Most messages do NOT need a rewrite. If it does not need any "
+    "change, output exactly the single token " + NO_CHANGE_TOKEN + " and "
+    "nothing else — do not restate or reformat the message. Only produce a "
+    "rewritten version when it genuinely needs clarifying, translating, or "
+    "structuring.\n"
+    "- Output ONLY the rewritten request text for the Provider AI, or the "
+    "single token " + NO_CHANGE_TOKEN + " — no preamble, no explanation, no "
+    "meta-commentary about what you changed."
 )
 
 GW_UNDERSTANDING_MAX_TOKENS = 400
@@ -1145,12 +1159,16 @@ GW_CLASSIFY_MAX_TOKENS = 200
 class GatewayRequestIntelligence:
     """Request Understanding / Enrichment: the Gateway's preprocessing step.
 
-    `process()` sends the user's raw text to the Gateway's own AI
+    `process()` first lets the Gateway decide, itself, whether the raw
+    message even needs improving — most messages don't. Only when it
+    genuinely needs clarifying/structuring does the Gateway rewrite it;
+    otherwise the original text is handed to the Provider system
+    unchanged (see `NO_CHANGE_TOKEN`). Sent to the Gateway's own AI
     connections (via `AstraAIGateway.chat()` — Gemini -> Groq -> Cloudflare
-    -> Bedrock fallback, GW_* config only) and returns a provider-ready
-    version of the request. This class does not execute the task and is
-    never registered as a Provider: callers hand its output to the existing
-    Provider system (e.g. `AstraRouter.route(...)`) for actual execution.
+    -> Bedrock fallback, GW_* config only). This class does not execute the
+    task and is never registered as a Provider: callers hand its output to
+    the existing Provider system (e.g. `AstraRouter.route(...)`) for actual
+    execution.
 
     Fails open: if the Gateway is absent, unconfigured, or every connection
     errors, `process()` returns the original text unchanged
@@ -1203,6 +1221,14 @@ class GatewayRequestIntelligence:
                     "gateway_connection": "", "raw_text": text}
         improved = (improved or "").strip()
         if not improved or improved == "(no reply)":
+            return {"text": text, "enriched": False,
+                    "gateway_connection": "", "raw_text": text}
+        if improved.strip('"\'` \n') == NO_CHANGE_TOKEN:
+            # The Gateway decided the message is already clear enough —
+            # this IS the decision the user asked for ("improve kora
+            # lagbe naki lagbe na"): pass the original straight to the
+            # Provider, unchanged, rather than manufacturing a rewrite
+            # nobody needs.
             return {"text": text, "enriched": False,
                     "gateway_connection": "", "raw_text": text}
         if _looks_like_assistant_voice(improved):

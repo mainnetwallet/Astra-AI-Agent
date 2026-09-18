@@ -85,6 +85,17 @@ class Planner:
         # recent planning call. "" means no contract-backed call has run
         # yet (e.g. no router configured).
         self.last_completion_status = ""
+        # Why the last _ai_steps() call returned None, so plan()'s fallback
+        # answer can say something true instead of always claiming "no
+        # Provider configured" — a Provider can be fully configured, get
+        # called (possibly several times, through the correction loop),
+        # and still fail to produce a usable plan. One of:
+        #   "no_provider"       - self.router is None/unusable (misconfig)
+        #   "provider_no_plan"  - the Provider was called but never
+        #                         returned a usable plan, even after the
+        #                         Gateway's bounded correction attempts
+        #   ""                  - no failure yet recorded
+        self.last_plan_failure_reason = ""
 
     # -- entry ---------------------------------------------------------------
     def plan(self, goal: str, ctx=None, max_goal_chars: int = 1500,
@@ -114,13 +125,16 @@ class Planner:
                                context=convo_context,
                                attachments=attachments)
         if not steps:
-            steps = [self._answer(budget_goal)]
+            steps = [self._answer(budget_goal,
+                     _fallback_text(self.last_plan_failure_reason))]
         return steps[:max_steps]
 
     # -- LLM-driven planning --------------------------------------------------
     def _ai_steps(self, g: str, max_steps: int = 6, context: str = "",
                   attachments: list | None = None) -> list | None:
+        self.last_plan_failure_reason = ""
         if not self.router:
+            self.last_plan_failure_reason = "no_provider"
             return None
         # Astra AI Gateway: Request Understanding/Enrichment happens here,
         # right before the goal reaches the existing Provider system — see
@@ -185,6 +199,7 @@ class Planner:
                 # to fall through to via the legacy `.route()` tuple
                 # interface — it's a misconfiguration, and planning fails
                 # clearly (no plan) rather than taking another AI path.
+                self.last_plan_failure_reason = "no_provider"
                 return None
             contract = build_task_completion_contract(
                 user_request=enriched_goal,
@@ -238,6 +253,14 @@ class Planner:
                         f"kintu kono configured Provider/Model ei capability "
                         f"support kore na. Apni ekta compatible model configure "
                         f"korun (jemon: stable-diffusion-xl on Bedrock for image).")]
+                # The Provider WAS reachable and DID respond (possibly more
+                # than once — the Gateway's bounded correction loop already
+                # gave it up to MAX_CORRECTION_ATTEMPTS retries on the same
+                # target); it just never produced a response that satisfied
+                # the plan contract (valid JSON with a "steps" field). This
+                # is a materially different situation from "no Provider
+                # configured" and must not be reported as one.
+                self.last_plan_failure_reason = "provider_no_plan"
                 return None
             text = rr.text
             # Lenient parse: the Gateway's own JSON check already passed
@@ -249,6 +272,7 @@ class Planner:
             data = loads_lenient(text)
             return self.parse_plan_json(data, max_steps=max_steps) or None
         except Exception:
+            self.last_plan_failure_reason = "provider_no_plan"
             return None
 
     def parse_plan_json(self, data: dict, max_steps: int = 6) -> list[dict]:
@@ -282,15 +306,25 @@ class Planner:
                 "description": description, "verify": verify or [],
                 "retries": 2, "depends_on": depends_on or []}
 
-    @staticmethod
-    def _answer(g: str, text: str = "") -> dict:
+    def _answer(self, g: str, text: str = "") -> dict:
+        reason = getattr(self, "last_plan_failure_reason", "")
         return {"id": "a1", "tool": "answer",
-                "params": {"text": text or _fallback_text()},
-                "description": "Direct reply (no Provider configured)",
+                "params": {"text": text or _fallback_text(reason)},
+                "description": ("Direct reply (provider gave no usable plan)"
+                                if reason == "provider_no_plan" else
+                                "Direct reply (no Provider configured)"),
                 "verify": [], "retries": 0, "is_answer": True}
 
 
-def _fallback_text() -> str:
+def _fallback_text(reason: str = "") -> str:
+    if reason == "provider_no_plan":
+        # The Provider was configured and did respond — it just couldn't
+        # produce a usable plan even after the Gateway's correction
+        # attempts. Telling the user "no Provider configured" here would
+        # be false, so this branch says what actually happened instead.
+        return ("Ami AI Provider-ke koyekbar try korlam, kintu ekhono ekta "
+                "thik plan/reply banate parlam na. Aro nirdisto kore ekbar "
+                "bolun, ba 'help' likhe dekhte paren.")
     return ("Ei command ta ami bodhokorar chesta korlam, kintu kono AI Provider "
             "configure kora nai. 'help' likhe dekhte paren, ba ekta Provider "
             "(jemon GEMINI_API_KEYS / GROQ_API_KEYS) config korun.")

@@ -25,6 +25,9 @@ Core (non-plugin) endpoints (all old routes stay backward-compatible):
 
   GET  /api/manifest        agent name + plugin tabs + core tabs
   POST /api/chat            {message} -> agent reply {reply, action, data, ok}
+  POST /api/chat/resume     {execution_id, allow} -> approve/reject a pending
+                             WAITING_USER tool call inline from chat (same
+                             reply shape as /api/chat; no separate tab needed)
   GET  /api/dashboard       aggregated plugin summary() blocks
   GET  /api/export          aggregated plugin export()
   POST /api/import          aggregate import across plugins
@@ -528,6 +531,12 @@ class AstraHandler(BaseHTTPRequestHandler):
                     reply = server.agent.handle(
                         body.get("message", ""),
                         context=body.get("context", "") or "")
+                return _json_ok(self, {"ok": True, "data": reply})
+            if path == ["api", "chat", "resume"] and method == "POST":
+                eid = (body.get("execution_id") or "").strip()
+                if not eid:
+                    return _json_err(self, "execution_id required")
+                reply = server.agent.resume(eid, bool(body.get("allow", True)))
                 return _json_ok(self, {"ok": True, "data": reply})
             if path == ["api", "dashboard"] and method == "GET":
                 return _json_ok(self, {"ok": True, "data": server.agent.dashboard()})

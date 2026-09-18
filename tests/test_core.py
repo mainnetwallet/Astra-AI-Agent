@@ -815,6 +815,138 @@ class TestOrchestratorRecovery(unittest.TestCase):
         self.assertTrue(all(v.get("ok") for v in r2["results"].values()))
 
 
+# ── inline chat Approve/Reject (Agent.resume, no separate Live tab) ──────────
+class TestAgentInlineResume(unittest.TestCase):
+    """A WAITING_USER step is approved/rejected straight from the chat
+    bubble via Agent.resume() -> POST /api/chat/resume, never a Live-tab
+    round trip. `_reply_from_report` hands the frontend action \"confirm\"
+    (not \"live\") for exactly this reason."""
+
+    def setUp(self):
+        self.stack = make_stack()
+        self.orch = self.stack["orchestrator"]
+        self.store = self.stack["store"]
+
+    def _make_pending(self):
+        report = self.orch.submit("plan my day", sync=True)
+        step = report["plan"][0]
+        self.store.exec(
+            "UPDATE astra_executions SET status = 'WAITING_USER' "
+            "WHERE execution_id = ?", (report["execution_id"],))
+        self.store.exec(
+            "UPDATE astra_executions SET pending_step = ? "
+            "WHERE execution_id = ?",
+            (json.dumps(step), report["execution_id"]))
+        return report["execution_id"]
+
+    def test_reply_from_report_pending_offers_inline_confirm_not_live_tab(self):
+        from astra.agent import Agent
+        agent = Agent([], orchestrator=self.orch)
+        report = {"pending": True, "execution_id": "exec-xyz", "results": {},
+                  "pending_step": {"tool": "write_file", "description": "write x"}}
+        reply = agent._reply_from_report("test", report)
+        self.assertEqual(reply["action"], "confirm")
+        self.assertNotIn("Live tab", reply["reply"])
+        self.assertEqual(reply["data"]["execution_id"], "exec-xyz")
+
+    def test_resume_approve_continues_run_and_formats_like_a_chat_reply(self):
+        from astra.agent import Agent
+        agent = Agent([], orchestrator=self.orch)
+        eid = self._make_pending()
+        reply = agent.resume(eid, True)
+        # resolved via the orchestrator and run back through the exact same
+        # _reply_from_report() formatting a normal /api/chat call uses —
+        # not the old fixed "Live tab e Approve/Reject" text.
+        self.assertNotEqual(reply["action"], "confirm")   # fully resolved
+        self.assertNotIn("Live tab", reply["reply"])
+        self.assertEqual(self.orch._row(eid)["status"], "COMPLETED")
+
+    def test_resume_reject_cancels_without_running_the_step(self):
+        from astra.agent import Agent
+        agent = Agent([], orchestrator=self.orch)
+        eid = self._make_pending()
+        reply = agent.resume(eid, False)
+        self.assertFalse(reply["ok"])
+        self.assertIn("Reject", reply["reply"])
+        self.assertEqual(self.orch._row(eid)["status"], "CANCELLED")
+
+    def test_resume_unknown_execution_reports_not_waiting(self):
+        from astra.agent import Agent
+        agent = Agent([], orchestrator=self.orch)
+        reply = agent.resume("exec-does-not-exist", True)
+        self.assertFalse(reply["ok"])
+        self.assertIn("wait", reply["reply"].lower())
+
+
+class TestChatResumeEndpoint(unittest.TestCase):
+    """POST /api/chat/resume — the HTTP route the inline Approve/Reject
+    buttons call, wired straight to Agent.resume()."""
+
+    def setUp(self):
+        import threading, time
+        from astra.web import AstraServer
+        self.stack = make_stack()
+        self.orch = self.stack["orchestrator"]
+        self.store = self.stack["store"]
+        self.srv = AstraServer(("127.0.0.1", 0), self.stack["store"],
+                                self.stack["agent"], self.stack["plugins"],
+                                stack=self.stack)
+        self.port = self.srv.server_address[1]
+        self.t = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.t.start(); time.sleep(0.3)
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def _post(self, p, d):
+        import urllib.request
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{p}",
+            data=json.dumps(d).encode(), method="POST",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read())
+
+    def test_resume_endpoint_requires_execution_id(self):
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self._post("/api/chat/resume", {"allow": True})
+        self.assertEqual(cm.exception.code, 400)
+
+    def test_resume_endpoint_approves_a_pending_execution(self):
+        report = self.orch.submit("get_health", sync=True)
+        step = report["plan"][0]
+        self.store.exec(
+            "UPDATE astra_executions SET status = 'WAITING_USER' "
+            "WHERE execution_id = ?", (report["execution_id"],))
+        self.store.exec(
+            "UPDATE astra_executions SET pending_step = ? "
+            "WHERE execution_id = ?",
+            (json.dumps(step), report["execution_id"]))
+        r = self._post("/api/chat/resume",
+                        {"execution_id": report["execution_id"], "allow": True})
+        self.assertTrue(r["ok"])
+        self.assertNotEqual(r["data"]["action"], "confirm")
+        self.assertEqual(self.orch._row(report["execution_id"])["status"],
+                          "COMPLETED")
+
+    def test_resume_endpoint_rejects_a_pending_execution(self):
+        report = self.orch.submit("get_health", sync=True)
+        step = report["plan"][0]
+        self.store.exec(
+            "UPDATE astra_executions SET status = 'WAITING_USER' "
+            "WHERE execution_id = ?", (report["execution_id"],))
+        self.store.exec(
+            "UPDATE astra_executions SET pending_step = ? "
+            "WHERE execution_id = ?",
+            (json.dumps(step), report["execution_id"]))
+        r = self._post("/api/chat/resume",
+                        {"execution_id": report["execution_id"], "allow": False})
+        self.assertFalse(r["data"]["ok"])
+        self.assertEqual(self.orch._row(report["execution_id"])["status"],
+                          "CANCELLED")
+
+
 # ── Store lifecycle (Section 5) ──────────────────────────────────────────────
 class TestStoreLifecycle(unittest.TestCase):
     def test_context_manager_closes(self):

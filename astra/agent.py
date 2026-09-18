@@ -105,9 +105,11 @@ class Agent:
             body = "\n".join(lines) or "Approval lagbe."
             step = report.get("pending_step") or {}
             tool = (step.get("description") or step.get("tool") or "")
-            return {"reply": (f"Approve lagbe: **{tool}** — Live tab e 'Approve' "
-                              f"ba 'Reject' press korun.\n" + body),
-                    "action": "live", "data": report, "ok": False}
+            # action "confirm" tells the frontend to render inline
+            # Approve/Reject buttons right under this bubble — resolved via
+            # resume(), never by sending the user off to a separate tab.
+            return {"reply": (f"⚠️ Approval lagbe: **{tool}**\n" + body),
+                    "action": "confirm", "data": report, "ok": False}
         if real:
             status = "COMPLETED" if report.get("status") == "COMPLETED" else \
                 ("FAILED" if report.get("status") == "FAILED" else report.get("status"))
@@ -171,6 +173,29 @@ class Agent:
         lines.append("\nFree-form question thakle kewo bujhle na — LLM chat "
                      "(ANTHROPIC_API_KEY set korle) uttor dibe.")
         return "\n".join(lines)
+
+    def resume(self, execution_id: str, allow: bool) -> dict:
+        """Approve or reject a WAITING_USER execution's pending tool call.
+
+        Backs the inline Approve/Reject buttons a chat bubble renders when
+        `_reply_from_report` returns action "confirm" — the whole
+        confirm/deny round-trip happens in chat, no separate tab involved.
+        Formatted exactly like a normal chat reply so the frontend can
+        render it (and, if the resumed plan hits *another* pending step,
+        chain into a fresh pair of Approve/Reject buttons) the same way.
+        """
+        if not self.orchestrator:
+            return {"reply": "Orchestrator available na — resume kora gelo na.",
+                    "action": "none", "data": {}, "ok": False}
+        report = self.orchestrator.resume(execution_id, allow)
+        if not allow:
+            return {"reply": "❌ Reject kora hoyeche — ei step ta বাতিল হলো.",
+                    "action": "none", "data": report, "ok": False}
+        if report.get("status") == "not waiting":
+            return {"reply": "Ei kaj ta ar approval-er jonno wait korche na "
+                              "(hoyto already handle hoye geche).",
+                    "action": "none", "data": report, "ok": False}
+        return self._reply_from_report(report.get("goal", ""), report)
 
     def dashboard(self) -> list[dict]:
         """Aggregate all plugin summary() blocks into one shared dashboard."""

@@ -329,7 +329,13 @@ BUILTIN_TOOLS = [
     ("wallet_balances", wallet_balances,"wallet",  Level.READ,           False, True),
     ("list_files",     list_files,     "files",   Level.READ,           False, True),
     ("read_file",      read_file,      "files",   Level.READ,           False, True),
-    ("write_file",     write_file,     "files",   Level.LOW_RISK_WRITE, True,  False),
+    # write_file is sandboxed to WORKSPACE (_safe()) and already refuses to
+    # clobber an existing file unless overwrite=True is explicitly passed —
+    # those two guards are the real safety net, so a chat-side confirmation
+    # prompt on top only adds friction for ordinary "create a file" asks
+    # (html pages, scripts, notes) without preventing anything the guards
+    # don't already prevent.
+    ("write_file",     write_file,     "files",   Level.LOW_RISK_WRITE, False, False),
     ("search_files",   search_files,   "files",   Level.READ,           False, True),
     ("get_health",     get_health,     "system",  Level.READ,           False, True),
     ("generate_document", generate_document, "files", Level.LOW_RISK_WRITE, False, True),

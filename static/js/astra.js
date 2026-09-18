@@ -129,7 +129,7 @@ loaders.assistant = function () {
   wireChatComposer();
 };
 
-function chatBubble(who, text, action, attachedFiles, artifacts) {
+function chatBubble(who, text, action, attachedFiles, artifacts, meta) {
   hideChatEmpty();
   const row = document.createElement("div");
   row.className = "msg " + (who === "me" ? "user" : "assistant");
@@ -163,7 +163,45 @@ function chatBubble(who, text, action, attachedFiles, artifacts) {
     artifacts.forEach((a) => { artWrap.appendChild(renderArtifact(a)); });
     content.appendChild(artWrap);
   }
-  if (action && action !== "none") {
+  if (action === "confirm") {
+    // inline Approve/Reject — resolved right here in chat, never by
+    // sending the user off to a separate tab.
+    const eid = meta && meta.execution_id;
+    const wrap = document.createElement("div");
+    wrap.className = "msg-confirm-actions";
+    const approveBtn = document.createElement("button");
+    approveBtn.type = "button";
+    approveBtn.className = "msg-confirm-btn msg-approve-btn";
+    approveBtn.textContent = "✅ Approve";
+    const rejectBtn = document.createElement("button");
+    rejectBtn.type = "button";
+    rejectBtn.className = "msg-confirm-btn msg-reject-btn";
+    rejectBtn.textContent = "❌ Reject";
+    const decide = async (allow) => {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      wrap.classList.add("resolved");
+      const typingRow = chatTyping();
+      try {
+        const r = await post("/api/chat/resume", { execution_id: eid, allow });
+        typingRow.remove();
+        if (!r.ok || !r.data) {
+          chatBubble("ai", "Server e problem — `" + (r.error || "unknown error") + "`");
+          return;
+        }
+        chatBubble("ai", r.data.reply, r.data.action, null,
+                   r.data.artifacts, r.data.data);
+      } catch (err) {
+        typingRow.remove();
+        chatBubble("ai", "Server e problem — `" + err + "`");
+      }
+    };
+    approveBtn.addEventListener("click", () => decide(true));
+    rejectBtn.addEventListener("click", () => decide(false));
+    wrap.appendChild(approveBtn);
+    wrap.appendChild(rejectBtn);
+    content.appendChild(wrap);
+  } else if (action && action !== "none") {
     const link = document.createElement("button");
     link.type = "button";
     link.className = "msg-action-link";
@@ -244,7 +282,7 @@ $("#chat-form").addEventListener("submit", async (e) => {
       chatBubble("ai", "Server e problem — `" + (r.error || "unknown error") + "`");
       return;
     }
-    chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts);
+    chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts, r.data.data);
     if (r.data.action === "dashboard") loaders.dashboard();
   } catch (err) {
     typingRow.remove();

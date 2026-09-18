@@ -217,7 +217,19 @@ def verify_task_completion(
 def build_task_correction_instruction(
         contract: TaskCompletionContract, result: ProviderExecutionResult,
         outcome: TaskVerificationOutcome) -> str:
-    """Precise correction instruction (§4) — never a bare "try again"."""
+    """Precise correction instruction (§4) — never a bare "try again".
+
+    Branches on how much of the previous attempt is actually salvageable:
+    if it satisfied NOTHING the contract asked for (failed the basic
+    shape check entirely, or every single piece of required evidence is
+    still missing), telling the model to "continue from where it left
+    off" makes no sense — there's nothing to continue from, and doing so
+    tends to produce a model that just repeats or rationalizes its first
+    (wrong) answer. In that case the instruction explicitly discards the
+    previous attempt and asks for a fresh one. Only when at least part of
+    the requirement was actually met does it ask for an incremental
+    patch, so real completed work is never thrown away and redone.
+    """
     missing = ", ".join(outcome.missing) or "(unspecified)"
     lines = []
     if contract.goal:
@@ -228,15 +240,30 @@ def build_task_correction_instruction(
         lines.append("Constraints: " + "; ".join(contract.constraints))
     lines.append(f"Status: task is {outcome.status.lower()} — {outcome.reason}")
     lines.append(f"Missing / Invalid: {missing}")
-    lines.append(
-        "Already Completed: the previous attempt returned a response; do "
-        "not repeat already-completed work.")
-    lines.append(
-        "Required Next Action: continue from where this left off and "
-        "produce the missing requirement(s) and evidence above. Do not "
-        "just say the task is done — return the actual changed output "
-        "and/or evidence requested. Do not re-run anything that may have "
-        "already succeeded; check state before repeating a side effect.")
+
+    nothing_salvaged = (
+        not outcome.evidence_checked
+        or (outcome.missing and len(outcome.missing) >= len(outcome.evidence_checked)))
+    if nothing_salvaged:
+        lines.append(
+            "Already Completed: none — the previous attempt's response "
+            "did not satisfy any part of the task and cannot be "
+            "salvaged.")
+        lines.append(
+            "Required Next Action: disregard the previous attempt "
+            "entirely and redo the task from scratch, addressing every "
+            "requirement listed above. Do not just say the task is "
+            "done — return the actual output and/or evidence requested.")
+    else:
+        lines.append(
+            "Already Completed: the previous attempt returned a response; "
+            "do not repeat already-completed work.")
+        lines.append(
+            "Required Next Action: continue from where this left off and "
+            "produce the missing requirement(s) and evidence above. Do not "
+            "just say the task is done — return the actual changed output "
+            "and/or evidence requested. Do not re-run anything that may have "
+            "already succeeded; check state before repeating a side effect.")
     return "\n".join(lines)
 
 

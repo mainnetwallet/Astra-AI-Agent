@@ -510,6 +510,7 @@ class AstraRouter:
         tried: set = set()
         results, attempts, fallback = [], 0, False
         last_failure_category = ""
+        last_completion_status = ""
         gateway_ok = True
 
         try:
@@ -533,6 +534,39 @@ class AstraRouter:
             tried.add(current.key())
 
             if rr is not None and rr.ok:
+                if gateway_ok:
+                    self._report_gateway_recovery(current, success=True,
+                                                  latency_ms=rr.latency_ms)
+                    # §6-§12: Gateway-owned result validation + bounded
+                    # correction — same target first (see
+                    # _maybe_supervise_result's docstring). If the Gateway
+                    # ultimately can't confirm/correct the result (contract
+                    # FAILED/INCOMPLETE/UNCERTAIN even after its own
+                    # correction round-trip, or supervise_execution rejects
+                    # it), this attempt is NOT returned as a success — it
+                    # falls through to the ordinary failure path below,
+                    # which tries the next ranked candidate/provider via
+                    # recover_execution_target. Previously this always
+                    # `return`ed here regardless of supervision outcome, so
+                    # one bad/misconfigured top-ranked provider that still
+                    # answered (just badly) could block every other
+                    # configured provider from ever being tried.
+                    supervised_ok = self._maybe_supervise_result(
+                        current, rr, req, by_key)
+                    if not supervised_ok:
+                        if rr.completion_status:
+                            last_completion_status = rr.completion_status
+                        results.append(rr.error or "gateway supervision failed")
+                        last_failure_category = classify_execution_failure(
+                            message=rr.error or "")
+                        try:
+                            current = self.gateway.recover_execution_target(
+                                gw_targets, current, last_failure_category,
+                                required_capabilities=req.required_capabilities,
+                                exclude=tried)
+                        except Exception:
+                            gateway_ok, current = False, None
+                        continue
                 if attempts > 1:
                     fallback = True
                 rr.fallback_used = fallback
@@ -546,14 +580,6 @@ class AstraRouter:
                     "reason": getattr(rr, "_reason", ""),
                     "candidates_considered": considered,
                 }
-                if gateway_ok:
-                    self._report_gateway_recovery(current, success=True,
-                                                  latency_ms=rr.latency_ms)
-                    # §6-§12: Gateway-owned result validation + bounded
-                    # correction — same target, no failover. See
-                    # _maybe_supervise_result's docstring for when this
-                    # actually does anything.
-                    self._maybe_supervise_result(current, rr, req, by_key)
                 self._emit("router.decision", task=req.task_type, provider=rr.provider,
                            model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
                            latency_ms=rr.latency_ms, fallback=fallback)
@@ -593,6 +619,7 @@ class AstraRouter:
                              requested_provider=req.preferred_provider or "",
                              requested_model=req.preferred_model or "",
                              fallback_reason=last_failure_category)
+        last.completion_status = last_completion_status
         self._emit("ai.failed", provider=(results[-1] if results else ""))
         return last
 
@@ -631,13 +658,22 @@ class AstraRouter:
 
     # -- Gateway-owned result supervision (§6-§12; additive, fail-open) -------
     def _maybe_supervise_result(self, target, rr: RoutingResult,
-                                req: RoutingRequest, by_key: dict) -> None:
+                                req: RoutingRequest, by_key: dict) -> bool:
         """After a successful attempt, give the attached Gateway a chance to
         deterministically validate the response and — if it's invalid or
         incomplete — drive a bounded correction round-trip back through
         `_RouterExecutionPort` to the SAME `target` (never a different
-        provider/model; recovery/failover is `recover_execution_target`'s
-        job, not this one's).
+        provider/model for the correction messages themselves; recovery/
+        failover across *providers* is `recover_execution_target`'s job,
+        which the caller now invokes when this returns False).
+
+        Returns True when the result is confirmed good (or supervision is
+        a no-op for this request), False when the Gateway's own
+        verify/correct/re-verify loop could not confirm success even after
+        its bounded corrections — in which case `rr.ok`/`rr.error` are
+        updated and the caller should treat this candidate as failed and
+        move on to the next one, instead of returning it as the final
+        answer.
 
         A no-op for the common case (§36: don't drag a simple request into
         supervision it never needs) — only actually asks the Gateway to
@@ -668,15 +704,33 @@ class AstraRouter:
                            provider=target.provider_id, model=target.model_id,
                            status=outcome.status, reason=outcome.reason,
                            attempts=attempts)
+                # INCOMPLETE/UNCERTAIN with real text is a legitimate
+                # best-effort answer (e.g. a multi-step task the model
+                # partially finished) — the caller still gets it, same as
+                # before this change, just tagged via completion_status.
+                # Only a genuine execution FAILED (the port itself raised
+                # during a correction round — credential/auth/network
+                # errors, exactly what happens when a provider's key is
+                # bad) or a response that ends up completely empty is
+                # treated as this candidate having failed outright, so the
+                # router falls over to the next configured provider
+                # instead of surfacing a dead/misconfigured one's error.
+                if outcome.status == "FAILED" or not (rr.text or "").strip():
+                    rr.ok = False
+                    rr.error = (f"{target.provider_id}: task completion "
+                               f"{outcome.status.lower()}"
+                               + (f" ({outcome.reason})" if outcome.reason else ""))
+                    return False
+                return True
             except Exception:
-                pass
-            return
+                return True  # fail-open: a supervision bug must not sink a good reply
+            return True
 
         if not hasattr(self.gateway, "supervise_execution"):
-            return
+            return True
         needs_check = req.structured_output or not (rr.text or "").strip()
         if not needs_check:
-            return
+            return True
         try:
             from astra.ai.gateway_contract import ProviderExecutionResult
             port = _RouterExecutionPort(self, by_key, req)
@@ -689,8 +743,13 @@ class AstraRouter:
             self._emit("router.gateway_supervision", task=req.task_type,
                        provider=target.provider_id, model=target.model_id,
                        ok=outcome.ok, reason=outcome.reason)
+            if not outcome.ok:
+                rr.ok = False
+                rr.error = (f"{target.provider_id}: {outcome.reason or 'supervision rejected response'}")
+                return False
+            return True
         except Exception:
-            pass
+            return True  # fail-open: a supervision bug must not sink a good reply
 
     # -- Astra AI Gateway (not a provider; reporting only — see module
     #    docstring: AstraRouter never executes a request against it) --------

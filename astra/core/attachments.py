@@ -28,7 +28,7 @@ MAX_ARCHIVE_RATIO = 100  # compressed-to-extracted ratio limit (zip bomb guard)
 
 FILE_FAMILIES: dict[str, str] = {
     ".pdf": "document", ".doc": "document", ".docx": "document",
-    ".txt": "text", ".md": "text",
+    ".txt": "text", ".md": "text", ".html": "text", ".htm": "text",
     ".csv": "data", ".tsv": "data",
     ".xls": "spreadsheet", ".xlsx": "spreadsheet",
     ".ppt": "presentation", ".pptx": "presentation",
@@ -77,6 +77,7 @@ _EXT_TO_MIME: dict[str, str] = {
     ".doc": "application/msword",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".txt": "text/plain", ".md": "text/markdown",
+    ".html": "text/html", ".htm": "text/html",
     ".csv": "text/csv", ".tsv": "text/tab-separated-values",
     ".xls": "application/vnd.ms-excel",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

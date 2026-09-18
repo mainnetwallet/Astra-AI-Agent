@@ -159,6 +159,89 @@ def generate_xlsx(content: str, title: str = "Sheet1") -> bytes:
     return buf.getvalue()
 
 
+def generate_html(content: str, title: str = "Document") -> bytes:
+    """Wrap text/HTML content into a minimal, self-contained HTML5 page.
+
+    If `content` already looks like a full HTML document (has a
+    <html>/<!DOCTYPE> tag), it is used as-is so a caller that generated
+    real markup isn't double-wrapped. Otherwise each line becomes a
+    paragraph and special characters are escaped."""
+    from xml.sax.saxutils import escape
+    stripped = content.strip()
+    lower = stripped.lower()
+    if lower.startswith("<!doctype") or lower.startswith("<html"):
+        return stripped.encode("utf-8")
+    paragraphs = "\n".join(
+        f"    <p>{escape(line)}</p>" for line in content.split("\n") if line.strip())
+    html = (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n<head>\n  <meta charset="UTF-8">\n'
+        f"  <title>{escape(title)}</title>\n"
+        "  <style>body{font-family:sans-serif;max-width:800px;margin:2rem auto;"
+        "padding:0 1rem;line-height:1.5}</style>\n"
+        "</head>\n<body>\n"
+        f"  <h1>{escape(title)}</h1>\n{paragraphs}\n"
+        "</body>\n</html>\n")
+    return html.encode("utf-8")
+
+
+def generate_txt(content: str, title: str = "Document") -> bytes:
+    """Plain-text passthrough (normalizes line endings)."""
+    return content.replace("\r\n", "\n").encode("utf-8")
+
+
+def generate_md(content: str, title: str = "Document") -> bytes:
+    """Markdown passthrough. If the content doesn't already start with a
+    top-level heading, one is added from `title` so the file stands on
+    its own when opened directly."""
+    text = content.replace("\r\n", "\n").strip()
+    if not text.startswith("#"):
+        text = f"# {title}\n\n{text}"
+    return (text + "\n").encode("utf-8")
+
+
+def generate_csv(content: str, title: str = "Sheet1") -> bytes:
+    """CSV passthrough. Accepts either already-comma-separated text or a
+    JSON list-of-lists/list-of-dicts, so a model that reasoned about the
+    data as JSON still produces a valid CSV file."""
+    import csv
+    import io
+    import json as _json
+    text = content.strip()
+    try:
+        data = _json.loads(text)
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        buf = io.StringIO()
+        fieldnames = list(data[0].keys())
+        writer = csv.DictWriter(buf, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in data:
+            writer.writerow(row)
+        return buf.getvalue().encode("utf-8")
+    if isinstance(data, list) and data and isinstance(data[0], list):
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        for row in data:
+            writer.writerow(row)
+        return buf.getvalue().encode("utf-8")
+    return content.replace("\r\n", "\n").encode("utf-8")
+
+
+def generate_json(content: str, title: str = "Document") -> bytes:
+    """Pretty-printed JSON. If `content` isn't already valid JSON (e.g.
+    the model just wrote plain text), it is wrapped as {"title", "content"}
+    so the output is always valid, parseable JSON rather than a failure."""
+    import json as _json
+    text = content.strip()
+    try:
+        data = _json.loads(text)
+    except (ValueError, TypeError):
+        data = {"title": title, "content": content}
+    return _json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+
+
 def generate_pptx(content: str, title: str = "Presentation") -> bytes:
     """Generate a minimal but valid PPTX from text content."""
     from xml.sax.saxutils import escape

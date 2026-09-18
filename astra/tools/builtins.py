@@ -257,9 +257,12 @@ def search_files(args: dict, ctx=None) -> dict:
 # ── document generation ───────────────────────────────────────────────────────
 
 def generate_document(args: dict, ctx=None) -> dict:
-    """Generate a real document file (PDF, DOCX, XLSX, PPTX) from content."""
+    """Generate a real document file (PDF, DOCX, XLSX, PPTX, HTML, TXT,
+    MD, CSV, JSON) from content."""
     from astra.tools.document_gen import (
-        generate_pdf, generate_docx, generate_xlsx, generate_pptx)
+        generate_pdf, generate_docx, generate_xlsx, generate_pptx,
+        generate_html, generate_txt, generate_md, generate_csv,
+        generate_json)
     from astra.core.artifacts import store_artifact, validate_artifact, make_artifact_dir
     import tempfile
 
@@ -274,11 +277,18 @@ def generate_document(args: dict, ctx=None) -> dict:
         "docx": (generate_docx, "document", ".docx"),
         "xlsx": (generate_xlsx, "spreadsheet", ".xlsx"),
         "pptx": (generate_pptx, "presentation", ".pptx"),
+        "html": (generate_html, "text", ".html"),
+        "htm": (generate_html, "text", ".html"),
+        "txt": (generate_txt, "text", ".txt"),
+        "md": (generate_md, "text", ".md"),
+        "markdown": (generate_md, "text", ".md"),
+        "csv": (generate_csv, "text", ".csv"),
+        "json": (generate_json, "data", ".json"),
     }
 
     if format_type not in generators:
         return {"ok": False, "error": f"Unsupported format: {format_type}. "
-                "Supported: pdf, docx, xlsx, pptx"}
+                "Supported: pdf, docx, xlsx, pptx, html, txt, md, csv, json"}
 
     gen_fn, art_type, ext = generators[format_type]
     data = gen_fn(content, title)

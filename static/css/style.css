@@ -279,6 +279,7 @@ a[class*="hl-"] { pointer-events: none; }
 /* activity log — terminal / console style feed */
 .log-list {
   display: block; height: 320px; max-height: 320px; overflow-y: auto; gap: 0;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y;
   background: radial-gradient(ellipse 70% 60% at 50% 35%, #0e1712 0%, #060907 60%, #050605 100%);
   border: 1px solid var(--line); border-radius: 12px;
   padding: 14px 18px;

@@ -678,6 +678,14 @@ function feedLine(e) {
   if (feed.firstElementChild && feed.firstElementChild.classList.contains("empty"))
     feed.innerHTML = "";
 
+  // New lines are prepended to the top (newest-first). If the user has
+  // scrolled down into older entries, inserting above them must not yank
+  // their view — so remember where they were and where the top of the
+  // scrollable content is right now.
+  const pinnedToTop = feed.scrollTop <= 4;
+  const prevScrollTop = feed.scrollTop;
+  const prevScrollHeight = feed.scrollHeight;
+
   const cats = [...logCategories(e.kind, e.data)];
   const isErr = cats.includes("errors");
   const isOk = !isErr && cats.includes("success");
@@ -710,6 +718,15 @@ function feedLine(e) {
   div.classList.toggle("hidden", !(matchesFilter && matchesQuery));
   feed.prepend(div);
   while (feed.children.length > LOGS_MAX_BUFFER) feed.removeChild(feed.lastChild);
+
+  // Restore the scroll anchor: stay pinned to the newest line if that's
+  // where the user already was, otherwise hold their reading position
+  // steady by compensating for the height just added above it.
+  if (pinnedToTop) {
+    feed.scrollTop = 0;
+  } else {
+    feed.scrollTop = prevScrollTop + (feed.scrollHeight - prevScrollHeight);
+  }
 }
 function feedText(d) {
   if (!d) return "";

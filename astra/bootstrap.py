@@ -17,8 +17,15 @@ from astra.core.events import EventBus
 from astra.core.permissions import Policy
 from astra.core.tasks import TaskEngine
 from astra.core.planner import Planner
-from astra.core.executor import Executor
-from astra.core.orchestrator import Orchestrator
+# NOTE: astra.core.executor (Executor) and astra.tools.registry
+# (ToolRegistry) have both been deleted — along with the confirm/ask gate
+# that lived across them. Every line below referencing `Executor`,
+# `ToolRegistry`, `registry`, or `executor` is now broken, pending a new
+# tool-execution layer.
+# NOTE: astra.core.orchestrator has been deleted (Orchestrator class no
+# longer exists). Every line below referencing `Orchestrator`/`orchestrator`
+# is now broken (ImportError at this line, then NameError further down) —
+# pending a new orchestration layer.
 from astra.ai.provider import ClaudeProvider, OpenAICompatibleProvider
 from astra.ai.router import AstraRouter
 from astra.ai.registry import build_providers, ProviderRegistry

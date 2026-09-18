@@ -1,159 +1,32 @@
-"""Astra Agent: hands every chat message straight to the orchestrator
-(Planner -> Astra AI Gateway -> Existing Provider System), then a gentle
-Banglish fallback.
+"""Astra Agent: non-chat surfaces (help/dashboard/export/import/resume)
+around the plugin list and the orchestrator.
 
-Deliberate: there is no deterministic pre-Gateway command matching here
-anymore. Every chat message, whatever it looks like, goes through the same
-Orchestrator -> Planner -> Gateway -> Provider path — the Gateway decides
-what a message needs (task vs small talk, rewrite vs pass-through), not a
-regex layer sitting in front of it. A previous version of this class
-walked `self.plugins` and let the first plugin whose `process(text)`
-matched answer directly, bypassing the Gateway/Provider entirely for
-things like wallet/airdrop commands. That has been removed on purpose —
-see the `plugins` constructor arg below for what still uses `self.plugins`
-and what plugin work remains to reconnect that functionality properly (as
-AI-callable tools via the tool registry, not chat-text regex).
+`handle()` — the chat entry point that used to hand every message to
+`self.orchestrator.submit(...)` and turn the report into a reply — has
+been removed along with its `_reply_from_report()` /
+`_extract_response_artifacts()` helpers, pending a new chat entry point.
+
+Still breaking on this removal:
+  - `astra/web.py`'s `POST /api/chat` handler calls `server.agent.handle(...)`
+  - `resume()` below still calls the now-removed `self._reply_from_report(...)`
+    on its success path
+Both need a new implementation once the chat path is redesigned.
 """
 from __future__ import annotations
 
 from .core import Plugin
-
-FALLBACK = (
-    "Ei command ta ami bojhini. 'help' likhe dekhta paren — ba simple "
-    "Banglish e bollun, jaate korte chai (jemon: 'add airdrop Notcoin "
-    "deadline 30 oct').")
-UNHANDLED_OFFLINE = (
-    "Ei command ta ami bodhokorar chesta korlam, kintu kono tool/plugin "
-    "match korlo na. 'help' likhe dekhte paren — ba chotto theke shuru "
-    "korun.")
-
 
 class Agent:
     def __init__(self, plugins: list[Plugin], orchestrator=None):
         # `plugins` is kept for the non-chat surfaces below that still use
         # it directly — help_text(), dashboard(), export_all()/import_all()
         # — and because HTTP routes / the tool registry are wired from the
-        # same plugin list elsewhere in bootstrap.py. `handle()` itself no
-        # longer reads from it: chat text is never regex-matched against a
-        # plugin here (see module docstring).
+        # same plugin list elsewhere in bootstrap.py.
         self.plugins = plugins
         self.orchestrator = orchestrator  # optional multi-step executor
-        # NOTE: there is deliberately no raw/direct LLM callable here. Any
-        # request MUST go through `orchestrator` (Orchestrator -> Planner ->
-        # Astra AI Gateway -> Existing Provider System). A prior version
-        # accepted an optional `llm` callable and would call it directly on
-        # orchestrator failure/absence, which is exactly the kind of legacy
-        # bypass path that lets a normal AI request skip the Gateway. It
-        # has been removed on purpose — do not re-add a direct model call
-        # here, and do not re-add a plugin.process(text) shortcut either.
-
-    def handle(self, message: str, context: str = "",
-               attachments: list | None = None) -> dict:
-        """Returns {reply, action, data, ok, artifacts} exactly as the old
-        single-domain agent did, so callers/UI stay compatible.
-
-        `context` is optional recent conversation the caller already has.
-        `attachments` is an optional list of processed Attachment dicts
-        from the multimodal upload layer. When present, the request is
-        multimodal and capability-aware routing is required.
-
-        Every message goes straight to `orchestrator` (Gateway ->
-        Provider) — there is no plugin/regex shortcut in front of it.
-        """
-        msg = " ".join(str(message).split()).strip()
-        if not msg and not attachments:
-            return {"reply": "Ki korte paren? 'help' likhun.", "action": "none",
-                    "data": {}, "ok": False}
-        if not msg and attachments:
-            msg = f"[{len(attachments)} file(s) attached]"
-        if self.orchestrator:
-            try:
-                report = self.orchestrator.submit(
-                    msg, sync=True, context=context,
-                    attachments=attachments or None)
-                return self._reply_from_report(msg, report)
-            except Exception:
-                pass
-        return {"reply": FALLBACK, "action": "none", "data": {}, "ok": False}
-
-    def _reply_from_report(self, message: str, report: dict) -> dict:
-        """Turn an orchestration report into {reply, action, data, ok, artifacts}
-        like a plugin would. Real tool steps -> ok True + compact summary; a
-        pure 'answer' step -> its text with ok False (unhandled by plugins).
-
-        When the response contains generated artifacts (images, code blocks,
-        data files), they are extracted, stored, validated, and returned in
-        the 'artifacts' list for the frontend to render."""
-        results = report.get("results") or {}
-        real, lines = 0, []
-        for sid, out in results.items():
-            if out.get("tool") == "answer":
-                continue
-            real += 1
-            desc = (out.get("description") or out.get("tool"))
-            if out.get("ok"):
-                head = _summarize(out.get("output") or {})
-                lines.append(f"✅ {desc}: {head}")
-            else:
-                lines.append(f"⚠️ {desc}: {out.get('error') or 'failed'}")
-        if report.get("pending"):
-            body = "\n".join(lines) or "Approval lagbe."
-            step = report.get("pending_step") or {}
-            tool = (step.get("description") or step.get("tool") or "")
-            # action "confirm" tells the frontend to render inline
-            # Approve/Reject buttons right under this bubble — resolved via
-            # resume(), never by sending the user off to a separate tab.
-            return {"reply": (f"⚠️ Approval lagbe: **{tool}**\n" + body),
-                    "action": "confirm", "data": report, "ok": False}
-        if real:
-            status = "COMPLETED" if report.get("status") == "COMPLETED" else \
-                ("FAILED" if report.get("status") == "FAILED" else report.get("status"))
-            head = f"📋 Plan complete ({status}) — {report.get('steps', 0)} step:\n"
-            reply = head + "\n".join(lines)
-            artifacts = self._extract_response_artifacts(message, results)
-            return {"reply": reply, "action": "live",
-                    "data": report, "ok": status == "COMPLETED",
-                    "artifacts": artifacts}
-        for sid, out in results.items():
-            if out.get("tool") == "answer":
-                text = (out.get("output") or {}).get("text", "") or UNHANDLED_OFFLINE
-                artifacts = self._extract_response_artifacts(message, results)
-                return {"reply": text, "action": "none", "data": report,
-                        "ok": False, "artifacts": artifacts}
-        return {"reply": UNHANDLED_OFFLINE, "action": "none", "data": report,
-                "ok": False, "artifacts": []}
-
-    def _extract_response_artifacts(self, message: str,
-                                     results: dict) -> list[dict]:
-        """Extract artifacts from provider responses when applicable."""
-        try:
-            from astra.ai.artifact_extraction import (
-                extract_artifacts, detect_output_type)
-            from astra.core.artifacts import make_artifact_dir
-            import tempfile
-            artifacts = []
-            for sid, out in results.items():
-                output = out.get("output") or {}
-                if isinstance(output, dict) and output.get("artifact"):
-                    artifacts.append(output["artifact"])
-            requested = detect_output_type(message)
-            if requested:
-                artifact_dir = make_artifact_dir(
-                    tempfile.gettempdir() + "/astra")
-                for sid, out in results.items():
-                    text = ""
-                    output = out.get("output") or {}
-                    if isinstance(output, dict):
-                        text = output.get("text", "")
-                    elif isinstance(output, str):
-                        text = output
-                    if text:
-                        found = extract_artifacts(text, artifact_dir,
-                                                   requested)
-                        artifacts.extend(found)
-            return artifacts
-        except Exception:
-            return []
+        # NOTE: `handle()` (the chat entry point) has been removed — see
+        # module docstring. `resume()` below still uses `self.orchestrator`
+        # directly for the approve/reject round-trip.
 
     def help_text(self) -> str:
         """Concatenated help from every plugin that offers one."""
@@ -221,34 +94,3 @@ class Agent:
         return report or {"imported": True}
 
 
-def _summarize(payload: dict) -> str:
-    """One-line human summary of a tool output dict (count/length aware)."""
-    if not payload:
-        return "(kono output nai)"
-    if isinstance(payload, dict) and "text" in payload:
-        return str(payload["text"])[:160]
-    if isinstance(payload, dict) and "count" in payload:
-        return f"{payload['count']} item"
-    if isinstance(payload, dict) and "content" in payload:
-        return str(payload["content"])[:160]
-    if isinstance(payload, dict) and "results" in payload:
-        n = len(payload["results"])
-        return f"{n} item"
-    if isinstance(payload, dict) and "wallets" in payload:
-        n = len(payload["wallets"])
-        return f"{n} wallet balance check\n{_balances_lines(payload['wallets'])}"
-    if isinstance(payload, dict) and "tasks" in payload:
-        return f"{len(payload['tasks'])} task"
-    text = str(payload)[:160]
-    return text if text else "(empty)"
-
-
-def _balances_lines(wallets: list) -> str:
-    lines = []
-    for w in wallets[:5]:
-        if w.get("error"):
-            lines.append(f"  • {w.get('label')}: {w.get('error')}")
-        else:
-            lines.append(f"  • {w.get('label')} [{w.get('symbol')}]: "
-                         f"{w.get('balance')} on {w.get('chain', '?').upper()}")
-    return "\n".join(lines) or ""

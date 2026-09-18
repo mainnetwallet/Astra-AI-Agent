@@ -67,6 +67,45 @@ class TestPlainTextReply(unittest.TestCase):
         self.assertEqual(
             Planner._plain_text_reply("<think>plan</think>\n\nHello!"), "Hello!")
 
+    def test_correction_scaffold_echo_is_never_shown_as_an_answer(self):
+        """Reproduces a real Activity Log case (nemotron-3.5-lightning:free
+        on "Hi"): a reasoning-heavy model burns its whole token budget on a
+        "thinking process" and, on the exhausted-correction attempt, ends
+        up quoting/musing about the correction instruction WE sent it
+        ("Goal: Produce a valid ordered step plan...", "Required Next
+        Action: ...") instead of ever answering "Hi". That ramble must
+        never be handed to the user as if it were the Provider's reply."""
+        ramble = (
+            "Here's a thinking process:\n\n"
+            "1.  Analyze User Input:\n"
+            "   - User says: \"Goal: Produce a valid ordered step plan "
+            "(JSON) for the user's goal, or an \\\"answer\\\" step if no "
+            "tool fits.\"\n"
+            "   - Then there's a \"Status\" block saying task is "
+            "incomplete, missing JSON, etc.\n"
+            "   - Then \"Required Next Action: disregard the previous "
+            "attempt entirely and redo the task from scratch...\"\n")
+        self.assertEqual(Planner._plain_text_reply(ramble), "")
+
+    def test_exhausted_correction_scaffold_echo_falls_back_gracefully(self):
+        """End-to-end: every scripted reply is the same scaffold-echoing
+        ramble (never valid JSON, never a real answer) -> correction is
+        exhausted -> the graceful fallback message is shown, never the
+        raw ramble."""
+        ramble = (
+            "Here's a thinking process:\n\n"
+            "1. Analyze User Input:\n"
+            "   - Goal: Produce a valid ordered step plan (JSON) for the "
+            "user's goal, or an \"answer\" step if no tool fits.\n"
+            "   - Required Next Action: disregard the previous attempt "
+            "entirely and redo the task from scratch.\n")
+        _, _, _, planner = _stack([ramble] * 6)
+        steps = planner.plan("Hi")
+        self.assertEqual(steps[0]["params"]["text"],
+                         _fallback_text("provider_no_plan"))
+        self.assertNotIn("Required Next Action", steps[0]["params"]["text"])
+        self.assertNotIn("thinking process", steps[0]["params"]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

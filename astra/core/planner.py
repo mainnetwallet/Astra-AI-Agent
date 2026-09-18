@@ -295,18 +295,36 @@ class Planner:
             self.last_plan_failure_reason = "provider_no_plan"
             return None
 
-    @staticmethod
-    def _plain_text_reply(text: str) -> str:
+    # Literal phrases that only ever appear in text WE inject into the
+    # conversation as a correction turn (build_task_correction_instruction
+    # in gateway_task_completion.py, build_correction_messages in
+    # gateway_supervision.py) — never in a real user-facing answer. A
+    # weak/reasoning-heavy model that runs out of budget mid-"thinking"
+    # tends to echo/analyze this scaffold back instead of answering it
+    # (e.g. quoting "Goal: ..."/"Required Next Action: ..." while musing
+    # about what it's supposed to do) — that ramble must never reach the
+    # user as if it were the Provider's actual reply.
+    _CORRECTION_SCAFFOLD_MARKERS = (
+        "Required Next Action", "Missing / Invalid", "Already Completed:",
+        "Status: task is",
+    )
+
+    @classmethod
+    def _plain_text_reply(cls, text: str) -> str:
         """The Provider's reply as user-facing prose, or "" when it isn't
         usable prose: empty / the adapters' "(no reply)" placeholder, only a
-        reasoning (<think>) block, or a broken/partial JSON plan that must
-        never be shown to the user as if it were an answer."""
+        reasoning (<think>) block, a broken/partial JSON plan, or the
+        Provider rambling about/echoing the Gateway's own correction
+        instructions instead of actually answering — none of these must
+        ever be shown to the user as if they were an answer."""
         import re
         t = re.sub(r"<think>.*?</think>", "", text or "",
                    flags=re.DOTALL | re.IGNORECASE).strip()
         if not t or t == "(no reply)":
             return ""
         if t[0] in "{[" or t.startswith("```") or '"steps"' in t:
+            return ""
+        if any(marker in t for marker in cls._CORRECTION_SCAFFOLD_MARKERS):
             return ""
         return t
 

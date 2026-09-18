@@ -470,11 +470,21 @@ class AstraHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_artifact(self, artifact_id: str, filename: str) -> None:
-        """Serve a stored artifact file."""
-        artifact_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data", "artifacts")
-        path = os.path.abspath(os.path.join(artifact_dir, artifact_id, filename))
+        """Serve a stored artifact file.
+
+        Generated artifacts are written by astra.core.artifacts.store_artifact
+        into `{tempdir}/astra/artifacts/{id}_{safe_filename}` (a flat
+        directory, id-prefixed — see generate_document / agent.py). This must
+        match that exact scheme or every download 404s.
+        """
+        import tempfile
+        from astra.core.artifacts import _safe_name
+
+        artifact_dir = os.path.join(tempfile.gettempdir(), "astra", "artifacts")
+        safe_filename = _safe_name(filename)
+        safe_id = _safe_name(artifact_id)
+        path = os.path.abspath(
+            os.path.join(artifact_dir, f"{safe_id}_{safe_filename}"))
         root = os.path.abspath(artifact_dir)
         if not path.startswith(root + os.sep):
             _json_err(self, "forbidden", 403)

@@ -350,7 +350,7 @@ const LOGS = {
 const LOGS_MAX_BUFFER = 300;
 
 const LOG_STAT_DEFS = [
-  { key: "total", label: "Total events" },
+  { key: "total", label: "Total" },
   { key: "api", label: "API calls" },
   { key: "success", label: "Success" },
   { key: "errors", label: "Errors" },

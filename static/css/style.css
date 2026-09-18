@@ -270,11 +270,20 @@ a[class*="hl-"] { pointer-events: none; }
 .tools-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .tool-chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 11px; white-space: nowrap; }
 
-/* mini stat cards above the log list (event counts, errors, success, api calls) */
-.cards.mini { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 12px; }
-.cards.mini .card { padding: 10px 12px; }
-.cards.mini .card-v { font-size: 20px; }
-.cards.mini .card-k { font-size: 11px; }
+/* mini stat cards above the log list (event counts, errors, success, api calls)
+   — one slim row of 4, not a 2x2 grid, so it stays compact on mobile */
+.cards.mini {
+  grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 12px;
+}
+.cards.mini .card {
+  padding: 6px 4px; text-align: center; display: flex; flex-direction: column;
+  align-items: center; gap: 1px;
+}
+.cards.mini .card-v { font-size: 15px; line-height: 1.1; }
+.cards.mini .card-k {
+  font-size: 9px; line-height: 1.15; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
 
 /* activity log — terminal / console style feed */
 .log-list {

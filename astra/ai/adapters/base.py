@@ -133,12 +133,24 @@ class CompatibleAdapter(AIProvider):
         raise ProviderError(f"{self.name} http {code}")
 
     # -- interface ------------------------------------------------------------
-    def chat(self, messages, model=None, max_tokens=500) -> str:
+    def chat(self, messages, model=None, max_tokens=500,
+              response_format: str | None = None) -> str:
         cred = self._pick()
         if cred is None:
             raise ProviderError(f"{self.name}: no healthy credential configured")
         body = {"model": model or (self.models[0] if self.models else ""),
                 "max_tokens": max_tokens, "messages": messages}
+        # OpenAI-compatible JSON mode. Prompt text alone ("return ONLY
+        # JSON") is not enough for chatty/"reasoning" free models (e.g.
+        # nvidia/nemotron-3.5-lightning:free on OpenRouter) — they burn
+        # the whole max_tokens budget narrating a "thinking process" and
+        # never emit JSON at all, which drives the Gateway's correction
+        # loop to exhaustion with nothing to show the user. When the
+        # caller needs structured output, ask the API to enforce it at
+        # the provider level too. Providers/models that don't support
+        # this field ignore it; we never fail because of it.
+        if response_format == "json_object":
+            body["response_format"] = {"type": "json_object"}
         t0 = time.perf_counter()
         data = self._post(f"{self.base_url}/chat/completions", body, cred)
         self._done(cred)

@@ -61,7 +61,7 @@ class _FailingProvider:
     def health_check(self):
         return True
 
-    def chat(self, messages, model=None, max_tokens=500):
+    def chat(self, messages, model=None, max_tokens=500, response_format=None):
         self.calls += 1
         raise ProviderError("gemini: simulated outage")
 

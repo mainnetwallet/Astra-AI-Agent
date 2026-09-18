@@ -33,11 +33,13 @@ class CloudflareAdapter(CompatibleAdapter):
         self._aidx += 1
         return f"{self.base_url}/accounts/{acc}/ai/v1"
 
-    def chat(self, messages, model=None, max_tokens=500) -> str:
+    def chat(self, messages, model=None, max_tokens=500,
+              response_format: str | None = None) -> str:
         base = self.base_url
         self.base_url = self._base()
         try:
-            return super().chat(messages, model, max_tokens)
+            return super().chat(messages, model, max_tokens,
+                                response_format=response_format)
         finally:
             self.base_url = base
 

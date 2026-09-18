@@ -55,7 +55,7 @@ class RecordingProvider:
     def health_check(self):
         return bool(self.pool)
 
-    def chat(self, messages, model=None, max_tokens=500):
+    def chat(self, messages, model=None, max_tokens=500, response_format=None):
         self.calls.append(model)
         spec = self.fail_models.get(model)
         if spec:

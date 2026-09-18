@@ -32,7 +32,7 @@ class _Conn:
         self.name, self.models, self.fail = name, list(models), fail
         self.pool = _Pool()
 
-    def chat(self, messages, model=None, max_tokens=500):
+    def chat(self, messages, model=None, max_tokens=500, response_format=None):
         if self.fail:
             raise ProviderError(f"{self.name}: boom")
         return f"ok-{self.name}-{model}"

@@ -253,6 +253,13 @@ class _RouterExecutionPort(ProviderExecutionPort):
             required_capabilities=self._req.required_capabilities,
             required_tools=self._req.required_tools,
             structured_output=self._req.structured_output,
+            # Carried over so a correction round-trip (this port is how
+            # every gateway_task_completion/gateway_supervision retry
+            # actually executes) still gets JSON mode + the higher token
+            # floor in _attempt below — a plan-contract request whose
+            # first reply wasn't JSON needs that on the retry even more
+            # than on the first try.
+            task_contract=self._req.task_contract,
             max_tokens=max_tokens, no_fallback=True)
         rr = self._router._attempt(adapter, model, corrected_req)
         if rr is None or not rr.ok:
@@ -838,9 +845,19 @@ class AstraRouter:
                     prompt = self._extract_prompt(req.messages)
                     text = adapter.text_to_speech(prompt, model=model.model_id)
                     streamed = False
-                elif req.required_tools or req.structured_output:
+                elif req.required_tools or req.structured_output or req.task_contract is not None:
+                    # §JSON mode: ask the provider API to enforce JSON, not
+                    # just the prompt text — a chatty/"reasoning" free model
+                    # (e.g. nvidia/nemotron-3.5-lightning:free) otherwise
+                    # spends its whole token budget on an unstructured
+                    # "thinking process" and never emits JSON, exhausting
+                    # the Gateway's correction loop with no usable reply.
+                    # Also give it real headroom: 500 tokens is not enough
+                    # for a reasoning model's preamble AND the JSON answer.
+                    structured_tokens = max(req.max_tokens, 1200)
                     text = adapter.chat(req.messages, model=model.model_id,
-                                        max_tokens=req.max_tokens)
+                                        max_tokens=structured_tokens,
+                                        response_format="json_object")
                     streamed = False
                 else:
                     text = adapter.chat(req.messages, model=model.model_id,

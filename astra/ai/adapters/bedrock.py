@@ -234,7 +234,13 @@ class BedrockAdapter(AIProvider):
                 blocks.append({"text": part.get("text", str(part))})
         return blocks or [{"text": ""}]
 
-    def chat(self, messages, model=None, max_tokens=500) -> str:
+    def chat(self, messages, model=None, max_tokens=500,
+              response_format: str | None = None) -> str:
+        # Bedrock's Converse API has no OpenAI-style response_format
+        # knob — accepted-and-ignored so callers that ask every adapter
+        # for JSON mode (astra.ai.router._attempt) don't crash here; JSON
+        # compliance on Bedrock still comes from the prompt + Gateway's
+        # own validate/correct loop, same as before this parameter existed.
         model = model or (self.models[0] if self.models else "")
         if not model:
             raise ProviderError("bedrock: no model configured")

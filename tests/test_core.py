@@ -1274,14 +1274,14 @@ class TestPhase4Router(unittest.TestCase):
         class Bad(AIProvider):
             name = "bad"
             models = ["m"]
-            def chat(self, messages, model=None, max_tokens=500):
+            def chat(self, messages, model=None, max_tokens=500, response_format=None):
                 raise ProviderError("down")
             def health_check(self): return True
 
         class Good(AIProvider):
             name = "good"
             models = ["m"]
-            def chat(self, messages, model=None, max_tokens=500):
+            def chat(self, messages, model=None, max_tokens=500, response_format=None):
                 return "works"
 
         r = AstraRouter(providers=[Bad(), Good()], max_retries=0)
@@ -1296,7 +1296,7 @@ class TestPhase4Router(unittest.TestCase):
         class AlwaysDown(AIProvider):
             name = "dead"
             models = ["m"]
-            def chat(self, messages, model=None, max_tokens=500):
+            def chat(self, messages, model=None, max_tokens=500, response_format=None):
                 return "never reached"
             def health_check(self): return False
 
@@ -1312,7 +1312,7 @@ class TestPhase4Router(unittest.TestCase):
         class Fast(AIProvider):
             name = "fast"
             models = ["m0"]
-            def chat(self, messages, model=None, max_tokens=500):
+            def chat(self, messages, model=None, max_tokens=500, response_format=None):
                 return "yo"
 
         r = AstraRouter(providers=[Fast()], max_retries=0, backoff_s=0.01)

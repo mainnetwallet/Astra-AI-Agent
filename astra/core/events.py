@@ -80,6 +80,13 @@ EVENT_KINDS = (
     "gateway.supervision.correction_failed",
     "gateway.supervision.correction_exhausted",
     "router.gateway_supervision",
+    # Gateway task-completion supervisor (astra/ai/gateway_task_completion.py):
+    # verify -> correct -> re-verify against the Task Completion Contract.
+    "router.gateway_task_completion",
+    "gateway.task_completion.correction_requested",
+    "gateway.task_completion.correction_succeeded",
+    "gateway.task_completion.correction_failed",
+    "gateway.task_completion.correction_exhausted",
 )
 
 

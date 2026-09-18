@@ -269,11 +269,46 @@ class Planner:
             # astra/ai/json_extract.py), so we must parse the same way
             # here rather than a bare json.loads that only trims stray
             # backtick characters.
-            data = loads_lenient(text)
-            return self.parse_plan_json(data, max_steps=max_steps) or None
+            steps = None
+            try:
+                steps = self.parse_plan_json(loads_lenient(text),
+                                             max_steps=max_steps) or None
+            except Exception:
+                steps = None
+            if steps:
+                return steps
+            # The Provider DID answer — just in plain prose instead of the
+            # JSON plan, and stayed that way through the Gateway's bounded
+            # corrections (typical for a chatty model on a greeting like
+            # "Hi"). That prose is the Provider's own reply, so hand it to
+            # the user as the answer rather than discarding it for a
+            # generic "couldn't make a plan" message. Still Provider output
+            # end to end — nothing is answered on the Planner's behalf.
+            prose = self._plain_text_reply(text)
+            if prose:
+                return [self._answer(
+                    g, prose,
+                    description="Direct reply (Provider answered in plain text)")]
+            self.last_plan_failure_reason = "provider_no_plan"
+            return None
         except Exception:
             self.last_plan_failure_reason = "provider_no_plan"
             return None
+
+    @staticmethod
+    def _plain_text_reply(text: str) -> str:
+        """The Provider's reply as user-facing prose, or "" when it isn't
+        usable prose: empty / the adapters' "(no reply)" placeholder, only a
+        reasoning (<think>) block, or a broken/partial JSON plan that must
+        never be shown to the user as if it were an answer."""
+        import re
+        t = re.sub(r"<think>.*?</think>", "", text or "",
+                   flags=re.DOTALL | re.IGNORECASE).strip()
+        if not t or t == "(no reply)":
+            return ""
+        if t[0] in "{[" or t.startswith("```") or '"steps"' in t:
+            return ""
+        return t
 
     def parse_plan_json(self, data: dict, max_steps: int = 6) -> list[dict]:
         """Turn an already-JSON-decoded `{"steps":[...]}` payload into
@@ -306,13 +341,14 @@ class Planner:
                 "description": description, "verify": verify or [],
                 "retries": 2, "depends_on": depends_on or []}
 
-    def _answer(self, g: str, text: str = "") -> dict:
+    def _answer(self, g: str, text: str = "", description: str = "") -> dict:
         reason = getattr(self, "last_plan_failure_reason", "")
         return {"id": "a1", "tool": "answer",
                 "params": {"text": text or _fallback_text(reason)},
-                "description": ("Direct reply (provider gave no usable plan)"
-                                if reason == "provider_no_plan" else
-                                "Direct reply (no Provider configured)"),
+                "description": description or (
+                    "Direct reply (provider gave no usable plan)"
+                    if reason == "provider_no_plan" else
+                    "Direct reply (no Provider configured)"),
                 "verify": [], "retries": 0, "is_answer": True}
 
 

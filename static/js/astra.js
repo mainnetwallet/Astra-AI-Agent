@@ -346,6 +346,7 @@ loaders.logs = async function () {
 const IMPORTANT_EVENT_HEADS = new Set(["astra_gateway", "ai", "provider"]);
 function isImportantEvent(e) {
   const kind = (e && e.kind) || "";
+  if (isCorrectionEvent(kind)) return true;
   if (!IMPORTANT_EVENT_HEADS.has(kind.split(".")[0])) return false;
   // The Gateway's own connections also emit ai.started/completed while
   // streaming, but every Gateway call is already reported (with its
@@ -353,6 +354,11 @@ function isImportantEvent(e) {
   // would list — and count — the same call twice.
   if (kind.startsWith("ai.") && e.agent === "gateway") return false;
   return true;
+}
+// Gateway result-supervision events ("the reply wasn't what was asked for,
+// asking the Provider again") — shown so a rejected reply is explainable.
+function isCorrectionEvent(kind) {
+  return /^gateway\.(task_completion|supervision)\.correction_/.test(kind || "");
 }
 
 // Everything that already happened before the Logs tab/SSE connection
@@ -416,7 +422,7 @@ function renderLogStats() {
 function logSource(e) {
   const k = (e && e.kind) || "";
   const head = k.split(".")[0];
-  if (head === "astra_gateway") return "gateway";
+  if (head === "astra_gateway" || isCorrectionEvent(k)) return "gateway";
   if (head === "ai") return e.agent === "gateway" ? "gateway" : "provider";
   if (head === "provider") return "provider";
   return "";
@@ -427,6 +433,9 @@ function logStatus(e) {
   const k = (e && e.kind) || "";
   const d = (e && e.data) || {};
   if (k === "astra_gateway.success" || k === "ai.completed") return "ok";
+  if (isCorrectionEvent(k))
+    return /correction_(failed|exhausted)$/.test(k) ? "err"
+         : /correction_succeeded$/.test(k) ? "ok" : "info";
   if (k === "astra_gateway.error" || k === "astra_gateway.stream_interrupted" ||
       k === "ai.failed" || k === "provider.failed") return "err";
   if (k === "provider.health_changed") return d.healthy === false ? "err" : "ok";
@@ -768,6 +777,7 @@ function logBadge(e, status) {
   if (k === "astra_gateway.request") return "🧭";
   if (k.endsWith(".started")) return "📡";
   if (k === "provider.health_changed") return "🩺";
+  if (isCorrectionEvent(k) && status === "info") return "🔁";
   return status === "err" ? "❌" : status === "ok" ? "✅" : "•";
 }
 
@@ -798,6 +808,19 @@ function logMessage(e, src) {
       if (d.aggregate)
         return `All providers failed · ${d.attempts != null ? d.attempts : "?"} attempt(s)${whyTxt}`;
       return `API call FAILED · ${t}${d.attempt > 1 ? ` · attempt ${d.attempt}` : ""}${whyTxt}`;
+    case "gateway.task_completion.correction_requested":
+    case "gateway.supervision.correction_requested":
+      return `Reply rejected, asking again · ${logTarget("provider", d)}` +
+             ` · attempt ${d.attempt != null ? d.attempt : "?"}${d.reason ? " · " + esc(String(d.reason)) : ""}`;
+    case "gateway.task_completion.correction_succeeded":
+    case "gateway.supervision.correction_succeeded":
+      return `Correction OK · ${logTarget("provider", d)} · attempt ${d.attempt != null ? d.attempt : "?"}`;
+    case "gateway.task_completion.correction_failed":
+    case "gateway.supervision.correction_failed":
+      return `Correction FAILED · ${logTarget("provider", d)}${whyTxt}`;
+    case "gateway.task_completion.correction_exhausted":
+    case "gateway.supervision.correction_exhausted":
+      return `Corrections exhausted · ${logTarget("provider", d)} · ${d.attempts != null ? d.attempts : "?"} attempt(s)${d.reason ? " · " + esc(String(d.reason)) : ""}`;
     case "provider.health_changed":
       return `Health changed · ${esc(d.provider || "?")} → ${d.healthy === false ? "DOWN" : "UP"}${whyTxt}`;
     default:

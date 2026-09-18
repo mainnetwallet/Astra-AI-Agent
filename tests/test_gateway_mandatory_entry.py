@@ -67,7 +67,7 @@ class SequencedProvider:
     def health_check(self):
         return True
 
-    def chat(self, messages, model=None, max_tokens=500):
+    def chat(self, messages, model=None, max_tokens=500, response_format=None):
         self.calls.append(list(messages))
         if not self._replies:
             raise ProviderError(f"{self.name}: no more scripted replies")

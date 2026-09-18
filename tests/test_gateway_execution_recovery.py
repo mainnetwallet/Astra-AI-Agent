@@ -51,7 +51,7 @@ class FakeAIProvider:
         self._calls = 0
         self.fail_first = fail_first
 
-    def chat(self, messages, model=None, max_tokens=500):
+    def chat(self, messages, model=None, max_tokens=500, response_format=None):
         self._calls += 1
         if self._calls <= self.fail_first:
             raise ProviderError("simulated failure")

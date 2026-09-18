@@ -46,7 +46,7 @@ class _FakeMultiModelConn:
         self.latency_by_model = dict(latency_by_model or {})
         self.calls = []                                   # list of model ids
 
-    def chat(self, messages, model=None, max_tokens=500):
+    def chat(self, messages, model=None, max_tokens=500, response_format=None):
         self.calls.append(model)
         if model in self.fail_models:
             raise ProviderError(f"{self.name}/{model}: simulated hard failure")

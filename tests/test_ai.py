@@ -35,7 +35,7 @@ class FakeAIProvider(AIProvider):
             # minimal shim: pool truthiness drives _provider_usable
             self.pool = _ShimPool(healthy)
 
-    def chat(self, messages, model=None, max_tokens=500):
+    def chat(self, messages, model=None, max_tokens=500, response_format=None):
         import time
         self._calls += 1
         if self.latency_s:
@@ -75,7 +75,7 @@ class _FakeGatewayConn:
         self._calls = 0
         self.fail_times = fail_times
 
-    def chat(self, messages, model=None, max_tokens=500):
+    def chat(self, messages, model=None, max_tokens=500, response_format=None):
         self._calls += 1
         self.last_messages = messages
         if self._calls <= self.fail_times:
@@ -1108,7 +1108,7 @@ class TestGatewayRequestIntelligence(unittest.TestCase):
         from astra.ai.gateway import GatewayRequestIntelligence
 
         class _AssistantVoiceConn(_FakeGatewayConn):
-            def chat(self, messages, model=None, max_tokens=500):
+            def chat(self, messages, model=None, max_tokens=500, response_format=None):
                 self._calls += 1
                 self.last_messages = messages
                 return "Hello! How can I assist you today?"
@@ -1149,7 +1149,7 @@ class TestGatewayRequestIntelligence(unittest.TestCase):
 
     def _conn_returning_text(self, name, payload):
         class _Conn(_FakeGatewayConn):
-            def chat(self, messages, model=None, max_tokens=500):
+            def chat(self, messages, model=None, max_tokens=500, response_format=None):
                 self._calls += 1
                 self.last_messages = messages
                 return payload
@@ -1169,7 +1169,7 @@ class TestGatewayIntentClassification(unittest.TestCase):
 
     def _conn_returning(self, name, payload):
         class _Conn(_FakeGatewayConn):
-            def chat(self, messages, model=None, max_tokens=500):
+            def chat(self, messages, model=None, max_tokens=500, response_format=None):
                 self._calls += 1
                 self.last_messages = messages
                 return payload

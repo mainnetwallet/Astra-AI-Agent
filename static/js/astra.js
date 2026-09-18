@@ -421,7 +421,49 @@ function initLogsToolbar() {
       $("#live-feed").innerHTML = `<div class="empty">cleared — listening…</div>`;
     });
   }
+  const copyBtn = $("#btn-logs-copy");
+  if (copyBtn && !copyBtn.dataset.hooked) {
+    copyBtn.dataset.hooked = "1";
+    copyBtn.addEventListener("click", () => copyLogsToClipboard(copyBtn));
+  }
   renderLogStats();
+}
+
+// Copies the currently-visible (i.e. filter/search-matched) log lines as
+// plain text, newest-first, in the same order they're shown on screen.
+async function copyLogsToClipboard(btn) {
+  const feed = $("#live-feed");
+  const lines = $$(".term-line", feed)
+    .filter((el) => !el.classList.contains("hidden"))
+    .map((el) => $$(".term-time, .term-msg", el).map((s) => s.textContent).join(" "));
+  const out = lines.join("\n");
+  const flash = (label) => {
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = label;
+    setTimeout(() => { btn.textContent = prev; }, 1400);
+  };
+  if (!out) { flash("Nothing to copy"); return; }
+  try {
+    await navigator.clipboard.writeText(out);
+    flash("✅ Copied");
+  } catch (_) {
+    // clipboard API unavailable/blocked (e.g. non-https localhost webview) —
+    // fall back to a hidden textarea + execCommand.
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = out;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      flash("✅ Copied");
+    } catch (_e) {
+      flash("⚠️ Copy failed");
+    }
+  }
 }
 
 function applyLogsFilter() {

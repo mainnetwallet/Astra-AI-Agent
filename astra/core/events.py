@@ -154,6 +154,16 @@ class EventBus:
         r = self.store.fetchone("SELECT COUNT(*) c FROM events")
         return r["c"] if r else 0
 
+    def clear(self) -> int:
+        """Wipe the persisted event log (the Logs panel's 'Clear' button —
+        without this, history() keeps handing the same rows back to any
+        client that reloads, since 'Clear' only ever emptied the browser's
+        in-memory feed). Returns how many rows were removed."""
+        with self._lock:
+            n = self.count()
+            self.store.exec("DELETE FROM events")
+            return n
+
 
 def _json(raw) -> dict:
     from json import loads

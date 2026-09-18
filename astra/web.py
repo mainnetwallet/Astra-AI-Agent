@@ -564,6 +564,9 @@ class AstraHandler(BaseHTTPRequestHandler):
             if path == ["api", "events"] and method == "GET":
                 return _json_ok(self, {"ok": True, "data": server.events().history(
                     limit=int(q.get("limit", 100)), after_id=int(q.get("after_id") or 0))})
+            if path == ["api", "events"] and method == "DELETE":
+                removed = server.events().clear()
+                return _json_ok(self, {"ok": True, "removed": removed})
             if path == ["api", "events", "stream"] and method == "GET":
                 return self._sse()
             if path == ["api", "events", "last"] and method == "GET":

@@ -438,11 +438,14 @@ function initLogsToolbar() {
   const clearBtn = $("#btn-logs-clear");
   if (clearBtn && !clearBtn.dataset.hooked) {
     clearBtn.dataset.hooked = "1";
-    clearBtn.addEventListener("click", () => {
+    clearBtn.addEventListener("click", async () => {
       LOGS.buffer = [];
       LOGS.counts = { total: 0, api: 0, errors: 0, success: 0 };
       renderLogStats();
       $("#live-feed").innerHTML = `<div class="empty">cleared — listening…</div>`;
+      // Also wipe the persisted history server-side — otherwise a page
+      // refresh reloads the same old events right back into the panel.
+      try { await del("/api/events"); } catch (_) { /* best-effort */ }
     });
   }
   const copyBtn = $("#btn-logs-copy");

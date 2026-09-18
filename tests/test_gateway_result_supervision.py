@@ -363,5 +363,38 @@ class TestFailOpenAndIsolation(unittest.TestCase):
                 self.assertNotEqual(node.id, "ProviderRegistry")
 
 
+class _Bus:
+    """Same minimal fixture as tests/test_logs_api_call_events.py."""
+
+    def __init__(self):
+        self.rows = []
+
+    def emit(self, kind, agent="", **data):
+        self.rows.append({"kind": kind, "agent": agent, "data": data})
+
+    def kinds(self, prefix):
+        return [r for r in self.rows if r["kind"].startswith(prefix)]
+
+
+class TestCorrectionRequestedShowsRejectedReply(unittest.TestCase):
+    """Same Activity Log visibility fix as the Task Completion supervisor:
+    `correction_requested` now carries `got`, the first 120 chars of the
+    reply that was actually rejected, not just the abstract `reason`."""
+
+    def test_got_is_the_rejected_replys_first_120_chars(self):
+        bus = _Bus()
+        sup = GatewayResultSupervision(events=bus)
+        port = _RecordingPort(['{"a": 1, "b": 2}'])
+        long_reply = "y" * 200
+        sup.supervise(port, _t("gemini", "model-a"),
+                      [{"role": "user", "content": "hi"}],
+                      ProviderExecutionResult(ok=True, text=long_reply),
+                      require_json=True, required_fields=("a", "b"))
+        requested = bus.kinds("gateway.supervision.correction_requested")
+        self.assertEqual(len(requested), 1)
+        self.assertEqual(requested[0]["data"]["got"], long_reply[:120])
+        self.assertEqual(len(requested[0]["data"]["got"]), 120)
+
+
 if __name__ == "__main__":
     unittest.main()

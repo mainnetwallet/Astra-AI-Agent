@@ -162,7 +162,8 @@ class GatewayResultSupervision:
             attempts += 1
             self._emit("gateway.supervision.correction_requested",
                        provider=target.provider_id, model=target.model_id,
-                       reason=outcome.reason, attempt=attempts)
+                       reason=outcome.reason, attempt=attempts,
+                       got=(current_result.text or "")[:120])
             current_messages = build_correction_messages(
                 current_messages, current_result, outcome)
             try:

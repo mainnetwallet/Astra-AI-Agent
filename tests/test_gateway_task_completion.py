@@ -403,5 +403,52 @@ class TestFailOpenAndIsolation(unittest.TestCase):
         self.assertEqual(rr.text, "hello")   # fail-open: original text kept
 
 
+# ── Activity Log visibility: what did the model actually say? ───────────────
+class _Bus:
+    """Same minimal fixture as tests/test_logs_api_call_events.py."""
+
+    def __init__(self):
+        self.rows = []
+
+    def emit(self, kind, agent="", **data):
+        self.rows.append({"kind": kind, "agent": agent, "data": data})
+
+    def kinds(self, prefix):
+        return [r for r in self.rows if r["kind"].startswith(prefix)]
+
+
+class TestCorrectionRequestedShowsRejectedReply(unittest.TestCase):
+    """The "Reply rejected, asking again" log line used to give only the
+    reason ("required field(s) missing from JSON response") with no way
+    to see what the model actually sent. `correction_requested` now also
+    carries `got`: the first 120 chars of the rejected reply."""
+
+    def test_got_is_the_rejected_replys_first_120_chars(self):
+        bus = _Bus()
+        sup = GatewayTaskCompletionSupervisor(events=bus)
+        port = _RecordingPort(["still not json"] * MAX_CORRECTION_ATTEMPTS)
+        contract = build_task_completion_contract(
+            "hi", require_json=True, required_fields=("steps",))
+        long_reply = "x" * 200
+        sup.supervise(port, _t(), [{"role": "user", "content": "hi"}],
+                      _r(long_reply), contract)
+        requested = bus.kinds("gateway.task_completion.correction_requested")
+        self.assertEqual(len(requested), MAX_CORRECTION_ATTEMPTS)
+        self.assertEqual(requested[0]["data"]["got"], long_reply[:120])
+        self.assertEqual(len(requested[0]["data"]["got"]), 120)
+
+    def test_got_reflects_each_attempts_own_rejected_reply(self):
+        bus = _Bus()
+        sup = GatewayTaskCompletionSupervisor(events=bus)
+        port = _RecordingPort(['{"nope":1}', '{"also_nope":1}'])
+        contract = build_task_completion_contract(
+            "hi", require_json=True, required_fields=("steps",))
+        sup.supervise(port, _t(), [{"role": "user", "content": "hi"}],
+                      _r('{"foo":1}'), contract)
+        requested = bus.kinds("gateway.task_completion.correction_requested")
+        self.assertEqual([r["data"]["got"] for r in requested],
+                         ['{"foo":1}', '{"nope":1}'])
+
+
 if __name__ == "__main__":
     unittest.main()

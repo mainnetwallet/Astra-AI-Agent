@@ -320,7 +320,8 @@ class GatewayTaskCompletionSupervisor:
             self._emit("gateway.task_completion.correction_requested",
                        provider=target.provider_id, model=target.model_id,
                        status=outcome.status, reason=outcome.reason,
-                       attempt=attempts)
+                       attempt=attempts,
+                       got=(current_result.text or "")[:120])
             current_messages = build_task_completion_messages(
                 current_messages, current_result, contract, outcome)
             try:

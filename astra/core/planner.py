@@ -318,6 +318,7 @@ class Planner:
         round-trip (Orchestrator._gateway_final_task_verification) can
         turn a corrective AI reply into additional steps without
         duplicating this parsing."""
+        data = self._normalize_plan_shape(data)
         steps = []
         issued: set[str] = set()
         for s in (data.get("steps", []) if isinstance(data, dict) else [])[:max_steps]:
@@ -332,6 +333,51 @@ class Planner:
                                     depends_on=deps))
             issued.add(steps[-1]["id"])
         return steps
+
+    # Synonyms a chatty/weak model reaches for instead of the requested
+    # {"steps":[{"tool":"answer","params":{"text":...}}]} envelope when it
+    # just wants to say something back (§8/§9: still a usable reply, not a
+    # malformed one worth a correction round-trip or a fallback message).
+    _ANSWER_TEXT_KEYS = ("answer", "text", "reply", "response", "message",
+                        "content")
+
+    @classmethod
+    def _normalize_plan_shape(cls, data):
+        """Tolerate a few common near-miss shapes instead of discarding an
+        otherwise-usable reply as unparseable (previously: a "steps" field
+        strictly required, so any reply lacking it fell through to
+        `_plain_text_reply`, which in turn rejects anything starting with
+        "{" — meaning these shapes were rejected TWICE and always ended up
+        in the generic fallback message, even though the model's own
+        answer was sitting right there):
+
+          - a bare list of step dicts, with no {"steps": [...]} wrapper
+          - a single step dict on its own (has a "tool" key), not wrapped
+            in a list at all
+          - a plain {"answer": "..."} — or "text"/"reply"/"response"/
+            "message"/"content" — instead of an "answer" tool step
+
+        Anything else (including a dict with none of the above, e.g.
+        {"plan": [...]}) is returned unchanged so the existing
+        required-field check and correction loop still run exactly as
+        before; this only widens what counts as ALREADY usable, it never
+        loosens what the Provider is asked to produce.
+        """
+        if isinstance(data, list):
+            return {"steps": data}
+        if not isinstance(data, dict):
+            return data
+        if "steps" in data:
+            return data
+        if "tool" in data:
+            return {"steps": [data]}
+        for key in cls._ANSWER_TEXT_KEYS:
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                return {"steps": [{"id": "s1", "tool": "answer",
+                                   "params": {"text": val},
+                                   "description": "Direct reply"}]}
+        return data
 
     # -- step factory ---------------------------------------------------------
     @staticmethod

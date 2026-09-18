@@ -811,7 +811,8 @@ function logMessage(e, src) {
     case "gateway.task_completion.correction_requested":
     case "gateway.supervision.correction_requested":
       return `Reply rejected, asking again · ${logTarget("provider", d)}` +
-             ` · attempt ${d.attempt != null ? d.attempt : "?"}${d.reason ? " · " + esc(String(d.reason)) : ""}`;
+             ` · attempt ${d.attempt != null ? d.attempt : "?"}${d.reason ? " · " + esc(String(d.reason)) : ""}` +
+             `${d.got ? ` · got: "${esc(String(d.got))}"` : ""}`;
     case "gateway.task_completion.correction_succeeded":
     case "gateway.supervision.correction_succeeded":
       return `Correction OK · ${logTarget("provider", d)} · attempt ${d.attempt != null ? d.attempt : "?"}`;

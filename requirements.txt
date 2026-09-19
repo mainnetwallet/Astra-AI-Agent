@@ -17,10 +17,3 @@
 # `requests` — never required by the core (urllib is used), but handy for
 # writing your own plugin adapters / one-off scripts against external APIs.
 # requests>=2.31
-
-# FastAPI web layer (optional, alternative to the stdlib server in
-# astra/web.py). Only needed if you run via run_fastapi.py instead of
-# run.py — the stdlib server remains the zero-dependency default.
-# fastapi>=0.110
-# uvicorn[standard]>=0.29
-# python-multipart>=0.0.9   # required by FastAPI for multipart/form-data (chat file uploads)

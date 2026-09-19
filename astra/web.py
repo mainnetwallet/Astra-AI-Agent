@@ -25,6 +25,7 @@ Core (non-plugin) endpoints (all old routes stay backward-compatible):
 
   GET  /api/manifest        agent name + plugin tabs + core tabs
   POST /api/chat            {message} -> agent reply {reply, action, data, ok}
+  GET  /api/chat/history[?after_id=N]  saved transcript + {pending} (DELETE clears it)
   POST /api/chat/resume     {execution_id, allow} -> approve/reject a pending
                              WAITING_USER tool call inline from chat (same
                              reply shape as /api/chat; no separate tab needed)
@@ -88,6 +89,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
 from .agent import Agent
+from .chat_log import ChatLog
 from .security import (ApiError, RateLimiter, make_request_id, redact,
                        redact_text)
 
@@ -556,23 +558,53 @@ class AstraHandler(BaseHTTPRequestHandler):
             if path == ["api", "manifest"]:
                 return _json_ok(self, {"ok": True, "data": server.manifest()})
             if path == ["api", "chat"] and method == "POST":
+                # The user message is saved BEFORE the agent runs and the reply
+                # is saved the moment it exists — so a page refresh mid-turn
+                # loses nothing: the reloaded page reads it back from
+                # /api/chat/history (see astra/chat_log.py).
+                log = server.chat_log
                 if self._is_multipart():
                     fields, files = self._read_multipart()
                     msg = fields.get("message", "")
                     ctx = fields.get("context", "")
+                    names = [f.get("filename", "file") for f in (files or [])[:10]]
                     attachments = self._process_uploads(files)
-                    reply = server.agent.handle(
-                        msg, context=ctx, attachments=attachments or None)
+                    log.add_user(msg, files=names)
+                    token = log.begin()
+                    try:
+                        reply = server.agent.handle(
+                            msg, context=ctx, attachments=attachments or None)
+                        log.add_reply(reply)
+                    finally:
+                        log.end(token)
                 else:
-                    reply = server.agent.handle(
-                        body.get("message", ""),
-                        context=body.get("context", "") or "")
+                    msg = body.get("message", "")
+                    log.add_user(msg)
+                    token = log.begin()
+                    try:
+                        reply = server.agent.handle(
+                            msg, context=body.get("context", "") or "")
+                        log.add_reply(reply)
+                    finally:
+                        log.end(token)
                 return _json_ok(self, {"ok": True, "data": reply})
+            if path == ["api", "chat", "history"] and method == "GET":
+                return _json_ok(self, {"ok": True, "data": server.chat_log.history(
+                    after_id=int(q.get("after_id") or 0),
+                    limit=min(int(q.get("limit") or 200), 500))})
+            if path == ["api", "chat", "history"] and method == "DELETE":
+                return _json_ok(self, {"ok": True,
+                                       "removed": server.chat_log.clear()})
             if path == ["api", "chat", "resume"] and method == "POST":
                 eid = (body.get("execution_id") or "").strip()
                 if not eid:
                     return _json_err(self, "execution_id required")
-                reply = server.agent.resume(eid, bool(body.get("allow", True)))
+                token = server.chat_log.begin()
+                try:
+                    reply = server.agent.resume(eid, bool(body.get("allow", True)))
+                    server.chat_log.add_reply(reply)
+                finally:
+                    server.chat_log.end(token)
                 return _json_ok(self, {"ok": True, "data": reply})
             if path == ["api", "dashboard"] and method == "GET":
                 return _json_ok(self, {"ok": True, "data": server.agent.dashboard()})
@@ -1172,6 +1204,7 @@ class AstraServer(ThreadingHTTPServer):
         super().__init__(addr, AstraHandler)
         self.store = store
         self.agent = agent
+        self.chat_log = ChatLog(store, redact=redact)
         self._stack = stack or {}
         cfg = self._get("config")
         # -- security knobs (all safe defaults) --------------------------------

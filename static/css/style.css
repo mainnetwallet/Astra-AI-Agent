@@ -166,6 +166,7 @@ a[class*="hl-"] { pointer-events: none; }
 @supports (height: 100dvh) {
   .chat-shell { height: calc(100dvh - 148px); }
 }
+.chat-toolbar { display: flex; justify-content: flex-end; padding: 0 2px 6px; }
 .chat-log {
   flex: 1; overflow-y: auto; display: flex; flex-direction: column;
   gap: 20px; padding: 6px 2px 18px;

@@ -127,7 +127,77 @@ loaders.assistant = function () {
   if (Astra.plugins._chatWired) return;
   Astra.plugins._chatWired = true;
   wireChatComposer();
+  chatRestore();
 };
+
+/* The transcript lives on the server (astra/chat_log.py), so a page refresh
+ * brings the conversation back instead of showing a blank "first open"
+ * screen. If a reply was still being worked on when the page reloaded, the
+ * typing indicator comes back too and the reply is picked up when it lands. */
+const CHAT = { lastId: 0 };
+const CHAT_EMPTY_HTML = ($("#chat-empty") || {}).outerHTML || "";
+const CHAT_WAIT_MAX_MS = 15 * 60 * 1000;
+
+function chatRenderMessages(msgs, markLast) {
+  msgs.forEach((m, i) => {
+    const isUser = m.role === "user";
+    // Approve/Reject only makes sense on the newest message; anything older
+    // was already answered (or superseded) before the refresh.
+    const stale = m.action === "confirm" && !(markLast && i === msgs.length - 1) && markLast;
+    chatBubble(isUser ? "me" : "ai", m.text, isUser ? null : (stale ? "none" : m.action),
+               (m.files || []).map((n) => ({ name: n })), m.artifacts, m.data);
+    CHAT.lastId = Math.max(CHAT.lastId, m.id || 0);
+  });
+}
+async function chatRestore() {
+  let r;
+  try { r = await api("/api/chat/history"); } catch (_e) { return; }
+  if (!r || !r.ok || !r.data) return;
+  const msgs = r.data.messages || [];
+  if (msgs.length) chatRenderMessages(msgs, true);
+  CHAT.lastId = Math.max(CHAT.lastId, r.data.last_id || 0);
+  if (r.data.pending) chatWaitForReply();
+}
+// A turn was still running when the page (re)loaded: show the typing
+// indicator, lock Send (so a second message can't interleave), and poll the
+// saved transcript until the reply arrives.
+function chatWaitForReply() {
+  const send = $("#chat-send");
+  const input = $("#chat-input");
+  send.dataset.busy = "1";
+  send.disabled = true;
+  let typing = chatTyping();
+  const started = Date.now();
+  const finish = () => {
+    if (typing) typing.remove();
+    delete send.dataset.busy;
+    send.disabled = !input.value.trim();
+  };
+  const tick = async () => {
+    let r = null;
+    try { r = await api("/api/chat/history?after_id=" + CHAT.lastId); } catch (_e) { /* retry */ }
+    if (r && r.ok && r.data) {
+      const fresh = r.data.messages || [];
+      if (fresh.length) {
+        typing.remove();
+        chatRenderMessages(fresh, false);
+        typing = r.data.pending ? chatTyping() : null;
+      }
+      if (!r.data.pending) return finish();
+    }
+    if (Date.now() - started > CHAT_WAIT_MAX_MS) return finish();
+    setTimeout(tick, 1500);
+  };
+  setTimeout(tick, 1500);
+}
+$("#chat-clear")?.addEventListener("click", async () => {
+  if ($("#chat-send").dataset.busy) return;
+  if (!confirm("Notun chat shuru korben? Ager chat muche jabe.")) return;
+  const r = await del("/api/chat/history");
+  if (!r || !r.ok) return;
+  $("#chat-log").innerHTML = CHAT_EMPTY_HTML;
+  CHAT.lastId = 0;
+});
 
 function chatBubble(who, text, action, attachedFiles, artifacts, meta) {
   hideChatEmpty();
@@ -234,7 +304,7 @@ function wireChatComposer() {
   const autosize = () => {
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 160) + "px";
-    sendBtn.disabled = !input.value.trim();
+    sendBtn.disabled = !input.value.trim() || !!sendBtn.dataset.busy;
   };
   input.addEventListener("input", autosize);
   input.addEventListener("keydown", (e) => {
@@ -258,6 +328,7 @@ $("#chat-form").addEventListener("submit", async (e) => {
   const msg = input.value.trim();
   const hasAttachments = _pendingAttachments.length > 0;
   if (!msg && !hasAttachments) return;
+  if ($("#chat-send").dataset.busy) return;   // a restored reply is still running
   chatBubble("me", msg, null, _pendingAttachments.map((a) => a.file));
   input.value = "";
   input.style.height = "auto";

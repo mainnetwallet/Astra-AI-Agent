@@ -119,7 +119,6 @@ CONTENT_TYPES = {
 
 CORE_TABS = [
     {"tab": "dashboard", "label": "📊 Dashboard", "core": True},
-    {"tab": "live", "label": "⚡ Live", "core": True},
     {"tab": "assistant", "label": "🤖 Assistant", "core": True},
     {"tab": "providers", "label": "🔌 AI Providers health", "core": True},
     {"tab": "router", "label": "🧠 Router", "core": True},

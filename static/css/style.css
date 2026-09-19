@@ -265,11 +265,6 @@ a[class*="hl-"] { pointer-events: none; }
 .chat-send:not(:disabled):hover { transform: scale(1.06); }
 
 
-/* live tab */
-.badge { background: var(--panel2); border: 1px solid var(--line); padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-.tools-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-.tool-chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 11px; white-space: nowrap; }
-
 /* mini stat cards above the log list (total, Gateway API calls, Provider API
    calls, success, errors) — one slim row of 5 so it stays compact on mobile */
 .cards.mini {

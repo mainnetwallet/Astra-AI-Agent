@@ -45,7 +45,7 @@ from astra.workflows.scheduler import SchedulerManager
 from astra.agent import Agent
 from astra.store import Store
 
-PLUGIN_MODULES = ["plugins.airdrop"]
+PLUGIN_MODULES = []  # plugins/airdrop.py removed — add new plugin module paths here
 
 
 def _discover_plugins(reg: Registry, modules: list[str]) -> None:

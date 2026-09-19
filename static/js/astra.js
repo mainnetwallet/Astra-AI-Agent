@@ -812,12 +812,10 @@ function renderGatewayCard(core) {
     const dot = dots[c.state] || "warn";
     const modelCount = (c.models || []).length;
     const models = modelCount ? `${modelCount} model(s)` : "no models";
-    const lat = _connAvgLatency(c);
-    const latTxt = lat == null ? "" : ` · ~${Math.round(lat)}ms`;
     return `<div class="provider-card" data-gw-conn="${esc(key)}">` +
       `<div class="provider-card-head">` +
       `<span class="status-dot ${dot}"></span><b>${esc(label)}</b>` +
-      `<span class="grow muted">${esc(c.state)} · ${models}${latTxt}</span>` +
+      `<span class="grow muted">${esc(c.state)} · ${models}</span>` +
       `<button class="btn mini" data-role="gw-test" data-conn="${esc(key)}">🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})</button>` +
       `</div>` +
       `<div class="model-health-table" data-role="gw-model-table">` +

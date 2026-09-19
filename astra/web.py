@@ -84,7 +84,7 @@ import os
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 from .agent import Agent
 from .security import (ApiError, RateLimiter, make_request_id, redact,
@@ -276,7 +276,10 @@ class AstraHandler(BaseHTTPRequestHandler):
 
     # -- plumbing ------------------------------------------------------------
     def _path_parts(self) -> list[str]:
-        return [p for p in urlparse(self.path).path.split("/") if p]
+        # Split on the *raw* "/" first, then percent-decode each segment, so an
+        # encoded model id like "openai%2Fgpt-oss-120b" or "%40cf%2Fmeta%2F..."
+        # arrives as one segment with its real "/" and "@" restored.
+        return [unquote(p) for p in urlparse(self.path).path.split("/") if p]
 
     def _query(self) -> dict:
         q = parse_qs(urlparse(self.path).query)

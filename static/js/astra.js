@@ -1050,6 +1050,22 @@ function renderGatewayCard(core) {
       }
     };
   }
+
+  // Hide/show toggle for every connection's per-model rows — same pattern
+  // as #btn-providers-toggle-models: state lives as a class on #gateway-card
+  // itself, so it survives this function's own re-renders.
+  const gwToggleBtn = $("#btn-gateway-toggle-models");
+  if (gwToggleBtn && !gwToggleBtn.dataset.hooked) {
+    gwToggleBtn.dataset.hooked = "1";
+    gwToggleBtn.onclick = () => {
+      const hidden = card.classList.toggle("models-hidden");
+      gwToggleBtn.textContent = hidden ? "👁 Show models" : "🙈 Hide models";
+    };
+  }
+  if (gwToggleBtn) {
+    gwToggleBtn.textContent = card.classList.contains("models-hidden")
+      ? "👁 Show models" : "🙈 Hide models";
+  }
 }
 
 /* -------------------------------- router (core) ---------------------------- */

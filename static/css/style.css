@@ -444,6 +444,7 @@ a[class*="hl-"] { pointer-events: none; }
 }
 .provider-card-head .grow { flex: 1; min-width: 0; }
 .model-health-table { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.model-health-table:empty { display: none; }
 .model-health-row {
   display: flex; align-items: center; gap: 8px; padding: 4px 0;
   font-size: 12px; color: var(--muted);

@@ -577,7 +577,7 @@ const PROVIDER_MODEL_RESULTS = {};   // provider name -> [{model, ok, latency_ms
 
 function modelHealthRowsHtml(results) {
   if (!results || !results.length) {
-    return `<div class="model-health-empty">Ekhono test kora hoyni — "Test" e click korle proti model koto shomoy nilo ta ekhane dekha jabe.</div>`;
+    return "";
   }
   return results.map((m) => {
     const cls = m.ok ? "ok" : "bad";

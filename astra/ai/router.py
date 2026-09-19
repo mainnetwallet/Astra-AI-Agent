@@ -1114,6 +1114,7 @@ class AstraRouter:
                 "healthy": info["state"] == "healthy",
                 "state": info["state"],
                 "models": models,
+                "base_url": getattr(p, "base_url", "") or "",
                 "latency_avg_ms": round(sum(lat) / len(lat), 1) if lat else None,
                 "calls": self._calls.get(name, 0),
                 "errors": self._errors.get(name, 0),

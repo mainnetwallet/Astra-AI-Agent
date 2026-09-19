@@ -697,8 +697,19 @@ class AstraHandler(BaseHTTPRequestHandler):
 
             # ai providers
             if path == ["api", "providers"] and method == "GET":
-                return _json_ok(self, {"ok": True,
-                                       "data": server.router().stats()})
+                data = server.router().stats()
+                # "🔌 AI Providers health" only ever shows providers that
+                # can actually be routed to — an API key AND a base URL
+                # AND at least one model are all required (§3 of the
+                # module docstring: without all three nothing can be
+                # called), so a partially-configured provider is dropped
+                # here rather than shown as a confusing "0 models" row.
+                provs = data.get("providers") or {}
+                data["providers"] = {
+                    n: p for n, p in provs.items()
+                    if p.get("credentials") and p.get("base_url") and p.get("models")
+                }
+                return _json_ok(self, {"ok": True, "data": data})
 
             # Astra AI Gateway — separate system, reported outside the
             # provider table (never a provider)

@@ -171,6 +171,27 @@ class ChatHistoryHttp(unittest.TestCase):
         hb = self._req(f"/api/chat/conversations/{chat_b}")["data"]
         self.assertEqual(hb["messages"], [])
 
+    def test_chat_response_carries_conversation_id(self):
+        self.release.set()  # this test doesn't need the slow/pending behavior
+        r = self._req("/api/chat", method="POST", body={"message": "hi"})
+        self.assertEqual(r["data"]["conversation_id"],
+                         self._req("/api/chat/history")["data"]["conversation_id"])
+
+    def test_history_endpoint_accepts_explicit_conversation_id(self):
+        # The frontend's background poller pins to a specific chat id rather
+        # than trusting whatever the server considers "current" at poll
+        # time (see chatWaitForReply in static/js/astra.js).
+        self.release.set()
+        self._req("/api/chat", method="POST", body={"message": "hi"})
+        chat_a = self._req("/api/chat/history")["data"]["conversation_id"]
+        chat_b = self._req("/api/chat/conversations", method="POST")["data"]["id"]
+        self.assertNotEqual(chat_a, chat_b)
+        # chat_b is now "current" server-side, but asking for chat_a by id
+        # explicitly must still return chat_a's own (non-empty) transcript.
+        h = self._req(f"/api/chat/history?conversation_id={chat_a}")["data"]
+        self.assertEqual(h["conversation_id"], chat_a)
+        self.assertEqual(len(h["messages"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

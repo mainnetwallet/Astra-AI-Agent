@@ -133,10 +133,36 @@ loaders.assistant = function () {
 /* The transcript lives on the server (astra/chat_log.py), so a page refresh
  * brings the conversation back instead of showing a blank "first open"
  * screen. If a reply was still being worked on when the page reloaded, the
- * typing indicator comes back too and the reply is picked up when it lands. */
-const CHAT = { lastId: 0 };
+ * typing indicator comes back too and the reply is picked up when it lands.
+ *
+ * `viewGen` guards every async chat operation (an in-flight send, a
+ * background poll for a pending reply). It's bumped every time a different
+ * chat is shown (page load, switching chats, opening a new one). Anything
+ * started for an earlier view checks its own snapshot of `viewGen` against
+ * the live value before touching the DOM — so a reply that finishes after
+ * the user has already moved to another chat can never get painted into
+ * the wrong one, and a background poll for chat A can never start showing
+ * chat B's messages just because B became the server's "current" chat. */
+const CHAT = { lastId: 0, conversationId: 0, viewGen: 0 };
 const CHAT_EMPTY_HTML = ($("#chat-empty") || {}).outerHTML || "";
 const CHAT_WAIT_MAX_MS = 15 * 60 * 1000;
+
+// Call this whenever a (possibly different) chat is about to be shown.
+// Resets the per-view state and the Send button's busy/disabled state to
+// match the new view — any older poll loop that later notices its gen is
+// stale just abandons quietly instead of touching this state itself.
+function chatEnterView(conversationId) {
+  CHAT.conversationId = conversationId;
+  CHAT.lastId = 0;
+  CHAT.viewGen++;
+  const send = $("#chat-send");
+  const input = $("#chat-input");
+  if (send) {
+    delete send.dataset.busy;
+    send.disabled = !(input && input.value.trim());
+  }
+  return CHAT.viewGen;
+}
 
 function chatRenderMessages(msgs, markLast) {
   msgs.forEach((m, i) => {
@@ -153,15 +179,18 @@ async function chatRestore() {
   let r;
   try { r = await api("/api/chat/history"); } catch (_e) { return; }
   if (!r || !r.ok || !r.data) return;
+  const gen = chatEnterView(r.data.conversation_id || 1);
   const msgs = r.data.messages || [];
   if (msgs.length) chatRenderMessages(msgs, true);
   CHAT.lastId = Math.max(CHAT.lastId, r.data.last_id || 0);
-  if (r.data.pending) chatWaitForReply();
+  if (r.data.pending) chatWaitForReply(gen, CHAT.conversationId);
 }
-// A turn was still running when the page (re)loaded: show the typing
-// indicator, lock Send (so a second message can't interleave), and poll the
-// saved transcript until the reply arrives.
-function chatWaitForReply() {
+// A turn was still running when the page (re)loaded, or the chat the user
+// just switched to still has one in flight: show the typing indicator,
+// lock Send, and poll that SPECIFIC chat's transcript until the reply
+// arrives — never whatever chat happens to be "current" on the server by
+// the time each poll fires.
+function chatWaitForReply(gen, conversationId) {
   const send = $("#chat-send");
   const input = $("#chat-input");
   send.dataset.busy = "1";
@@ -169,13 +198,19 @@ function chatWaitForReply() {
   let typing = chatTyping();
   const started = Date.now();
   const finish = () => {
+    if (gen !== CHAT.viewGen) return;   // a later view already owns this state
     if (typing) typing.remove();
     delete send.dataset.busy;
     send.disabled = !input.value.trim();
   };
   const tick = async () => {
+    if (gen !== CHAT.viewGen) return;   // user moved to a different chat — abandon
     let r = null;
-    try { r = await api("/api/chat/history?after_id=" + CHAT.lastId); } catch (_e) { /* retry */ }
+    try {
+      r = await api("/api/chat/history?after_id=" + CHAT.lastId
+        + "&conversation_id=" + conversationId);
+    } catch (_e) { /* retry */ }
+    if (gen !== CHAT.viewGen) return;   // moved on while that request was in flight
     if (r && r.ok && r.data) {
       const fresh = r.data.messages || [];
       if (fresh.length) {
@@ -192,12 +227,17 @@ function chatWaitForReply() {
 }
 // "New chat" no longer wipes anything — it opens a fresh thread and the old
 // one stays reachable from the ⋮ history menu (see chatSwitchTo below).
+// Allowed even while the current chat still has a reply in flight — that
+// chat keeps working in the background and is reachable again from the ⋮
+// history menu. If the current chat is already a fresh, untouched "new
+// chat" (nothing rendered, nothing in flight), clicking it again is a
+// no-op: no API call, no re-render, nothing changes.
 $("#chat-clear")?.addEventListener("click", async () => {
-  if ($("#chat-send").dataset.busy) return;
+  if ($("#chat-empty")) return;   // already an empty new chat — nothing to do
   const r = await post("/api/chat/conversations");
-  if (!r || !r.ok) return;
+  if (!r || !r.ok || !r.data) return;
   $("#chat-log").innerHTML = CHAT_EMPTY_HTML;
-  CHAT.lastId = 0;
+  chatEnterView(r.data.id);
   closeChatHistoryMenu();
 });
 
@@ -257,9 +297,9 @@ async function chatLoadHistoryList() {
 
 // Swap the visible chat log for a saved chat's messages and make it the
 // server's "current" thread, so new messages and a later page reload land
-// back in the same conversation.
+// back in the same conversation. Allowed even if the chat being left still
+// has a reply in flight — that turn keeps running server-side regardless.
 async function chatSwitchTo(id) {
-  if ($("#chat-send").dataset.busy) return;
   let r;
   try { r = await api("/api/chat/conversations/" + id); } catch (_e) { return; }
   if (!r || !r.ok || !r.data) return;
@@ -273,11 +313,11 @@ async function chatShowCurrent() {
 }
 function chatShowLoadedHistory(data) {
   $("#chat-log").innerHTML = CHAT_EMPTY_HTML;
-  CHAT.lastId = 0;
+  const gen = chatEnterView(data.conversation_id);
   const msgs = data.messages || [];
   if (msgs.length) chatRenderMessages(msgs, true);
   CHAT.lastId = Math.max(CHAT.lastId, data.last_id || 0);
-  if (data.pending) chatWaitForReply();
+  if (data.pending) chatWaitForReply(gen, data.conversation_id);
 }
 
 $("#chat-history-list")?.addEventListener("click", async (e) => {
@@ -428,6 +468,11 @@ $("#chat-form").addEventListener("submit", async (e) => {
   const hasAttachments = _pendingAttachments.length > 0;
   if (!msg && !hasAttachments) return;
   if ($("#chat-send").dataset.busy) return;   // a restored reply is still running
+  // Snapshot which chat this is being sent to. The user is free to switch
+  // chats (or open a new one) before the reply comes back — it's already
+  // saved server-side under this chat regardless — so only paint the
+  // bubble here if this chat is still the one on screen when it lands.
+  const sentGen = CHAT.viewGen;
   chatBubble("me", msg, null, _pendingAttachments.map((a) => a.file));
   input.value = "";
   input.style.height = "auto";
@@ -446,8 +491,9 @@ $("#chat-form").addEventListener("submit", async (e) => {
     } else {
       r = await post("/api/chat", { message: msg });
     }
-    typingRow.remove();
     hideUploadIndicator();
+    if (sentGen !== CHAT.viewGen) return;   // moved to a different chat — leave it be
+    typingRow.remove();
     if (!r.ok || !r.data) {
       chatBubble("ai", "Server e problem — `" + (r.error || "unknown error") + "`");
       return;
@@ -455,8 +501,9 @@ $("#chat-form").addEventListener("submit", async (e) => {
     chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts, r.data.data);
     if (r.data.action === "dashboard") loaders.dashboard();
   } catch (err) {
-    typingRow.remove();
     hideUploadIndicator();
+    if (sentGen !== CHAT.viewGen) return;   // moved to a different chat — leave it be
+    typingRow.remove();
     chatBubble("ai", "Server e problem — `" + err + "`");
   }
 });

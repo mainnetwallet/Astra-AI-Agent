@@ -25,8 +25,9 @@ Core (non-plugin) endpoints (all old routes stay backward-compatible):
 
   GET  /api/manifest        agent name + plugin tabs + core tabs
   POST /api/chat            {message} -> agent reply {reply, action, data, ok}
-  GET  /api/chat/history[?after_id=N]  saved transcript of the CURRENT chat
-                             + {pending} (DELETE wipes every chat, hard reset)
+  GET  /api/chat/history[?after_id=N][&conversation_id=N]  saved transcript
+                             (defaults to the CURRENT chat) + {pending}
+                             scoped to that chat (DELETE wipes every chat)
   GET  /api/chat/conversations         list saved chats {id, title, count,
                              updated_at, current} newest-first
   POST /api/chat/conversations         open a new chat, becomes current
@@ -599,11 +600,19 @@ class AstraHandler(BaseHTTPRequestHandler):
                         log.add_reply(reply, conversation_id=cid)
                     finally:
                         log.end(token)
+                # The browser may have switched to a different chat (or
+                # opened a new one) while this was running — tell it which
+                # chat this reply actually belongs to, so it only paints the
+                # bubble into the log if that's still what's on screen.
+                reply = dict(reply)
+                reply["conversation_id"] = cid
                 return _json_ok(self, {"ok": True, "data": reply})
             if path == ["api", "chat", "history"] and method == "GET":
+                cid_param = q.get("conversation_id")
                 return _json_ok(self, {"ok": True, "data": server.chat_log.history(
                     after_id=int(q.get("after_id") or 0),
-                    limit=min(int(q.get("limit") or 200), 500))})
+                    limit=min(int(q.get("limit") or 200), 500),
+                    conversation_id=int(cid_param) if cid_param else None)})
             if path == ["api", "chat", "history"] and method == "DELETE":
                 return _json_ok(self, {"ok": True,
                                        "removed": server.chat_log.clear()})
@@ -644,6 +653,8 @@ class AstraHandler(BaseHTTPRequestHandler):
                     server.chat_log.add_reply(reply, conversation_id=cid)
                 finally:
                     server.chat_log.end(token)
+                reply = dict(reply)
+                reply["conversation_id"] = cid
                 return _json_ok(self, {"ok": True, "data": reply})
             if path == ["api", "dashboard"] and method == "GET":
                 return _json_ok(self, {"ok": True, "data": server.agent.dashboard()})

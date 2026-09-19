@@ -829,12 +829,33 @@ class AstraRouter:
     # independent of whatever other provider tests are running.
     _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
 
+    def test_provider_model(self, name: str, model_id: str) -> dict:
+        """Probe exactly ONE (provider, model) pair and return its result the
+        instant this single call finishes — saved via `_record_route` /
+        `_mark_down` immediately, independent of any other model's test.
+        This is what lets the UI show each model's result as soon as it
+        arrives instead of waiting on the whole provider's model list."""
+        req = RoutingRequest(task_type="health_check",
+                             messages=self._TEST_MESSAGES,
+                             preferred_provider=name, preferred_model=model_id,
+                             no_fallback=True, max_tokens=8)
+        rr = self.route_request(req)
+        return {
+            "model": rr.model or model_id,
+            "ok": bool(rr.ok),
+            "latency_ms": round(rr.latency_ms, 1),
+            "error": "" if rr.ok else (rr.error or "test failed"),
+        }
+
     def test_provider(self, name: str) -> dict:
         """Probe EVERY model this provider exposes, one at a time — not just
         the first. Each model's result is recorded (via `_record_route` /
         `_mark_down`) the instant that model's own probe returns, so a
         slow/dead model never blocks the rest of the provider's models from
-        being tested and saved."""
+        being tested and saved. Kept for the "test-all" bulk endpoint; the
+        per-model UI test now calls `test_provider_model` directly, one
+        model at a time, so each result can reach the browser as soon as
+        it's ready instead of waiting for this whole list."""
         provider = next((p for p in self.providers
                          if getattr(p, "name", "?") == name), None)
         if provider is None:
@@ -844,19 +865,7 @@ class AstraRouter:
         if not models:
             return {"provider": name, "ok": False, "models": [],
                     "error": "no model configured"}
-        results = []
-        for model_id in models:
-            req = RoutingRequest(task_type="health_check",
-                                 messages=self._TEST_MESSAGES,
-                                 preferred_provider=name, preferred_model=model_id,
-                                 no_fallback=True, max_tokens=8)
-            rr = self.route_request(req)
-            results.append({
-                "model": rr.model or model_id,
-                "ok": bool(rr.ok),
-                "latency_ms": round(rr.latency_ms, 1),
-                "error": "" if rr.ok else (rr.error or "test failed"),
-            })
+        results = [self.test_provider_model(name, model_id) for model_id in models]
         return {"provider": name, "ok": any(r["ok"] for r in results),
                 "models": results, "error": ""}
 

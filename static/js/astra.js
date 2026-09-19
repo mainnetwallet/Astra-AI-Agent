@@ -573,16 +573,26 @@ function applyLogsFilter() {
 // Model-level test results kept client-side so a redraw from /api/providers
 // (which only knows aggregate provider health, not "model X took 42ms just
 // now") never wipes out what the last Test click just showed.
-const PROVIDER_MODEL_RESULTS = {};   // provider name -> [{model, ok, latency_ms, error}]
+const PROVIDER_MODEL_RESULTS = {};   // provider name -> [{model, ok, latency_ms, error, pending}]
+// Provider name -> that provider's model id list, refreshed on every
+// /api/providers render. The per-model test click reads from here instead
+// of re-fetching, so it knows exactly which models to fire requests for.
+const PROVIDER_MODELS = {};
 
 function modelHealthRowsHtml(results) {
   if (!results || !results.length) {
     return "";
   }
   return results.map((m) => {
+    if (m.pending) {
+      return `<div class="model-health-row pending" data-model-row="${esc(m.model)}">` +
+        `<span class="status-dot warn"></span>` +
+        `<span class="model-name">${esc(m.model)}</span>` +
+        `<span class="model-latency">⏳ testing…</span></div>`;
+    }
     const cls = m.ok ? "ok" : "bad";
     const right = m.ok ? `${m.latency_ms}ms` : `❌ ${esc(m.error || "error")}`;
-    return `<div class="model-health-row ${cls}">` +
+    return `<div class="model-health-row ${cls}" data-model-row="${esc(m.model)}">` +
       `<span class="status-dot ${m.ok ? "ok" : "bad"}"></span>` +
       `<span class="model-name">${esc(m.model)}</span>` +
       `<span class="model-latency">${right}</span></div>`;
@@ -596,14 +606,13 @@ loaders.providers = async function () {
   const provs = (r.data && r.data.providers) ? r.data.providers : r.data;
   const rows = Object.entries(provs || {}).map(([n, p]) => {
     const dot = p.healthy ? "ok" : (p.state === "down" ? "bad" : "warn");
-    const lat = p.latency_avg_ms == null ? "—" : p.latency_avg_ms + "ms";
     const modelCount = p.models ? p.models.length : 0;
+    PROVIDER_MODELS[n] = p.models || [];
     return `<div class="provider-card" data-provider-row="${esc(n)}">` +
       `<div class="provider-card-head">` +
       `<span class="status-dot ${dot}"></span><b>${esc(n)}</b>` +
       `<span class="grow muted">${esc(p.state || (p.healthy ? "healthy" : "?"))} · ` +
-      `${modelCount} model(s) · ${p.calls || 0} calls · ${p.errors || 0} err · ` +
-      `avg ${esc(lat)}</span>` +
+      `${modelCount} model(s) · ${p.calls || 0} calls · ${p.errors || 0} err</span>` +
       `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}">🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})</button>` +
       `</div>` +
       `<div class="model-health-table" data-role="model-table">` +
@@ -616,35 +625,62 @@ loaders.providers = async function () {
     btn.dataset.hooked = "1";
     btn.onclick = async () => { await post("/api/v1/models/refresh"); loaders.providers(); };
   }
-  // per-provider manual test: click tests EVERY model that provider has,
-  // one model at a time, saving each model's result the instant that
-  // model's own probe returns.
+  // per-provider manual test: click fires ONE request PER MODEL, all in
+  // parallel — each model's row flips from "testing…" to its result (and
+  // is saved server-side, see test_provider_model) the instant that one
+  // model's own response comes back, independent of every other model.
+  // Nothing here waits for the slowest model before showing the fast ones.
   if (!list.dataset.hooked) {
     list.dataset.hooked = "1";
     list.addEventListener("click", async (ev) => {
       const b = ev.target.closest('[data-role="provider-test"]');
       if (!b) return;
       const name = b.dataset.provider;
+      const models = PROVIDER_MODELS[name] || [];
       const tableEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="model-table"]`, list);
+      if (!models.length) {
+        if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">no model configured</div>`;
+        return;
+      }
       b.disabled = true;
       const prevLabel = b.textContent;
-      b.textContent = "⏳ Testing all models…";
-      if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">Testing…</div>`;
-      try {
-        const res = await post(`/api/v1/providers/${encodeURIComponent(name)}/test`);
-        PROVIDER_MODEL_RESULTS[name] = (res.ok && res.data && res.data.models) || [];
-        if (res.ok && res.data && res.data.error && !res.data.models.length) {
-          if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">⚠️ ${esc(res.data.error)}</div>`;
-        }
-      } catch (_e) {
-        PROVIDER_MODEL_RESULTS[name] = [];
-      } finally {
-        b.disabled = false;
-        b.textContent = prevLabel;
-        // health/latency/error counts changed — refresh the row from the
-        // saved state, without waiting on any other provider's test.
-        loaders.providers();
-      }
+      b.textContent = `⏳ Testing ${models.length} model${models.length === 1 ? "" : "s"}…`;
+      // seed every row as "pending" up front so the table shows all models
+      // immediately, then each one flips over independently as it finishes.
+      PROVIDER_MODEL_RESULTS[name] = models.map((m) => ({ model: m, pending: true }));
+      if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(PROVIDER_MODEL_RESULTS[name]);
+
+      const updateRow = (result) => {
+        const rows = PROVIDER_MODEL_RESULTS[name] || [];
+        const idx = rows.findIndex((r) => r.model === result.model);
+        if (idx >= 0) rows[idx] = result; else rows.push(result);
+        if (!tableEl) return;
+        const rowEl = $(`[data-model-row="${CSS.escape(result.model)}"]`, tableEl);
+        const html = modelHealthRowsHtml([result]);
+        if (rowEl) rowEl.outerHTML = html; else tableEl.insertAdjacentHTML("beforeend", html);
+      };
+
+      const probes = models.map((modelId) =>
+        post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
+          .then((res) => {
+            const result = (res.ok && res.data) ? res.data :
+              { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" };
+            updateRow(result);
+          })
+          .catch((e) => {
+            updateRow({ model: modelId, ok: false, latency_ms: 0, error: String(e) });
+          })
+      );
+      // Promise.allSettled (not Promise.all) so one model erroring can never
+      // stop the button/label from resetting once the rest are done — every
+      // individual result was already saved+shown the moment it arrived.
+      await Promise.allSettled(probes);
+      b.disabled = false;
+      b.textContent = prevLabel;
+      // health/latency/error counts changed — refresh aggregate numbers
+      // (calls/errors on the card header) without touching the per-model
+      // rows we already painted above.
+      loaders.providers();
     });
   }
   const testAllBtn = $("#btn-providers-test-all");

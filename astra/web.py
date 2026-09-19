@@ -59,6 +59,8 @@ New /api/v1 endpoints:
   GET  /api/v1/router/status     routing health
   GET  /api/v1/router/stats      routing + task statistics
   POST /api/v1/providers/<name>/refresh | enable | disable | test
+  POST /api/v1/providers/<name>/test/<model>  test one model only, result
+                                     returned as soon as that one call ends
   POST /api/v1/providers/test-all   test every provider + every Astra AI
                                      Gateway connection in one call (each
                                      result saved as soon as it completes)
@@ -803,6 +805,13 @@ class AstraHandler(BaseHTTPRequestHandler):
                 and method == "POST"
                 and path[3] in ("refresh", "enable", "disable", "test")):
             return self._provider_admin(s, path[2], path[3])
+        # single-model test: /api/v1/providers/<name>/test/<model> — probes
+        # just that one (provider, model) pair so the browser gets each
+        # model's result the instant it's ready, instead of waiting for
+        # every model on the provider to finish (see test_provider_model).
+        if (len(path) == 5 and path[:2] == ["api", "providers"]
+                and path[3] == "test" and method == "POST"):
+            return self._provider_model_test(s, path[2], path[4])
         # one-click "🌐 Gateway test": probes every provider AND every
         # Astra AI Gateway connection, saving each result as it completes.
         if path == ["api", "providers", "test-all"] and method == "POST":
@@ -887,6 +896,18 @@ class AstraHandler(BaseHTTPRequestHandler):
             result = router.test_provider(name)
             return self._json_ok_rid({"ok": True, "data": result})
         return self._err_rid(f"unknown action: {action}", 400)
+
+    def _provider_model_test(self, s, name, model_id) -> bool:
+        """Probe exactly one (provider, model) pair. Backs the per-model UI
+        test calls so the browser can fire one request per model and update
+        each row the moment that model's own response comes back, instead
+        of waiting on the whole provider's model list."""
+        router = s.router()
+        if router is None:
+            return self._err_rid("providers unavailable", 400,
+                                 "provider_unavailable")
+        result = router.test_provider_model(name, model_id)
+        return self._json_ok_rid({"ok": True, "data": result})
 
     def _providers_test_all(self, s) -> bool:
         """One-click 'Gateway test': probe every provider AND every Astra AI

@@ -599,6 +599,44 @@ function modelHealthRowsHtml(results) {
   }).join("");
 }
 
+// Shared by every "test" button (single provider, single gateway
+// connection, and the combined Test All): seed every model as a pending
+// row, fire one request per model in parallel via `testOneFn`, and paint
+// each row into `tableEl` the instant that model's own response lands —
+// no waiting on the slowest model before the fast ones show up.
+// `resultsArray` is mutated in place (it's the same array object held in
+// PROVIDER_MODEL_RESULTS / GATEWAY_MODEL_RESULTS) so a later re-render
+// from /api/providers still sees each finished result. Returns the
+// Promise that resolves once every model has settled (success or error).
+function streamModelTests(models, tableEl, resultsArray, testOneFn, onResult) {
+  resultsArray.length = 0;
+  models.forEach((m) => resultsArray.push({ model: m, pending: true }));
+  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(resultsArray);
+
+  const updateRow = (result) => {
+    const idx = resultsArray.findIndex((r) => r.model === result.model);
+    if (idx >= 0) resultsArray[idx] = result; else resultsArray.push(result);
+    if (!tableEl) return;
+    const rowEl = $(`[data-model-row="${CSS.escape(result.model)}"]`, tableEl);
+    const html = modelHealthRowsHtml([result]);
+    if (rowEl) rowEl.outerHTML = html; else tableEl.insertAdjacentHTML("beforeend", html);
+  };
+
+  const probes = models.map((modelId) =>
+    testOneFn(modelId)
+      .then((result) => { updateRow(result); if (onResult) onResult(result); })
+      .catch((e) => {
+        const result = { model: modelId, ok: false, latency_ms: 0, error: String(e) };
+        updateRow(result);
+        if (onResult) onResult(result);
+      })
+  );
+  // Promise.allSettled (not Promise.all) so one model erroring can never
+  // stop the caller from moving on once the rest are done — every
+  // individual result was already saved+shown the moment it arrived.
+  return Promise.allSettled(probes);
+}
+
 loaders.providers = async function () {
   const r = await api("/api/providers");
   const list = $("#providers-list");
@@ -639,77 +677,9 @@ loaders.providers = async function () {
       const b = ev.target.closest('[data-role="provider-test"]');
       if (!b) return;
       const name = b.dataset.provider;
-      const models = PROVIDER_MODELS[name] || [];
-      const tableEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="model-table"]`, list);
-      if (!models.length) {
-        if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">no model configured</div>`;
-        return;
-      }
       b.disabled = true;
       const prevLabel = b.textContent;
-      b.textContent = `⏳ Testing ${models.length} model${models.length === 1 ? "" : "s"}…`;
-      // seed every row as "pending" up front so the table shows all models
-      // immediately, then each one flips over independently as it finishes.
-      PROVIDER_MODEL_RESULTS[name] = models.map((m) => ({ model: m, pending: true }));
-      if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(PROVIDER_MODEL_RESULTS[name]);
-
-      // Wipe THIS provider's previously saved calls/errors/latency before
-      // the fresh run starts — a test's numbers should be this test's own
-      // result, not the old save with new numbers piled on top. Scoped to
-      // just this one provider; every other provider's saved health is
-      // left exactly as it was.
-      const countsEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="provider-counts"]`, list);
-      try {
-        const reset = await post(`/api/v1/providers/${encodeURIComponent(name)}/reset-health`);
-        if (countsEl) {
-          const calls = (reset.ok && reset.data && reset.data.calls) || 0;
-          const errors = (reset.ok && reset.data && reset.data.errors) || 0;
-          countsEl.dataset.calls = String(calls);
-          countsEl.dataset.errors = String(errors);
-          countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ${calls} calls · ${errors} err`;
-        }
-      } catch (_e) { /* reset failing shouldn't block the test itself */ }
-
-      const updateRow = (result) => {
-        const rows = PROVIDER_MODEL_RESULTS[name] || [];
-        const idx = rows.findIndex((r) => r.model === result.model);
-        if (idx >= 0) rows[idx] = result; else rows.push(result);
-        if (!tableEl) return;
-        const rowEl = $(`[data-model-row="${CSS.escape(result.model)}"]`, tableEl);
-        const html = modelHealthRowsHtml([result]);
-        if (rowEl) rowEl.outerHTML = html; else tableEl.insertAdjacentHTML("beforeend", html);
-      };
-
-      // "20 calls · 3 err" in the header — bumped by +1 call (and +1 err on
-      // failure) the instant EACH model's own result lands, on top of the
-      // zeroed count the reset above just set, instead of waiting for the
-      // whole test batch to finish before the number moves.
-      const bumpCounts = (ok) => {
-        if (!countsEl) return;
-        const calls = (parseInt(countsEl.dataset.calls, 10) || 0) + 1;
-        const errors = (parseInt(countsEl.dataset.errors, 10) || 0) + (ok ? 0 : 1);
-        countsEl.dataset.calls = String(calls);
-        countsEl.dataset.errors = String(errors);
-        countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ${calls} calls · ${errors} err`;
-      };
-
-      const probes = models.map((modelId) =>
-        post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
-          .then((res) => {
-            const result = (res.ok && res.data) ? res.data :
-              { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" };
-            updateRow(result);
-            bumpCounts(result.ok);
-          })
-          .catch((e) => {
-            updateRow({ model: modelId, ok: false, latency_ms: 0, error: String(e) });
-            bumpCounts(false);
-          })
-      );
-      // Promise.allSettled (not Promise.all) so one model erroring can never
-      // stop the button/label from resetting once the rest are done — every
-      // individual result was already saved+shown the moment it arrived.
-      await Promise.allSettled(probes);
+      await testProviderStreaming(name, b);
       b.disabled = false;
       b.textContent = prevLabel;
       // final resync with the server's own aggregate numbers (covers any
@@ -724,14 +694,27 @@ loaders.providers = async function () {
     testAllBtn.onclick = async () => {
       testAllBtn.disabled = true;
       const prevLabel = testAllBtn.textContent;
-      testAllBtn.textContent = "⏳ Testing all…";
+      // Same streaming UI as a single provider/connection Test click, just
+      // fired for every provider AND every Gateway connection at once, all
+      // in parallel — every model's row (and every provider's live call/
+      // err count) updates the instant that one model's own result lands,
+      // nothing here waits for the whole run to finish.
+      const providerNames = Object.keys(PROVIDER_MODELS);
+      const connectionKeys = Object.keys(GATEWAY_MODELS);
+      const total = providerNames.length + connectionKeys.length;
+      let done = 0;
+      testAllBtn.textContent = `⏳ Testing all (0/${total})…`;
+      const bumpProgress = () => {
+        done += 1;
+        testAllBtn.textContent = `⏳ Testing all (${done}/${total})…`;
+      };
       try {
-        const res = await post("/api/v1/providers/test-all");
-        if (res.ok && res.data) {
-          (res.data.providers || []).forEach((p) => {
-            PROVIDER_MODEL_RESULTS[p.provider] = p.models || [];
-          });
-        }
+        await Promise.allSettled([
+          ...providerNames.map((name) =>
+            testProviderStreaming(name).then(bumpProgress)),
+          ...connectionKeys.map((key) =>
+            testGatewayConnectionStreaming(key).then(bumpProgress)),
+        ]);
       } finally {
         testAllBtn.disabled = false;
         testAllBtn.textContent = prevLabel;
@@ -742,6 +725,56 @@ loaders.providers = async function () {
   renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
 };
 
+// Streams a single provider's every model test, live — the same routine
+// the single "🧪 Test" button uses, factored out so Test All can run it
+// for every provider in parallel without duplicating the logic. `btn`
+// (optional) gets its label updated while this provider's own test runs;
+// omit it when called as part of a bulk Test All (the bulk button owns
+// its own progress label instead).
+async function testProviderStreaming(name, btn) {
+  const models = PROVIDER_MODELS[name] || [];
+  const tableEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="model-table"]`);
+  if (!models.length) {
+    if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">no model configured</div>`;
+    return;
+  }
+  if (btn) btn.textContent = `⏳ Testing ${models.length} model${models.length === 1 ? "" : "s"}…`;
+
+  // Wipe THIS provider's previously saved calls/errors/latency before the
+  // fresh run starts — a test's numbers should be this test's own result,
+  // not the old save with new numbers piled on top. Scoped to just this
+  // one provider; every other provider's saved health is left untouched.
+  const countsEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="provider-counts"]`);
+  const renderCounts = (calls, errors) => {
+    if (!countsEl) return;
+    countsEl.dataset.calls = String(calls);
+    countsEl.dataset.errors = String(errors);
+    countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ${calls} calls · ${errors} err`;
+  };
+  try {
+    const reset = await post(`/api/v1/providers/${encodeURIComponent(name)}/reset-health`);
+    renderCounts((reset.ok && reset.data && reset.data.calls) || 0,
+                 (reset.ok && reset.data && reset.data.errors) || 0);
+  } catch (_e) { /* reset failing shouldn't block the test itself */ }
+
+  // "20 calls · 3 err" in the header — bumped by +1 call (and +1 err on
+  // failure) the instant EACH model's own result lands, on top of the
+  // zeroed count the reset above just set, instead of waiting for the
+  // whole test batch to finish before the number moves.
+  const bumpCounts = (ok) => {
+    if (!countsEl) return;
+    renderCounts((parseInt(countsEl.dataset.calls, 10) || 0) + 1,
+                 (parseInt(countsEl.dataset.errors, 10) || 0) + (ok ? 0 : 1));
+  };
+
+  PROVIDER_MODEL_RESULTS[name] = PROVIDER_MODEL_RESULTS[name] || [];
+  await streamModelTests(models, tableEl, PROVIDER_MODEL_RESULTS[name],
+    (modelId) => post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
+      .then((res) => (res.ok && res.data) ? res.data :
+        { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
+    (result) => bumpCounts(result.ok));
+}
+
 /* -------------------------- Astra AI Gateway ------------------------- */
 const GATEWAY_LABELS = {
   "astra-gw-gemini": "Gemini",
@@ -751,7 +784,11 @@ const GATEWAY_LABELS = {
 };
 // Model-level Gateway test results, kept client-side for the same reason
 // as PROVIDER_MODEL_RESULTS above.
-const GATEWAY_MODEL_RESULTS = {};   // connection name -> [{model, ok, latency_ms, error}]
+const GATEWAY_MODEL_RESULTS = {};   // connection name -> [{model, ok, latency_ms, error, pending}]
+// Connection key -> its model id list, refreshed on every render — same
+// role as PROVIDER_MODELS, read by the per-model test instead of
+// re-fetching.
+const GATEWAY_MODELS = {};
 
 // Best-average-latency across a connection's tracked models — used purely
 // to *display* connections fastest/healthiest first, mirroring how the
@@ -765,18 +802,30 @@ function _connAvgLatency(c) {
   return vals.reduce((a, b) => a + b, 0) / vals.length;
 }
 
+// Streams one Gateway connection's every model test, live — the exact
+// same per-model, parallel, no-waiting behaviour testProviderStreaming
+// uses for providers, so a single connection's "🧪 Test" and the bulk
+// Test All look and behave identically. `btn` (optional) gets its label
+// updated while this connection's own test runs.
+async function testGatewayConnectionStreaming(key, btn) {
+  const models = GATEWAY_MODELS[key] || [];
+  const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`);
+  if (!models.length) {
+    if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">no model configured</div>`;
+    return;
+  }
+  if (btn) btn.textContent = `⏳ Testing ${models.length} model${models.length === 1 ? "" : "s"}…`;
+  GATEWAY_MODEL_RESULTS[key] = GATEWAY_MODEL_RESULTS[key] || [];
+  await streamModelTests(models, tableEl, GATEWAY_MODEL_RESULTS[key],
+    (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
+      .then((res) => (res.ok && res.data) ? res.data :
+        { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }));
+}
+
 async function runGatewayConnectionTest(key, btn, card) {
-  const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`, card);
-  if (btn) { btn.disabled = true; btn.dataset.prev = btn.textContent; btn.textContent = "⏳ Testing…"; }
-  if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">Testing…</div>`;
+  if (btn) { btn.disabled = true; btn.dataset.prev = btn.textContent; }
   try {
-    const res = await post(`/api/v1/gateway/${encodeURIComponent(key)}/test`);
-    GATEWAY_MODEL_RESULTS[key] = (res.ok && res.data && res.data.models) || [];
-    if (res.ok && res.data && res.data.error && !(res.data.models || []).length) {
-      if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">⚠️ ${esc(res.data.error)}</div>`;
-    }
-  } catch (_e) {
-    GATEWAY_MODEL_RESULTS[key] = [];
+    await testGatewayConnectionStreaming(key, btn);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = btn.dataset.prev; }
     loaders.providers();
@@ -812,6 +861,7 @@ function renderGatewayCard(core) {
     const dot = dots[c.state] || "warn";
     const modelCount = (c.models || []).length;
     const models = modelCount ? `${modelCount} model(s)` : "no models";
+    GATEWAY_MODELS[key] = c.models || [];
     return `<div class="provider-card" data-gw-conn="${esc(key)}">` +
       `<div class="provider-card-head">` +
       `<span class="status-dot ${dot}"></span><b>${esc(label)}</b>` +
@@ -845,14 +895,16 @@ function renderGatewayCard(core) {
     testBtn.onclick = async () => {
       testBtn.disabled = true;
       const prevLabel = testBtn.textContent;
-      testBtn.textContent = "⏳ Testing gateway…";
+      const keys = Object.keys(GATEWAY_MODELS);
+      const total = keys.length;
+      let done = 0;
+      testBtn.textContent = `⏳ Testing gateway (0/${total})…`;
       try {
-        const res = await post("/api/v1/gateway/test");
-        if (res.ok) {
-          (res.data.connections || []).forEach((c) => {
-            GATEWAY_MODEL_RESULTS[c.connection] = c.models || [];
-          });
-        }
+        await Promise.allSettled(keys.map((key) =>
+          testGatewayConnectionStreaming(key).then(() => {
+            done += 1;
+            testBtn.textContent = `⏳ Testing gateway (${done}/${total})…`;
+          })));
       } finally {
         testBtn.disabled = false;
         testBtn.textContent = prevLabel;

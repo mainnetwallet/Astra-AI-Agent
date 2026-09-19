@@ -822,6 +822,13 @@ class AstraHandler(BaseHTTPRequestHandler):
         if (len(path) == 4 and path[:2] == ["api", "gateway"]
                 and path[3] == "test" and method == "POST"):
             return self._gateway_test_one(s, path[2])
+        # single-model Gateway test: /api/v1/gateway/<connection>/test/<model>
+        # — probes just that one (connection, model) pair, mirroring the
+        # provider per-model endpoint above, so the browser gets each
+        # model's result the instant it's ready.
+        if (len(path) == 5 and path[:2] == ["api", "gateway"]
+                and path[3] == "test" and method == "POST"):
+            return self._gateway_model_test(s, path[2], path[4])
         # web3
         if path[:3] == ["api", "web3", "transactions"] and method == "GET":
             return self._web3_tx_list(s, path)
@@ -968,6 +975,19 @@ class AstraHandler(BaseHTTPRequestHandler):
                                  "gateway_unavailable")
         return self._json_ok_rid({"ok": True,
                                   "data": gw.test_connection_by_name(name)})
+
+    def _gateway_model_test(self, s, name, model_id) -> bool:
+        """Probe exactly one (connection, model) pair. Backs the per-model
+        UI test calls so the browser can fire one request per model and
+        update each row the moment that model's own response comes back —
+        same streaming behaviour the provider cards use."""
+        router = s.router()
+        gw = getattr(router, "gateway", None) if router else None
+        if gw is None:
+            return self._err_rid("Astra AI Gateway not configured", 400,
+                                 "gateway_unavailable")
+        result = gw.test_connection_model_by_name(name, model_id)
+        return self._json_ok_rid({"ok": True, "data": result})
 
     def _web3_tx_list(self, s, path) -> bool:
         tx = s._get("tx_manager")

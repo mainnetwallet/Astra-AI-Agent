@@ -611,7 +611,10 @@ loaders.providers = async function () {
     return `<div class="provider-card" data-provider-row="${esc(n)}">` +
       `<div class="provider-card-head">` +
       `<span class="status-dot ${dot}"></span><b>${esc(n)}</b>` +
-      `<span class="grow muted">${esc(p.state || (p.healthy ? "healthy" : "?"))} · ` +
+      `<span class="grow muted" data-role="provider-counts" ` +
+      `data-calls="${p.calls || 0}" data-errors="${p.errors || 0}" ` +
+      `data-label="${esc(p.state || (p.healthy ? "healthy" : "?"))}" data-modelcount="${modelCount}">` +
+      `${esc(p.state || (p.healthy ? "healthy" : "?"))} · ` +
       `${modelCount} model(s) · ${p.calls || 0} calls · ${p.errors || 0} err</span>` +
       `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}">🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})</button>` +
       `</div>` +
@@ -660,15 +663,31 @@ loaders.providers = async function () {
         if (rowEl) rowEl.outerHTML = html; else tableEl.insertAdjacentHTML("beforeend", html);
       };
 
+      // "20 calls · 3 err" in the header — bumped by +1 call (and +1 err on
+      // failure) the instant EACH model's own result lands, on top of
+      // whatever it already showed, instead of waiting for the whole test
+      // batch to finish before the number moves.
+      const countsEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="provider-counts"]`, list);
+      const bumpCounts = (ok) => {
+        if (!countsEl) return;
+        const calls = (parseInt(countsEl.dataset.calls, 10) || 0) + 1;
+        const errors = (parseInt(countsEl.dataset.errors, 10) || 0) + (ok ? 0 : 1);
+        countsEl.dataset.calls = String(calls);
+        countsEl.dataset.errors = String(errors);
+        countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ${calls} calls · ${errors} err`;
+      };
+
       const probes = models.map((modelId) =>
         post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
           .then((res) => {
             const result = (res.ok && res.data) ? res.data :
               { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" };
             updateRow(result);
+            bumpCounts(result.ok);
           })
           .catch((e) => {
             updateRow({ model: modelId, ok: false, latency_ms: 0, error: String(e) });
+            bumpCounts(false);
           })
       );
       // Promise.allSettled (not Promise.all) so one model erroring can never
@@ -677,9 +696,9 @@ loaders.providers = async function () {
       await Promise.allSettled(probes);
       b.disabled = false;
       b.textContent = prevLabel;
-      // health/latency/error counts changed — refresh aggregate numbers
-      // (calls/errors on the card header) without touching the per-model
-      // rows we already painted above.
+      // final resync with the server's own aggregate numbers (covers any
+      // other counters — latency, credential health — the header doesn't
+      // track locally), without touching the per-model rows already painted.
       loaders.providers();
     });
   }

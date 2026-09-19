@@ -600,11 +600,38 @@ function savedKeyRows(models, keys, keyResults) {
   return any ? rows : [];
 }
 
+// Saved (server-side) per-model Gateway health -> the same row shape a
+// live test produces, so a page reload shows each connection's last
+// known state instead of an empty table. Mirrors savedKeyRows above,
+// which already does this for provider per-key results — the Gateway
+// card was missing this restoration entirely, so it went blank on every
+// reload even though the server has the data (routing_state health).
+function savedGatewayModelRows(models, modelHealth) {
+  let any = false;
+  const rows = (models || []).map((modelId) => {
+    const h = (modelHealth || {})[modelId];
+    const tested = h && ((h.success_count || 0) + (h.failure_count || 0) > 0);
+    if (!tested) return { model: modelId, untested: true };
+    any = true;
+    const lastOk = h.last_success && (!h.last_failure || h.last_success > h.last_failure);
+    return lastOk
+      ? { model: modelId, ok: true, latency_ms: Math.round(h.average_latency_ms || 0) }
+      : { model: modelId, ok: false, error: "last test failed" };
+  });
+  return any ? rows : [];
+}
+
 function modelHealthRowsHtml(results) {
   if (!results || !results.length) {
     return "";
   }
   return results.map((m) => {
+    if (m.untested) {
+      return `<div class="model-health-row" data-model-row="${esc(m.model)}">` +
+        `<span class="status-dot"></span>` +
+        `<span class="model-name">${esc(m.model)}</span>` +
+        `<span class="model-latency muted">not tested yet</span></div>`;
+    }
     if (m.keys) {
       const anyPending = m.keys.some((k) => k.pending);
       const anyOk = m.keys.some((k) => k.ok === true);
@@ -672,7 +699,18 @@ function streamModelTests(models, tableEl, resultsArray, testOneFn, onResult) {
 loaders.providers = async function () {
   const r = await api("/api/providers");
   const list = $("#providers-list");
-  if (!r.ok) { list.innerHTML = `<div class="empty">${esc(r.error || "providers unavailable")}</div>`; return; }
+  if (!r.ok) {
+    // A transient failure (a burst of parallel "Test all" requests is
+    // exactly when the backend is most likely to hiccup) must never wipe
+    // rows that are already on screen — only show the error state if
+    // this is genuinely the first load. `list.dataset.hooked` is set the
+    // moment a successful render has completed at least once, so it's a
+    // reliable "have we shown real data before" flag.
+    if (!list.dataset.hooked) {
+      list.innerHTML = `<div class="empty">${esc(r.error || "providers unavailable")}</div>`;
+    }
+    return;
+  }
   const provs = (r.data && r.data.providers) ? r.data.providers : r.data;
   const rows = Object.entries(provs || {}).map(([n, p]) => {
     const dot = p.healthy ? "ok" : (p.state === "down" ? "bad" : "warn");
@@ -943,6 +981,13 @@ function renderGatewayCard(core) {
     const modelCount = (c.models || []).length;
     const models = modelCount ? `${modelCount} model(s)` : "no models";
     GATEWAY_MODELS[key] = c.models || [];
+    // First paint after a reload: show the last saved per-model results
+    // (same idea as PROVIDER_MODEL_RESULTS restoration in loaders.providers),
+    // instead of leaving this connection's table empty until someone
+    // clicks Test again.
+    if (!(GATEWAY_MODEL_RESULTS[key] || []).length) {
+      GATEWAY_MODEL_RESULTS[key] = savedGatewayModelRows(c.models || [], c.model_health || {});
+    }
     return `<div class="provider-card" data-gw-conn="${esc(key)}">` +
       `<div class="provider-card-head">` +
       `<span class="status-dot ${dot}"></span><b>${esc(label)}</b>` +

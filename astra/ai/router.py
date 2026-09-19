@@ -341,8 +341,15 @@ class AstraRouter:
                 lambda key_id, model, _n=name: self._key_model_state(_n, key_id, model))
 
     def add(self, provider) -> None:
-        self.providers.append(provider)
-        self._slots(provider)
+        # Both steps under the lock: `health()` (any request thread, since
+        # the server is a ThreadingHTTPServer) iterates self.providers and
+        # indexes straight into self._latency[name] — if it observed the
+        # provider appended here before _slots() had run, that indexing
+        # raised KeyError and 500'd the whole /api/providers response
+        # (which the UI then treated as "wipe the provider list").
+        with self._lock:
+            self.providers.append(provider)
+            self._slots(provider)
 
     def _provider_usable(self, provider) -> bool:
         pool = getattr(provider, "pool", None)
@@ -1264,11 +1271,19 @@ class AstraRouter:
     # -- introspection (legacy contract, secret-free) -------------------------
     def health(self) -> dict:
         out = {}
-        for p in self.providers:
+        # Snapshot under the lock so a concurrent add()/reset_health() (a
+        # "Test all" burst fires plenty of these in parallel threads) can
+        # never be caught mid-mutation. `.get(name, ...)` on every
+        # bookkeeping dict below is defense-in-depth on top of that: a
+        # provider that's in self.providers but not yet in these dicts
+        # must never raise KeyError and 500 this whole endpoint.
+        with self._lock:
+            providers_snapshot = list(self.providers)
+        for p in providers_snapshot:
             name = getattr(p, "name", "?")
             info = self._provider_info(p)
             models = list(getattr(p, "models", []) or [])
-            lat = self._latency[name]
+            lat = self._latency.get(name, [])
             out[name] = {
                 "healthy": info["state"] == "healthy",
                 "state": info["state"],
@@ -1303,14 +1318,15 @@ class AstraRouter:
         test run (single-provider or "test all") so that test's numbers
         start from zero instead of piling onto whatever was saved from
         every earlier test."""
-        self._down.discard(name)
-        self._calls[name] = 0
-        for by_name in (self._errors, self._latency):
-            bucket = by_name.get(name)
-            if isinstance(bucket, list):
-                bucket.clear()
-            elif isinstance(bucket, int):
-                by_name[name] = 0
+        with self._lock:
+            self._down.discard(name)
+            self._calls[name] = 0
+            for by_name in (self._errors, self._latency):
+                bucket = by_name.get(name)
+                if isinstance(bucket, list):
+                    bucket.clear()
+                elif isinstance(bucket, int):
+                    by_name[name] = 0
 
     def reset_all_health(self) -> None:
         """reset_health() for every provider — used before a "test all" run

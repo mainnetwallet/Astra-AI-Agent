@@ -965,17 +965,6 @@ class TestGatewayZeroBypass(unittest.TestCase):
         self.assertNotIn("self.llm(", src)
         self.assertNotIn("provider.chat(", src)
 
-    def test_no_direct_provider_calls_in_planner(self):
-        import inspect
-        from astra.core.planner import Planner
-        src = inspect.getsource(Planner)
-        lines = [l for l in src.split("\n")
-                 if not l.strip().startswith("#") and not l.strip().startswith("'")
-                 and not l.strip().startswith('"')]
-        code = "\n".join(lines)
-        self.assertNotIn("ProviderRegistry(", code)
-        self.assertNotIn("adapter.chat(", code)
-
     def test_image_gen_through_router_not_direct(self):
         import inspect
         from astra.ai.router import AstraRouter

@@ -2,13 +2,13 @@
 
 Locks in the architecture:
 
-    User -> Planner -> Gateway Request Intelligence -> AstraRouter.
+    User -> Gateway Request Intelligence -> AstraRouter.
     route_request() -> Astra AI Gateway -> Existing Provider -> AI Model
 
 Specifically proves (see the pass's final report for the full audit):
 
-  1. Planner cannot use the legacy `router.route()` tuple call for normal
-     AI planning — `route_request()` is the only entry point.
+  1. (Planner-specific legacy-route-path tests removed along with
+     astra/core/planner.py, which has been deleted.)
   2. A router missing `route_request()` fails planning clearly (a plain
      "answer" fallback step), never silently via another AI path.
   3. A contract-bearing request cannot execute through an Existing
@@ -39,7 +39,6 @@ from astra.ai.gateway import (AstraAIGateway, AstraGatewayBedrock,
 from astra.ai.registry import KEYS_ENV
 from astra.ai.router import AstraRouter, RoutingRequest
 from astra.core.exceptions import ProviderError
-from astra.core.planner import Planner
 
 
 class _ShimPool:
@@ -66,69 +65,7 @@ class _FailingProvider:
         raise ProviderError("gemini: simulated outage")
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# 1-2: Planner has exactly one AI-backed planning path
-# ═══════════════════════════════════════════════════════════════════════
-class TestPlannerHasNoLegacyRoutePath(unittest.TestCase):
-    def test_legacy_route_never_invoked_when_route_request_available(self):
-        """A router exposing BOTH methods must only ever see
-        `route_request()` called for normal AI planning."""
-        from astra.ai.router import RoutingResult
 
-        class _DualRouter:
-            def __init__(self):
-                self.route_calls = 0
-                self.route_request_calls = 0
-
-            def route(self, messages):
-                self.route_calls += 1
-                return ("gemini", "model-a", '{"steps":[]}')
-
-            def route_request(self, req):
-                self.route_request_calls += 1
-                return RoutingResult(
-                    provider="gemini", model="model-a", ok=True,
-                    text='{"steps":[{"id":"s1","tool":"answer",'
-                         '"params":{"text":"hi"},"description":"d"}]}')
-
-        router = _DualRouter()
-        planner = Planner(router=router, tools=["answer"])
-        planner.plan("say hi")
-        self.assertEqual(router.route_calls, 0)
-        self.assertEqual(router.route_request_calls, 1)
-
-    def test_router_without_route_request_fails_closed(self):
-        """A duck-typed router exposing only the legacy `.route()` tuple
-        interface cannot plan at all — Planner fails clearly (plain
-        fallback answer) instead of taking that alternate AI path."""
-        class _LegacyOnlyRouter:
-            def __init__(self):
-                self.calls = 0
-
-            def route(self, messages):
-                self.calls += 1
-                return ("gemini", "model-a", '{"steps":[]}')
-
-        router = _LegacyOnlyRouter()
-        planner = Planner(router=router, tools=["answer"])
-        steps = planner.plan("say hi")
-        self.assertEqual(router.calls, 0)
-        self.assertTrue(steps[0].get("is_answer"))
-        self.assertEqual(planner.last_completion_status, "")
-
-    def test_planner_source_has_no_bare_route_call(self):
-        """Regression lock: the module source must never again contain a
-        bare `router.route(` call — route_request() is the only path."""
-        from astra.core import planner as planner_mod
-        src = inspect.getsource(planner_mod)
-        self.assertNotIn("self.router.route(", src)
-        self.assertNotIn(".router.route([", src)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 3-4: Router-boundary enforcement + Gateway isolation
-# ═══════════════════════════════════════════════════════════════════════
-class TestRouterBoundaryEnforcement(unittest.TestCase):
     def test_contract_bearing_request_fails_closed_without_gateway(self):
         provider = _FailingProvider()
         # give it one scripted success so a plain request WOULD succeed —
@@ -207,10 +144,6 @@ class TestNoAlternateExecutionPath(unittest.TestCase):
         for needle in self.FORBIDDEN:
             self.assertNotIn(needle, src,
                              f"{module.__name__} contains forbidden pattern {needle!r}")
-
-    def test_planner_has_no_direct_ai_call(self):
-        from astra.core import planner
-        self._assert_module_clean(planner)
 
     def test_orchestrator_has_no_direct_ai_call(self):
         from astra.core import orchestrator

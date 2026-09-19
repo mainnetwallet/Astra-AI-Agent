@@ -2,9 +2,14 @@
 
 `build()` wires: Store → Registry(plugins) → TaskEngine → Memories →
 EventBus → Policy → ToolRegistry(+builtins+plugin tools) → Providers →
-AstraRouter → Planner → Executor → WorkflowEngine → Scheduler → Orchestrator
+AstraRouter → Executor → WorkflowEngine → Scheduler → Orchestrator
 → Agent. run.py, tests, and boot helpers all call this, so the wiring is
 defined once and verified everywhere.
+
+NOTE: astra.core.planner (Planner) has been deleted. Every line below
+that referenced `Planner`/`planner` has been removed along with it —
+`Orchestrator` below is now constructed without a `planner=` argument,
+pending whatever replaces it.
 """
 from __future__ import annotations
 
@@ -16,7 +21,6 @@ from astra.core.config import Config
 from astra.core.events import EventBus
 from astra.core.permissions import Policy
 from astra.core.tasks import TaskEngine
-from astra.core.planner import Planner
 # NOTE: astra.core.executor (Executor) and astra.tools.registry
 # (ToolRegistry) have both been deleted — along with the confirm/ask gate
 # that lived across them. Every line below referencing `Executor`,
@@ -178,9 +182,8 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
                          registry=model_registry, gateway=gateway)
     router.attach_events(events)
     # Gateway Request Intelligence: rewrites a raw/messy goal into a
-    # Provider-ready prompt using ONLY the Gateway's own GW_* connections,
-    # before Planner hands it to the existing Provider system (`router`
-    # above). Always constructed (never None) — it degrades to a no-op
+    # Provider-ready prompt using ONLY the Gateway's own GW_* connections.
+    # Always constructed (never None) — it degrades to a no-op
     # pass-through on its own when `gateway` is None/unusable. See
     # astra/ai/gateway.py module docstring for the isolation contract.
     gateway_intelligence = build_gateway_request_intelligence(gateway)
@@ -190,9 +193,6 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     if env_models == "1":
         discovery.refresh(force=False)   # best-effort, never blocks boot
 
-    planner = Planner(router=router,
-                      tools=[t["name"] for t in registry.list()],
-                      config=config, gateway_intelligence=gateway_intelligence)
     executor = Executor(registry, tasks=tasks, events=events,
                         experiences=experiences)
     # specialist agents (Agent manager): deterministic selection steers
@@ -201,7 +201,7 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     agent_manager.register_many(SPECIALISTS)
     orchestrator = Orchestrator(
         store, config=config, tasks=tasks, registry=registry,
-        planner=planner, executor=executor, router=router, memory=memory,
+        executor=executor, router=router, memory=memory,
         experiences=experiences, events=events, policy=policy,
         plugins=plugins, agents=agent_manager)
     orchestrator.web3_manager = tx_manager
@@ -219,7 +219,7 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
             deadline_callback=lambda: _deadline_events(plugins))
         scheduler.start()
 
-    # chat agent (plugins first, then orchestrator -> Planner -> Astra AI
+    # chat agent (plugins first, then orchestrator -> Astra AI
     # Gateway -> Existing Provider System; no direct/raw LLM path exists)
     agent = Agent(plugins, orchestrator=orchestrator)
 
@@ -227,7 +227,7 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
         "config": config, "store": store, "plugins": plugins,
         "events": events, "policy": policy, "memory": memory,
         "experiences": experiences, "tasks": tasks, "registry": registry,
-        "router": router, "planner": planner, "executor": executor,
+        "router": router, "executor": executor,
         "orchestrator": orchestrator, "workflows": workflows,
         "scheduler": scheduler, "agent": agent,
         "model_registry": model_registry, "provider_registry": provider_registry,

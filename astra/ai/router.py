@@ -830,29 +830,38 @@ class AstraRouter:
     _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
 
     def test_provider(self, name: str) -> dict:
-        """Probe one provider's first available model right now."""
+        """Probe EVERY model this provider exposes, one at a time — not just
+        the first. Each model's result is recorded (via `_record_route` /
+        `_mark_down`) the instant that model's own probe returns, so a
+        slow/dead model never blocks the rest of the provider's models from
+        being tested and saved."""
         provider = next((p for p in self.providers
                          if getattr(p, "name", "?") == name), None)
         if provider is None:
-            return {"provider": name, "ok": False, "model": "",
-                    "latency_ms": 0, "error": "unknown provider"}
+            return {"provider": name, "ok": False, "models": [],
+                    "error": "unknown provider"}
         models = list(getattr(provider, "models", []) or [])
         if not models:
-            return {"provider": name, "ok": False, "model": "",
-                    "latency_ms": 0, "error": "no model configured"}
-        model_id = models[0]
-        req = RoutingRequest(task_type="health_check",
-                             messages=self._TEST_MESSAGES,
-                             preferred_provider=name, preferred_model=model_id,
-                             no_fallback=True, max_tokens=8)
-        rr = self.route_request(req)
-        return {"provider": name, "ok": bool(rr.ok),
+            return {"provider": name, "ok": False, "models": [],
+                    "error": "no model configured"}
+        results = []
+        for model_id in models:
+            req = RoutingRequest(task_type="health_check",
+                                 messages=self._TEST_MESSAGES,
+                                 preferred_provider=name, preferred_model=model_id,
+                                 no_fallback=True, max_tokens=8)
+            rr = self.route_request(req)
+            results.append({
                 "model": rr.model or model_id,
+                "ok": bool(rr.ok),
                 "latency_ms": round(rr.latency_ms, 1),
-                "error": "" if rr.ok else (rr.error or "test failed")}
+                "error": "" if rr.ok else (rr.error or "test failed"),
+            })
+        return {"provider": name, "ok": any(r["ok"] for r in results),
+                "models": results, "error": ""}
 
     def test_all_providers(self) -> list:
-        """Probe every provider, one at a time. Each provider's result is
+        """Probe every provider's every model, one at a time. Each result is
         saved (via `test_provider` -> `_record_route`) the moment its own
         probe completes — no need to wait for every provider to finish, and
         one provider erroring never stops the rest from being tested."""

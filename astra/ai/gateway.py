@@ -903,43 +903,58 @@ class AstraAIGateway:
     _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
 
     def test_connection(self, conn) -> dict:
-        """Probe a single Gateway connection and persist the result
-        immediately. Returns a small JSON-safe dict for the UI."""
-        model_id = (conn.models or [None])[0]
-        if not model_id:
+        """Probe EVERY model this Gateway connection exposes — not just the
+        first — and persist each result immediately. Returns a small
+        JSON-safe dict for the UI."""
+        models = list(conn.models or [])
+        if not models:
             return {"connection": conn.name, "ok": False,
-                    "error": "no model configured", "latency_ms": 0,
-                    "model": ""}
-        start = time.perf_counter()
-        try:
-            conn.chat(self._TEST_MESSAGES, model=model_id, max_tokens=8)
-        except (ProviderError, TimeoutError) as e:
-            error = getattr(e, "message", None) or str(e)
-            self.routing_state.record_failure(conn.name, model_id)
-            self._emit("astra_gateway.test", connection=conn.name,
-                       model=model_id, ok=False, reason=error)
-            return {"connection": conn.name, "ok": False, "error": error,
-                    "latency_ms": 0, "model": model_id}
-        except Exception as e:
-            error = f"{type(e).__name__}: {e}"
-            self.routing_state.record_failure(conn.name, model_id)
-            self._emit("astra_gateway.test", connection=conn.name,
-                       model=model_id, ok=False, reason=error)
-            return {"connection": conn.name, "ok": False, "error": error,
-                    "latency_ms": 0, "model": model_id}
-        latency_ms = (time.perf_counter() - start) * 1000.0
-        self.routing_state.record_success(conn.name, model_id, latency_ms)
-        self._emit("astra_gateway.test", connection=conn.name, model=model_id,
-                   ok=True, latency_ms=round(latency_ms, 1))
-        return {"connection": conn.name, "ok": True, "error": "",
-                "latency_ms": round(latency_ms, 1), "model": model_id}
+                    "error": "no model configured", "models": []}
+        results = []
+        for model_id in models:
+            start = time.perf_counter()
+            try:
+                conn.chat(self._TEST_MESSAGES, model=model_id, max_tokens=8)
+            except (ProviderError, TimeoutError) as e:
+                error = getattr(e, "message", None) or str(e)
+                self.routing_state.record_failure(conn.name, model_id)
+                self._emit("astra_gateway.test", connection=conn.name,
+                           model=model_id, ok=False, reason=error)
+                results.append({"model": model_id, "ok": False,
+                                "error": error, "latency_ms": 0})
+                continue
+            except Exception as e:
+                error = f"{type(e).__name__}: {e}"
+                self.routing_state.record_failure(conn.name, model_id)
+                self._emit("astra_gateway.test", connection=conn.name,
+                           model=model_id, ok=False, reason=error)
+                results.append({"model": model_id, "ok": False,
+                                "error": error, "latency_ms": 0})
+                continue
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self.routing_state.record_success(conn.name, model_id, latency_ms)
+            self._emit("astra_gateway.test", connection=conn.name, model=model_id,
+                       ok=True, latency_ms=round(latency_ms, 1))
+            results.append({"model": model_id, "ok": True, "error": "",
+                            "latency_ms": round(latency_ms, 1)})
+        return {"connection": conn.name, "ok": any(r["ok"] for r in results),
+                "models": results, "error": ""}
+
+    def test_connection_by_name(self, name: str) -> dict:
+        """Probe exactly one connection by its name (e.g. 'astra-gw-gemini'),
+        or every model of every connection sharing that name."""
+        conn = next((c for c in self.connections if c.name == name), None)
+        if conn is None:
+            return {"connection": name, "ok": False, "models": [],
+                    "error": "unknown gateway connection"}
+        return self.test_connection(conn)
 
     def test_all_connections(self) -> list:
-        """Probe every configured connection, one at a time. Each result is
-        saved (via `test_connection`) the moment it completes — a slow or
-        failing connection never blocks the others from being recorded, and
-        the caller doesn't have to wait for every probe to *succeed*, only
-        for the loop to finish."""
+        """Probe every configured connection's every model, one at a time.
+        Each result is saved (via `test_connection`) the moment it
+        completes — a slow or failing connection never blocks the others
+        from being recorded, and the caller doesn't have to wait for every
+        probe to *succeed*, only for the loop to finish."""
         return [self.test_connection(c) for c in self.connections]
 
     # -- health (reported separately, never as a provider) --------------------

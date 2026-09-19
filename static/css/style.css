@@ -434,3 +434,25 @@ a[class*="hl-"] { pointer-events: none; }
   animation: uploadSpin .8s linear infinite;
 }
 @keyframes uploadSpin { to { transform: rotate(360deg); } }
+/* ======================== 🔌 AI Providers health (per-model breakdown) ======================== */
+.provider-card {
+  background: var(--panel2); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 10px 12px;
+}
+.provider-card-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.provider-card-head .grow { flex: 1; min-width: 0; }
+.model-health-table { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.model-health-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 0;
+  font-size: 12px; color: var(--muted);
+}
+.model-health-row .model-name {
+  flex: 1; min-width: 0; color: var(--text); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.model-health-row .model-latency { min-width: 70px; text-align: right; }
+.model-health-row.ok .model-latency { color: var(--good); }
+.model-health-row.bad { color: var(--bad); }
+.model-health-empty { font-size: 12px; color: var(--muted); padding: 4px 0; }

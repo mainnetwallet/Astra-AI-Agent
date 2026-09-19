@@ -570,22 +570,45 @@ function applyLogsFilter() {
 }
 
 /* ------------------------------ providers (core) --------------------------- */
+// Model-level test results kept client-side so a redraw from /api/providers
+// (which only knows aggregate provider health, not "model X took 42ms just
+// now") never wipes out what the last Test click just showed.
+const PROVIDER_MODEL_RESULTS = {};   // provider name -> [{model, ok, latency_ms, error}]
+
+function modelHealthRowsHtml(results) {
+  if (!results || !results.length) {
+    return `<div class="model-health-empty">Ekhono test kora hoyni — "Test" e click korle proti model koto shomoy nilo ta ekhane dekha jabe.</div>`;
+  }
+  return results.map((m) => {
+    const cls = m.ok ? "ok" : "bad";
+    const right = m.ok ? `${m.latency_ms}ms` : `❌ ${esc(m.error || "error")}`;
+    return `<div class="model-health-row ${cls}">` +
+      `<span class="status-dot ${m.ok ? "ok" : "bad"}"></span>` +
+      `<span class="model-name">${esc(m.model)}</span>` +
+      `<span class="model-latency">${right}</span></div>`;
+  }).join("");
+}
+
 loaders.providers = async function () {
   const r = await api("/api/providers");
   const list = $("#providers-list");
   if (!r.ok) { list.innerHTML = `<div class="empty">${esc(r.error || "providers unavailable")}</div>`; return; }
   const provs = (r.data && r.data.providers) ? r.data.providers : r.data;
   const rows = Object.entries(provs || {}).map(([n, p]) => {
-    const dot = p.healthy ? "🟢" : (p.state === "down" ? "🔴" : "⚪");
+    const dot = p.healthy ? "ok" : (p.state === "down" ? "bad" : "warn");
     const lat = p.latency_avg_ms == null ? "—" : p.latency_avg_ms + "ms";
-    return `<div class="row" data-provider-row="${esc(n)}"><b>${dot} ${esc(n)}</b>` +
-      `<span>${esc(p.state || p.healthy || "?")}</span>` +
-      `<span>${p.models ? p.models.length : 0} models</span>` +
-      `<span>${p.calls || 0} calls · ${p.errors || 0} err</span>` +
-      `<span>${esc(lat)}</span>` +
-      `<span class="provider-test-result muted" data-role="test-result"></span>` +
-      `<button class="btn small" data-role="provider-test" data-provider="${esc(n)}">🧪 Test</button>` +
-      `</div>`;
+    const modelCount = p.models ? p.models.length : 0;
+    return `<div class="provider-card" data-provider-row="${esc(n)}">` +
+      `<div class="provider-card-head">` +
+      `<span class="status-dot ${dot}"></span><b>${esc(n)}</b>` +
+      `<span class="grow muted">${esc(p.state || (p.healthy ? "healthy" : "?"))} · ` +
+      `${modelCount} model(s) · ${p.calls || 0} calls · ${p.errors || 0} err · ` +
+      `avg ${esc(lat)}</span>` +
+      `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}">🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})</button>` +
+      `</div>` +
+      `<div class="model-health-table" data-role="model-table">` +
+      modelHealthRowsHtml(PROVIDER_MODEL_RESULTS[n]) +
+      `</div></div>`;
   }).join("");
   list.innerHTML = rows || `<div class="empty">kono provider e creds nai (offline mode)</div>`;
   const btn = $("#btn-providers-refresh");
@@ -593,22 +616,28 @@ loaders.providers = async function () {
     btn.dataset.hooked = "1";
     btn.onclick = async () => { await post("/api/v1/models/refresh"); loaders.providers(); };
   }
-  // per-provider manual test: click updates just that provider's health,
-  // saved the instant the probe returns (not batched with the others).
+  // per-provider manual test: click tests EVERY model that provider has,
+  // one model at a time, saving each model's result the instant that
+  // model's own probe returns.
   if (!list.dataset.hooked) {
     list.dataset.hooked = "1";
     list.addEventListener("click", async (ev) => {
       const b = ev.target.closest('[data-role="provider-test"]');
       if (!b) return;
       const name = b.dataset.provider;
-      const resultEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="test-result"]`, list);
+      const tableEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="model-table"]`, list);
       b.disabled = true;
       const prevLabel = b.textContent;
-      b.textContent = "⏳ Testing…";
-      if (resultEl) resultEl.textContent = "";
+      b.textContent = "⏳ Testing all models…";
+      if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">Testing…</div>`;
       try {
         const res = await post(`/api/v1/providers/${encodeURIComponent(name)}/test`);
-        renderProviderTestResult(resultEl, res.ok ? res.data : null, res.error);
+        PROVIDER_MODEL_RESULTS[name] = (res.ok && res.data && res.data.models) || [];
+        if (res.ok && res.data && res.data.error && !res.data.models.length) {
+          if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">⚠️ ${esc(res.data.error)}</div>`;
+        }
+      } catch (_e) {
+        PROVIDER_MODEL_RESULTS[name] = [];
       } finally {
         b.disabled = false;
         b.textContent = prevLabel;
@@ -626,7 +655,12 @@ loaders.providers = async function () {
       const prevLabel = testAllBtn.textContent;
       testAllBtn.textContent = "⏳ Testing all…";
       try {
-        await post("/api/v1/providers/test-all");
+        const res = await post("/api/v1/providers/test-all");
+        if (res.ok && res.data) {
+          (res.data.providers || []).forEach((p) => {
+            PROVIDER_MODEL_RESULTS[p.provider] = p.models || [];
+          });
+        }
       } finally {
         testAllBtn.disabled = false;
         testAllBtn.textContent = prevLabel;
@@ -637,14 +671,6 @@ loaders.providers = async function () {
   renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
 };
 
-function renderProviderTestResult(el, data, err) {
-  if (!el) return;
-  if (!data) { el.textContent = `⚠️ ${err || "test failed"}`; return; }
-  el.textContent = data.ok
-    ? `🟢 ${data.latency_ms}ms (${data.model || ""})`
-    : `🔴 ${data.error || "error"}`;
-}
-
 /* -------------------------- Astra AI Gateway ------------------------- */
 const GATEWAY_LABELS = {
   "astra-gw-gemini": "Gemini",
@@ -652,6 +678,10 @@ const GATEWAY_LABELS = {
   "astra-gw-cloudflare": "Cloudflare",
   "astra-gw-bedrock": "Bedrock",
 };
+// Model-level Gateway test results, kept client-side for the same reason
+// as PROVIDER_MODEL_RESULTS above.
+const GATEWAY_MODEL_RESULTS = {};   // connection name -> [{model, ok, latency_ms, error}]
+
 // Best-average-latency across a connection's tracked models — used purely
 // to *display* connections fastest/healthiest first, mirroring how the
 // Gateway itself prefers a healthy, low-latency target when it fallbacks.
@@ -662,6 +692,24 @@ function _connAvgLatency(c) {
   if (!withLatency.length) return null;
   const vals = withLatency.map((h) => h.average_latency_ms ?? h.avg_latency_ms);
   return vals.reduce((a, b) => a + b, 0) / vals.length;
+}
+
+async function runGatewayConnectionTest(key, btn, card) {
+  const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`, card);
+  if (btn) { btn.disabled = true; btn.dataset.prev = btn.textContent; btn.textContent = "⏳ Testing…"; }
+  if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">Testing…</div>`;
+  try {
+    const res = await post(`/api/v1/gateway/${encodeURIComponent(key)}/test`);
+    GATEWAY_MODEL_RESULTS[key] = (res.ok && res.data && res.data.models) || [];
+    if (res.ok && res.data && res.data.error && !(res.data.models || []).length) {
+      if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">⚠️ ${esc(res.data.error)}</div>`;
+    }
+  } catch (_e) {
+    GATEWAY_MODEL_RESULTS[key] = [];
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = btn.dataset.prev; }
+    loaders.providers();
+  }
 }
 
 function renderGatewayCard(core) {
@@ -691,18 +739,36 @@ function renderGatewayCard(core) {
   const rows = ranked.map(([key, c]) => {
     const label = GATEWAY_LABELS[key] || key;
     const dot = dots[c.state] || "warn";
-    const models = (c.models || []).length ? `${(c.models || []).length} model(s)` : "no models";
+    const modelCount = (c.models || []).length;
+    const models = modelCount ? `${modelCount} model(s)` : "no models";
     const lat = _connAvgLatency(c);
     const latTxt = lat == null ? "" : ` · ~${Math.round(lat)}ms`;
-    return `<div class="card" data-gw-conn="${esc(key)}"><div class="card-v"><span class="status-dot ${dot}"></span>` +
-      `<b>${esc(label)}</b></div><div class="card-k muted">${esc(c.state)} · ${models}${latTxt}</div>` +
-      `<div class="card-k" data-role="gw-test-result"></div></div>`;
+    return `<div class="provider-card" data-gw-conn="${esc(key)}">` +
+      `<div class="provider-card-head">` +
+      `<span class="status-dot ${dot}"></span><b>${esc(label)}</b>` +
+      `<span class="grow muted">${esc(c.state)} · ${models}${latTxt}</span>` +
+      `<button class="btn mini" data-role="gw-test" data-conn="${esc(key)}">🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})</button>` +
+      `</div>` +
+      `<div class="model-health-table" data-role="gw-model-table">` +
+      modelHealthRowsHtml(GATEWAY_MODEL_RESULTS[key]) +
+      `</div></div>`;
   }).join("");
   const dot = dots[core.state] || "warn";
   card.innerHTML = `<div class="row"><span class="status-dot ${dot}"></span>` +
     `<b>${esc(core.state)}</b>` +
     `<span class="muted">· ${(core.models || []).length} model(s) across ${conns.length} connection(s), fastest-healthy first</span></div>` +
-    `<div class="cards mini" style="margin-top:8px">${rows}</div>`;
+    `<div class="list" style="margin-top:8px">${rows}</div>`;
+
+  // per-connection Test button — tests every model of just that ONE
+  // connection (e.g. only Gemini's models), not the whole gateway.
+  if (!card.dataset.hooked) {
+    card.dataset.hooked = "1";
+    card.addEventListener("click", (ev) => {
+      const b = ev.target.closest('[data-role="gw-test"]');
+      if (!b) return;
+      runGatewayConnectionTest(b.dataset.conn, b, card);
+    });
+  }
 
   const testBtn = $("#btn-gateway-test");
   if (testBtn && !testBtn.dataset.hooked) {
@@ -714,9 +780,8 @@ function renderGatewayCard(core) {
       try {
         const res = await post("/api/v1/gateway/test");
         if (res.ok) {
-          (res.data.connections || []).forEach((r) => {
-            const el = $(`[data-gw-conn="${CSS.escape(r.connection)}"] [data-role="gw-test-result"]`, card);
-            if (el) el.textContent = r.ok ? `🟢 ${r.latency_ms}ms (${r.model})` : `🔴 ${r.error}`;
+          (res.data.connections || []).forEach((c) => {
+            GATEWAY_MODEL_RESULTS[c.connection] = c.models || [];
           });
         }
       } finally {

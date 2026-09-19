@@ -64,7 +64,9 @@ New /api/v1 endpoints:
                                      result saved as soon as it completes)
   POST /api/v1/gateway/test         test only the 4 Astra AI Gateway
                                      connections (Gemini/Groq/Cloudflare/
-                                     Bedrock)
+                                     Bedrock) — every model of each
+  POST /api/v1/gateway/<name>/test  test one Gateway connection only —
+                                     every model that connection exposes
   GET  /api/v1/web3/transactions              (+ /{tx_id})
   GET  /api/v1/web3/transaction-policy        (mode/limits/whitelist/stop)
   POST /api/v1/web3/transaction-policy/mode   (operator token required)
@@ -796,6 +798,10 @@ class AstraHandler(BaseHTTPRequestHandler):
             return self._providers_test_all(s)
         if path == ["api", "gateway", "test"] and method == "POST":
             return self._gateway_test(s)
+        # single-connection Gateway test: /api/v1/gateway/<connection>/test
+        if (len(path) == 4 and path[:2] == ["api", "gateway"]
+                and path[3] == "test" and method == "POST"):
+            return self._gateway_test_one(s, path[2])
         # web3
         if path[:3] == ["api", "web3", "transactions"] and method == "GET":
             return self._web3_tx_list(s, path)
@@ -897,6 +903,17 @@ class AstraHandler(BaseHTTPRequestHandler):
                                  "gateway_unavailable")
         return self._json_ok_rid({"ok": True,
                                   "data": {"connections": gw.test_all_connections()}})
+
+    def _gateway_test_one(self, s, name) -> bool:
+        """Test one Astra AI Gateway connection (e.g. 'astra-gw-gemini') —
+        every model it exposes, not just one."""
+        router = s.router()
+        gw = getattr(router, "gateway", None) if router else None
+        if gw is None:
+            return self._err_rid("Astra AI Gateway not configured", 400,
+                                 "gateway_unavailable")
+        return self._json_ok_rid({"ok": True,
+                                  "data": gw.test_connection_by_name(name)})
 
     def _web3_tx_list(self, s, path) -> bool:
         tx = s._get("tx_manager")

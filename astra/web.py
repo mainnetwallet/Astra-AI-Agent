@@ -428,6 +428,13 @@ class AstraHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # No cache header here meant the browser was free to keep serving a
+        # stale astra.js/style.css indefinitely after every deploy — a UI
+        # fix landing in git often wouldn't actually reach the page until a
+        # manual hard-refresh. These are cheap to re-fetch and change on
+        # every deploy, so always make the browser revalidate them.
+        if path.endswith((".html", ".js", ".css")):
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.send_header("X-Request-Id", getattr(self, "_rid", ""))
         self.apply_security_headers()
         self.end_headers()

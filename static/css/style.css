@@ -440,6 +440,10 @@ a[class*="hl-"] { pointer-events: none; }
 .provider-card-head .grow { flex: 1; min-width: 0; }
 .model-health-table { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
 .model-health-table:empty { display: none; }
+/* Toggled by #btn-providers-toggle-models — hides every provider's
+   per-model rows (gemini-3.7-flash, key chips, etc.) without touching
+   the provider card itself (name/state/Test button stay visible). */
+#providers-list.models-hidden .model-health-table { display: none; }
 .model-health-row {
   display: flex; align-items: center; gap: 8px; padding: 4px 0;
   font-size: 12px; color: var(--muted);

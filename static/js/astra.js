@@ -738,10 +738,22 @@ loaders.providers = async function () {
       `</div></div>`;
   }).join("");
   list.innerHTML = rows || `<div class="empty">kono provider e creds nai (offline mode)</div>`;
-  const btn = $("#btn-providers-refresh");
-  if (btn && !btn.dataset.hooked) {
-    btn.dataset.hooked = "1";
-    btn.onclick = async () => { await post("/api/v1/models/refresh"); loaders.providers(); };
+  // Hide/show toggle for every provider's per-model rows (gemini-3.7-flash,
+  // key chips, etc.) — one button, same click alternates hide <-> show.
+  // The state lives as a class on #providers-list itself (not on the rows
+  // just rebuilt above), so it survives every re-render: list.innerHTML
+  // replaces the children each time, never this element's own classList.
+  const toggleBtn = $("#btn-providers-toggle-models");
+  if (toggleBtn && !toggleBtn.dataset.hooked) {
+    toggleBtn.dataset.hooked = "1";
+    toggleBtn.onclick = () => {
+      const hidden = list.classList.toggle("models-hidden");
+      toggleBtn.textContent = hidden ? "👁 Show models" : "🙈 Hide models";
+    };
+  }
+  if (toggleBtn) {
+    toggleBtn.textContent = list.classList.contains("models-hidden")
+      ? "👁 Show models" : "🙈 Hide models";
   }
   // per-provider manual test: click fires ONE request PER MODEL, all in
   // parallel — each model's row flips from "testing…" to its result (and

@@ -577,6 +577,142 @@ const PROVIDER_KEYS = {};
 const FORCE_SHOWN_PROVIDERS = new Set();
 const FORCE_SHOWN_GATEWAY = new Set();
 
+/* ---- Running-test persistence (survives a real page refresh) -------------
+ * Test / Test all fire their requests from the browser, so a page refresh
+ * used to wipe every "⏳ testing…" row even though the server kept working
+ * on (and saving) those calls. Each running test is therefore also written
+ * to localStorage (with a snapshot of the last-known saved results). After a
+ * refresh, loaders.providers / renderGatewayCard read it back, show the
+ * still-running rows as pending (card force-revealed, Test buttons disabled)
+ * and poll the server until each row's saved result differs from the
+ * snapshot — then paint the real result. Entries older than
+ * RUNNING_MAX_AGE_MS are treated as dead and dropped.
+ */
+const RUNNING_KEY = "astra_running_tests";
+const RUNNING_MAX_AGE_MS = 3 * 60 * 1000;
+const RUN_SEP = "\u001f";
+const LIVE_PROVIDER_TESTS = new Set();      // tests THIS page instance is running
+const LIVE_GATEWAY_TESTS = new Set();
+const RESTORED_PROVIDER_PENDING = new Set(); // tests restored after a refresh, still running
+const RESTORED_GATEWAY_PENDING = new Set();
+const LAST_PROVIDER_DATA = {};               // provider name -> last /api/providers entry
+const LAST_GATEWAY_DATA = {};                // connection key -> last gateway connection entry
+let _runningPollTimer = null;
+
+function _loadRunning() {
+  let st;
+  try { st = JSON.parse(localStorage.getItem(RUNNING_KEY) || "{}") || {}; }
+  catch (_e) { st = {}; }
+  st.providers = st.providers || {};
+  st.gateway = st.gateway || {};
+  const now = Date.now();
+  for (const grp of ["providers", "gateway"]) {
+    for (const [k, v] of Object.entries(st[grp])) {
+      if (!v || now - (v.startedAt || 0) > RUNNING_MAX_AGE_MS) delete st[grp][k];
+    }
+  }
+  if (st.testAll && now - st.testAll > RUNNING_MAX_AGE_MS) st.testAll = 0;
+  if (st.gatewayAll && now - st.gatewayAll > RUNNING_MAX_AGE_MS) st.gatewayAll = 0;
+  return st;
+}
+function _runningUpdate(fn) {
+  const st = _loadRunning();
+  fn(st);
+  try { localStorage.setItem(RUNNING_KEY, JSON.stringify(st)); }
+  catch (_e) { /* storage unavailable — live UI still works, only refresh-restore is lost */ }
+}
+const _gwSig = (h) => h ? `${h.success_count || 0}/${h.failure_count || 0}` : "0/0";
+function _providerRunBase(name) {
+  const base = {};
+  const kr = (LAST_PROVIDER_DATA[name] || {}).key_results || {};
+  Object.entries(kr).forEach(([m, byKey]) =>
+    Object.entries(byKey || {}).forEach(([kid, r]) => { base[m + RUN_SEP + kid] = (r && r.tested_at) || ""; }));
+  return base;
+}
+function _gatewayRunBase(key) {
+  const base = {};
+  Object.entries((LAST_GATEWAY_DATA[key] || {}).model_health || {})
+    .forEach(([m, h]) => { base[m] = _gwSig(h); });
+  return base;
+}
+function _runningNoteLocal(name, result) {
+  _runningUpdate((st) => {
+    const e = st.providers[name];
+    if (e) { e.local = e.local || {}; e.local[result.model] = result; }
+  });
+}
+// Rebuild one provider's rows from the server's saved data + a stored run.
+// Returns how many rows/chips are still waiting on the server.
+function _restoreProviderRun(n, p, run) {
+  const models = p.models || [];
+  const keys = p.keys || [];
+  let pending = 0;
+  if (run.mode === "keys" && keys.length) {
+    PROVIDER_MODEL_RESULTS[n] = models.map((m) => ({
+      model: m,
+      keys: keys.map((k) => {
+        const r = ((p.key_results || {})[m] || {})[k.key_id];
+        const fresh = r && (r.tested_at || "") !== (run.base[m + RUN_SEP + k.key_id] || "");
+        if (fresh) return { key_id: k.key_id, label: k.label, ok: r.ok, latency_ms: r.latency_ms,
+                            error: r.error, tested_at: r.tested_at };
+        pending += 1;
+        return { key_id: k.key_id, label: k.label, pending: true };
+      }),
+    }));
+    return pending;
+  }
+  // Providers without keys: results only exist client-side, so the ones that
+  // landed before the refresh were stored in the run; the rest stay pending
+  // until the server's call counter (reset at test start) covers every model.
+  const local = run.local || {};
+  const finished = (p.calls || 0) >= models.length;
+  PROVIDER_MODEL_RESULTS[n] = models.map((m) => {
+    if (local[m]) return local[m];
+    if (finished) return { model: m, untested: true };
+    pending += 1;
+    return { model: m, pending: true };
+  });
+  return pending;
+}
+function _gwRow(modelId, h) {
+  const tested = h && ((h.success_count || 0) + (h.failure_count || 0) > 0);
+  if (!tested) return { model: modelId, untested: true };
+  const lastOk = h.last_success && (!h.last_failure || h.last_success > h.last_failure);
+  return lastOk
+    ? { model: modelId, ok: true, latency_ms: Math.round(h.average_latency_ms || 0) }
+    : { model: modelId, ok: false, error: "last test failed" };
+}
+// Disable/relabel the bulk buttons while a restored run is still going, and
+// keep polling the server until it's done. Live (this-page) runs own their
+// buttons via dataset.live and are left alone.
+function _syncRunningUi() {
+  const st = _loadRunning();
+  const pendingCount = RESTORED_PROVIDER_PENDING.size + RESTORED_GATEWAY_PENDING.size;
+  const anyLive = LIVE_PROVIDER_TESTS.size + LIVE_GATEWAY_TESTS.size > 0;
+  if (pendingCount === 0 && !anyLive && (st.testAll || st.gatewayAll)) {
+    _runningUpdate((s2) => { s2.testAll = 0; s2.gatewayAll = 0; });
+    st.testAll = 0; st.gatewayAll = 0;
+  }
+  const setBusy = (btn, busyLabel, busy) => {
+    if (!btn || btn.dataset.live) return;
+    if (busy) {
+      if (!btn.dataset.restored) { btn.dataset.orig = btn.textContent; btn.dataset.restored = "1"; }
+      btn.disabled = true;
+      btn.textContent = busyLabel;
+    } else if (btn.dataset.restored) {
+      btn.disabled = false;
+      btn.textContent = btn.dataset.orig;
+      delete btn.dataset.restored;
+    }
+  };
+  setBusy($("#btn-providers-test-all"), "⏳ Testing all…", pendingCount > 0 && !!st.testAll);
+  setBusy($("#btn-gateway-test"), "⏳ Testing gateway…",
+          RESTORED_GATEWAY_PENDING.size > 0 && !!(st.gatewayAll || st.testAll));
+  clearTimeout(_runningPollTimer);
+  _runningPollTimer = null;
+  if (pendingCount > 0) _runningPollTimer = setTimeout(() => loaders.providers(), 2000);
+}
+
 // One API key's result for one model. `k` = {key_id, label, pending?, ok?,
 // latency_ms?, error?}; `ok` undefined/null means "never tested".
 function keyChipHtml(k) {
@@ -738,15 +874,33 @@ loaders.providers = async function () {
     return;
   }
   const provs = (r.data && r.data.providers) ? r.data.providers : r.data;
+  RESTORED_PROVIDER_PENDING.clear();
   const rows = Object.entries(provs || {}).map(([n, p]) => {
     const dot = p.healthy ? "ok" : (p.state === "down" ? "bad" : "warn");
     const modelCount = p.models ? p.models.length : 0;
     PROVIDER_MODELS[n] = p.models || [];
     PROVIDER_KEYS[n] = p.keys || [];
+    LAST_PROVIDER_DATA[n] = p;
     // First paint after a reload: show the last saved per-key results.
     if (!(PROVIDER_MODEL_RESULTS[n] || []).length && (p.keys || []).length) {
       PROVIDER_MODEL_RESULTS[n] = savedKeyRows(p.models || [], p.keys, p.key_results);
     }
+    // A test that was still running when the page was refreshed: show its
+    // unfinished rows as pending (and reveal the card) until the server has
+    // saved their results. Tests running on THIS page keep their live rows.
+    RESTORED_PROVIDER_PENDING.delete(n);
+    if (!LIVE_PROVIDER_TESTS.has(n)) {
+      const run = _loadRunning().providers[n];
+      if (run) {
+        if (_restoreProviderRun(n, p, run) > 0) {
+          RESTORED_PROVIDER_PENDING.add(n);
+          FORCE_SHOWN_PROVIDERS.add(n);
+        } else {
+          _runningUpdate((st) => { delete st.providers[n]; });
+        }
+      }
+    }
+    const busy = LIVE_PROVIDER_TESTS.has(n) || RESTORED_PROVIDER_PENDING.has(n);
     const keyCount = (p.keys || []).length;
     const forceShow = FORCE_SHOWN_PROVIDERS.has(n) ? " force-show" : "";
     return `<div class="provider-card${forceShow}" data-provider-row="${esc(n)}">` +
@@ -758,7 +912,10 @@ loaders.providers = async function () {
       `data-keycount="${keyCount}">` +
       `${esc(p.state || (p.healthy ? "healthy" : "?"))} · ` +
       `${modelCount} model(s) · ${keyCount} key(s) · ${p.calls || 0} calls · ${p.errors || 0} err</span>` +
-      `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}">🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"}${keyCount > 1 ? ` × ${keyCount} keys` : ""})</button>` +
+      `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}"${busy ? " disabled" : ""}>` +
+      (busy ? "⏳ Testing…"
+            : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"}${keyCount > 1 ? ` × ${keyCount} keys` : ""})`) +
+      `</button>` +
       `</div>` +
       `<div class="model-health-table" data-role="model-table">` +
       modelHealthRowsHtml(PROVIDER_MODEL_RESULTS[n]) +
@@ -827,7 +984,9 @@ loaders.providers = async function () {
     testAllBtn.dataset.hooked = "1";
     testAllBtn.onclick = async () => {
       testAllBtn.disabled = true;
-      const prevLabel = testAllBtn.textContent;
+      testAllBtn.dataset.live = "1";
+      _runningUpdate((st) => { st.testAll = Date.now(); st.gatewayAll = Date.now(); });
+      const prevLabel = testAllBtn.dataset.restored ? testAllBtn.dataset.orig : testAllBtn.textContent;
       // Same streaming UI as a single provider/connection Test click, just
       // fired for every provider AND every Gateway connection at once, all
       // in parallel — every model's row (and every provider's live call/
@@ -850,6 +1009,8 @@ loaders.providers = async function () {
             testGatewayConnectionStreaming(key).then(bumpProgress)),
         ]);
       } finally {
+        delete testAllBtn.dataset.live;
+        _runningUpdate((st) => { st.testAll = 0; st.gatewayAll = 0; });
         testAllBtn.disabled = false;
         testAllBtn.textContent = prevLabel;
         loaders.providers();
@@ -857,6 +1018,7 @@ loaders.providers = async function () {
     };
   }
   renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
+  _syncRunningUi();
 };
 
 // Streams a single provider's every model test, live — the same routine
@@ -866,6 +1028,24 @@ loaders.providers = async function () {
 // omit it when called as part of a bulk Test All (the bulk button owns
 // its own progress label instead).
 async function testProviderStreaming(name, btn) {
+  const models = PROVIDER_MODELS[name] || [];
+  if (models.length) {
+    // Persist "this provider is testing" so a page refresh can bring the
+    // pending rows back (see the running-test persistence block above).
+    LIVE_PROVIDER_TESTS.add(name);
+    RESTORED_PROVIDER_PENDING.delete(name);
+    const entry = { startedAt: Date.now(), mode: (PROVIDER_KEYS[name] || []).length ? "keys" : "models",
+                    base: _providerRunBase(name), local: {} };
+    _runningUpdate((st) => { st.providers[name] = entry; });
+  }
+  try {
+    await _testProviderStreamingInner(name, btn);
+  } finally {
+    if (LIVE_PROVIDER_TESTS.delete(name)) _runningUpdate((st) => { delete st.providers[name]; });
+  }
+}
+
+async function _testProviderStreamingInner(name, btn) {
   const models = PROVIDER_MODELS[name] || [];
   const tableEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="model-table"]`);
   if (!models.length) {
@@ -917,7 +1097,7 @@ async function testProviderStreaming(name, btn) {
     (modelId) => post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
       .then((res) => (res.ok && res.data) ? res.data :
         { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
-    (result) => bumpCounts(result.ok));
+    (result) => { bumpCounts(result.ok); _runningNoteLocal(name, result); });
 }
 
 async function testProviderKeysStreaming(name, models, keys, tableEl, onResult) {
@@ -985,6 +1165,21 @@ function _connAvgLatency(c) {
 // updated while this connection's own test runs.
 async function testGatewayConnectionStreaming(key, btn) {
   const models = GATEWAY_MODELS[key] || [];
+  if (models.length) {
+    LIVE_GATEWAY_TESTS.add(key);
+    RESTORED_GATEWAY_PENDING.delete(key);
+    const entry = { startedAt: Date.now(), base: _gatewayRunBase(key) };
+    _runningUpdate((st) => { st.gateway[key] = entry; });
+  }
+  try {
+    await _testGatewayConnectionStreamingInner(key, btn);
+  } finally {
+    if (LIVE_GATEWAY_TESTS.delete(key)) _runningUpdate((st) => { delete st.gateway[key]; });
+  }
+}
+
+async function _testGatewayConnectionStreamingInner(key, btn) {
+  const models = GATEWAY_MODELS[key] || [];
   const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`);
   if (!models.length) {
     if (tableEl) tableEl.innerHTML = `<div class="model-health-empty">no model configured</div>`;
@@ -1025,6 +1220,7 @@ function renderGatewayCard(core) {
   // applied by the time the connection rows exist on a later render.
   if (_loadModelsHiddenState().gateway) card.classList.add("models-hidden");
   const conns = Object.entries((core && core.connections) || {});
+  RESTORED_GATEWAY_PENDING.clear();
   if (!core || core.state === "not_configured" || conns.length === 0) {
     card.innerHTML = `<div class="row"><span class="status-dot warn"></span>` +
       `<b>Not configured</b></div>` +
@@ -1058,12 +1254,36 @@ function renderGatewayCard(core) {
     if (!(GATEWAY_MODEL_RESULTS[key] || []).length) {
       GATEWAY_MODEL_RESULTS[key] = savedGatewayModelRows(c.models || [], c.model_health || {});
     }
+    LAST_GATEWAY_DATA[key] = c;
+    // Test still running when the page was refreshed: models whose saved
+    // health hasn't changed since the run started stay "testing…"; the rest
+    // show their freshly saved result.
+    if (!LIVE_GATEWAY_TESTS.has(key)) {
+      const run = _loadRunning().gateway[key];
+      if (run) {
+        let pending = 0;
+        GATEWAY_MODEL_RESULTS[key] = (c.models || []).map((m) => {
+          const h = (c.model_health || {})[m];
+          if (_gwSig(h) === ((run.base || {})[m] || "0/0")) { pending += 1; return { model: m, pending: true }; }
+          return _gwRow(m, h);
+        });
+        if (pending > 0) {
+          RESTORED_GATEWAY_PENDING.add(key);
+          FORCE_SHOWN_GATEWAY.add(key);
+        } else {
+          _runningUpdate((st) => { delete st.gateway[key]; });
+        }
+      }
+    }
+    const busy = LIVE_GATEWAY_TESTS.has(key) || RESTORED_GATEWAY_PENDING.has(key);
     const forceShow = FORCE_SHOWN_GATEWAY.has(key) ? " force-show" : "";
     return `<div class="provider-card${forceShow}" data-gw-conn="${esc(key)}">` +
       `<div class="provider-card-head">` +
       `<span class="status-dot ${dot}"></span><b>${esc(label)}</b>` +
       `<span class="grow muted">${esc(c.state)} · ${models}</span>` +
-      `<button class="btn mini" data-role="gw-test" data-conn="${esc(key)}">🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})</button>` +
+      `<button class="btn mini" data-role="gw-test" data-conn="${esc(key)}"${busy ? " disabled" : ""}>` +
+      (busy ? "⏳ Testing…" : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})`) +
+      `</button>` +
       `</div>` +
       `<div class="model-health-table" data-role="gw-model-table">` +
       modelHealthRowsHtml(GATEWAY_MODEL_RESULTS[key]) +
@@ -1087,7 +1307,9 @@ function renderGatewayCard(core) {
     testBtn.dataset.hooked = "1";
     testBtn.onclick = async () => {
       testBtn.disabled = true;
-      const prevLabel = testBtn.textContent;
+      testBtn.dataset.live = "1";
+      _runningUpdate((st) => { st.gatewayAll = Date.now(); });
+      const prevLabel = testBtn.dataset.restored ? testBtn.dataset.orig : testBtn.textContent;
       const keys = Object.keys(GATEWAY_MODELS);
       const total = keys.length;
       let done = 0;
@@ -1099,6 +1321,8 @@ function renderGatewayCard(core) {
             testBtn.textContent = `⏳ Testing gateway (${done}/${total})…`;
           })));
       } finally {
+        delete testBtn.dataset.live;
+        _runningUpdate((st) => { st.gatewayAll = 0; });
         testBtn.disabled = false;
         testBtn.textContent = prevLabel;
         loaders.providers();

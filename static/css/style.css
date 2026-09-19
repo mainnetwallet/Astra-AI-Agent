@@ -166,7 +166,7 @@ a[class*="hl-"] { pointer-events: none; }
 @supports (height: 100dvh) {
   .chat-shell { height: calc(100dvh - 148px); }
 }
-.chat-toolbar { display: flex; justify-content: flex-end; align-items: center; gap: 6px; padding: 0 2px 6px; }
+.chat-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 0 2px 6px; }
 
 /* 3-dot chat-history menu, left of "New chat" */
 .chat-history-menu { position: relative; }

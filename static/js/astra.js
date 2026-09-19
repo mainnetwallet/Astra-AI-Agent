@@ -569,6 +569,13 @@ const PROVIDER_MODELS = {};
 // {key_id, label:"key 1", healthy, in_cooldown, last_error}). Read by the
 // per-key test so it knows which keys to fire every model through.
 const PROVIDER_KEYS = {};
+// Providers/connections temporarily revealed by their own Test click while
+// the main Hide/Show toggle is set to hidden — session-only (never saved to
+// localStorage), so a real page refresh drops back to fully hidden per the
+// main toggle's persisted state, exactly like it did before this override
+// existed. Cleared whenever the main toggle itself is clicked.
+const FORCE_SHOWN_PROVIDERS = new Set();
+const FORCE_SHOWN_GATEWAY = new Set();
 
 // One API key's result for one model. `k` = {key_id, label, pending?, ok?,
 // latency_ms?, error?}; `ok` undefined/null means "never tested".
@@ -741,7 +748,8 @@ loaders.providers = async function () {
       PROVIDER_MODEL_RESULTS[n] = savedKeyRows(p.models || [], p.keys, p.key_results);
     }
     const keyCount = (p.keys || []).length;
-    return `<div class="provider-card" data-provider-row="${esc(n)}">` +
+    const forceShow = FORCE_SHOWN_PROVIDERS.has(n) ? " force-show" : "";
+    return `<div class="provider-card${forceShow}" data-provider-row="${esc(n)}">` +
       `<div class="provider-card-head">` +
       `<span class="status-dot ${dot}"></span><b>${esc(n)}</b>` +
       `<span class="grow muted" data-role="provider-counts" ` +
@@ -771,6 +779,10 @@ loaders.providers = async function () {
       const st = _loadModelsHiddenState();
       st.providers = hidden;
       _saveModelsHiddenState(st);
+      // Flipping the main toggle either way makes any per-provider
+      // "revealed by testing it" override moot — clear it so it doesn't
+      // linger and confuse the next hide.
+      FORCE_SHOWN_PROVIDERS.clear();
     };
   }
   if (toggleBtn) {
@@ -788,6 +800,17 @@ loaders.providers = async function () {
       const b = ev.target.closest('[data-role="provider-test"]');
       if (!b) return;
       const name = b.dataset.provider;
+      // Testing one specific provider reveals just that provider's card,
+      // even while the main toggle is hidden — everything else stays
+      // hidden. Session-only (see FORCE_SHOWN_PROVIDERS above): a real
+      // page refresh drops back to fully hidden.
+      if (list.classList.contains("models-hidden")) {
+        FORCE_SHOWN_PROVIDERS.add(name);
+        // Reveal immediately too, not just on the resync at the end —
+        // the Set alone only takes effect the next time rows are rebuilt.
+        const cardEl = $(`[data-provider-row="${CSS.escape(name)}"]`);
+        if (cardEl) cardEl.classList.add("force-show");
+      }
       b.disabled = true;
       const prevLabel = b.textContent;
       await testProviderStreaming(name, b);
@@ -976,6 +999,15 @@ async function testGatewayConnectionStreaming(key, btn) {
 }
 
 async function runGatewayConnectionTest(key, btn, card) {
+  // Testing one specific connection reveals just that connection's card,
+  // even while the main toggle is hidden — same override as the provider
+  // side. Session-only: cleared on toggle click, never persisted, so a
+  // real page refresh drops back to fully hidden.
+  if (card && card.classList.contains("models-hidden")) {
+    FORCE_SHOWN_GATEWAY.add(key);
+    const cardEl = $(`[data-gw-conn="${CSS.escape(key)}"]`);
+    if (cardEl) cardEl.classList.add("force-show");
+  }
   if (btn) { btn.disabled = true; btn.dataset.prev = btn.textContent; }
   try {
     await testGatewayConnectionStreaming(key, btn);
@@ -1026,7 +1058,8 @@ function renderGatewayCard(core) {
     if (!(GATEWAY_MODEL_RESULTS[key] || []).length) {
       GATEWAY_MODEL_RESULTS[key] = savedGatewayModelRows(c.models || [], c.model_health || {});
     }
-    return `<div class="provider-card" data-gw-conn="${esc(key)}">` +
+    const forceShow = FORCE_SHOWN_GATEWAY.has(key) ? " force-show" : "";
+    return `<div class="provider-card${forceShow}" data-gw-conn="${esc(key)}">` +
       `<div class="provider-card-head">` +
       `<span class="status-dot ${dot}"></span><b>${esc(label)}</b>` +
       `<span class="grow muted">${esc(c.state)} · ${models}</span>` +
@@ -1085,6 +1118,7 @@ function renderGatewayCard(core) {
       const st = _loadModelsHiddenState();
       st.gateway = hidden;
       _saveModelsHiddenState(st);
+      FORCE_SHOWN_GATEWAY.clear();
     };
   }
   if (gwToggleBtn) {

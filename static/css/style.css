@@ -445,6 +445,12 @@ a[class*="hl-"] { pointer-events: none; }
    the provider card itself (name/state/Test button stay visible). */
 #providers-list.models-hidden .model-health-table { display: none; }
 #gateway-card.models-hidden .model-health-table { display: none; }
+/* Overrides the two rules above for one specific card: set when that
+   provider/connection's own Test button is clicked while the main
+   toggle is hidden (see FORCE_SHOWN_PROVIDERS / FORCE_SHOWN_GATEWAY in
+   astra.js) — reveals just that card, everything else stays hidden. */
+#providers-list.models-hidden .provider-card.force-show .model-health-table,
+#gateway-card.models-hidden .provider-card.force-show .model-health-table { display: block; }
 .model-health-row {
   display: flex; align-items: center; gap: 8px; padding: 4px 0;
   font-size: 12px; color: var(--muted);

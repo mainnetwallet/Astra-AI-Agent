@@ -42,13 +42,15 @@ class FakeGateway:
     def __init__(self, replies, usable=True):
         self.replies = list(replies)
         self.calls = []            # every gateway.chat() messages list
+        self.categories = []       # the explicit category of each call
         self.usable = usable
 
     def is_usable(self):
         return self.usable
 
-    def chat(self, messages, model=None, max_tokens=500):
+    def chat(self, messages, model=None, max_tokens=500, category=None):
         self.calls.append(messages)
+        self.categories.append(category)
         r = self.replies.pop(0)
         if isinstance(r, Exception):
             raise r
@@ -135,6 +137,28 @@ class TestHappyPath(unittest.TestCase):
         self.assertIsNone(rt.requests[0].preferred_provider)
         self.assertIsNone(rt.requests[0].preferred_model)
         self.assertTrue(out["ok"])
+
+
+class TestGatewayCategoryOverride(unittest.TestCase):
+    def test_pipeline_states_its_own_category_for_both_gateway_calls(self):
+        pipe, gw, rt = make([understand(), verdict("complete")], ["ok"])
+        pipe.run("hello")
+        self.assertEqual(gw.categories, ["general", "reasoning"])
+
+    def test_real_gateway_honours_category_over_keyword_sniffing(self):
+        """A prompt that merely mentions 'vision' must not hard-filter out a
+        Gateway model that has no vision capability when a category is set."""
+        from astra.ai.gateway import AstraAIGateway
+        from astra.core.exceptions import ProviderError
+        from astra.store import Store
+        conn = _GwConnection(["ok-1", "ok-2"])
+        gw = AstraAIGateway(connections=[conn], store=Store(":memory:"))
+        msgs = [{"role": "user",
+                 "content": "caps=chat,vision  screenshot of a table as json"}]
+        with self.assertRaises(ProviderError):       # sniffed -> vision -> no model
+            gw.chat(msgs, max_tokens=50)
+        conn.replies = ["ok-2"]
+        self.assertEqual(gw.chat(msgs, max_tokens=50, category="general"), "ok-2")
 
 
 class TestVerificationKnowsCallOne(unittest.TestCase):

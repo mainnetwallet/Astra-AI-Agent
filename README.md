@@ -111,7 +111,7 @@ logs, UI, or API responses. Router preference order: `AI_PROVIDER=gemini groq â€
 | `ASTRA_TOKEN` | *(none)* | Operator token â€” protects every `/api/*`+`/api/v1/*` |
 | `ENV` | development | `production` hides error details |
 | `ASTRA_API_RATE_LIMIT` | 300 | Per-IP requests/minute |
-| `ASTRA_MAX_BODY_MB` | 10 | Max request body size |
+| `ASTRA_MAX_BODY_MB` | 50 | Max request body size |
 | `ASTRA_CORS_ORIGINS` | *(reflect)* | Allowlisted origins (space-separated) |
 | `ASTRA_ALLOW_PRIVATE_URLS` | 0 | SSRF guard override for research |
 | `WEB3_TRANSACTION_MODE` | CONFIRM | `CONFIRM` (manual) or `AUTO` (policy-only) |

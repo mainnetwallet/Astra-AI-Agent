@@ -192,6 +192,9 @@ class TestWebHardening(unittest.TestCase):
         self.assertIn("error_code", body)
 
     def test_body_cap(self):
+        # The default cap is 50 MB (uploads need room); this test pins an
+        # explicit 10 MB cap so it checks enforcement, not the default.
+        self.srv.max_body_bytes = 10 * 1024 * 1024
         r = urllib.request.Request(self.base + "/api/v1/chat",
                                    data=b"x" * (11 * 1024 * 1024), method="POST")
         try:

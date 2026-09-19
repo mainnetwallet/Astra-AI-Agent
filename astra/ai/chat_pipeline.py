@@ -63,6 +63,10 @@ _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
 
 MAX_TARGETS_IN_PROMPT = 60
 MAX_OUTPUT_CHARS_IN_VERIFY = 12000
+# The Gateway picks ITS OWN model by keyword-classifying user-role text. These
+# control prompts embed the provider catalogue ("...vision...") and provider
+# output, which would trip the hard vision/json filters, so the pipeline
+# states the category explicitly instead of letting it be guessed.
 UNDERSTAND_MAX_TOKENS = 700
 VERIFY_MAX_TOKENS = 600
 
@@ -242,7 +246,7 @@ class ChatPipeline:
             raw = self.gateway.chat(
                 [{"role": "system", "content": UNDERSTAND_SYSTEM_PROMPT},
                  {"role": "user", "content": "\n\n".join(parts)}],
-                max_tokens=UNDERSTAND_MAX_TOKENS)
+                max_tokens=UNDERSTAND_MAX_TOKENS, category="general")
         except Exception as e:
             self._emit("chat.pipeline.understand_failed", error=str(e))
             return fallback
@@ -286,7 +290,7 @@ class ChatPipeline:
                 raw = self.gateway.chat(
                     [{"role": "system", "content": VERIFY_SYSTEM_PROMPT},
                      {"role": "user", "content": prompt}],
-                    max_tokens=VERIFY_MAX_TOKENS)
+                    max_tokens=VERIFY_MAX_TOKENS, category="reasoning")
             except Exception as e:
                 state["unavailable"] = str(e)
                 return (FAILED, f"verification unavailable: {e}")

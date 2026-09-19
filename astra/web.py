@@ -10,7 +10,7 @@ Security hardening (production build):
     Bearer token / X-Astra-Token header / ?token= (SSE has no headers);
     unset token = open (safe local-first default)
   * per-IP rate limiting — ASTRA_API_RATE_LIMIT (default 300 requests/min)
-  * request body cap — ASTRA_MAX_BODY_MB (default 10 MB)
+  * request body cap — ASTRA_MAX_BODY_MB (default 50 MB)
   * security headers + Content-Security-Policy on every response
   * X-Request-Id on every response; request_id in every JSON body
   * structured JSON errors {ok, error, error_code, request_id} — never

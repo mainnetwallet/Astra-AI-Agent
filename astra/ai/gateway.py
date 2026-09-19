@@ -714,13 +714,21 @@ class AstraAIGateway:
         context_tokens = chars // 4
         return text, context_tokens, vision
 
-    def _select_order(self, messages, max_tokens):
-        from astra.ai.gateway_routing import (classify_gateway_request,
+    def _select_order(self, messages, max_tokens, category=None):
+        from astra.ai.gateway_routing import (REQUEST_CATEGORIES,
+                                              classify_gateway_request,
                                               eligible_targets, rank_targets,
                                               prefer_last_successful)
         text, context_tokens, vision = self._classification_inputs(messages)
-        category = classify_gateway_request(text, vision=vision,
-                                            context_tokens=context_tokens)
+        if category in REQUEST_CATEGORIES:
+            # Caller knows what kind of call this is (e.g. the chat
+            # pipeline's own understand/verify calls) — keyword-sniffing the
+            # text would mis-classify control prompts that merely mention
+            # "vision"/"json"/"table" and hard-filter out every model.
+            pass
+        else:
+            category = classify_gateway_request(
+                text, vision=vision, context_tokens=context_tokens)
         self.last_category = category
         targets = eligible_targets(self._catalog, self.routing_state,
                                    category=category,
@@ -736,13 +744,16 @@ class AstraAIGateway:
             except Exception:
                 pass
 
-    def chat(self, messages, model=None, max_tokens=500) -> str:
+    def chat(self, messages, model=None, max_tokens=500, category=None) -> str:
+        """`category` (optional, one of gateway_routing.REQUEST_CATEGORIES)
+        overrides the keyword classification of the user-role text; leave it
+        unset for ordinary requests."""
         if model:
             return self._try_connections(
                 lambda c, m: c.chat(messages, model=m, max_tokens=max_tokens),
                 model=model, messages=messages, max_tokens=max_tokens)
 
-        category, ranked = self._select_order(messages, max_tokens)
+        category, ranked = self._select_order(messages, max_tokens, category)
         self._emit("astra_gateway.request", category=category,
                    candidates=len(ranked))
         if not ranked:

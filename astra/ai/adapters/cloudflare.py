@@ -6,6 +6,8 @@ neutrality), and the API token travels as the Bearer header.
 """
 from __future__ import annotations
 
+import threading
+
 from .base import CompatibleAdapter
 
 
@@ -25,36 +27,19 @@ class CloudflareAdapter(CompatibleAdapter):
         accounts = (config.getlist(self.account_ids_env) if config else []) or []
         self._accounts = accounts or []
         self._aidx = 0
+        self._aidx_lock = threading.Lock()
 
-    def _base(self) -> str:
+    def _api_base(self) -> str:
+        """Per-request account pick (deterministic round-robin).
+
+        Must NOT mutate ``self.base_url``: the adapter is shared by concurrent
+        request threads (the UI fires one test per model in parallel), and
+        the old save/mutate/restore dance made them stack
+        ``/accounts/<id>/ai/v1`` onto each other's URLs, so most calls hit a
+        malformed path and came back "authentication failed"."""
         if not self._accounts:
             raise ValueError("cloudflare: no account ids configured (CLOUDFLARE_ACCOUNT_IDS)")
-        acc = self._accounts[self._aidx % len(self._accounts)]
-        self._aidx += 1
+        with self._aidx_lock:
+            acc = self._accounts[self._aidx % len(self._accounts)]
+            self._aidx += 1
         return f"{self.base_url}/accounts/{acc}/ai/v1"
-
-    def chat(self, messages, model=None, max_tokens=500,
-              response_format: str | None = None) -> str:
-        base = self.base_url
-        self.base_url = self._base()
-        try:
-            return super().chat(messages, model, max_tokens,
-                                response_format=response_format)
-        finally:
-            self.base_url = base
-
-    def stream(self, messages, model=None, max_tokens=500):
-        base = self.base_url
-        self.base_url = self._base()
-        try:
-            yield from super().stream(messages, model, max_tokens)
-        finally:
-            self.base_url = base
-
-    def list_models(self) -> list[str]:
-        base = self.base_url
-        self.base_url = self._base()
-        try:
-            return super().list_models()
-        finally:
-            self.base_url = base

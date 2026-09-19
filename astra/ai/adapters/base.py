@@ -106,12 +106,25 @@ class CompatibleAdapter(AIProvider):
         except ValueError as e:
             raise ProviderError(f"{self.name} bad json response") from e
 
+    def _api_base(self) -> str:
+        """Base URL for ONE request. Adapters that need a per-request base
+        (e.g. Cloudflare's per-account path) override this instead of
+        mutating ``self.base_url`` — the adapter is shared by concurrent
+        request threads, so mutating shared state corrupts other calls."""
+        return self.base_url
+
     def _classify_http(self, e: urllib.error.HTTPError, cred) -> None:
         code = getattr(e, "code", 0)
         rate_limited = code in (408, 429)
         auth = code in (401, 403)
+        # 400/404/409/422 describe THIS request/model (bad params, model
+        # removed, ...), not the API key. Cooling the key down for them
+        # blocks every other model on the provider (single-key setups
+        # then report "no healthy credential configured" for all of them).
+        request_level = code in (400, 404, 409, 422)
         self._done(cred, True, reason=f"http {code}", rate_limited=rate_limited,
-                   auth_failure=auth, cooldown_s=(45 if rate_limited else 30))
+                   auth_failure=auth,
+                   cooldown_s=(0.0 if request_level else 45 if rate_limited else 30))
         if code == 400:
             raise ProviderError(f"{self.name} invalid request")
         if code == 401:
@@ -152,7 +165,7 @@ class CompatibleAdapter(AIProvider):
         if response_format == "json_object":
             body["response_format"] = {"type": "json_object"}
         t0 = time.perf_counter()
-        data = self._post(f"{self.base_url}/chat/completions", body, cred)
+        data = self._post(f"{self._api_base()}/chat/completions", body, cred)
         self._done(cred)
         try:
             text = data["choices"][0]["message"]["content"] or ""
@@ -173,7 +186,7 @@ class CompatibleAdapter(AIProvider):
         body = {"model": used_model,
                 "max_tokens": max_tokens, "messages": messages, "stream": True}
         data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(f"{self.base_url}/chat/completions",
+        req = urllib.request.Request(f"{self._api_base()}/chat/completions",
                                      data=data, headers=self._headers(cred))
         full = ""
         try:
@@ -220,7 +233,7 @@ class CompatibleAdapter(AIProvider):
             "response_format": "b64_json",
         }
         t0 = time.perf_counter()
-        data = self._post(f"{self.base_url}/images/generations", body, cred)
+        data = self._post(f"{self._api_base()}/images/generations", body, cred)
         self._done(cred)
         self._last_latency_ms = int((time.perf_counter() - t0) * 1000)
         try:
@@ -243,7 +256,7 @@ class CompatibleAdapter(AIProvider):
         }
         payload = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
-            f"{self.base_url}/audio/speech",
+            f"{self._api_base()}/audio/speech",
             data=payload, headers=self._headers(cred))
         t0 = time.perf_counter()
         try:
@@ -285,7 +298,7 @@ class CompatibleAdapter(AIProvider):
         """Best-effort GET /models → ids; falls back to configured list."""
         cred = self.pick_for_discovery()
         try:
-            req = urllib.request.Request(f"{self.base_url}/models",
+            req = urllib.request.Request(f"{self._api_base()}/models",
                                          headers=self._headers(cred))
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))

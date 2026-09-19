@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -119,12 +120,21 @@ class _GatewayCompatibleConnection:
         except ValueError as e:
             raise ProviderError(f"{self.name} bad json response") from e
 
+    def _api_base(self) -> str:
+        """Base URL for ONE request (see CompatibleAdapter._api_base): connections
+        needing a per-request base override this instead of mutating the
+        shared ``self.base_url`` from concurrent threads."""
+        return self.base_url
+
     def _classify_http(self, e: urllib.error.HTTPError, cred) -> None:
         code = getattr(e, "code", 0)
         rate_limited = code in (408, 429)
         auth = code in (401, 403)
+        # request/model-level errors must not cool down the shared API key
+        request_level = code in (400, 404, 409, 422)
         self._done(cred, True, reason=f"http {code}", rate_limited=rate_limited,
-                   auth_failure=auth, cooldown_s=(45 if rate_limited else 30))
+                   auth_failure=auth,
+                   cooldown_s=(0.0 if request_level else 45 if rate_limited else 30))
         if code == 408:
             raise TimeoutError(f"{self.name} timed out")
         if code == 429:
@@ -158,7 +168,7 @@ class _GatewayCompatibleConnection:
             raise ProviderError(f"{self.name}: no healthy credential configured")
         body = {"model": model or (self.models[0] if self.models else ""),
                 "max_tokens": max_tokens, "messages": messages}
-        data = self._post(f"{self.base_url}/chat/completions", body, cred)
+        data = self._post(f"{self._api_base()}/chat/completions", body, cred)
         self._done(cred)
         try:
             text = data["choices"][0]["message"]["content"] or ""
@@ -177,7 +187,7 @@ class _GatewayCompatibleConnection:
         body = {"model": model or (self.models[0] if self.models else ""),
                 "max_tokens": max_tokens, "messages": messages, "stream": True}
         data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(f"{self.base_url}/chat/completions",
+        req = urllib.request.Request(f"{self._api_base()}/chat/completions",
                                      data=data, headers=self._headers(cred))
         full = ""
         try:
@@ -253,30 +263,18 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
         accounts = (config.getlist(self.account_ids_env) if config else []) or []
         self._accounts = accounts or []
         self._aidx = 0
+        self._aidx_lock = threading.Lock()
 
-    def _account_base(self) -> str:
+    def _api_base(self) -> str:
+        # Per-request account pick; never mutates self.base_url (shared by
+        # concurrent request threads).
         if not self._accounts:
             raise ProviderError(
                 f"{self.name}: no account ids configured ({self.account_ids_env})")
-        acc = self._accounts[self._aidx % len(self._accounts)]
-        self._aidx += 1
+        with self._aidx_lock:
+            acc = self._accounts[self._aidx % len(self._accounts)]
+            self._aidx += 1
         return f"{self.base_url}/accounts/{acc}/ai/v1"
-
-    def chat(self, messages, model=None, max_tokens=500) -> str:
-        base = self.base_url
-        self.base_url = self._account_base()
-        try:
-            return super().chat(messages, model, max_tokens)
-        finally:
-            self.base_url = base
-
-    def stream(self, messages, model=None, max_tokens=500):
-        base = self.base_url
-        self.base_url = self._account_base()
-        try:
-            yield from super().stream(messages, model, max_tokens)
-        finally:
-            self.base_url = base
 
 
 # ── Gateway Bedrock connection (independent of BedrockAdapter) ──────────────

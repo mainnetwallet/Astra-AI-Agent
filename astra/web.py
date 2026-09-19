@@ -58,7 +58,13 @@ New /api/v1 endpoints:
   POST /api/v1/models/refresh    re-run provider model discovery
   GET  /api/v1/router/status     routing health
   GET  /api/v1/router/stats      routing + task statistics
-  POST /api/v1/providers/<name>/refresh | enable | disable
+  POST /api/v1/providers/<name>/refresh | enable | disable | test
+  POST /api/v1/providers/test-all   test every provider + every Astra AI
+                                     Gateway connection in one call (each
+                                     result saved as soon as it completes)
+  POST /api/v1/gateway/test         test only the 4 Astra AI Gateway
+                                     connections (Gemini/Groq/Cloudflare/
+                                     Bedrock)
   GET  /api/v1/web3/transactions              (+ /{tx_id})
   GET  /api/v1/web3/transaction-policy        (mode/limits/whitelist/stop)
   POST /api/v1/web3/transaction-policy/mode   (operator token required)
@@ -111,7 +117,7 @@ CORE_TABS = [
     {"tab": "dashboard", "label": "📊 Dashboard", "core": True},
     {"tab": "live", "label": "⚡ Live", "core": True},
     {"tab": "assistant", "label": "🤖 Assistant", "core": True},
-    {"tab": "providers", "label": "🔌 Providers", "core": True},
+    {"tab": "providers", "label": "🔌 AI Providers health", "core": True},
     {"tab": "router", "label": "🧠 Router", "core": True},
     {"tab": "web3", "label": "⛓️ Wallet", "core": True},
     {"tab": "backup", "label": "💾 Backup", "core": True},
@@ -776,11 +782,20 @@ class AstraHandler(BaseHTTPRequestHandler):
                                       "data": {"routing": r.routing_stats(),
                                                "task": r.task_stats(),
                                                "last_route": r.last_route()}})
-        # provider admin: /api/v1/providers/<name>/refresh|enable|disable
-        if (len(path) == 5 and path[:2] == ["api", "providers"]
+        # provider admin: /api/v1/providers/<name>/refresh|enable|disable|test
+        # (fixed off-by-one: "api"+"providers"+<name>+<action> is 4 segments,
+        # not 5 — the old `len(path) == 5` check meant this route, including
+        # refresh/enable/disable, could never actually match a real request)
+        if (len(path) == 4 and path[:2] == ["api", "providers"]
                 and method == "POST"
-                and path[4] in ("refresh", "enable", "disable")):
-            return self._provider_admin(s, path[2], path[4])
+                and path[3] in ("refresh", "enable", "disable", "test")):
+            return self._provider_admin(s, path[2], path[3])
+        # one-click "🌐 Gateway test": probes every provider AND every
+        # Astra AI Gateway connection, saving each result as it completes.
+        if path == ["api", "providers", "test-all"] and method == "POST":
+            return self._providers_test_all(s)
+        if path == ["api", "gateway", "test"] and method == "POST":
+            return self._gateway_test(s)
         # web3
         if path[:3] == ["api", "web3", "transactions"] and method == "GET":
             return self._web3_tx_list(s, path)
@@ -847,7 +862,41 @@ class AstraHandler(BaseHTTPRequestHandler):
             return self._json_ok_rid({"ok": True,
                                       "data": {"provider": name,
                                                "enabled": want}})
+        if action == "test":
+            # manual "🔌 AI Providers health" per-provider Test button: a
+            # real call against this one provider, no fallback to another
+            # provider, result saved (router._record_route /
+            # _mark_down) the instant this call returns.
+            result = router.test_provider(name)
+            return self._json_ok_rid({"ok": True, "data": result})
         return self._err_rid(f"unknown action: {action}", 400)
+
+    def _providers_test_all(self, s) -> bool:
+        """One-click 'Gateway test': probe every provider AND every Astra AI
+        Gateway connection. Each probe's result is persisted the moment that
+        probe finishes (see AstraRouter.test_provider /
+        AstraAIGateway.test_connection) — this loop doesn't wait for every
+        test to *succeed*, only for each to *finish* before moving on, so a
+        slow/dead provider never blocks the others from being recorded."""
+        router = s.router()
+        if router is None:
+            return self._err_rid("providers unavailable", 400,
+                                 "provider_unavailable")
+        providers = router.test_all_providers()
+        gw = getattr(router, "gateway", None)
+        connections = gw.test_all_connections() if gw is not None else []
+        return self._json_ok_rid({"ok": True, "data": {
+            "providers": providers, "gateway_connections": connections}})
+
+    def _gateway_test(self, s) -> bool:
+        """Test only the Astra AI Gateway's four connections."""
+        router = s.router()
+        gw = getattr(router, "gateway", None) if router else None
+        if gw is None:
+            return self._err_rid("Astra AI Gateway not configured", 400,
+                                 "gateway_unavailable")
+        return self._json_ok_rid({"ok": True,
+                                  "data": {"connections": gw.test_all_connections()}})
 
     def _web3_tx_list(self, s, path) -> bool:
         tx = s._get("tx_manager")

@@ -892,6 +892,56 @@ class AstraAIGateway:
         self.last_connection = ""
         self.last_model = ""
 
+    # -- manual health probe ("🔌 AI Providers health" test buttons) ----------
+    # Sends one tiny real request to a connection's first model, purely to
+    # measure current latency/health — completely separate from `chat()`'s
+    # routing loop (no fallback across connections here: a manual test of
+    # "Cloudflare" must test Cloudflare, never quietly succeed via Bedrock).
+    # Every result is persisted through `routing_state.record_success/
+    # failure` the instant it's known — one connection's slow/failed probe
+    # never delays saving another connection's result.
+    _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
+
+    def test_connection(self, conn) -> dict:
+        """Probe a single Gateway connection and persist the result
+        immediately. Returns a small JSON-safe dict for the UI."""
+        model_id = (conn.models or [None])[0]
+        if not model_id:
+            return {"connection": conn.name, "ok": False,
+                    "error": "no model configured", "latency_ms": 0,
+                    "model": ""}
+        start = time.perf_counter()
+        try:
+            conn.chat(self._TEST_MESSAGES, model=model_id, max_tokens=8)
+        except (ProviderError, TimeoutError) as e:
+            error = getattr(e, "message", None) or str(e)
+            self.routing_state.record_failure(conn.name, model_id)
+            self._emit("astra_gateway.test", connection=conn.name,
+                       model=model_id, ok=False, reason=error)
+            return {"connection": conn.name, "ok": False, "error": error,
+                    "latency_ms": 0, "model": model_id}
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
+            self.routing_state.record_failure(conn.name, model_id)
+            self._emit("astra_gateway.test", connection=conn.name,
+                       model=model_id, ok=False, reason=error)
+            return {"connection": conn.name, "ok": False, "error": error,
+                    "latency_ms": 0, "model": model_id}
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        self.routing_state.record_success(conn.name, model_id, latency_ms)
+        self._emit("astra_gateway.test", connection=conn.name, model=model_id,
+                   ok=True, latency_ms=round(latency_ms, 1))
+        return {"connection": conn.name, "ok": True, "error": "",
+                "latency_ms": round(latency_ms, 1), "model": model_id}
+
+    def test_all_connections(self) -> list:
+        """Probe every configured connection, one at a time. Each result is
+        saved (via `test_connection`) the moment it completes — a slow or
+        failing connection never blocks the others from being recorded, and
+        the caller doesn't have to wait for every probe to *succeed*, only
+        for the loop to finish."""
+        return [self.test_connection(c) for c in self.connections]
+
     # -- health (reported separately, never as a provider) --------------------
     def health(self) -> dict:
         model_health_by_conn: dict[str, dict] = {}

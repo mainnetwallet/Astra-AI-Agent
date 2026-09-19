@@ -819,6 +819,46 @@ class AstraRouter:
         return {"state": state, "models": self._gateway_models(),
                 "connections": detail}
 
+    # -- manual health probe ("🔌 AI Providers health" test buttons) ----------
+    # A real, tiny request against exactly one provider — `no_fallback=True`
+    # plus a pinned `preferred_model` guarantees route_request() never
+    # silently substitutes another provider (§11), so "test Groq" actually
+    # tests Groq. The result is recorded through the same `_record_route`
+    # path a live chat request uses, so it's saved (routing_stats + this
+    # provider's rolling health) the instant this one call finishes —
+    # independent of whatever other provider tests are running.
+    _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
+
+    def test_provider(self, name: str) -> dict:
+        """Probe one provider's first available model right now."""
+        provider = next((p for p in self.providers
+                         if getattr(p, "name", "?") == name), None)
+        if provider is None:
+            return {"provider": name, "ok": False, "model": "",
+                    "latency_ms": 0, "error": "unknown provider"}
+        models = list(getattr(provider, "models", []) or [])
+        if not models:
+            return {"provider": name, "ok": False, "model": "",
+                    "latency_ms": 0, "error": "no model configured"}
+        model_id = models[0]
+        req = RoutingRequest(task_type="health_check",
+                             messages=self._TEST_MESSAGES,
+                             preferred_provider=name, preferred_model=model_id,
+                             no_fallback=True, max_tokens=8)
+        rr = self.route_request(req)
+        return {"provider": name, "ok": bool(rr.ok),
+                "model": rr.model or model_id,
+                "latency_ms": round(rr.latency_ms, 1),
+                "error": "" if rr.ok else (rr.error or "test failed")}
+
+    def test_all_providers(self) -> list:
+        """Probe every provider, one at a time. Each provider's result is
+        saved (via `test_provider` -> `_record_route`) the moment its own
+        probe completes — no need to wait for every provider to finish, and
+        one provider erroring never stops the rest from being tested."""
+        return [self.test_provider(getattr(p, "name", "?"))
+                for p in self.providers]
+
     def _attempt(self, adapter, model: Model, req: RoutingRequest) -> RoutingResult | None:
         name = getattr(adapter, "name", "")
         self._emit("ai.started", provider=name, model=model.model_id)

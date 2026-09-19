@@ -578,11 +578,14 @@ loaders.providers = async function () {
   const rows = Object.entries(provs || {}).map(([n, p]) => {
     const dot = p.healthy ? "🟢" : (p.state === "down" ? "🔴" : "⚪");
     const lat = p.latency_avg_ms == null ? "—" : p.latency_avg_ms + "ms";
-    return `<div class="row"><b>${dot} ${esc(n)}</b>` +
+    return `<div class="row" data-provider-row="${esc(n)}"><b>${dot} ${esc(n)}</b>` +
       `<span>${esc(p.state || p.healthy || "?")}</span>` +
       `<span>${p.models ? p.models.length : 0} models</span>` +
       `<span>${p.calls || 0} calls · ${p.errors || 0} err</span>` +
-      `<span>${esc(lat)}</span></div>`;
+      `<span>${esc(lat)}</span>` +
+      `<span class="provider-test-result muted" data-role="test-result"></span>` +
+      `<button class="btn small" data-role="provider-test" data-provider="${esc(n)}">🧪 Test</button>` +
+      `</div>`;
   }).join("");
   list.innerHTML = rows || `<div class="empty">kono provider e creds nai (offline mode)</div>`;
   const btn = $("#btn-providers-refresh");
@@ -590,8 +593,57 @@ loaders.providers = async function () {
     btn.dataset.hooked = "1";
     btn.onclick = async () => { await post("/api/v1/models/refresh"); loaders.providers(); };
   }
+  // per-provider manual test: click updates just that provider's health,
+  // saved the instant the probe returns (not batched with the others).
+  if (!list.dataset.hooked) {
+    list.dataset.hooked = "1";
+    list.addEventListener("click", async (ev) => {
+      const b = ev.target.closest('[data-role="provider-test"]');
+      if (!b) return;
+      const name = b.dataset.provider;
+      const resultEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="test-result"]`, list);
+      b.disabled = true;
+      const prevLabel = b.textContent;
+      b.textContent = "⏳ Testing…";
+      if (resultEl) resultEl.textContent = "";
+      try {
+        const res = await post(`/api/v1/providers/${encodeURIComponent(name)}/test`);
+        renderProviderTestResult(resultEl, res.ok ? res.data : null, res.error);
+      } finally {
+        b.disabled = false;
+        b.textContent = prevLabel;
+        // health/latency/error counts changed — refresh the row from the
+        // saved state, without waiting on any other provider's test.
+        loaders.providers();
+      }
+    });
+  }
+  const testAllBtn = $("#btn-providers-test-all");
+  if (testAllBtn && !testAllBtn.dataset.hooked) {
+    testAllBtn.dataset.hooked = "1";
+    testAllBtn.onclick = async () => {
+      testAllBtn.disabled = true;
+      const prevLabel = testAllBtn.textContent;
+      testAllBtn.textContent = "⏳ Testing all…";
+      try {
+        await post("/api/v1/providers/test-all");
+      } finally {
+        testAllBtn.disabled = false;
+        testAllBtn.textContent = prevLabel;
+        loaders.providers();
+      }
+    };
+  }
   renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
 };
+
+function renderProviderTestResult(el, data, err) {
+  if (!el) return;
+  if (!data) { el.textContent = `⚠️ ${err || "test failed"}`; return; }
+  el.textContent = data.ok
+    ? `🟢 ${data.latency_ms}ms (${data.model || ""})`
+    : `🔴 ${data.error || "error"}`;
+}
 
 /* -------------------------- Astra AI Gateway ------------------------- */
 const GATEWAY_LABELS = {
@@ -600,6 +652,18 @@ const GATEWAY_LABELS = {
   "astra-gw-cloudflare": "Cloudflare",
   "astra-gw-bedrock": "Bedrock",
 };
+// Best-average-latency across a connection's tracked models — used purely
+// to *display* connections fastest/healthiest first, mirroring how the
+// Gateway itself prefers a healthy, low-latency target when it fallbacks.
+function _connAvgLatency(c) {
+  const rows = Object.values(c.model_health || {});
+  if (!rows.length) return null;
+  const withLatency = rows.filter((h) => h.average_latency_ms || h.avg_latency_ms);
+  if (!withLatency.length) return null;
+  const vals = withLatency.map((h) => h.average_latency_ms ?? h.avg_latency_ms);
+  return vals.reduce((a, b) => a + b, 0) / vals.length;
+}
+
 function renderGatewayCard(core) {
   const card = $("#gateway-card");
   if (!card) return;
@@ -612,18 +676,56 @@ function renderGatewayCard(core) {
     return;
   }
   const dots = { healthy: "ok", degraded: "warn", not_configured: "warn", unhealthy: "bad" };
-  const rows = conns.map(([key, c]) => {
+  // healthy-and-fastest first, so the card visually matches actual
+  // fallback preference — never a fixed Gemini→Groq→Cloudflare→Bedrock order.
+  const ranked = conns.slice().sort(([, a], [, b]) => {
+    const ah = a.state === "healthy" ? 0 : 1;
+    const bh = b.state === "healthy" ? 0 : 1;
+    if (ah !== bh) return ah - bh;
+    const al = _connAvgLatency(a); const bl = _connAvgLatency(b);
+    if (al == null && bl == null) return 0;
+    if (al == null) return 1;
+    if (bl == null) return -1;
+    return al - bl;
+  });
+  const rows = ranked.map(([key, c]) => {
     const label = GATEWAY_LABELS[key] || key;
     const dot = dots[c.state] || "warn";
     const models = (c.models || []).length ? `${(c.models || []).length} model(s)` : "no models";
-    return `<div class="card"><div class="card-v"><span class="status-dot ${dot}"></span>` +
-      `<b>${esc(label)}</b></div><div class="card-k muted">${esc(c.state)} · ${models}</div></div>`;
+    const lat = _connAvgLatency(c);
+    const latTxt = lat == null ? "" : ` · ~${Math.round(lat)}ms`;
+    return `<div class="card" data-gw-conn="${esc(key)}"><div class="card-v"><span class="status-dot ${dot}"></span>` +
+      `<b>${esc(label)}</b></div><div class="card-k muted">${esc(c.state)} · ${models}${latTxt}</div>` +
+      `<div class="card-k" data-role="gw-test-result"></div></div>`;
   }).join("");
   const dot = dots[core.state] || "warn";
   card.innerHTML = `<div class="row"><span class="status-dot ${dot}"></span>` +
     `<b>${esc(core.state)}</b>` +
-    `<span class="muted">· ${(core.models || []).length} model(s) across ${conns.length} connection(s)</span></div>` +
+    `<span class="muted">· ${(core.models || []).length} model(s) across ${conns.length} connection(s), fastest-healthy first</span></div>` +
     `<div class="cards mini" style="margin-top:8px">${rows}</div>`;
+
+  const testBtn = $("#btn-gateway-test");
+  if (testBtn && !testBtn.dataset.hooked) {
+    testBtn.dataset.hooked = "1";
+    testBtn.onclick = async () => {
+      testBtn.disabled = true;
+      const prevLabel = testBtn.textContent;
+      testBtn.textContent = "⏳ Testing gateway…";
+      try {
+        const res = await post("/api/v1/gateway/test");
+        if (res.ok) {
+          (res.data.connections || []).forEach((r) => {
+            const el = $(`[data-gw-conn="${CSS.escape(r.connection)}"] [data-role="gw-test-result"]`, card);
+            if (el) el.textContent = r.ok ? `🟢 ${r.latency_ms}ms (${r.model})` : `🔴 ${r.error}`;
+          });
+        }
+      } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = prevLabel;
+        loaders.providers();
+      }
+    };
+  }
 }
 
 /* -------------------------------- router (core) ---------------------------- */

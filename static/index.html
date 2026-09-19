@@ -121,19 +121,31 @@
   <!-- ======== PROVIDERS (core) ======== -->
   <section id="tab-providers" class="tabview">
     <div class="panel">
-      <h3>🔌 AI Providers</h3>
-      <p class="muted">Ja-thuk provider e AI model cholche, oi provider login
-        healthy ki na, latency, calls, errors — sob ekhane dekha jay. AstraRouter
-        nije kono provider noy — ei providers-ke use kore routing kore.</p>
+      <h3>🔌 AI Providers health</h3>
+      <p class="muted">Astra AI Agent run kora por sob provider ar gateway model
+        health check hoy — kunta koto shomoy nilo, kunta error dilo, sob ekhane
+        save thake. AI Gateway sei health dekhe sobcheye fast ar healthy
+        provider/model diye age fallback kore; error deoya model abar try kora
+        hoy na jotokkhon na healthy hoy. Prottek provider e ekta Test button
+        ache — click korle sathe sathe shei provider check hoy ar health
+        update hoye jay. Niche ekta "Test all" button-o ache — 1 click-e
+        sob provider + gateway connection ekshathe test hobe, ar joto tara
+        result ashbe totokhon-e save hoye jabe (sob successful howar jonno
+        wait korte hobe na).</p>
       <div class="row" style="margin-bottom:8px">
         <button class="btn" id="btn-providers-refresh">🔄 Refresh discovery</button>
+        <button class="btn primary" id="btn-providers-test-all">⚡ Test all (providers + gateway)</button>
       </div>
       <div id="providers-list" class="list"><div class="empty">Loading…</div></div>
 
       <h3 style="margin-top:16px">🌐 Astra AI Gateway</h3>
       <p class="muted">Separate last-resort gateway after every direct provider
-        above is exhausted. Auto-fallback: Gemini → Groq → Cloudflare →
-        Bedrock. Never one of the providers itself.</p>
+        above is exhausted. Auto-fallback: sobcheye healthy/fastest connection
+        age try hoy — order fixed na, health onujayi thik hoy (Gemini, Groq,
+        Cloudflare, Bedrock er moddhe). Never one of the providers itself.</p>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn" id="btn-gateway-test">🌐 Gateway test (all connections)</button>
+      </div>
       <div id="gateway-card" class="list"><div class="empty">Loading…</div></div>
     </div>
   </section>

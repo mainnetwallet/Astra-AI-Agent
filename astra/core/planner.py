@@ -3,14 +3,15 @@ pipeline.
 
 `plan()` and `_ai_steps()` (the Gateway-enriched, AI-driven "turn a raw
 goal into a step plan" entry point) have been removed — this class is
-being rebuilt with a new planning entry point. What remains is
+being rebuilt with a new planning entry point. `parse_plan_json()` has
+also been removed; its only caller was
+`Orchestrator._gateway_final_task_verification()`, which is itself
+deleted, so nothing in the codebase invokes it anymore. What remains is
 plan-shape plumbing other code still depends on:
 
-  - `parse_plan_json()` / `_normalize_plan_shape()` — turn an
-    already-JSON-decoded `{"steps": [...]}` (or a few tolerated near-miss
-    shapes) into executor-ready step dicts. Still used by
-    `Orchestrator._gateway_final_task_verification()` to turn a
-    corrective AI reply into additional steps.
+  - `_normalize_plan_shape()` — tolerates a few near-miss JSON shapes.
+    Now orphaned along with `parse_plan_json()`; nothing calls it
+    directly anymore either, but it's left in place pending cleanup.
   - `_step()` / `_answer()` / `_fallback_text()` — step-dict factories.
     `_answer()` is still called directly by `Orchestrator.run()`'s
     replan path when a replan produces no usable steps.
@@ -51,30 +52,6 @@ class Planner:
         #                         Gateway's bounded correction attempts
         #   ""                  - no failure yet recorded
         self.last_plan_failure_reason = ""
-
-    def parse_plan_json(self, data: dict, max_steps: int = 6) -> list[dict]:
-        """Turn an already-JSON-decoded `{"steps":[...]}` payload into
-        executor-ready step dicts (tool allowlist, dependency filtering,
-        id issuance) — the same logic `_ai_steps` uses for the initial
-        plan, factored out so a post-execution Gateway correction
-        round-trip (Orchestrator._gateway_final_task_verification) can
-        turn a corrective AI reply into additional steps without
-        duplicating this parsing."""
-        data = self._normalize_plan_shape(data)
-        steps = []
-        issued: set[str] = set()
-        for s in (data.get("steps", []) if isinstance(data, dict) else [])[:max_steps]:
-            tool = s.get("tool") or "answer"
-            if tool not in (self.tools or []) + ["answer"]:
-                tool = "answer"
-            deps = [d for d in (s.get("depends_on") or [])
-                    if isinstance(d, str) and d in issued]
-            steps.append(self._step("s%d" % (len(issued) + 1), tool,
-                                    s.get("params") or {},
-                                    s.get("description", ""),
-                                    depends_on=deps))
-            issued.add(steps[-1]["id"])
-        return steps
 
     # Synonyms a chatty/weak model reaches for instead of the requested
     # {"steps":[{"tool":"answer","params":{"text":...}}]} envelope when it

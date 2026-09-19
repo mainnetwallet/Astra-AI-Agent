@@ -25,7 +25,14 @@ Core (non-plugin) endpoints (all old routes stay backward-compatible):
 
   GET  /api/manifest        agent name + plugin tabs + core tabs
   POST /api/chat            {message} -> agent reply {reply, action, data, ok}
-  GET  /api/chat/history[?after_id=N]  saved transcript + {pending} (DELETE clears it)
+  GET  /api/chat/history[?after_id=N]  saved transcript of the CURRENT chat
+                             + {pending} (DELETE wipes every chat, hard reset)
+  GET  /api/chat/conversations         list saved chats {id, title, count,
+                             updated_at, current} newest-first
+  POST /api/chat/conversations         open a new chat, becomes current
+                             (reuses the current one if it's still empty)
+  GET  /api/chat/conversations/<id>    switch current chat + its history
+  DELETE /api/chat/conversations/<id>  delete one chat
   POST /api/chat/resume     {execution_id, allow} -> approve/reject a pending
                              WAITING_USER tool call inline from chat (same
                              reply shape as /api/chat; no separate tab needed)
@@ -595,6 +602,29 @@ class AstraHandler(BaseHTTPRequestHandler):
             if path == ["api", "chat", "history"] and method == "DELETE":
                 return _json_ok(self, {"ok": True,
                                        "removed": server.chat_log.clear()})
+            # chat history: the 🗑/⋮ pair in the Assistant tab. Each chat is a
+            # "conversation"; GET lists them, POST opens a new one (reusing
+            # the current chat if it's still empty), GET/DELETE on an id
+            # switches to / deletes that particular chat.
+            if path == ["api", "chat", "conversations"] and method == "GET":
+                return _json_ok(self, {"ok": True,
+                                       "data": server.chat_log.list_conversations()})
+            if path == ["api", "chat", "conversations"] and method == "POST":
+                cid = server.chat_log.new_conversation()
+                return _json_ok(self, {"ok": True, "data": {"id": cid}})
+            if (len(path) == 4 and path[:3] == ["api", "chat", "conversations"]
+                    and path[3].isdigit()):
+                cid = int(path[3])
+                if method == "GET":
+                    if not server.chat_log.switch(cid):
+                        return _json_err(self, "chat not found", 404)
+                    return _json_ok(self, {"ok": True,
+                                           "data": server.chat_log.history(conversation_id=cid)})
+                if method == "DELETE":
+                    if not server.chat_log.delete_conversation(cid):
+                        return _json_err(self, "chat not found", 404)
+                    return _json_ok(self, {"ok": True,
+                                           "data": {"current": server.chat_log.current_id}})
             if path == ["api", "chat", "resume"] and method == "POST":
                 eid = (body.get("execution_id") or "").strip()
                 if not eid:

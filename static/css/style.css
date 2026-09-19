@@ -166,7 +166,42 @@ a[class*="hl-"] { pointer-events: none; }
 @supports (height: 100dvh) {
   .chat-shell { height: calc(100dvh - 148px); }
 }
-.chat-toolbar { display: flex; justify-content: flex-end; padding: 0 2px 6px; }
+.chat-toolbar { display: flex; justify-content: flex-end; align-items: center; gap: 6px; padding: 0 2px 6px; }
+
+/* 3-dot chat-history menu, left of "New chat" */
+.chat-history-menu { position: relative; }
+.icon-btn { width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; font-size: 16px; line-height: 1; }
+.chat-history-panel {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 20;
+  width: 270px; max-width: calc(100vw - 40px); max-height: 360px; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 6px; box-shadow: 0 12px 28px rgba(0,0,0,.35);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity .12s ease, transform .12s ease;
+}
+.chat-history-panel.open { opacity: 1; visibility: visible; transform: translateY(0); }
+.chat-history-head {
+  padding: 6px 10px 8px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--muted);
+}
+.chat-history-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: transparent; border: 0; color: var(--text); text-align: left;
+  padding: 9px 10px; border-radius: 7px; cursor: pointer; font-size: 12.5px;
+}
+.chat-history-item:hover { background: var(--panel2); }
+.chat-history-item.active { background: var(--panel2); color: var(--accent2); font-weight: 600; }
+.chat-history-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-history-time { font-size: 10.5px; flex-shrink: 0; }
+.chat-history-del {
+  flex-shrink: 0; background: transparent; border: 0; color: var(--muted);
+  cursor: pointer; font-size: 12px; padding: 3px 5px; border-radius: 5px; opacity: 0;
+}
+.chat-history-item:hover .chat-history-del { opacity: 1; }
+.chat-history-del:hover { color: var(--bad); background: rgba(248,113,113,.12); }
+@media (hover: none) {
+  .chat-history-del { opacity: 1; }  /* touch devices: no hover, keep it visible */
+}
 .chat-log {
   flex: 1; overflow-y: auto; display: flex; flex-direction: column;
   gap: 20px; padding: 6px 2px 18px;

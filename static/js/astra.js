@@ -190,13 +190,112 @@ function chatWaitForReply() {
   };
   setTimeout(tick, 1500);
 }
+// "New chat" no longer wipes anything — it opens a fresh thread and the old
+// one stays reachable from the ⋮ history menu (see chatSwitchTo below).
 $("#chat-clear")?.addEventListener("click", async () => {
   if ($("#chat-send").dataset.busy) return;
-  if (!confirm("Notun chat shuru korben? Ager chat muche jabe.")) return;
-  const r = await del("/api/chat/history");
+  const r = await post("/api/chat/conversations");
   if (!r || !r.ok) return;
   $("#chat-log").innerHTML = CHAT_EMPTY_HTML;
   CHAT.lastId = 0;
+  closeChatHistoryMenu();
+});
+
+/* -------------------- chat history (⋮ menu, multiple saved chats) --------- */
+function closeChatHistoryMenu() {
+  $("#chat-history-panel")?.classList.remove("open");
+  $("#chat-history-btn")?.setAttribute("aria-expanded", "false");
+}
+function openChatHistoryMenu() {
+  $("#chat-history-panel")?.classList.add("open");
+  $("#chat-history-btn")?.setAttribute("aria-expanded", "true");
+  chatLoadHistoryList();
+}
+$("#chat-history-btn")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const open = $("#chat-history-panel")?.classList.contains("open");
+  if (open) closeChatHistoryMenu(); else openChatHistoryMenu();
+});
+document.addEventListener("click", (e) => {
+  if (!$("#chat-history-menu")?.contains(e.target)) closeChatHistoryMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeChatHistoryMenu();
+});
+
+// Server timestamps are naive "YYYY-MM-DD HH:MM:SS" local time — show just
+// a clock time for today, else a short date.
+function chatHistoryTimeLabel(ts) {
+  if (!ts) return "";
+  const d = new Date(String(ts).replace(" ", "T"));
+  if (isNaN(d.getTime())) return "";
+  const now = new Date();
+  return d.toDateString() === now.toDateString()
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString([], { day: "2-digit", month: "short" });
+}
+
+async function chatLoadHistoryList() {
+  const list = $("#chat-history-list");
+  if (!list) return;
+  list.innerHTML = `<div class="empty">Loading…</div>`;
+  let r;
+  try { r = await api("/api/chat/conversations"); } catch (_e) { r = null; }
+  const convos = (r && r.ok && r.data) || [];
+  if (!convos.length) {
+    list.innerHTML = `<div class="empty">Kono purono chat nei</div>`;
+    return;
+  }
+  list.innerHTML = convos.map((c) => `
+    <div class="chat-history-item${c.current ? " active" : ""}" data-id="${c.id}">
+      <span class="chat-history-title">${esc(c.title || "New chat")}</span>
+      <span class="chat-history-time muted">${esc(chatHistoryTimeLabel(c.updated_at))}</span>
+      <button type="button" class="chat-history-del" data-del="${c.id}"
+        title="Ei chat ta muche felun" aria-label="Delete chat">🗑</button>
+    </div>`).join("");
+}
+
+// Swap the visible chat log for a saved chat's messages and make it the
+// server's "current" thread, so new messages and a later page reload land
+// back in the same conversation.
+async function chatSwitchTo(id) {
+  if ($("#chat-send").dataset.busy) return;
+  let r;
+  try { r = await api("/api/chat/conversations/" + id); } catch (_e) { return; }
+  if (!r || !r.ok || !r.data) return;
+  chatShowLoadedHistory(r.data);
+}
+async function chatShowCurrent() {
+  let r;
+  try { r = await api("/api/chat/history"); } catch (_e) { return; }
+  if (!r || !r.ok || !r.data) return;
+  chatShowLoadedHistory(r.data);
+}
+function chatShowLoadedHistory(data) {
+  $("#chat-log").innerHTML = CHAT_EMPTY_HTML;
+  CHAT.lastId = 0;
+  const msgs = data.messages || [];
+  if (msgs.length) chatRenderMessages(msgs, true);
+  CHAT.lastId = Math.max(CHAT.lastId, data.last_id || 0);
+  if (data.pending) chatWaitForReply();
+}
+
+$("#chat-history-list")?.addEventListener("click", async (e) => {
+  const delBtn = e.target.closest("[data-del]");
+  if (delBtn) {
+    e.stopPropagation();
+    if (!confirm("Ei chat ta muche felben? Eta ar fire pawa jabe na.")) return;
+    const r = await del("/api/chat/conversations/" + delBtn.dataset.del);
+    if (r && r.ok) {
+      await chatShowCurrent();     // deleting the open chat may switch us elsewhere
+      chatLoadHistoryList();
+    }
+    return;
+  }
+  const item = e.target.closest(".chat-history-item");
+  if (!item || item.classList.contains("active")) return closeChatHistoryMenu();
+  await chatSwitchTo(item.dataset.id);
+  closeChatHistoryMenu();
 });
 
 function chatBubble(who, text, action, attachedFiles, artifacts, meta) {

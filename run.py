@@ -34,7 +34,6 @@ def main() -> int:
     stack = build(with_scheduler=os.environ.get("ASTRA_SCHEDULER") == "1")
     store: Store = stack["store"]
     agent = stack["agent"]
-    plugins = stack["plugins"]
     events = stack["events"]
 
     config = stack["config"]
@@ -43,7 +42,7 @@ def main() -> int:
     bind = config.get("BIND", "127.0.0.1")
     token = config.get("ASTRA_TOKEN") or ""
 
-    httpd = AstraServer((bind, port), store, agent, plugins,
+    httpd = AstraServer((bind, port), store, agent,
                         stack=stack)
     url = f"http://localhost:{port}/"
 
@@ -52,7 +51,7 @@ def main() -> int:
     print(f"  👉 Open:  {url}")
     print(f"  🔒 Bind: {bind} | "
           f"API auth: {'token protected' if token else 'OPEN (set ASTRA_TOKEN)'}")
-    print(f"  📦 Plugins: {', '.join(p.title for p in plugins if p.enabled)}")
+    print("  📦 Plugins: none (plugins/ is empty — see plugins/README.md)")
     print(f"  🧠 Orchestrator {('ON' if stack['orchestrator'] else 'off')} | "
           f"Tools: {len(stack['registry'].list())} | "
           f"AI: {'configured' if stack['router'].providers else 'not configured'}")
@@ -73,11 +72,6 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nBye boss! 👋")
     finally:
-        for p in plugins:
-            try:
-                p.shutdown()
-            except Exception:
-                pass
         if stack.get("scheduler"):
             stack["scheduler"].stop()
         store.close()

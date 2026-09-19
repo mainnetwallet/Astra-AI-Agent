@@ -1,7 +1,7 @@
 """Assemble the full Astra stack from one call.
 
-`build()` wires: Store → Registry(plugins) → TaskEngine → Memories →
-EventBus → Policy → ToolRegistry(+builtins+plugin tools) → Providers →
+`build()` wires: Store → TaskEngine → Memories →
+EventBus → Policy → ToolRegistry(+builtins) → Providers →
 AstraRouter → Executor → WorkflowEngine → Scheduler → Orchestrator
 → Agent. run.py, tests, and boot helpers all call this, so the wiring is
 defined once and verified everywhere.
@@ -10,13 +10,16 @@ NOTE: astra.core.planner (Planner) has been deleted. Every line below
 that referenced `Planner`/`planner` has been removed along with it —
 `Orchestrator` below is now constructed without a `planner=` argument,
 pending whatever replaces it.
+
+NOTE: the Plugin/Registry system (astra.core.Plugin, astra.core.Registry)
+has been removed. `plugins/` is an empty placeholder for future plugins
+(see plugins/README.md) — nothing in this module discovers, loads, or
+wires plugins anymore.
 """
 from __future__ import annotations
 
-import importlib
 import os
 
-from astra.core import Registry
 from astra.core.config import Config
 from astra.core.events import EventBus
 from astra.core.permissions import Policy
@@ -45,46 +48,23 @@ from astra.workflows.scheduler import SchedulerManager
 from astra.agent import Agent
 from astra.store import Store
 
-PLUGIN_MODULES = []  # plugins/airdrop.py removed — add new plugin module paths here
-
-
-def _discover_plugins(reg: Registry, modules: list[str]) -> None:
-    for mod_name in modules:
-        mod = importlib.import_module(mod_name)
-        plugin_cls = getattr(mod, "Plugin", None) or getattr(mod, "PLUGIN", None)
-        if plugin_cls is None:
-            from astra.core import Plugin as PluginBase
-            plugin_cls = next(v for v in vars(mod).values()
-                              if isinstance(v, type) and v.__module__ == mod.__name__
-                              and issubclass(v, PluginBase))
-        reg.add(plugin_cls)
-
-
 def default_db_path() -> str:
     data_dir = os.environ.get("DATA_DIR", os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))
     return os.path.join(data_dir, "astra.db")
 
 
-def build(store: Store | None = None, config=None, with_plugins: bool = True,
-          with_scheduler: bool = False,
-          plugin_modules: list | None = None) -> dict:
+def build(store: Store | None = None, config=None,
+          with_scheduler: bool = False) -> dict:
     """Returns dict with every subsystem wired on one store/config.
 
       stack = build()
-      agent = stack["agent"]; plugins = stack["plugins"]; etc.
+      agent = stack["agent"]; etc.
     """
-    modules = plugin_modules or PLUGIN_MODULES
     config = config or Config()
     if store is None:
         store = Store(config.get("DATABASE", default_db_path()))
     store.migrate()
-
-    # plugins
-    reg = Registry()
-    if with_plugins:
-        _discover_plugins(reg, modules)
-    plugins = reg.load(store, config)
 
     # core subsystems
     events = EventBus(store)
@@ -100,7 +80,6 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     builtins.register_builtins(registry)
     browser_manager = BrowserManager(config=config, events=events)
     register_browser_tools(registry, browser_manager)
-    registry.register_plugin_tools(plugins)
 
     # Web3 transaction manager: deterministic policy + encrypted keystore.
     # The LLM may only *prepare*; authorize/sign/broadcast stay out of the
@@ -203,7 +182,7 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
         store, config=config, tasks=tasks, registry=registry,
         executor=executor, router=router, memory=memory,
         experiences=experiences, events=events, policy=policy,
-        plugins=plugins, agents=agent_manager)
+        agents=agent_manager)
     orchestrator.web3_manager = tx_manager
     # crash recovery: executions stranded mid-flight by a previous shutdown
     # are marked FAILED so they no longer read as "running".
@@ -214,17 +193,15 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
     workflows = WorkflowEngine(store, registry, events)
     scheduler = None
     if with_scheduler:
-        scheduler = SchedulerManager(
-            store, workflows, events,
-            deadline_callback=lambda: _deadline_events(plugins))
+        scheduler = SchedulerManager(store, workflows, events)
         scheduler.start()
 
-    # chat agent (plugins first, then orchestrator -> Astra AI
-    # Gateway -> Existing Provider System; no direct/raw LLM path exists)
-    agent = Agent(plugins, orchestrator=orchestrator)
+    # chat agent (orchestrator -> Astra AI Gateway -> Existing Provider
+    # System; no direct/raw LLM path exists)
+    agent = Agent(orchestrator=orchestrator)
 
     return {
-        "config": config, "store": store, "plugins": plugins,
+        "config": config, "store": store,
         "events": events, "policy": policy, "memory": memory,
         "experiences": experiences, "tasks": tasks, "registry": registry,
         "router": router, "executor": executor,
@@ -237,20 +214,6 @@ def build(store: Store | None = None, config=None, with_plugins: bool = True,
         "web3_policy": policy_engine,
         "gateway_intelligence": gateway_intelligence,
     }
-
-
-def _deadline_events(plugins) -> list:
-    """Used by the scheduler: airdrop deadlines as (name, iso-date)."""
-    out = []
-    for p in plugins:
-        if hasattr(p, "upcoming_deadlines"):
-            try:
-                for a in p.upcoming_deadlines(30):
-                    if a.get("deadline"):
-                        out.append((a.get("name", "?"), a["deadline"]))
-            except Exception:
-                continue
-    return out
 
 
 def _first_environ(key: str) -> str:

@@ -361,7 +361,7 @@ class TestWebSystem(unittest.TestCase):
         from astra.web import AstraServer
         self.stack = make_stack(with_scheduler=True)
         self.srv = AstraServer(("127.0.0.1", 0), self.stack["store"],
-                                self.stack["agent"], self.stack["plugins"],
+                                self.stack["agent"],
                                 stack=self.stack)
         self.port = self.srv.server_address[1]
         self.t = threading.Thread(target=self.srv.serve_forever, daemon=True)
@@ -624,7 +624,7 @@ class TestChatResumeEndpoint(unittest.TestCase):
         self.orch = self.stack["orchestrator"]
         self.store = self.stack["store"]
         self.srv = AstraServer(("127.0.0.1", 0), self.stack["store"],
-                                self.stack["agent"], self.stack["plugins"],
+                                self.stack["agent"],
                                 stack=self.stack)
         self.port = self.srv.server_address[1]
         self.t = threading.Thread(target=self.srv.serve_forever, daemon=True)

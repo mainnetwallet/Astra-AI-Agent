@@ -97,7 +97,7 @@ def _server(token="", env="development"):
         stack["config"].set("ASTRA_TOKEN", token)
     stack["config"].set("ENV", env)
     srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
-                      stack["plugins"], stack=stack)
+                      stack=stack)
     srv.operator_token = token
     srv.env = env
     th = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -280,7 +280,7 @@ class TestWeb3TxActionEndpoint(unittest.TestCase):
         stack["keystore"].store_key("default", "01" * 32)
         stack["tx_manager"].keystore = stack["keystore"]
         srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
-                          stack["plugins"], stack=stack)
+                          stack=stack)
         srv.operator_token = "sekrit"
         th = threading.Thread(target=srv.serve_forever, daemon=True)
         th.start()
@@ -316,7 +316,7 @@ class TestWeb3TxActionEndpoint(unittest.TestCase):
         stack = build(store=Store(os.path.join(d, "t.db")), config=cfg,
                      with_scheduler=False)
         srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
-                          stack["plugins"], stack=stack)
+                          stack=stack)
         srv.operator_token = "sekrit"
         th = threading.Thread(target=srv.serve_forever, daemon=True)
         th.start()

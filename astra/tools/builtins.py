@@ -309,19 +309,13 @@ def generate_document(args: dict, ctx=None) -> dict:
 # ── diagnostics ─────────────────────────────────────────────────────────────────
 
 def get_health(args: dict, ctx=None) -> dict:
-    """System health summary for GET /api/health."""
+    """System health summary for GET /api/health.
+
+    NOTE: the plugin system has been removed — "plugins" is always [].
+    """
     import astra
     info = {"version": astra.__version__, "plugins": [],
             "database": "ok", "tools": len(ctx.tools._tools) if ctx and hasattr(ctx, "tools") else 0}
-    for p in (ctx.plugins if ctx else []):
-        status = {"slug": p.slug, "enabled": getattr(p, "enabled", True)}
-        hc = {}
-        try:
-            hc = p.health_check() if hasattr(p, "health_check") else {"ok": True}
-        except Exception as e:
-            hc = {"ok": False, "error": str(e)}
-        status["health"] = hc
-        info["plugins"].append(status)
     return info
 
 

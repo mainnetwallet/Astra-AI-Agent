@@ -1,9 +1,12 @@
 """Execution context handed to tools, planners and the orchestrator.
 
-A ToolContext carries the shared subsystems (store, config, event bus, memory,
-plugins, generic task engine) so a tool fn can do real work without reaching
-for globals. An ExecutionContext tracks one in-flight execution: its steps,
-artifacts and short-term scratch.
+A ToolContext carries the shared subsystems (store, config, event bus,
+memory, generic task engine) so a tool fn can do real work without
+reaching for globals. An ExecutionContext tracks one in-flight execution:
+its steps, artifacts and short-term scratch.
+
+NOTE: the plugin system has been removed; ToolContext no longer carries
+a `plugins` list or `plugin(slug)` lookup.
 """
 from __future__ import annotations
 
@@ -12,21 +15,14 @@ class ToolContext:
     """Everything a tool may legitimately touch, by dependency injection."""
 
     def __init__(self, store=None, config=None, events=None, memory=None,
-                 plugins=None, tasks=None, web3_manager=None):
+                 tasks=None, web3_manager=None):
         self.store = store
         self.config = config
         self.events = events
         self.memory = memory
-        self.plugins = list(plugins or [])
         self.tasks = tasks
         self.web3_manager = web3_manager
         self.tx_manager = web3_manager   # alias used by web3 tools
-
-    def plugin(self, slug: str):
-        for p in self.plugins:
-            if p.slug == slug:
-                return p
-        return None
 
     def emit(self, kind: str, **data):
         if self.events:

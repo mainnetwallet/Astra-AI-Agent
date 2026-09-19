@@ -77,7 +77,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from .agent import Agent
-from .core import Plugin
 from .security import (ApiError, RateLimiter, make_request_id, redact,
                        redact_text)
 
@@ -725,44 +724,9 @@ class AstraHandler(BaseHTTPRequestHandler):
                 return _json_ok(self, {"ok": True,
                                        "data": server.orchestrator().recent()})
 
-            # plugin management
-            if path == ["api", "plugins"] and method == "GET":
-                return _json_ok(self, {"ok": True, "data": [
-                    {"slug": p.slug, "title": p.title, "icon": p.icon,
-                     "enabled": bool(getattr(p, "enabled", True)),
-                     "version": getattr(p, "version", ""),
-                     "health": (getattr(p, "health", None) or
-                                ({**p.health_check()} if hasattr(p, "health_check") else {}))}
-                    for p in server.plugins]})
-            if len(path) == 4 and path[0] == "api" and path[1] == "plugins" and path[3] in ("enable", "disable") and method == "POST":
-                slug, want = path[2], path[3] == "enable"
-                for p in server.plugins:
-                    if p.slug == slug:
-                        p.enabled = want
-                        server.registry_plugin_tools()
-                        # persist to store
-                        store_inst = server.store
-                        try:
-                            from astra.core import Registry as _R
-                            _R.set_enabled(store_inst, slug, want)
-                        except Exception:
-                            pass
-                        return _json_ok(self, {"ok": True,
-                                               "data": {"slug": slug, "enabled": want}})
-                return _json_err(self, f"plugin not found: {slug}", 404)
-
-            # plugin routes (only enabled plugins answer)
-            for p in server.plugins:
-                if not getattr(p, "enabled", True):
-                    continue
-                for r_method, r_parts, handler in p.routes():
-                    if r_method != method:
-                        continue
-                    params = _route_matcher(r_parts, path)
-                    if params is None:
-                        continue
-                    status, payload = handler(server.store, params, body, q)
-                    return _json_ok(self, payload, status)
+            # NOTE: plugin management (GET/enable/disable /api/plugins) and
+            # per-plugin route dispatch removed along with the plugin system.
+            # plugins/ is an empty placeholder — see plugins/README.md.
             return _json_err(self, "unknown route", 404)
         except ApiError as e:
             server.note_request(method, path, error=True)
@@ -1024,11 +988,10 @@ class AstraHandler(BaseHTTPRequestHandler):
 class AstraServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, addr, store, agent: Agent, plugins: list[Plugin], stack=None):
+    def __init__(self, addr, store, agent: Agent, stack=None):
         super().__init__(addr, AstraHandler)
         self.store = store
         self.agent = agent
-        self.plugins = plugins
         self._stack = stack or {}
         cfg = self._get("config")
         # -- security knobs (all safe defaults) --------------------------------
@@ -1154,15 +1117,8 @@ class AstraServer(ThreadingHTTPServer):
         except Exception as e:
             out["ok"] = False
             out["checks"]["database"] = f"error: {e}"
-        plugin_checks = []
-        for p in self.plugins:
-            try:
-                hc = p.health_check() if hasattr(p, "health_check") else {"ok": True}
-            except Exception as e:
-                hc = {"ok": False, "error": str(e)}
-            plugin_checks.append({"slug": p.slug, "enabled": bool(getattr(p, "enabled", True)),
-                                  **hc})
-        out["checks"]["plugins"] = plugin_checks
+        # NOTE: the plugin system has been removed — "plugins" is always [].
+        out["checks"]["plugins"] = []
         if self.router():
             out["checks"]["providers"] = self.router().health()
         if self.scheduler():
@@ -1172,41 +1128,25 @@ class AstraServer(ThreadingHTTPServer):
         provider_unhealthy = any(
             p.get("healthy") is False
             for name, p in out["checks"].get("providers", {}).items())
-        if any(not c.get("ok", True) for c in plugin_checks) or provider_unhealthy:
+        if provider_unhealthy:
             out["ok"] = False
         return out
 
     def registry_plugin_tools(self):
-        """Re-register plugin tools in the registry (enable/disable applies
-        to routes + manifest; tools are idempotent to re-add)."""
-        reg = self.registry()
-        if reg is None:
-            return
-        for p in self.plugins:
-            for spec in (p.tools() or []):
-                try:
-                    reg.unregister(spec.get("name", ""))
-                except Exception:
-                    pass
-        reg.register_plugin_tools([p for p in self.plugins if getattr(p, "enabled", True)])
+        """NOTE: the plugin system has been removed — no-op kept so any
+        remaining callers don't break."""
+        return
 
     def manifest(self) -> dict:
-        """Frontend bootstrap: agent name + one tab descriptor per enabled
-        plugin plus the always-on core tabs."""
+        """Frontend bootstrap: agent name + always-on core tabs.
+
+        NOTE: the plugin system has been removed — no plugin tabs/entries
+        are added anymore (plugins/ is an empty placeholder)."""
         tabs = [dict(t) for t in CORE_TABS]
-        for p in self.plugins:
-            if not getattr(p, "enabled", True):
-                continue
-            tabs.append({"tab": p.slug, "label": f"{p.icon} {p.title}",
-                         "plugin": p.slug, "js": f"/static/js/plugins/{p.slug}.js"})
         tabs.append(dict(LOGS_TAB))
         return {
             "name": AGENT_NAME,
             "version": getattr(__import__("astra"), "__version__", "1.0.0"),
-            "plugins": [{"slug": p.slug, "title": p.title, "icon": p.icon,
-                         "order": p.order, "version": p.version,
-                         "description": p.description,
-                         "enabled": bool(getattr(p, "enabled", True))}
-                        for p in self.plugins],
+            "plugins": [],
             "tabs": tabs,
         }

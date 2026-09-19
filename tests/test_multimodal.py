@@ -456,8 +456,7 @@ class TestMultipartChat(unittest.TestCase):
         from tests.helpers import make_agent
         from astra.web import AstraServer
         cls.store, cls.plugin, cls.agent = make_agent()
-        cls.server = AstraServer(("127.0.0.1", 0), cls.store, cls.agent,
-                                  cls.agent.plugins)
+        cls.server = AstraServer(("127.0.0.1", 0), cls.store, cls.agent)
         cls.port = cls.server.server_address[1]
         cls.base = f"http://127.0.0.1:{cls.port}"
         cls.thread = threading.Thread(target=cls.server.serve_forever,

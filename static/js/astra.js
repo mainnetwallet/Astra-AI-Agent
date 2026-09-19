@@ -1010,11 +1010,7 @@ function renderGatewayCard(core) {
       modelHealthRowsHtml(GATEWAY_MODEL_RESULTS[key]) +
       `</div></div>`;
   }).join("");
-  const dot = dots[core.state] || "warn";
-  card.innerHTML = `<div class="row"><span class="status-dot ${dot}"></span>` +
-    `<b>${esc(core.state)}</b>` +
-    `<span class="muted">· ${(core.models || []).length} model(s) across ${conns.length} connection(s), fastest-healthy first</span></div>` +
-    `<div class="list" style="margin-top:8px">${rows}</div>`;
+  card.innerHTML = `<div class="list" style="margin-top:8px">${rows}</div>`;
 
   // per-connection Test button — tests every model of just that ONE
   // connection (e.g. only Gemini's models), not the whole gateway.

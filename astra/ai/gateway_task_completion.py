@@ -137,6 +137,13 @@ class TaskVerificationOutcome:
     reason: str = ""
     missing: list = field(default_factory=list)
     evidence_checked: list = field(default_factory=list)
+    # Optional guidance from a semantic verifier (see `_unpack_semantic`):
+    # `action` is "fix" (patch what is missing) or "redo" (start over);
+    # `instructions` is the verifier's own precise wording for the provider.
+    # Both stay empty for every deterministic/evidence outcome, so existing
+    # behaviour is unchanged unless a verifier opts in.
+    action: str = ""
+    instructions: str = ""
 
     @property
     def ok(self) -> bool:
@@ -152,6 +159,19 @@ class TaskVerificationOutcome:
 def _missing_evidence(contract: TaskCompletionContract, evidence: dict | None) -> list:
     ev = evidence or {}
     return [key for key in contract.evidence_required if not ev.get(key)]
+
+
+def _unpack_semantic(res) -> tuple:
+    """Accept `(status, reason)` (original contract) or
+    `(status, reason, extra_dict)` where `extra_dict` may carry `missing`
+    (list), `action` ("fix"|"redo") and `instructions` (str)."""
+    status, reason = res[0], res[1]
+    extra = res[2] if len(res) > 2 and isinstance(res[2], dict) else {}
+    action = str(extra.get("action") or "").lower()
+    if action not in ("fix", "redo"):
+        action = ""
+    missing = [str(m) for m in (extra.get("missing") or []) if str(m).strip()]
+    return status, reason, missing, action, str(extra.get("instructions") or "").strip()
 
 
 def verify_task_completion(
@@ -199,7 +219,8 @@ def verify_task_completion(
     #    deterministic/evidence check above has already passed.
     if contract.require_semantic and semantic_verifier is not None:
         try:
-            status, reason = semantic_verifier(contract, result, evidence or {})
+            status, reason, sem_missing, sem_action, sem_instr = _unpack_semantic(
+                semantic_verifier(contract, result, evidence or {}))
         except Exception as e:
             # fail open toward caution, never toward false completion:
             # an exception in the (external) verifier is UNCERTAIN, not
@@ -208,8 +229,11 @@ def verify_task_completion(
                 UNCERTAIN, f"semantic verifier error: {e}")
         status = status if status in COMPLETION_STATUSES else UNCERTAIN
         if status != COMPLETE:
-            return TaskVerificationOutcome(status, reason or
-                                           "semantic verification did not confirm completion")
+            return TaskVerificationOutcome(
+                status, reason or
+                "semantic verification did not confirm completion",
+                missing=sem_missing, action=sem_action,
+                instructions=sem_instr)
 
     return TaskVerificationOutcome(COMPLETE, "", [], list(contract.evidence_required))
 
@@ -244,6 +268,12 @@ def build_task_correction_instruction(
     nothing_salvaged = (
         not outcome.evidence_checked
         or (outcome.missing and len(outcome.missing) >= len(outcome.evidence_checked)))
+    if outcome.action:
+        # A semantic verifier that looked at the actual reply knows better
+        # than the evidence-count heuristic whether to patch or start over.
+        nothing_salvaged = outcome.action == "redo"
+    if outcome.instructions:
+        lines.append(f"Gateway review: {outcome.instructions}")
     if nothing_salvaged:
         lines.append(
             "Already Completed: none — the previous attempt's response "

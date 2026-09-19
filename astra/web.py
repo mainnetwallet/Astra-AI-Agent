@@ -700,7 +700,18 @@ class AstraHandler(BaseHTTPRequestHandler):
                     {"state": "not_configured", "connections": []}
                 return _json_ok(self, {"ok": True, "data": gw})
 
-            # orchestrator / agents
+            # orchestrator / agents — the orchestrator was removed; chat now
+            # runs through the Gateway pipeline (see astra/ai/chat_pipeline.py).
+            # These routes stay so old clients get a clear answer, not a 500.
+            if path[:2] in (["api", "agents"], ["api", "executions"]):
+                if server.orchestrator() is None:
+                    if path == ["api", "agents"] and method == "GET":
+                        return _json_ok(self, {"ok": True, "data": {
+                            "recent": [], "stats": {}}})
+                    if path == ["api", "executions"] and method == "GET":
+                        return _json_ok(self, {"ok": True, "data": []})
+                    return _json_err(
+                        self, "orchestrator removed — use POST /api/chat", 410)
             if path == ["api", "agents"] and method == "GET":
                 return _json_ok(self, {"ok": True,
                                        "data": {"recent": server.orchestrator().recent(),

@@ -938,6 +938,30 @@ class AstraRouter:
                 continue
         return
 
+    def available_targets(self) -> list[dict]:
+        """Sanitized (provider, model) targets that are usable right now.
+
+        Plain data only — no adapters, credentials or pools — so callers
+        (e.g. the chat pipeline's Gateway "assign the work" step) can show
+        the Gateway what it may choose from without touching provider
+        internals. Same eligibility as routing itself (`_candidates`):
+        provider has healthy credentials and the model is not disabled.
+        """
+        out = []
+        try:
+            candidates = self._candidates(RoutingRequest())
+        except Exception:
+            return out
+        for adapter, model in candidates:
+            out.append({
+                "provider": getattr(adapter, "name", ""),
+                "model": model.model_id,
+                "capabilities": list(getattr(model, "capabilities", []) or []),
+                "quality": getattr(model, "quality_class", ""),
+                "context_window": int(getattr(model, "context_window", 0) or 0),
+            })
+        return out
+
     def _candidates_ranked(self, req):
         candidates = self._candidates(req)
         if self.policy:

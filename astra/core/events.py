@@ -87,6 +87,12 @@ EVENT_KINDS = (
     "gateway.task_completion.correction_succeeded",
     "gateway.task_completion.correction_failed",
     "gateway.task_completion.correction_exhausted",
+    # Chat pipeline (astra/ai/chat_pipeline.py): Gateway understand+assign ->
+    # Provider -> Gateway verify -> user.
+    "chat.pipeline.started", "chat.pipeline.assigned",
+    "chat.pipeline.understand_failed", "chat.pipeline.verified",
+    "chat.pipeline.verify_error", "chat.pipeline.finished",
+    "chat.pipeline.failed",
 )
 
 

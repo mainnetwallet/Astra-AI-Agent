@@ -1,10 +1,19 @@
-"""Astra Agent: non-chat surfaces (help/dashboard/export/import/resume)
-around the orchestrator.
+"""Astra Agent: the chat entry point plus the non-chat surfaces
+(help/dashboard/export/import/resume).
 
-`handle()` — the chat entry point that used to hand every message to
-`self.orchestrator.submit(...)` and turn the report into a reply — has
-been removed along with its `_reply_from_report()` /
-`_extract_response_artifacts()` helpers, pending a new chat entry point.
+`handle()` sends every chat message through the ChatPipeline
+(astra/ai/chat_pipeline.py):
+
+    User -> Gateway (understand + assign) -> Provider
+         -> Gateway (verify; fix/redo loop) -> User
+
+The provider's raw output never reaches the user before the Gateway has
+verified it. See that module for the full flow and its fail-open rules.
+
+Invariant (enforced by tests/test_zero_bypass_hardening.py):
+there is no raw/direct LLM callable in this module. Every AI call goes
+through the ChatPipeline, i.e. the Astra AI Gateway and the AstraRouter,
+never straight to a provider SDK or HTTP endpoint.
 
 NOTE: the plugin system (astra.core.Plugin/Registry) has been removed.
 `plugins/` is an empty placeholder for future plugins (see
@@ -12,50 +21,46 @@ plugins/README.md). help_text(), dashboard(), export_all(), and
 import_all() below no longer aggregate anything from plugins — they
 return placeholders until new plugins exist to aggregate.
 
-Still breaking on the handle() removal:
-  - `astra/web.py`'s `POST /api/chat` handler calls `server.agent.handle(...)`
-  - `resume()` below still calls the now-removed `self._reply_from_report(...)`
-    on its success path
-Both need a new implementation once the chat path is redesigned.
+The old orchestrator/planner approve-reject round-trip no longer exists, so
+`resume()` reports that honestly instead of pretending to continue a run.
 """
 from __future__ import annotations
 
 
 class Agent:
-    def __init__(self, orchestrator=None):
-        self.orchestrator = orchestrator  # optional multi-step executor
-        # NOTE: `handle()` (the chat entry point) has been removed — see
-        # module docstring. `resume()` below still uses `self.orchestrator`
-        # directly for the approve/reject round-trip.
+    def __init__(self, orchestrator=None, pipeline=None):
+        self.orchestrator = orchestrator   # legacy; no longer used for chat
+        self.pipeline = pipeline           # astra.ai.chat_pipeline.ChatPipeline
+
+    def handle(self, message: str, context: str = "",
+               attachments: list | None = None) -> dict:
+        """Chat entry point. Always returns the reply shape the frontend
+        renders: {reply, action, ok, data[, artifacts]}."""
+        if self.pipeline is None:
+            return {"reply": "Chat pipeline configure kora nei — Gateway/"
+                             "Provider setup check korun.",
+                    "action": "none", "ok": False, "data": {}}
+        try:
+            return self.pipeline.run(message, context=context or "",
+                                     attachments=attachments)
+        except Exception as e:          # never let a bug become a blank 500
+            return {"reply": f"Chat e ekta problem hoyeche — `{e}`",
+                    "action": "none", "ok": False,
+                    "data": {"error": str(e)}}
 
     def help_text(self) -> str:
         """No plugins are registered yet — see plugins/README.md."""
         return ("🤖 Astra AI Agent\nEkhono kono plugin add kora hoyni.\n\n"
-                "Free-form question thakle kewo bujhle na — LLM chat "
-                "(ANTHROPIC_API_KEY set korle) uttor dibe.")
+                "Apni jei message-i pathan, Gateway seta bujhe best "
+                "provider/model ke kaj dey, uttor verify kore tarpor apnake "
+                "dey.")
 
     def resume(self, execution_id: str, allow: bool) -> dict:
-        """Approve or reject a WAITING_USER execution's pending tool call.
-
-        Backs the inline Approve/Reject buttons a chat bubble renders when
-        `_reply_from_report` returns action "confirm" — the whole
-        confirm/deny round-trip happens in chat, no separate tab involved.
-        Formatted exactly like a normal chat reply so the frontend can
-        render it (and, if the resumed plan hits *another* pending step,
-        chain into a fresh pair of Approve/Reject buttons) the same way.
-        """
-        if not self.orchestrator:
-            return {"reply": "Orchestrator available na — resume kora gelo na.",
-                    "action": "none", "data": {}, "ok": False}
-        report = self.orchestrator.resume(execution_id, allow)
-        if not allow:
-            return {"reply": "❌ Reject kora hoyeche — ei step ta বাতিল হলো.",
-                    "action": "none", "data": report, "ok": False}
-        if report.get("status") == "not waiting":
-            return {"reply": "Ei kaj ta ar approval-er jonno wait korche na "
-                              "(hoyto already handle hoye geche).",
-                    "action": "none", "data": report, "ok": False}
-        return self._reply_from_report(report.get("goal", ""), report)
+        """The approve/reject round-trip belonged to the removed
+        orchestrator; there is nothing to resume any more."""
+        return {"reply": "Ei approval step ta ar available na — chat ekhon "
+                         "Gateway pipeline diye cholche.",
+                "action": "none", "data": {}, "ok": False}
 
     def dashboard(self) -> list[dict]:
         """No plugins are registered yet — see plugins/README.md."""

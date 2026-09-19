@@ -52,7 +52,9 @@ def main() -> int:
     print(f"  🔒 Bind: {bind} | "
           f"API auth: {'token protected' if token else 'OPEN (set ASTRA_TOKEN)'}")
     print("  📦 Plugins: none (plugins/ is empty — see plugins/README.md)")
-    print(f"  🧠 Orchestrator {('ON' if stack['orchestrator'] else 'off')} | "
+    gw = stack["router"].gateway
+    print(f"  🧠 Chat pipeline ON (Gateway "
+          f"{'ready' if gw is not None and gw.is_usable() else 'not configured — answers unverified'}) | "
           f"Tools: {len(stack['registry'].list())} | "
           f"AI: {'configured' if stack['router'].providers else 'not configured'}")
     if stack["scheduler"]:

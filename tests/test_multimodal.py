@@ -929,30 +929,6 @@ class TestCapabilityMismatchRejection(unittest.TestCase):
         self.assertTrue(meets_hard_requirements(model, req))
 
 
-class TestToolArtifactExtraction(unittest.TestCase):
-    """Agent extracts artifacts from tool output."""
-
-    def test_tool_generated_artifact_extracted(self):
-        from astra.agent import Agent
-        a = Agent.__new__(Agent)
-        a.plugins = []
-        results = {
-            "s1": {
-                "tool": "generate_document",
-                "ok": True,
-                "output": {
-                    "ok": True,
-                    "artifact": {"id": "abc", "filename": "test.pdf",
-                                 "validated": True, "artifact_type": "document"},
-                    "format": "pdf"
-                }
-            }
-        }
-        arts = a._extract_response_artifacts("generate a pdf report", results)
-        self.assertEqual(len(arts), 1)
-        self.assertEqual(arts[0]["filename"], "test.pdf")
-
-
 class TestGatewayZeroBypass(unittest.TestCase):
     """Multimodal additions preserve zero-bypass invariants."""
 

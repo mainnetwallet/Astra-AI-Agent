@@ -145,19 +145,15 @@ class TestNoAlternateExecutionPath(unittest.TestCase):
             self.assertNotIn(needle, src,
                              f"{module.__name__} contains forbidden pattern {needle!r}")
 
-    def test_orchestrator_has_no_direct_ai_call(self):
-        from astra.core import orchestrator
-        self._assert_module_clean(orchestrator)
+    def test_chat_pipeline_has_no_direct_ai_call(self):
+        from astra.ai import chat_pipeline
+        self._assert_module_clean(chat_pipeline)
 
     def test_agent_has_no_direct_ai_call(self):
         import astra.agent as agent_mod
         self._assert_module_clean(agent_mod)
         # explicit regression note left in the module itself
         self.assertIn("no raw/direct LLM callable", inspect.getsource(agent_mod))
-
-    def test_executor_has_no_direct_ai_call(self):
-        from astra.core import executor
-        self._assert_module_clean(executor)
 
 
 if __name__ == "__main__":

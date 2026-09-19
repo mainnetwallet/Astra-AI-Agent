@@ -2,14 +2,14 @@
 
 `build()` wires: Store → TaskEngine → Memories →
 EventBus → Policy → ToolRegistry(+builtins) → Providers →
-AstraRouter → Executor → WorkflowEngine → Scheduler → Orchestrator
+AstraRouter (+ Gateway) → ChatPipeline → WorkflowEngine → Scheduler
 → Agent. run.py, tests, and boot helpers all call this, so the wiring is
 defined once and verified everywhere.
 
-NOTE: astra.core.planner (Planner) has been deleted. Every line below
-that referenced `Planner`/`planner` has been removed along with it —
-`Orchestrator` below is now constructed without a `planner=` argument,
-pending whatever replaces it.
+Chat path: Agent.handle() → ChatPipeline (Gateway understands + assigns →
+Provider → Gateway verifies → user). Planner, Executor and Orchestrator
+have been deleted; the stack keeps `orchestrator`/`executor` keys (value
+None) so anything reading them degrades instead of raising KeyError.
 
 NOTE: the Plugin/Registry system (astra.core.Plugin, astra.core.Registry)
 has been removed. `plugins/` is an empty placeholder for future plugins
@@ -25,15 +25,11 @@ from astra.core.events import EventBus
 from astra.core.permissions import Policy
 from astra.core.tasks import TaskEngine
 # NOTE: astra.tools.registry.ToolRegistry has been restored (see that
-# module's docstring). astra.core.executor (Executor) has NOT — it and
-# the confirm/ask gate that used to live across both are still deleted.
-# Every line below referencing `Executor`/`executor` is broken, pending
-# a new tool-execution layer (ToolRegistry.execute() itself works fine
-# standalone — see tests/test_web3_toolregistry_auto_integration.py).
-# NOTE: astra.core.orchestrator has been deleted (Orchestrator class no
-# longer exists). Every line below referencing `Orchestrator`/`orchestrator`
-# is now broken (ImportError at this line, then NameError further down) —
-# pending a new orchestration layer.
+# module's docstring). astra.core.executor (Executor) and
+# astra.core.orchestrator (Orchestrator) remain deleted — chat no longer
+# goes through them (see astra/ai/chat_pipeline.py). ToolRegistry.execute()
+# itself works standalone — see
+# tests/test_web3_toolregistry_auto_integration.py.
 from astra.ai.provider import ClaudeProvider, OpenAICompatibleProvider
 from astra.ai.router import AstraRouter
 from astra.ai.registry import build_providers, ProviderRegistry
@@ -173,22 +169,21 @@ def build(store: Store | None = None, config=None,
     if env_models == "1":
         discovery.refresh(force=False)   # best-effort, never blocks boot
 
-    executor = Executor(registry, tasks=tasks, events=events,
-                        experiences=experiences)
     # specialist agents (Agent manager): deterministic selection steers
-    # routing hints and plan decoration; the Orchestrator persists the pick.
+    # routing hints; kept registered for introspection (/api/agents-style
+    # listings) even though chat no longer plans through them.
     agent_manager = AgentManager()
     agent_manager.register_many(SPECIALISTS)
-    orchestrator = Orchestrator(
-        store, config=config, tasks=tasks, registry=registry,
-        executor=executor, router=router, memory=memory,
-        experiences=experiences, events=events, policy=policy,
-        agents=agent_manager)
-    orchestrator.web3_manager = tx_manager
-    # crash recovery: executions stranded mid-flight by a previous shutdown
-    # are marked FAILED so they no longer read as "running".
-    orchestrator.recover_stale()
-    tx_manager.recover()   # resolve in-flight web3 txs safely (chain-checked)
+    # crash recovery for in-flight web3 txs (chain-checked, safe).
+    tx_manager.recover()
+
+    # chat pipeline: Gateway understands + assigns -> Provider -> Gateway
+    # verifies (fix/redo loop) -> user. The Gateway and the router are the
+    # only AI paths; there is no direct/raw LLM path.
+    from astra.ai.chat_pipeline import ChatPipeline
+    chat_pipeline = ChatPipeline(
+        gateway, router, events=events,
+        max_tokens=config.getint("CHAT_MAX_TOKENS", 1500))
 
     # workflows + scheduler
     workflows = WorkflowEngine(store, registry, events)
@@ -197,16 +192,17 @@ def build(store: Store | None = None, config=None,
         scheduler = SchedulerManager(store, workflows, events)
         scheduler.start()
 
-    # chat agent (orchestrator -> Astra AI Gateway -> Existing Provider
-    # System; no direct/raw LLM path exists)
-    agent = Agent(orchestrator=orchestrator)
+    # chat agent (ChatPipeline -> Astra AI Gateway <-> Provider system;
+    # no direct/raw LLM path exists)
+    agent = Agent(pipeline=chat_pipeline)
 
     return {
         "config": config, "store": store,
         "events": events, "policy": policy, "memory": memory,
         "experiences": experiences, "tasks": tasks, "registry": registry,
-        "router": router, "executor": executor,
-        "orchestrator": orchestrator, "workflows": workflows,
+        "router": router, "executor": None,
+        "orchestrator": None, "chat_pipeline": chat_pipeline,
+        "workflows": workflows,
         "scheduler": scheduler, "agent": agent,
         "model_registry": model_registry, "provider_registry": provider_registry,
         "discovery": discovery, "agent_manager": agent_manager,

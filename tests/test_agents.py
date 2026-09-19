@@ -69,20 +69,5 @@ class TestTaskClassify(unittest.TestCase):
                          "research")
 
 
-class TestOrchestratorPersistsSelection(unittest.TestCase):
-    def test_selected_agent_and_steps_persisted(self):
-        os.environ["DATA_DIR"] = tempfile.mkdtemp()
-        from astra.bootstrap import build
-        b = build()
-        o = b["orchestrator"]
-        res = o.submit("summarize the readme file", sync=True)
-        self.assertEqual(res["status"], "COMPLETED")
-        self.assertTrue(res["selected_agent"])
-        self.assertGreaterEqual(len(res["steps_detail"]), 1)
-        self.assertTrue(all(s["status"] for s in res["steps_detail"]))
-        self.assertIn("selected_agent", res)
-        os.environ.pop("DATA_DIR", None)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -87,6 +87,13 @@ class TestTaskEngine(unittest.TestCase):
 class TestToolRegistry(unittest.TestCase):
     def setUp(self): self.stack = make_stack(); self.reg = self.stack["registry"]
 
+    def _ctx(self):
+        from astra.core.context import ToolContext
+        st = self.stack
+        return ToolContext(store=st["store"], config=st["config"],
+                           events=st["events"], memory=st["memory"],
+                           tasks=st["tasks"], web3_manager=st["tx_manager"])
+
     def test_builtin_tools_registered(self):
         names = [t["name"] for t in self.reg.list()]
         for expect in ("search_web", "remember", "recall", "get_health",
@@ -95,14 +102,14 @@ class TestToolRegistry(unittest.TestCase):
             self.assertIn(expect, names)
 
     def test_execute_remember_and_recall(self):
-        ctx = self.stack["orchestrator"]._tool_ctx()
+        ctx = self._ctx()
         out = self.reg.execute("remember", {"content": "test memory 123",
                                              "category": "note"}, ctx)
         self.assertTrue(out.get("ok"))
         self.assertGreater(out["result"]["id"], 0)
 
     def test_execute_search_web_offline(self):
-        ctx = self.stack["orchestrator"]._tool_ctx()
+        ctx = self._ctx()
         out = self.reg.execute("search_web", {"query": "python test"}, ctx)
         self.assertIn("ok", out)
         # graceful: must never raise — returns a structured result either way
@@ -115,7 +122,7 @@ class TestToolRegistry(unittest.TestCase):
         import urllib.error
         import urllib.request
         from unittest import mock
-        ctx = self.stack["orchestrator"]._tool_ctx()
+        ctx = self._ctx()
         with mock.patch.object(urllib.request, "urlopen",
                                side_effect=urllib.error.URLError("offline")):
             out = self.reg.execute("search_web", {"query": "flip", "n": 3}, ctx)
@@ -247,36 +254,6 @@ class TestScheduler(unittest.TestCase):
         self.assertIsNone(compute_next_run("oneshot", "2025-01-01 00:00", now=now))
 
 
-# ── Orchestrator ──────────────────────────────────────────────────────────────
-class TestOrchestrator(unittest.TestCase):
-    def setUp(self): self.stack = make_stack(); self.orch = self.stack["orchestrator"]
-
-    def test_submit_sync_health(self):
-        r = self.orch.submit("get_health", sync=True)
-        self.assertIn(r["status"], ("COMPLETED", "FAILED"))
-        self.assertGreater(r["steps"], 0)
-
-    def test_submit_sync_unknown_goal(self):
-        r = self.orch.submit("random blorp 42", sync=True)
-        self.assertIn(r["status"], ("COMPLETED", "FAILED"))
-
-    def test_submit_async_and_state(self):
-        r = self.orch.submit("get_health", sync=False)
-        self.assertIn("execution_id", r)
-        self.assertEqual(r["status"], "started")
-        state = self.orch.state(r["execution_id"])
-        self.assertIn(state["status"], ("IDLE", "PLANNING", "EXECUTING",
-                                        "COMPLETED", "FAILED", "unknown"))
-
-    def test_recent_and_stats(self):
-        self.orch.submit("get_health", sync=True)
-        rec = self.orch.recent()
-        self.assertGreater(len(rec), 0)
-        stats = self.orch.stats()
-        self.assertIn("total", stats)
-
-
-# ── Config ────────────────────────────────────────────────────────────────────
 class TestConfig(unittest.TestCase):
     """Config tests isolate from environment PORT/ASTRA_* by clearing them
     during the test, then restoring afterwards."""
@@ -336,10 +313,9 @@ class TestStateTimeutil(unittest.TestCase):
 class TestBootstrap(unittest.TestCase):
     def test_build_returns_all_keys(self):
         s = make_stack(with_scheduler=True)
-        for key in ("config", "store", "plugins", "events", "policy",
+        for key in ("config", "store", "events", "policy",
                      "memory", "experiences", "tasks", "registry", "router",
-                     "executor", "orchestrator", "workflows",
-                     "scheduler", "agent"):
+                     "chat_pipeline", "workflows", "scheduler", "agent"):
             self.assertIn(key, s)
         self.assertIsNotNone(s["scheduler"])
 
@@ -347,10 +323,13 @@ class TestBootstrap(unittest.TestCase):
         s = make_stack(with_scheduler=False)
         self.assertIsNone(s["scheduler"])
 
-    def test_agent_handle_uses_orchestrator(self):
+    def test_agent_handle_uses_chat_pipeline(self):
         s = make_stack()
+        self.assertIs(s["agent"].pipeline, s["chat_pipeline"])
         reply = s["agent"].handle("get_health")
+        # no providers configured in tests -> an honest failure, never a crash
         self.assertIn("reply", reply)
+        self.assertFalse(reply["ok"])
 
 
 # ── Web endpoints (system) ────────────────────────────────────────────────────
@@ -428,11 +407,20 @@ class TestWebSystem(unittest.TestCase):
         r2 = self._patch(f"/api/schedules/{sid}", {"enabled": False})
         self.assertFalse(r2["data"]["enabled"])
 
-    def test_agents_submit_and_history(self):
-        r = self._post("/api/agents", {"goal": "get health", "sync": True})
-        self.assertIn(r["data"]["status"], ("COMPLETED", "FAILED"))
-        hist = self._get("/api/executions")
-        self.assertGreater(len(hist["data"]), 0)
+    def test_agents_routes_degrade_without_orchestrator(self):
+        """The orchestrator was removed: listings are empty and submitting
+        a goal says so (410) instead of crashing with a 500."""
+        self.assertEqual(self._get("/api/agents")["data"],
+                         {"recent": [], "stats": {}})
+        self.assertEqual(self._get("/api/executions")["data"], [])
+        import json, urllib.error, urllib.request
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/agents",
+            data=json.dumps({"goal": "x"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(cm.exception.code, 410)
 
     def test_config_has_app_keys(self):
         r = self._get("/api/config")
@@ -443,246 +431,12 @@ class TestWebSystem(unittest.TestCase):
         tabs = [t["tab"] for t in r["data"]["tabs"]]
         self.assertIn("live", tabs)
         self.assertIn("dashboard", tabs)
-        self.assertIn("airdrop", tabs)
 
     def test_events_returns_list(self):
         r = self._get("/api/events")
         self.assertIsInstance(r["data"], list)
 
 
-# ── Orchestrator recovery + idempotency (Sections 14–15) ─────────────────────
-class TestOrchestratorRecovery(unittest.TestCase):
-    def setUp(self):
-        self.stack = make_stack()
-        self.orch = self.stack["orchestrator"]
-        self.store = self.stack["store"]
-
-    def test_recover_stale_marks_running_as_failed(self):
-        """Stranded PLANNING/EXECUTING/WAITING_USER executions are terminal-
-        failed on restart (Section 14 + 51)."""
-        # simulate an execution that was mid-flight when 'the process died'
-        eid = "exec-deadbeef"
-        self.store.exec(
-            "INSERT INTO astra_executions (execution_id, goal, status) "
-            "VALUES (?, 'delegated research', 'EXECUTING')", (eid,))
-        recovered = self.orch.recover_stale()
-        self.assertIn(eid, recovered)
-        row = self.orch._row(eid)
-        self.assertEqual(row["status"], "FAILED")
-        self.assertIn("restart", row["error"])
-
-    def test_recover_stale_keeps_completed(self):
-        """Completed executions must never be touched by recovery."""
-        r = self.orch.submit("get_health", sync=True)
-        recovered = self.orch.recover_stale()
-        self.assertNotIn(r["execution_id"], recovered)
-        row = self.orch._row(r["execution_id"])
-        self.assertEqual(row["status"], "COMPLETED")
-
-    def test_resume_skips_completed_steps(self):
-        """Resume is idempotent: already-successful steps aren't re-executed."""
-        report = self.orch.submit("plan my day", sync=True)
-        results = report["results"]
-        done = {k for k, v in results.items() if v.get("ok")}
-        self.assertGreater(len(done), 0)
-        # simulate: run stuck at WAITING_USER on an already-succeeded step,
-        # which is exactly what a crash between save and user-approve leaves
-        step = report["plan"][0]
-        self.store.exec(
-            "UPDATE astra_executions SET status = 'WAITING_USER' "
-            "WHERE execution_id = ?", (report["execution_id"],))
-        self.store.exec(
-            "UPDATE astra_executions SET pending_step = ? "
-            "WHERE execution_id = ?",
-            (json.dumps(step), report["execution_id"]))
-        r2 = self.orch.resume(report["execution_id"], allow=True)
-        self.assertEqual(r2["status"], "COMPLETED")
-        # no step got a second result entry (no re-execution)
-        self.assertEqual(len(r2["results"]), len(results))
-        # and every step is still ok
-        self.assertTrue(all(v.get("ok") for v in r2["results"].values()))
-
-
-# ── inline chat Approve/Reject (Agent.resume, no separate Live tab) ──────────
-class _FakeOrchestratorCapturesSubmit:
-    """Minimal orchestrator stand-in — records every `submit()` call so
-    tests can prove a message reached it (or didn't) without needing the
-    real Orchestrator/Gateway/Provider chain."""
-
-    def __init__(self, report=None):
-        self.submitted = []
-        self._report = report or {"execution_id": "exec-1", "status": "COMPLETED",
-                                  "results": {}, "steps": 0}
-
-    def submit(self, goal, sync=False, context="", attachments=None):
-        self.submitted.append(goal)
-        return self._report
-
-
-class TestAgentNoPluginBypass(unittest.TestCase):
-    """Agent.handle() no longer walks self.plugins and regex-matches chat
-    text — every message goes straight to the orchestrator (Gateway ->
-    Provider), even text that an old-style plugin.process() would have
-    claimed. See astra/agent.py's module docstring for why."""
-
-    def test_plugin_process_is_never_called(self):
-        from astra.agent import Agent
-
-        class _PluginThatWouldHaveMatched:
-            plugins_process_calls = []
-
-            def process(self, text):
-                self.__class__.plugins_process_calls.append(text)
-                return (True, "handled by plugin", "airdrop", {})
-
-        plugin = _PluginThatWouldHaveMatched()
-        orch = _FakeOrchestratorCapturesSubmit()
-        agent = Agent([plugin], orchestrator=orch)
-        reply = agent.handle("add airdrop Notcoin deadline 30 oct")
-        self.assertEqual(_PluginThatWouldHaveMatched.plugins_process_calls, [])
-        self.assertEqual(orch.submitted, ["add airdrop Notcoin deadline 30 oct"])
-        self.assertNotEqual(reply["reply"], "handled by plugin")
-
-    def test_message_reaches_orchestrator_even_with_no_plugins(self):
-        from astra.agent import Agent
-        orch = _FakeOrchestratorCapturesSubmit()
-        agent = Agent([], orchestrator=orch)
-        agent.handle("hi")
-        self.assertEqual(orch.submitted, ["hi"])
-
-
-class TestAgentInlineResume(unittest.TestCase):
-    """A WAITING_USER step is approved/rejected straight from the chat
-    bubble via Agent.resume() -> POST /api/chat/resume, never a Live-tab
-    round trip. `_reply_from_report` hands the frontend action \"confirm\"
-    (not \"live\") for exactly this reason."""
-
-    def setUp(self):
-        self.stack = make_stack()
-        self.orch = self.stack["orchestrator"]
-        self.store = self.stack["store"]
-
-    def _make_pending(self):
-        report = self.orch.submit("plan my day", sync=True)
-        step = report["plan"][0]
-        self.store.exec(
-            "UPDATE astra_executions SET status = 'WAITING_USER' "
-            "WHERE execution_id = ?", (report["execution_id"],))
-        self.store.exec(
-            "UPDATE astra_executions SET pending_step = ? "
-            "WHERE execution_id = ?",
-            (json.dumps(step), report["execution_id"]))
-        return report["execution_id"]
-
-    def test_reply_from_report_pending_offers_inline_confirm_not_live_tab(self):
-        from astra.agent import Agent
-        agent = Agent([], orchestrator=self.orch)
-        report = {"pending": True, "execution_id": "exec-xyz", "results": {},
-                  "pending_step": {"tool": "write_file", "description": "write x"}}
-        reply = agent._reply_from_report("test", report)
-        self.assertEqual(reply["action"], "confirm")
-        self.assertNotIn("Live tab", reply["reply"])
-        self.assertEqual(reply["data"]["execution_id"], "exec-xyz")
-
-    def test_resume_approve_continues_run_and_formats_like_a_chat_reply(self):
-        from astra.agent import Agent
-        agent = Agent([], orchestrator=self.orch)
-        eid = self._make_pending()
-        reply = agent.resume(eid, True)
-        # resolved via the orchestrator and run back through the exact same
-        # _reply_from_report() formatting a normal /api/chat call uses —
-        # not the old fixed "Live tab e Approve/Reject" text.
-        self.assertNotEqual(reply["action"], "confirm")   # fully resolved
-        self.assertNotIn("Live tab", reply["reply"])
-        self.assertEqual(self.orch._row(eid)["status"], "COMPLETED")
-
-    def test_resume_reject_cancels_without_running_the_step(self):
-        from astra.agent import Agent
-        agent = Agent([], orchestrator=self.orch)
-        eid = self._make_pending()
-        reply = agent.resume(eid, False)
-        self.assertFalse(reply["ok"])
-        self.assertIn("Reject", reply["reply"])
-        self.assertEqual(self.orch._row(eid)["status"], "CANCELLED")
-
-    def test_resume_unknown_execution_reports_not_waiting(self):
-        from astra.agent import Agent
-        agent = Agent([], orchestrator=self.orch)
-        reply = agent.resume("exec-does-not-exist", True)
-        self.assertFalse(reply["ok"])
-        self.assertIn("wait", reply["reply"].lower())
-
-
-class TestChatResumeEndpoint(unittest.TestCase):
-    """POST /api/chat/resume — the HTTP route the inline Approve/Reject
-    buttons call, wired straight to Agent.resume()."""
-
-    def setUp(self):
-        import threading, time
-        from astra.web import AstraServer
-        self.stack = make_stack()
-        self.orch = self.stack["orchestrator"]
-        self.store = self.stack["store"]
-        self.srv = AstraServer(("127.0.0.1", 0), self.stack["store"],
-                                self.stack["agent"],
-                                stack=self.stack)
-        self.port = self.srv.server_address[1]
-        self.t = threading.Thread(target=self.srv.serve_forever, daemon=True)
-        self.t.start(); time.sleep(0.3)
-
-    def tearDown(self):
-        self.srv.shutdown()
-        self.srv.server_close()
-
-    def _post(self, p, d):
-        import urllib.request
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{p}",
-            data=json.dumps(d).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req) as r:
-            return json.loads(r.read())
-
-    def test_resume_endpoint_requires_execution_id(self):
-        import urllib.error
-        with self.assertRaises(urllib.error.HTTPError) as cm:
-            self._post("/api/chat/resume", {"allow": True})
-        self.assertEqual(cm.exception.code, 400)
-
-    def test_resume_endpoint_approves_a_pending_execution(self):
-        report = self.orch.submit("get_health", sync=True)
-        step = report["plan"][0]
-        self.store.exec(
-            "UPDATE astra_executions SET status = 'WAITING_USER' "
-            "WHERE execution_id = ?", (report["execution_id"],))
-        self.store.exec(
-            "UPDATE astra_executions SET pending_step = ? "
-            "WHERE execution_id = ?",
-            (json.dumps(step), report["execution_id"]))
-        r = self._post("/api/chat/resume",
-                        {"execution_id": report["execution_id"], "allow": True})
-        self.assertTrue(r["ok"])
-        self.assertNotEqual(r["data"]["action"], "confirm")
-        self.assertEqual(self.orch._row(report["execution_id"])["status"],
-                          "COMPLETED")
-
-    def test_resume_endpoint_rejects_a_pending_execution(self):
-        report = self.orch.submit("get_health", sync=True)
-        step = report["plan"][0]
-        self.store.exec(
-            "UPDATE astra_executions SET status = 'WAITING_USER' "
-            "WHERE execution_id = ?", (report["execution_id"],))
-        self.store.exec(
-            "UPDATE astra_executions SET pending_step = ? "
-            "WHERE execution_id = ?",
-            (json.dumps(step), report["execution_id"]))
-        r = self._post("/api/chat/resume",
-                        {"execution_id": report["execution_id"], "allow": False})
-        self.assertFalse(r["data"]["ok"])
-        self.assertEqual(self.orch._row(report["execution_id"])["status"],
-                          "CANCELLED")
-
-
-# ── Store lifecycle (Section 5) ──────────────────────────────────────────────
 class TestStoreLifecycle(unittest.TestCase):
     def test_context_manager_closes(self):
         """Store used as a context manager auto-closes on __exit__."""

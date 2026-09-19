@@ -409,9 +409,9 @@ class TestZeroBypassMultimodal(unittest.TestCase):
 
     def test_no_direct_provider_in_web(self):
         import inspect
-        from astra import web, web_fastapi
+        from astra import web, fastAPI
         self.assertNotIn("ProviderRegistry", inspect.getsource(web))
-        self.assertNotIn("ProviderRegistry", inspect.getsource(web_fastapi))
+        self.assertNotIn("ProviderRegistry", inspect.getsource(fastAPI))
 
     def test_routing_request_preserved(self):
         req = RoutingRequest(

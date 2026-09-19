@@ -279,7 +279,7 @@ class LifespanTests(unittest.TestCase):
     """Who owns the stack is decided by what `make_app` was handed."""
 
     def test_own_stack_is_built_and_closed(self):
-        from astra.web_fastapi import make_app
+        from astra.fastAPI import make_app
         stack = _stack()
         with mock.patch("astra.bootstrap.build", return_value=stack) as built:
             app = make_app()          # nothing handed over -> app owns it
@@ -290,7 +290,7 @@ class LifespanTests(unittest.TestCase):
             stack["store"].fetch("SELECT 1")
 
     def test_supplied_stack_is_closed_on_shutdown(self):
-        from astra.web_fastapi import make_app
+        from astra.fastAPI import make_app
         stack = _stack()
         app = make_app(stack=stack)
         asyncio.run(_drive_lifespan(app))
@@ -298,7 +298,7 @@ class LifespanTests(unittest.TestCase):
             stack["store"].fetch("SELECT 1")
 
     def test_scheduler_is_stopped_on_shutdown(self):
-        from astra.web_fastapi import make_app
+        from astra.fastAPI import make_app
         stack = _stack()
         sched = _FakeScheduler()
         stack["scheduler"] = sched
@@ -307,7 +307,7 @@ class LifespanTests(unittest.TestCase):
         self.assertTrue(sched.stopped)
 
     def test_caller_owned_site_is_left_alone(self):
-        from astra.web_fastapi import make_app
+        from astra.fastAPI import make_app
         stack = _stack()
         site = AstraSite(("127.0.0.1", 0), stack["store"], stack["agent"],
                          stack=stack)
@@ -320,7 +320,7 @@ class LifespanTests(unittest.TestCase):
         stack["store"].close()
 
     def test_lifecycle_can_be_overridden(self):
-        from astra.web_fastapi import make_app
+        from astra.fastAPI import make_app
         stack = _stack()
         app = make_app(stack=stack, manage_lifecycle=False)
         asyncio.run(_drive_lifespan(app))
@@ -330,7 +330,7 @@ class LifespanTests(unittest.TestCase):
         stack["store"].close()
 
     def test_create_app_is_a_zero_arg_factory(self):
-        from astra.web_fastapi import create_app
+        from astra.fastAPI import create_app
         stack = _stack()
         with mock.patch("astra.bootstrap.build", return_value=stack):
             app = create_app()

@@ -11,7 +11,7 @@ route logic of its own; there is exactly one implementation of the API.
 Run it:
 
     python3 run.py                                  # banner + env handling
-    uvicorn --factory astra.web_fastapi:create_app  # plain ASGI deployment
+    uvicorn --factory astra.fastAPI:create_app      # plain ASGI deployment
 
 Design notes:
 
@@ -263,7 +263,7 @@ def make_app(stack=None, store=None, agent=None, site=None, docs=None,
 
       * nothing — the app builds the normal bootstrap stack on ASGI startup
         and stops the scheduler + closes the store on shutdown (this is what
-        `uvicorn --factory astra.web_fastapi:create_app` does);
+        `uvicorn --factory astra.fastAPI:create_app` does);
       * `stack=` — used as-is; lifecycle defaults to managed (the app shuts
         down the scheduler/store), matching run.py;
       * `store=`/`agent=` — the caller owns the lifecycle;
@@ -329,7 +329,7 @@ def make_app(stack=None, store=None, agent=None, site=None, docs=None,
 
 
 def create_app():
-    """Zero-argument factory for `uvicorn --factory astra.web_fastapi:create_app`.
+    """Zero-argument factory for `uvicorn --factory astra.fastAPI:create_app`.
 
     The stack is built on startup (never at import) and torn down on shutdown.
     """

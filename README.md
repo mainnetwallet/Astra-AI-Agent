@@ -202,7 +202,7 @@ python3 run.py                     # http://localhost:8787/
 
 `astra/web.py` owns *what* a request means — the route table, auth, rate
 limit, body cap, CORS, security headers, SSE frames and JSON envelopes — and
-deals in neutral `Request`/`Response` objects. `astra/web_fastapi.py` is the
+deals in neutral `Request`/`Response` objects. `astra/fastAPI.py` is the
 only adapter that turns those into bytes: one catch-all route, so no route can
 drift out of sync. All the routes, auth, rate limits, CORS, headers, uploads,
 body cap and SSE behaviour documented above are unchanged.
@@ -212,7 +212,7 @@ the scheduler + closes the store on shutdown, so process managers
 (systemd, gunicorn, Docker, k8s) can own the process directly:
 
 ```bash
-uvicorn --factory astra.web_fastapi:create_app --host 127.0.0.1 --port 8787
+uvicorn --factory astra.fastAPI:create_app --host 127.0.0.1 --port 8787
 ```
 
 The app owns the lifecycle only when it was handed a `stack` (or nothing at
@@ -227,7 +227,7 @@ generator would hold one of those slots for the full 45 s connection.
 
 * `ASTRA_FASTAPI_DOCS=1` exposes `/docs` + `/openapi.json`. Off by default —
   Swagger UI loads its JS from a CDN, which the app's own CSP blocks. The
-  router is mounted as one catch-all (see `astra/web_fastapi.py`), so the
+  router is mounted as one catch-all (see `astra/fastAPI.py`), so the
   generated schema cannot describe individual routes; the API table above is
   the authoritative reference.
 * `python-multipart` is deliberately **not** required: uploads are parsed by
@@ -296,8 +296,8 @@ Drop it in `plugins/`, add `"myplugin"` to `ACTIVE_PLUGINS`, restart.
 
 ```bash
 python3 -m unittest discover -s tests -v        # full suite, stdlib runner
-python3 -m pytest -q tests/test_web_fastapi.py  # live smoke: boots the real
-                                                # FastAPI server and checks the API
+python3 -m pytest -q tests/test_fastapi_server.py   # live smoke: boots the real
+                                                    # FastAPI server and checks the API
 python3 -m compileall astra                     # syntax sanity
 ```
 
@@ -307,7 +307,7 @@ For a manual end-to-end check, start a server and hit it:
 
 Optional dev extras: `pip install -r requirements-dev.txt` (pytest, Playwright).
 
-Web tests: `tests/test_web_fastapi.py` boots the real FastAPI/uvicorn server
+Web tests: `tests/test_fastapi_server.py` boots the real FastAPI/uvicorn server
 in-process (ephemeral port) and checks status codes, security headers, JSON
 bodies, static bytes, SSE frames, the lifespan and the worker pool.
 

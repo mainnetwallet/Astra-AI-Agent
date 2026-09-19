@@ -54,7 +54,7 @@ class LiveServer:
         import uvicorn
 
         from astra.web import AstraSite
-        from astra.web_fastapi import make_app
+        from astra.fastAPI import make_app
 
         if stack is not None:
             store = store or stack["store"]

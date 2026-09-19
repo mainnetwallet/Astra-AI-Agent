@@ -3,7 +3,7 @@
 #   pip install -r requirements.txt
 #
 # FastAPI + uvicorn are the only web server: `python3 run.py` launches the
-# ASGI app in astra/web_fastapi.py, which serves the shared router in
+# ASGI app in astra/fastAPI.py, which serves the shared router in
 # astra/web.py. There is no stdlib http.server path any more.
 #
 # Everything else the agent uses is the Python 3.9+ standard library

@@ -7,7 +7,7 @@ free of sockets and frameworks: it deals in `Request`/`Response` objects, and
 `WebApp.handle()` is a pure function of the request plus the `AstraSite`. That
 is what lets the entire API be unit-tested with no server running at all.
 
-`astra/web_fastapi.py` owns *how* those bytes travel — it binds this router to
+`astra/fastAPI.py` owns *how* those bytes travel — it binds this router to
 FastAPI/uvicorn (one catch-all route, a lifespan that builds and tears down the
 stack, and a worker threadpool for blocking work), and `run.py` is the
 launcher. There is exactly one server: FastAPI/ASGI.

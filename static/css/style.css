@@ -451,4 +451,14 @@ a[class*="hl-"] { pointer-events: none; }
 .model-health-row .model-latency { min-width: 70px; text-align: right; }
 .model-health-row.ok .model-latency { color: var(--good); }
 .model-health-row.bad { color: var(--bad); }
+.model-health-row.keyed { flex-wrap: wrap; }
+.model-health-row.keyed .model-name { flex: 1 1 60%; }
+.key-results { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 4px 6px; padding-left: 16px; }
+.key-chip {
+  font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line);
+  color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.key-chip.ok { color: var(--good); border-color: var(--good); }
+.key-chip.bad { color: var(--bad); border-color: var(--bad); }
+.key-chip.pending { color: var(--warn); border-color: var(--warn); }
 .model-health-empty { font-size: 12px; color: var(--muted); padding: 4px 0; }

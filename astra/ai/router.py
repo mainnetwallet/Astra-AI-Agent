@@ -65,6 +65,28 @@ CREATE TABLE IF NOT EXISTS routing_stats (
 );
 """
 
+# Saved health of every (provider, API key, model) triple — which key was used
+# for which model and whether it worked. Keys are identified by a non-secret
+# fingerprint (see Credential.key_id), never by the key itself.
+KEY_MODEL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS key_model_health (
+    provider   TEXT NOT NULL,
+    key_id     TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    key_label  TEXT DEFAULT '',
+    ok         INTEGER DEFAULT 0,
+    latency_ms INTEGER DEFAULT 0,
+    error      TEXT DEFAULT '',
+    source     TEXT DEFAULT 'live',
+    tested_at  TEXT DEFAULT '',
+    ts         REAL DEFAULT 0,
+    PRIMARY KEY (provider, key_id, model)
+);
+"""
+
+# A saved per-key/model result steers routing only while it is this fresh.
+KEY_MODEL_TTL_S = 600.0
+
 TASK_TYPES = ("simple_chat", "reasoning", "research", "coding", "vision",
               "browser", "structured_output", "translation", "summarization",
               "planning", "tool_selection", "web3",
@@ -295,12 +317,16 @@ class AstraRouter:
         self._calls: dict[str, int] = {}
         self._down: set[str] = set()
         self._last: dict = {}
+        # (provider, key_id, model) -> {ok, latency_ms, error, source, tested_at, ts, key_label}
+        self._key_model: dict[tuple, dict] = {}
         for p in self.providers:
             self._slots(p)
         if self.gateway is not None:
             self._slots(self.gateway)
         if store is not None and store:
             store.install(STATS_SCHEMA)
+            store.install(KEY_MODEL_SCHEMA)
+            self._load_key_model()
 
     # -- plumbing -------------------------------------------------------------
     def _slots(self, provider) -> None:
@@ -309,6 +335,10 @@ class AstraRouter:
         self._errors.setdefault(name, 0)
         self._calls.setdefault(name, 0)
         self._cost_est.setdefault(name, 0.0)
+        pool = getattr(provider, "pool", None)
+        if pool is not None and hasattr(pool, "model_status"):
+            pool.model_status = (
+                lambda key_id, model, _n=name: self._key_model_state(_n, key_id, model))
 
     def add(self, provider) -> None:
         self.providers.append(provider)
@@ -317,6 +347,8 @@ class AstraRouter:
     def _provider_usable(self, provider) -> bool:
         pool = getattr(provider, "pool", None)
         if pool is not None:
+            if getattr(pool, "pinned_key", lambda: None)() and getattr(pool, "count", 0):
+                return True     # a manual per-key test must reach even a disabled key
             return bool(pool)                   # pool has healthy credentials
         try:
             return bool(provider.health_check())
@@ -428,6 +460,11 @@ class AstraRouter:
                                  requested_model=req.preferred_model or "")
         ranked = self.policy.rank(candidates, req) if self.policy else \
             [(0.0, c[0], c[1]) for c in candidates]
+        # Healthy first: a (provider, model) whose every key recently failed
+        # for it goes behind the rest. Stable sort — the policy's own score
+        # order is untouched within each group, and untested models are not
+        # penalised (only *known-bad* ones move).
+        ranked.sort(key=lambda r: 1 if self._model_status(r[1], r[2].model_id) == "failed" else 0)
 
         # §11: an explicit "use exactly this model, no fallback" request
         # only ever gets that one target — never silently substituted.
@@ -829,23 +866,129 @@ class AstraRouter:
     # independent of whatever other provider tests are running.
     _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
 
-    def test_provider_model(self, name: str, model_id: str) -> dict:
+    def test_provider_model(self, name: str, model_id: str,
+                            key_id: str | None = None) -> dict:
         """Probe exactly ONE (provider, model) pair and return its result the
         instant this single call finishes — saved via `_record_route` /
         `_mark_down` immediately, independent of any other model's test.
         This is what lets the UI show each model's result as soon as it
-        arrives instead of waiting on the whole provider's model list."""
+        arrives instead of waiting on the whole provider's model list.
+
+        With ``key_id`` the call is forced through that one API key (one
+        attempt, no rotation), and the outcome is saved against
+        (provider, key, model) — see `_record_key_model`. Without it the
+        pool picks a key as usual and the result is still saved against
+        whichever key it used."""
+        adapter = next((p for p in self.providers
+                        if getattr(p, "name", "?") == name), None)
+        pool = getattr(adapter, "pool", None)
         req = RoutingRequest(task_type="health_check",
                              messages=self._TEST_MESSAGES,
                              preferred_provider=name, preferred_model=model_id,
                              no_fallback=True, max_tokens=8)
-        rr = self.route_request(req)
+        if key_id and pool is not None and hasattr(pool, "pinned"):
+            if key_id not in {k["key_id"] for k in pool.keys()}:
+                return {"model": model_id, "ok": False, "latency_ms": 0,
+                        "error": f"unknown key {key_id!r}", "key_id": key_id,
+                        "key": key_id}
+            with pool.pinned(key_id):
+                rr = self.route_request(req)
+        else:
+            rr = self.route_request(req)
+        cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
         return {
             "model": rr.model or model_id,
             "ok": bool(rr.ok),
             "latency_ms": round(rr.latency_ms, 1),
             "error": "" if rr.ok else (rr.error or "test failed"),
+            "key_id": cred.key_id if cred else (key_id or ""),
+            "key": cred.label if cred else "",
         }
+
+    # -- per-(provider, key, model) health ------------------------------------
+    @staticmethod
+    def _pinned(adapter) -> bool:
+        pool = getattr(adapter, "pool", None)
+        return bool(pool is not None and getattr(pool, "pinned_key", lambda: None)())
+
+    def _load_key_model(self) -> None:
+        try:
+            for r in self.store.fetch("SELECT * FROM key_model_health"):
+                self._key_model[(r["provider"], r["key_id"], r["model"])] = {
+                    "ok": bool(r["ok"]), "latency_ms": r["latency_ms"] or 0,
+                    "error": r["error"] or "", "source": r["source"] or "live",
+                    "tested_at": r["tested_at"] or "", "ts": r["ts"] or 0.0,
+                    "key_label": r["key_label"] or ""}
+        except Exception:
+            pass
+
+    def _record_key_model(self, adapter, model_id: str, ok: bool,
+                          latency_ms, error: str, req=None) -> None:
+        """Save which key served (or failed) this model. Called for every
+        provider attempt — live traffic and manual tests alike. Nothing is
+        saved when no key was actually picked (e.g. "no healthy credential")."""
+        pool = getattr(adapter, "pool", None)
+        cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
+        if cred is None:
+            return
+        name = getattr(adapter, "name", "")
+        now = time.time()
+        source = "test" if (req is not None and req.task_type == "health_check") else "live"
+        row = {"ok": bool(ok), "latency_ms": int(latency_ms or 0),
+               "error": "" if ok else str(error or "")[:300], "source": source,
+               "tested_at": _now(), "ts": now, "key_label": cred.label}
+        with self._lock:
+            self._key_model[(name, cred.key_id, model_id)] = row
+            if self.store:
+                try:
+                    self.store.exec(
+                        "INSERT INTO key_model_health (provider, key_id, model, "
+                        "key_label, ok, latency_ms, error, source, tested_at, ts) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(provider, key_id, model) DO UPDATE SET "
+                        "key_label=excluded.key_label, ok=excluded.ok, "
+                        "latency_ms=excluded.latency_ms, error=excluded.error, "
+                        "source=excluded.source, tested_at=excluded.tested_at, "
+                        "ts=excluded.ts",
+                        (name, cred.key_id, model_id, cred.label, int(ok),
+                         row["latency_ms"], row["error"], source, row["tested_at"], now))
+                except Exception:
+                    pass
+
+    def _key_model_state(self, provider: str, key_id: str, model_id: str):
+        """True = recently OK, False = recently failed, None = unknown/stale."""
+        row = self._key_model.get((provider, key_id, model_id))
+        if not row or time.time() - row["ts"] > KEY_MODEL_TTL_S:
+            return None
+        return row["ok"]
+
+    def _model_status(self, adapter, model_id: str) -> str:
+        """'ok' if any key recently worked for this model, 'failed' if EVERY
+        key recently failed for it, else 'unknown'."""
+        pool = getattr(adapter, "pool", None)
+        if pool is None or not hasattr(pool, "keys"):
+            return "unknown"
+        name = getattr(adapter, "name", "")
+        states = [self._key_model_state(name, k["key_id"], model_id) for k in pool.keys()]
+        if not states:
+            return "unknown"
+        if any(st is True for st in states):
+            return "ok"
+        if all(st is False for st in states):
+            return "failed"
+        return "unknown"
+
+    def key_health(self, provider: str) -> dict:
+        """Saved per-key results for one provider:
+        {model: {key_id: {ok, latency_ms, error, source, tested_at, key_label}}}."""
+        out: dict = {}
+        for (p, key_id, model), row in list(self._key_model.items()):
+            if p != provider:
+                continue
+            out.setdefault(model, {})[key_id] = {
+                k: row[k] for k in ("ok", "latency_ms", "error", "source",
+                                    "tested_at", "key_label")}
+        return out
 
     def test_provider(self, name: str) -> dict:
         """Probe EVERY model this provider exposes, one at a time — not just
@@ -938,12 +1081,17 @@ class AstraRouter:
                                             f"retry #{attempt}"))
                 self._emit("ai.completed", provider=name, model=model.model_id,
                            latency_ms=ms)
+                self._record_key_model(adapter, model.model_id, True, ms, "", req)
                 return rr
             except (ProviderError, TimeoutError) as e:
                 last_error = e.message or getattr(e, "category", type(e).__name__)
                 self._errors[name] = self._errors.get(name, 0) + 1
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt)
+                self._record_key_model(adapter, model.model_id, False,
+                                       duration_ms(t0), last_error, req)
+                if self._pinned(adapter):
+                    break           # per-key test: one attempt, on that key only
                 # the adapter's credential pool has already cooled the bad key;
                 # a fresh key on the same model may succeed, so keep retrying up
                 # to max_retries, respecting backoff only for transient errors.
@@ -954,6 +1102,8 @@ class AstraRouter:
                 self._errors[name] = self._errors.get(name, 0) + 1
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt)
+                if self._pinned(adapter):
+                    break
                 if attempt <= self.max_retries:
                     time.sleep(min(self.backoff_s * attempt, 8))
         self._mark_down(name, last_error)
@@ -1129,6 +1279,9 @@ class AstraRouter:
                 "errors": self._errors.get(name, 0),
                 "cost_usd": round(self._cost_est.get(name, 0.0), 6),
                 "credentials": self._credential_count(p),
+                "keys": (p.pool.keys() if getattr(p, "pool", None) is not None
+                         and hasattr(p.pool, "keys") else []),
+                "key_results": self.key_health(name),
             }
         return out
 

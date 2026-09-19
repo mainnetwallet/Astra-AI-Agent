@@ -59,7 +59,8 @@ New /api/v1 endpoints:
   GET  /api/v1/router/status     routing health
   GET  /api/v1/router/stats      routing + task statistics
   POST /api/v1/providers/<name>/refresh | enable | disable | test
-  POST /api/v1/providers/<name>/test/<model>  test one model only, result
+  POST /api/v1/providers/<name>/test/<model>[?key=<key_id>]  test one model only
+                                     (optionally via one specific API key); result
                                      returned as soon as that one call ends
   POST /api/v1/providers/test-all   test every provider + every Astra AI
                                      Gateway connection in one call (each
@@ -931,7 +932,10 @@ class AstraHandler(BaseHTTPRequestHandler):
         if router is None:
             return self._err_rid("providers unavailable", 400,
                                  "provider_unavailable")
-        result = router.test_provider_model(name, model_id)
+        # optional ?key=<key_id>: force this test through one specific API key
+        # (ids come from /api/providers -> providers.<n>.keys[].key_id)
+        key_id = (self._query().get("key") or "").strip() or None
+        result = router.test_provider_model(name, model_id, key_id)
         return self._json_ok_rid({"ok": True, "data": result})
 
     def _providers_test_all(self, s) -> bool:

@@ -565,12 +565,57 @@ const PROVIDER_MODEL_RESULTS = {};   // provider name -> [{model, ok, latency_ms
 // /api/providers render. The per-model test click reads from here instead
 // of re-fetching, so it knows exactly which models to fire requests for.
 const PROVIDER_MODELS = {};
+// Provider name -> its API keys as the server reports them (secret-free:
+// {key_id, label:"key 1", healthy, in_cooldown, last_error}). Read by the
+// per-key test so it knows which keys to fire every model through.
+const PROVIDER_KEYS = {};
+
+// One API key's result for one model. `k` = {key_id, label, pending?, ok?,
+// latency_ms?, error?}; `ok` undefined/null means "never tested".
+function keyChipHtml(k) {
+  const id = `data-key="${esc(k.key_id)}"`;
+  if (k.pending) return `<span class="key-chip pending" ${id}>⏳ ${esc(k.label)}</span>`;
+  if (k.ok === undefined || k.ok === null)
+    return `<span class="key-chip none" ${id}>${esc(k.label)} · not tested</span>`;
+  const when = k.tested_at ? ` title="${esc(k.tested_at)}"` : "";
+  if (k.ok) return `<span class="key-chip ok" ${id}${when}>✓ ${esc(k.label)} · ${k.latency_ms}ms</span>`;
+  return `<span class="key-chip bad" ${id}${when || ` title="${esc(k.error || "")}"`}>` +
+    `❌ ${esc(k.label)} · ${esc(k.error || "error")}</span>`;
+}
+
+// Saved (server-side) per-key results -> the same row shape a live test
+// produces, so a page reload shows the last known state of every key.
+function savedKeyRows(models, keys, keyResults) {
+  let any = false;
+  const rows = models.map((m) => ({
+    model: m,
+    keys: keys.map((k) => {
+      const r = ((keyResults || {})[m] || {})[k.key_id];
+      if (r) any = true;
+      return r ? { key_id: k.key_id, label: k.label, ok: r.ok, latency_ms: r.latency_ms,
+                   error: r.error, tested_at: r.tested_at }
+               : { key_id: k.key_id, label: k.label };
+    }),
+  }));
+  return any ? rows : [];
+}
 
 function modelHealthRowsHtml(results) {
   if (!results || !results.length) {
     return "";
   }
   return results.map((m) => {
+    if (m.keys) {
+      const anyPending = m.keys.some((k) => k.pending);
+      const anyOk = m.keys.some((k) => k.ok === true);
+      const anyTested = m.keys.some((k) => k.ok === true || k.ok === false);
+      const cls = anyPending ? "pending" : (anyOk ? "ok" : (anyTested ? "bad" : "none"));
+      const dot = anyPending ? "warn" : (anyOk ? "ok" : (anyTested ? "bad" : "warn"));
+      return `<div class="model-health-row keyed ${cls}" data-model-row="${esc(m.model)}">` +
+        `<span class="status-dot ${dot}"></span>` +
+        `<span class="model-name">${esc(m.model)}</span>` +
+        `<div class="key-results">${m.keys.map(keyChipHtml).join("")}</div></div>`;
+    }
     if (m.pending) {
       return `<div class="model-health-row pending" data-model-row="${esc(m.model)}">` +
         `<span class="status-dot warn"></span>` +
@@ -633,15 +678,22 @@ loaders.providers = async function () {
     const dot = p.healthy ? "ok" : (p.state === "down" ? "bad" : "warn");
     const modelCount = p.models ? p.models.length : 0;
     PROVIDER_MODELS[n] = p.models || [];
+    PROVIDER_KEYS[n] = p.keys || [];
+    // First paint after a reload: show the last saved per-key results.
+    if (!(PROVIDER_MODEL_RESULTS[n] || []).length && (p.keys || []).length) {
+      PROVIDER_MODEL_RESULTS[n] = savedKeyRows(p.models || [], p.keys, p.key_results);
+    }
+    const keyCount = (p.keys || []).length;
     return `<div class="provider-card" data-provider-row="${esc(n)}">` +
       `<div class="provider-card-head">` +
       `<span class="status-dot ${dot}"></span><b>${esc(n)}</b>` +
       `<span class="grow muted" data-role="provider-counts" ` +
       `data-calls="${p.calls || 0}" data-errors="${p.errors || 0}" ` +
-      `data-label="${esc(p.state || (p.healthy ? "healthy" : "?"))}" data-modelcount="${modelCount}">` +
+      `data-label="${esc(p.state || (p.healthy ? "healthy" : "?"))}" data-modelcount="${modelCount}" ` +
+      `data-keycount="${keyCount}">` +
       `${esc(p.state || (p.healthy ? "healthy" : "?"))} · ` +
-      `${modelCount} model(s) · ${p.calls || 0} calls · ${p.errors || 0} err</span>` +
-      `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}">🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})</button>` +
+      `${modelCount} model(s) · ${keyCount} key(s) · ${p.calls || 0} calls · ${p.errors || 0} err</span>` +
+      `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}">🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"}${keyCount > 1 ? ` × ${keyCount} keys` : ""})</button>` +
       `</div>` +
       `<div class="model-health-table" data-role="model-table">` +
       modelHealthRowsHtml(PROVIDER_MODEL_RESULTS[n]) +
@@ -736,7 +788,8 @@ async function testProviderStreaming(name, btn) {
     if (!countsEl) return;
     countsEl.dataset.calls = String(calls);
     countsEl.dataset.errors = String(errors);
-    countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ${calls} calls · ${errors} err`;
+    countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ` +
+      `${countsEl.dataset.keycount || 0} key(s) · ${calls} calls · ${errors} err`;
   };
   try {
     const reset = await post(`/api/v1/providers/${encodeURIComponent(name)}/reset-health`);
@@ -754,12 +807,53 @@ async function testProviderStreaming(name, btn) {
                  (parseInt(countsEl.dataset.errors, 10) || 0) + (ok ? 0 : 1));
   };
 
+  // Provider has API keys the server told us about: test EVERY model through
+  // EVERY key (one request per model x key, all in parallel). Each key's chip
+  // flips from "testing" to its result the moment that one call returns, and
+  // the server saves it against (provider, key, model).
+  const keys = PROVIDER_KEYS[name] || [];
+  if (keys.length) {
+    await testProviderKeysStreaming(name, models, keys, tableEl, (r) => bumpCounts(r.ok));
+    return;
+  }
+
   PROVIDER_MODEL_RESULTS[name] = PROVIDER_MODEL_RESULTS[name] || [];
   await streamModelTests(models, tableEl, PROVIDER_MODEL_RESULTS[name],
     (modelId) => post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
       .then((res) => (res.ok && res.data) ? res.data :
         { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
     (result) => bumpCounts(result.ok));
+}
+
+async function testProviderKeysStreaming(name, models, keys, tableEl, onResult) {
+  const rows = models.map((m) => ({
+    model: m,
+    keys: keys.map((k) => ({ key_id: k.key_id, label: k.label, pending: true })),
+  }));
+  PROVIDER_MODEL_RESULTS[name] = rows;
+  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(rows);
+  const repaint = (row) => {
+    if (!tableEl) return;
+    const el = $(`[data-model-row="${CSS.escape(row.model)}"]`, tableEl);
+    if (el) el.outerHTML = modelHealthRowsHtml([row]);
+  };
+  const probes = [];
+  rows.forEach((row) => row.keys.forEach((slot) => {
+    probes.push(
+      post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(row.model)}` +
+           `?key=${encodeURIComponent(slot.key_id)}`)
+        .then((res) => (res.ok && res.data) ? res.data
+          : { ok: false, latency_ms: 0, error: res.error || "test failed" })
+        .catch((e) => ({ ok: false, latency_ms: 0, error: String(e) }))
+        .then((r) => {
+          Object.assign(slot, { pending: false, ok: !!r.ok, latency_ms: r.latency_ms,
+                                error: r.error, tested_at: new Date().toLocaleString() });
+          repaint(row);
+          if (onResult) onResult(r);
+        }));
+  }));
+  // allSettled: one key/model failing never stops the rest from finishing.
+  return Promise.allSettled(probes);
 }
 
 /* -------------------------- Astra AI Gateway ------------------------- */

@@ -66,8 +66,8 @@ class CompatibleAdapter(AIProvider):
         return raw
 
     # -- credential handling --------------------------------------------------
-    def _pick(self):
-        return self.pool.pick()
+    def _pick(self, model: str | None = None):
+        return self.pool.pick(model)
 
     def _done(self, cred=None, errored=False, reason="", *, rate_limited=False,
               auth_failure=False, cooldown_s: float = 30.0) -> None:
@@ -148,7 +148,7 @@ class CompatibleAdapter(AIProvider):
     # -- interface ------------------------------------------------------------
     def chat(self, messages, model=None, max_tokens=500,
               response_format: str | None = None) -> str:
-        cred = self._pick()
+        cred = self._pick(model or (self.models[0] if self.models else ""))
         if cred is None:
             raise ProviderError(f"{self.name}: no healthy credential configured")
         body = {"model": model or (self.models[0] if self.models else ""),
@@ -176,10 +176,10 @@ class CompatibleAdapter(AIProvider):
         return text.strip() or "(no reply)"
 
     def stream(self, messages, model=None, max_tokens=500):
-        cred = self._pick()
+        used_model = model or (self.models[0] if self.models else "")
+        cred = self._pick(used_model)
         if cred is None:
             raise ProviderError(f"{self.name}: no healthy credential configured")
-        used_model = model or (self.models[0] if self.models else "")
         if self.events:
             self.events.emit("ai.started", agent="provider", provider=self.name,
                              model=used_model)

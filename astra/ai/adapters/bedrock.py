@@ -244,7 +244,7 @@ class BedrockAdapter(AIProvider):
         model = model or (self.models[0] if self.models else "")
         if not model:
             raise ProviderError("bedrock: no model configured")
-        cred = self.pool.pick()
+        cred = self.pool.pick(model)
         if cred is None:
             raise ProviderError("bedrock: no healthy credential configured")
         body = self._converse_body(messages, model, max_tokens)
@@ -256,7 +256,7 @@ class BedrockAdapter(AIProvider):
         model = model or (self.models[0] if self.models else "")
         if not model:
             raise ProviderError("bedrock: no model configured")
-        cred = self.pool.pick()
+        cred = self.pool.pick(model)
         if cred is None:
             raise ProviderError("bedrock: no healthy credential configured")
         if self.events:

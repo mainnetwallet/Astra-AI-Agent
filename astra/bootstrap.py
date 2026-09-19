@@ -24,11 +24,12 @@ from astra.core.config import Config
 from astra.core.events import EventBus
 from astra.core.permissions import Policy
 from astra.core.tasks import TaskEngine
-# NOTE: astra.core.executor (Executor) and astra.tools.registry
-# (ToolRegistry) have both been deleted — along with the confirm/ask gate
-# that lived across them. Every line below referencing `Executor`,
-# `ToolRegistry`, `registry`, or `executor` is now broken, pending a new
-# tool-execution layer.
+# NOTE: astra.tools.registry.ToolRegistry has been restored (see that
+# module's docstring). astra.core.executor (Executor) has NOT — it and
+# the confirm/ask gate that used to live across both are still deleted.
+# Every line below referencing `Executor`/`executor` is broken, pending
+# a new tool-execution layer (ToolRegistry.execute() itself works fine
+# standalone — see tests/test_web3_toolregistry_auto_integration.py).
 # NOTE: astra.core.orchestrator has been deleted (Orchestrator class no
 # longer exists). Every line below referencing `Orchestrator`/`orchestrator`
 # is now broken (ImportError at this line, then NameError further down) —

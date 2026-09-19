@@ -16,6 +16,12 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest", "playwright"]
+# Optional ASGI server (astra/web_fastapi.py + run_fastapi.py). The default
+# server stays zero-dependency: `python3 run.py` installs nothing.
+#   pip install ".[fastapi]"
+# On Termux/Android also pin pydantic<2: pydantic 2 ships a Rust core with
+# no Android wheel, so `pip install pydantic` would build it from source.
+fastapi = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 [tool.setuptools]
 packages = ["astra", "astra.ai", "astra.ai.adapters", "astra.agents",
@@ -25,3 +31,4 @@ include-package-data = true
 
 [project.scripts]
 astra = "run:main"
+astra-fastapi = "run_fastapi:main"

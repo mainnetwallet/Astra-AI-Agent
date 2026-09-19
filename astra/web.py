@@ -1,9 +1,17 @@
-"""Astra web server: serves the plugin-driven UI and a shared JSON API.
+"""Astra web server — stdlib adapter over `astra.web_core`.
 
-Zero dependencies — stdlib http.server. Threaded so plugins that do slow
-work (network research) don't block the UI. Routes come from each plugin's
-`routes()`; a small matcher turns `("PATCH", ("api","wallets","<id>"), h)`
-into a call with `params={"id": <int>}`.
+This module owns the socket: it parses one request off the wire, hands
+the neutral `web_core.Request` to the shared router, and writes the
+`web_core.Response` back. It decides nothing about routing, auth or
+response shape — see astra/web_core.py. The optional FastAPI server
+(astra/web_fastapi.py) calls the very same router, so the two cannot
+disagree about behaviour.
+
+Zero dependencies — stdlib http.server. Threaded, so a slow tool call
+(network research, a provider probe) never blocks the UI. The route table
+itself lives in astra/web_core.py; `route_matcher` there is the helper that
+maps a pattern like `("PATCH", ("api","wallets","<id>"))` onto a request
+path with `params={"id": <int>}` (kept for the plugin route contract).
 
 Security hardening (production build):
   * optional operator auth — set ASTRA_TOKEN: all /api/* then require a
@@ -88,100 +96,28 @@ New /api/v1 endpoints:
 """
 from __future__ import annotations
 
-import hmac
 import json
-import os
-import time
-import uuid
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, unquote
 
-from .agent import Agent
-from .chat_log import ChatLog
 from .security import (ApiError, RateLimiter, make_request_id, redact,
-                       redact_text)
+                       redact_text)  # noqa: F401  (re-exported for callers)
+from .web_core import (AGENT_NAME, CONTENT_TYPES, CORE_TABS, LOGS_TAB,
+                       SECURITY_HEADERS, STATIC_DIR,  # noqa: F401
+                       AstraSite, Headers, Request, Response, WebApp,
+                       api_error_response, error_response, json_response,
+                       parse_multipart_body, parse_query, response_headers,
+                       split_path)
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-
-AGENT_NAME = "Astra AI Agent"
-
-CONTENT_TYPES = {
-    "html": "text/html; charset=utf-8",
-    "js": "application/javascript; charset=utf-8",
-    "css": "text/css; charset=utf-8",
-    "json": "application/json; charset=utf-8",
-    "svg": "image/svg+xml",
-    "png": "image/png",
-    "jpg": "image/jpeg", "jpeg": "image/jpeg",
-    "gif": "image/gif", "webp": "image/webp",
-    "mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg",
-    "m4a": "audio/mp4", "aac": "audio/aac", "flac": "audio/flac",
-    "opus": "audio/opus",
-    "mp4": "video/mp4", "webm": "video/webm", "mov": "video/quicktime",
-    "pdf": "application/pdf",
-    "csv": "text/csv", "tsv": "text/tab-separated-values",
-    "txt": "text/plain; charset=utf-8", "md": "text/plain; charset=utf-8",
-    "xml": "application/xml", "yaml": "application/x-yaml",
-    "zip": "application/zip",
-    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-}
-
-CORE_TABS = [
-    {"tab": "dashboard", "label": "📊 Dashboard", "core": True},
-    {"tab": "assistant", "label": "🤖 Assistant", "core": True},
-    {"tab": "providers", "label": "🔌 AI Providers health", "core": True},
-    {"tab": "router", "label": "🧠 Router", "core": True},
-    {"tab": "web3", "label": "⛓️ Wallet", "core": True},
-    {"tab": "backup", "label": "💾 Backup", "core": True},
-]
-
-# Appended after every plugin tab (Airdrops, etc.) — see manifest().
-LOGS_TAB = {"tab": "logs", "label": "📡 Activity Log", "core": True}
-
-# Header templates for a hardened server.
-# * X-Frame-Options / nosniff / Referrer-Policy / CSP defend the SPA
-# * X-Request-Id correlates one request across logs + response bodies
-# * Cache-Control: no-store keeps API payloads off shared caches
-SECURITY_HEADERS = [
-    ("X-Content-Type-Options", "nosniff"),
-    ("X-Frame-Options", "SAMEORIGIN"),
-    ("Referrer-Policy", "no-referrer"),
-    ("X-XSS-Protection", "0"),  # modern browsers: this header is deprecated
-    ("Cross-Origin-Opener-Policy", "same-origin"),
-    ("Content-Security-Policy",
-     "default-src 'self'; img-src 'self' data: blob:; "
-     "media-src 'self' blob:; "
-     "style-src 'self' 'unsafe-inline'; script-src 'self'; "
-     "connect-src 'self'; frame-ancestors 'self'"),
-]
+__all__ = ["AGENT_NAME", "AstraHandler", "AstraServer", "AstraSite",
+           "WebApp", "STATIC_DIR", "CONTENT_TYPES", "CORE_TABS",
+           "LOGS_TAB", "SECURITY_HEADERS", "Request", "Response", "Headers"]
 
 
 def _json(handler: "AstraHandler", payload, code: int = 200) -> None:
-    """Serialise a payload as JSON with full hardening. The payload is
-    redacted defensively so a subsystem that leaks a secret can never egress
-    it through the API. The request_id rides both header and body."""
-    rid = getattr(handler, "_rid", "")
-    if isinstance(payload, dict) and "request_id" not in payload:
-        payload = {**payload, "request_id": rid}
-    body = json.dumps(redact(payload), ensure_ascii=False).encode("utf-8")
-    try:
-        handler.send_response(code)
-        handler.send_header("Content-Type", "application/json; charset=utf-8")
-        handler.send_header("Content-Length", str(len(body)))
-        handler.send_header("X-Request-Id", rid)
-        handler.apply_security_headers()
-        handler.apply_cors_headers()
-        handler.send_header("Cache-Control", "no-store")
-        handler.end_headers()
-        handler.wfile.write(body)
-    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-        # The browser went away before the response was written (page refresh,
-        # tab closed, request aborted). The work — e.g. a provider test — was
-        # already done and saved, so there is nobody left to answer: drop it
-        # quietly instead of a traceback (and a second one from the 500 path).
-        handler.close_connection = True
+    """Serialise a payload as JSON with full hardening (compat helper)."""
+    handler._emit(json_response(payload, code, getattr(handler, "_rid", "")),
+                  handler._last_request(), handler.command)
 
 
 def _json_ok(handler: "AstraHandler", payload, code: int = 200) -> None:
@@ -191,99 +127,9 @@ def _json_ok(handler: "AstraHandler", payload, code: int = 200) -> None:
 def _json_err(handler: "AstraHandler", message: str, code: int = 400,
               error_code: str = "bad_request") -> None:
     """Structured error envelope — no stack traces, ever."""
-    _json(handler, {"ok": False, "error": message,
-                    "error_code": error_code,
-                    "request_id": getattr(handler, "_rid", "")}, code)
-
-
-def _parse_multipart_body(raw: bytes, content_type: str) -> tuple[dict, list]:
-    """Minimal multipart/form-data parser (stdlib `cgi` was removed in
-    Python 3.13, so this replaces `cgi.FieldStorage` for our purposes).
-
-    Returns (fields_dict, files_list) where each file is
-    {filename, data (bytes), content_type}."""
-    fields: dict = {}
-    files: list = []
-    if not raw or "boundary=" not in content_type:
-        return fields, files
-
-    boundary = content_type.split("boundary=", 1)[1].strip()
-    if boundary.startswith('"') and boundary.endswith('"'):
-        boundary = boundary[1:-1]
-    boundary = boundary.encode("utf-8")
-    delimiter = b"--" + boundary
-    # Split on the delimiter; drop preamble/epilogue and the closing "--".
-    parts = raw.split(delimiter)
-    for part in parts:
-        if not part or part in (b"--", b"--\r\n"):
-            continue
-        # Each part looks like: \r\n<headers>\r\n\r\n<body>\r\n
-        part = part.strip(b"\r\n")
-        if not part:
-            continue
-        if b"\r\n\r\n" in part:
-            header_block, body = part.split(b"\r\n\r\n", 1)
-        elif b"\n\n" in part:
-            header_block, body = part.split(b"\n\n", 1)
-        else:
-            continue
-        # Trailing CRLF before the next boundary belongs to the delimiter.
-        if body.endswith(b"\r\n"):
-            body = body[:-2]
-        elif body.endswith(b"\n"):
-            body = body[:-1]
-
-        headers = {}
-        for line in header_block.split(b"\r\n"):
-            if b":" not in line:
-                continue
-            name, _, value = line.partition(b":")
-            headers[name.strip().lower().decode("latin-1")] = \
-                value.strip().decode("latin-1")
-
-        disposition = headers.get("content-disposition", "")
-        if "form-data" not in disposition:
-            continue
-        field_name = None
-        filename = None
-        for piece in disposition.split(";"):
-            piece = piece.strip()
-            if piece.startswith("name="):
-                field_name = piece[len("name="):].strip('"')
-            elif piece.startswith("filename="):
-                filename = piece[len("filename="):].strip('"')
-        if field_name is None:
-            continue
-
-        if filename:
-            files.append({
-                "filename": filename,
-                "data": body,
-                "content_type": headers.get("content-type",
-                                             "application/octet-stream"),
-            })
-        else:
-            fields[field_name] = body.decode("utf-8", errors="replace")
-
-    return fields, files
-
-
-def _route_matcher(route_parts, path_parts):
-    """Match a route pattern like ("api","wallets","<id>") against real path
-    segments. Returns a params dict (id -> int) or None."""
-    if len(route_parts) != len(path_parts):
-        return None
-    params = {}
-    for pat, real in zip(route_parts, path_parts):
-        if pat == "<id>":
-            if not real.isdigit():
-                return None
-            params["id"] = int(real)
-        elif pat == "<slug>":
-            params["slug"] = real
-        elif pat != real:
-            return None
-    return params
+    handler._emit(error_response(message, code, error_code,
+                                 getattr(handler, "_rid", "")),
+                  handler._last_request(), handler.command)
 
 
 class AstraHandler(BaseHTTPRequestHandler):
@@ -293,23 +139,41 @@ class AstraHandler(BaseHTTPRequestHandler):
         pass
 
     # -- plumbing ------------------------------------------------------------
-    def _path_parts(self) -> list[str]:
+    def _path_parts(self) -> list:
         # Split on the *raw* "/" first, then percent-decode each segment, so an
         # encoded model id like "openai%2Fgpt-oss-120b" or "%40cf%2Fmeta%2F..."
         # arrives as one segment with its real "/" and "@" restored.
-        return [unquote(p) for p in urlparse(self.path).path.split("/") if p]
+        return split_path(self.path)
 
     def _query(self) -> dict:
-        q = parse_qs(urlparse(self.path).query)
-        return {k: v[0] for k, v in q.items()}
+        return parse_query(self.path)
+
+    def _content_length(self) -> int:
+        try:
+            return int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return 0
+
+    def _is_multipart(self) -> bool:
+        return "multipart/form-data" in (self.headers.get("Content-Type") or "")
+
+    def _drain(self, length: int) -> None:
+        """Read and discard up to `length` bytes of an oversized body so the
+        client can complete its send and read the error response."""
+        remaining = length
+        while remaining > 0:
+            try:
+                chunk = self.rfile.read(min(64 * 1024, remaining))
+            except Exception:
+                return
+            if not chunk:
+                return
+            remaining -= len(chunk)
 
     def _read_json(self) -> dict:
         """Read a JSON body with a hard size cap (prevents memory blowup)."""
         max_bytes = self.server.max_body_bytes
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = 0
+        length = self._content_length()
         if length <= 0:
             return {}
         if length > max_bytes:
@@ -325,20 +189,13 @@ class AstraHandler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
-    def _is_multipart(self) -> bool:
-        ct = self.headers.get("Content-Type", "")
-        return "multipart/form-data" in ct
-
-    def _read_multipart(self) -> tuple[dict, list]:
+    def _read_multipart(self) -> tuple:
         """Parse multipart/form-data. Returns (fields_dict, files_list).
         Each file in files_list is {filename, data (bytes), content_type}.
 
         Implemented by hand (no `cgi` module — removed in Python 3.13)."""
         max_bytes = self.server.max_body_bytes
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = 0
+        length = self._content_length()
         if length > max_bytes:
             self._drain(min(length, 64 * 1024 * 1024))
             raise ApiError("payload_too_large",
@@ -346,884 +203,72 @@ class AstraHandler(BaseHTTPRequestHandler):
         ct = self.headers.get("Content-Type", "")
         raw = self.rfile.read(length) if length > 0 else b""
         try:
-            return _parse_multipart_body(raw, ct)
+            return parse_multipart_body(raw, ct)
         except Exception:
             return {}, []
-
-    # -- security helpers ------------------------------------------------
-    def _drain(self, length: int) -> None:
-        """Read and discard up to `length` bytes of an oversized body so the
-        client can complete its send and read the error response."""
-        remaining = length
-        while remaining > 0:
-            try:
-                chunk = self.rfile.read(min(64 * 1024, remaining))
-            except Exception:
-                return
-            if not chunk:
-                return
-            remaining -= len(chunk)
 
     def apply_security_headers(self) -> None:
         for name, value in SECURITY_HEADERS:
             self.send_header(name, value)
 
     def apply_cors_headers(self) -> None:
-        origin = self.headers.get("Origin")
-        allowed = self.server.cors_origin(origin)
-        if allowed:
-            self.send_header("Access-Control-Allow-Origin", allowed)
-            self.send_header("Vary", "Origin")
-            if self.command == "OPTIONS":
-                self.send_header("Access-Control-Allow-Methods",
-                                 "GET,POST,PATCH,DELETE,OPTIONS")
-                self.send_header("Access-Control-Allow-Headers",
-                                 "Content-Type, X-Astra-Token, Authorization")
-                self.send_header("Access-Control-Max-Age", "600")
+        resp = Response(cors=True, cache=None)
+        req = self._last_request()
+        for name, value in response_headers(resp, req, self.server, self.command):
+            if name.startswith("Access-Control") or name == "Vary":
+                self.send_header(name, value)
 
-    def _authorized(self) -> bool:
-        """Operator token gate. ASTRA_TOKEN unset = open (local-first);
-        set = Bearer / X-Astra-Token / ?token= must match, constant-time."""
-        token = self.server.operator_token
-        if not token:
-            return True
-        supplied = self.headers.get("Authorization", "")
-        if supplied.lower().startswith("bearer "):
-            candidate = supplied[7:].strip()
-        else:
-            candidate = (self.headers.get("X-Astra-Token", "")
-                         or self._query().get("token", ""))
-        return bool(candidate) and hmac.compare_digest(candidate, token)
+    # -- request / response bridge -------------------------------------------
+    def _last_request(self) -> Request:
+        """The Request built for the current response (for compat helpers)."""
+        req = getattr(self, "_req", None)
+        if req is None:
+            req = self._new_request()
+        return req
 
-    def _rate_limited(self) -> bool:
-        limiter = self.server.rate_limiter
-        if not limiter:
-            return False
+    def _new_request(self) -> Request:
         ip = (self.client_address or ("unknown", 0))[0]
-        return not limiter.allow(ip)
+        return Request(self.command, self.path,
+                       headers=Headers(self.headers.items()),
+                       remote_ip=ip, rid=make_request_id())
 
-    def _resolve_v1(self, path: list[str]) -> list[str]:
-        """/api/v1/<rest> -> /api/<rest> so every legacy route is served
-        under the versioned prefix with no duplicated code path."""
-        if len(path) >= 3 and path[0] == "api" and path[1] == "v1":
-            return ["api"] + path[2:]
-        return path
-
-    def _gate(self, path: list[str]):
-        """Auth + rate-limit for API traffic. Returns an already-sent marker
-        string (truthy) on rejection or None to proceed."""
-        if not (path and path[0] == "api"):
-            return None
-        if not self._authorized():
-            _json_err(self, "authentication required", 401,
-                      error_code="authentication")
-            return "auth"
-        if self._rate_limited():
-            _json_err(self, "rate limit exceeded", 429, error_code="rate_limit")
-            return "rate"
-        return None
-
-    def _send_static(self, rel: str) -> None:
-        if rel in ("", "/"):
-            rel = "index.html"
-        rel = rel.lstrip("/")
-        if ".." in rel or "\\" in rel:
-            _json_err(self, "bad path", 400)
-            return
-        root = os.path.abspath(STATIC_DIR)
-        path = os.path.abspath(os.path.join(root, rel))
-        # path-traversal guard: resolved path must stay inside static root
-        if not (path == root or path.startswith(root + os.sep)):
-            _json_err(self, "forbidden", 403)
-            return
-        if not os.path.isfile(path):
-            self.send_error(404, "not found")
-            return
-        ctype = CONTENT_TYPES.get(path.rsplit(".", 1)[-1], "application/octet-stream")
-        with open(path, "rb") as f:
-            body = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        # No cache header here meant the browser was free to keep serving a
-        # stale astra.js/style.css indefinitely after every deploy — a UI
-        # fix landing in git often wouldn't actually reach the page until a
-        # manual hard-refresh. These are cheap to re-fetch and change on
-        # every deploy, so always make the browser revalidate them.
-        if path.endswith((".html", ".js", ".css")):
-            self.send_header("Cache-Control", "no-cache, must-revalidate")
-        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
-        self.apply_security_headers()
-        self.end_headers()
-        self.wfile.write(body)
-
-    # -- multimodal ----------------------------------------------------------
-    def _process_uploads(self, files: list) -> list[dict]:
-        """Process uploaded files into attachment dicts for the agent."""
-        if not files:
-            return []
-        upload_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data", "uploads")
-        os.makedirs(upload_dir, exist_ok=True)
-        attachments = []
-        for f in files[:10]:
-            try:
-                from astra.core.attachments import process_upload
-                att = process_upload(f["data"], f["filename"], upload_dir)
-                attachments.append(att.to_dict())
-            except Exception as e:
-                attachments.append({
-                    "filename": f.get("filename", "unknown"),
-                    "error": str(e),
-                    "processed": False,
-                })
-        return attachments
-
-    def _serve_upload(self, filename: str) -> None:
-        """Serve an uploaded file for preview."""
-        upload_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data", "uploads")
-        path = os.path.abspath(os.path.join(upload_dir, filename))
-        root = os.path.abspath(upload_dir)
-        if not path.startswith(root + os.sep):
-            _json_err(self, "forbidden", 403)
-            return
-        if not os.path.isfile(path):
-            _json_err(self, "file not found", 404)
-            return
-        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-        ctype = CONTENT_TYPES.get(ext, "application/octet-stream")
-        with open(path, "rb") as f:
-            body = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
-        self.apply_security_headers()
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _serve_artifact(self, artifact_id: str, filename: str) -> None:
-        """Serve a stored artifact file.
-
-        Generated artifacts are written by astra.core.artifacts.store_artifact
-        into `{tempdir}/astra/artifacts/{id}_{safe_filename}` (a flat
-        directory, id-prefixed — see generate_document / agent.py). This must
-        match that exact scheme or every download 404s.
-        """
-        import tempfile
-        from astra.core.artifacts import _safe_name
-
-        artifact_dir = os.path.join(tempfile.gettempdir(), "astra", "artifacts")
-        safe_filename = _safe_name(filename)
-        safe_id = _safe_name(artifact_id)
-        path = os.path.abspath(
-            os.path.join(artifact_dir, f"{safe_id}_{safe_filename}"))
-        root = os.path.abspath(artifact_dir)
-        if not path.startswith(root + os.sep):
-            _json_err(self, "forbidden", 403)
-            return
-        if not os.path.isfile(path):
-            _json_err(self, "artifact not found", 404)
-            return
-        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-        ctype = CONTENT_TYPES.get(ext, "application/octet-stream")
-        with open(path, "rb") as f:
-            body = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Disposition",
-                         f'inline; filename="{filename}"')
-        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
-        self.apply_security_headers()
-        self.end_headers()
-        self.wfile.write(body)
-
-    # -- dispatch ------------------------------------------------------------
-    def _dispatch(self, method: str) -> None:
-        self._rid = make_request_id()
-        server, path = self.server, self._resolve_v1(self._path_parts())
-        gated = self._gate(path)
-        if gated:
-            return
-        server.note_request(method, path)
-        try:
-            q = self._query()
-            body = {} if self._is_multipart() else self._read_json()
-            if not path:
-                return self._send_static("index.html")
-            if path[0] == "static":
-                return self._send_static("/".join(path[1:]))
-            if path[0] == "favicon.ico":
-                self.send_response(204)
-                self.send_header("X-Request-Id", self._rid)
-                return self.end_headers()
-
-            # system / manifest endpoints
-            if path == ["api", "manifest"]:
-                return _json_ok(self, {"ok": True, "data": server.manifest()})
-            if path == ["api", "chat"] and method == "POST":
-                # The user message is saved BEFORE the agent runs and the reply
-                # is saved the moment it exists — so a page refresh mid-turn
-                # loses nothing: the reloaded page reads it back from
-                # /api/chat/history (see astra/chat_log.py).
-                log = server.chat_log
-                if self._is_multipart():
-                    fields, files = self._read_multipart()
-                    msg = fields.get("message", "")
-                    ctx = fields.get("context", "")
-                    names = [f.get("filename", "file") for f in (files or [])[:10]]
-                    attachments = self._process_uploads(files)
-                    # Pin this whole turn to the chat the message actually
-                    # landed in. If the user switches chats (or opens a new
-                    # one) while the agent is still working, `current_id`
-                    # changes — the reply must stay with the original chat,
-                    # not follow the user to wherever they went.
-                    cid = log.add_user(msg, files=names)
-                    token = log.begin(cid)
-                    try:
-                        reply = server.agent.handle(
-                            msg, context=ctx, attachments=attachments or None)
-                        log.add_reply(reply, conversation_id=cid)
-                    finally:
-                        log.end(token)
-                else:
-                    msg = body.get("message", "")
-                    cid = log.add_user(msg)
-                    token = log.begin(cid)
-                    try:
-                        reply = server.agent.handle(
-                            msg, context=body.get("context", "") or "")
-                        log.add_reply(reply, conversation_id=cid)
-                    finally:
-                        log.end(token)
-                # The browser may have switched to a different chat (or
-                # opened a new one) while this was running — tell it which
-                # chat this reply actually belongs to, so it only paints the
-                # bubble into the log if that's still what's on screen.
-                reply = dict(reply)
-                reply["conversation_id"] = cid
-                return _json_ok(self, {"ok": True, "data": reply})
-            if path == ["api", "chat", "history"] and method == "GET":
-                cid_param = q.get("conversation_id")
-                return _json_ok(self, {"ok": True, "data": server.chat_log.history(
-                    after_id=int(q.get("after_id") or 0),
-                    limit=min(int(q.get("limit") or 200), 500),
-                    conversation_id=int(cid_param) if cid_param else None)})
-            if path == ["api", "chat", "history"] and method == "DELETE":
-                return _json_ok(self, {"ok": True,
-                                       "removed": server.chat_log.clear()})
-            # chat history: the 🗑/⋮ pair in the Assistant tab. Each chat is a
-            # "conversation"; GET lists them, POST opens a new one (reusing
-            # the current chat if it's still empty), GET/DELETE on an id
-            # switches to / deletes that particular chat.
-            if path == ["api", "chat", "conversations"] and method == "GET":
-                return _json_ok(self, {"ok": True,
-                                       "data": server.chat_log.list_conversations()})
-            if path == ["api", "chat", "conversations"] and method == "POST":
-                cid = server.chat_log.new_conversation()
-                return _json_ok(self, {"ok": True, "data": {"id": cid}})
-            if (len(path) == 4 and path[:3] == ["api", "chat", "conversations"]
-                    and path[3].isdigit()):
-                cid = int(path[3])
-                if method == "GET":
-                    if not server.chat_log.switch(cid):
-                        return _json_err(self, "chat not found", 404)
-                    return _json_ok(self, {"ok": True,
-                                           "data": server.chat_log.history(conversation_id=cid)})
-                if method == "DELETE":
-                    if not server.chat_log.delete_conversation(cid):
-                        return _json_err(self, "chat not found", 404)
-                    return _json_ok(self, {"ok": True,
-                                           "data": {"current": server.chat_log.current_id}})
-            if path == ["api", "chat", "resume"] and method == "POST":
-                eid = (body.get("execution_id") or "").strip()
-                if not eid:
-                    return _json_err(self, "execution_id required")
-                # Same pin as /api/chat: capture the chat this approval was
-                # made in now, so a chat switch mid-resume can't send the
-                # follow-up reply to the wrong conversation.
-                cid = server.chat_log.current_id
-                token = server.chat_log.begin(cid)
-                try:
-                    reply = server.agent.resume(eid, bool(body.get("allow", True)))
-                    server.chat_log.add_reply(reply, conversation_id=cid)
-                finally:
-                    server.chat_log.end(token)
-                reply = dict(reply)
-                reply["conversation_id"] = cid
-                return _json_ok(self, {"ok": True, "data": reply})
-            if path == ["api", "dashboard"] and method == "GET":
-                return _json_ok(self, {"ok": True, "data": server.agent.dashboard()})
-            if path == ["api", "export"] and method == "GET":
-                return _json_ok(self, {"ok": True, "data": server.agent.export_all()})
-            if path == ["api", "import"] and method == "POST":
-                result = server.agent.import_all(body.get("data", body))
-                return _json_ok(self, {"ok": True, "data": result})
-            if path == ["api", "health"] and method == "GET":
-                return _json_ok(self, {"ok": True, "data": server.health()})
-            if path == ["api", "config"] and method == "GET":
-                return _json_ok(self, {"ok": True, "data": server.cfg().all()})
-
-            # live events
-            if path == ["api", "events"] and method == "GET":
-                return _json_ok(self, {"ok": True, "data": server.events().history(
-                    limit=int(q.get("limit", 100)), after_id=int(q.get("after_id") or 0))})
-            if path == ["api", "events"] and method == "DELETE":
-                removed = server.events().clear()
-                return _json_ok(self, {"ok": True, "removed": removed})
-            if path == ["api", "events", "stream"] and method == "GET":
-                return self._sse()
-            if path == ["api", "events", "last"] and method == "GET":
-                return _json_ok(self, {"ok": True,
-                                       "data": {"last_id": server.events().last_id()}})
-
-            # tools / tasks / memory / experiences
-            if path == ["api", "tools"] and method == "GET":
-                return _json_ok(self, {"ok": True,
-                                       "data": {"tools": server.registry().list(),
-                                                "stats": server.registry().stats()}})
-            if path == ["api", "tasks"] and method == "GET":
-                return _json_ok(self, {"ok": True,
-                                       "data": server.tasks().list(
-                                           status=q.get("status") or None,
-                                           type=q.get("type") or None)})
-            if path == ["api", "tasks"] and method == "POST":
-                # airdrop plugin's task schema uses "airdrop_id" — yield to the
-                # plugin route so old API users keep working untouched
-                if body.get("airdrop_id") is not None:
-                    pass  # handled below (plugin route loop)
-                else:
-                    goal = (body.get("goal") or "").strip()
-                    if not goal:
-                        return _json_err(self, "goal required")
-                    t = server.tasks().create(goal=goal, type=body.get("type", "manual"),
-                                              priority=int(body.get("priority", 0)),
-                                              description=body.get("description", ""))
-                    return _json_ok(self, {"ok": True, "data": t}, 201)
-            if len(path) == 3 and path[0] == "api" and path[1] == "tasks" and method == "GET":
-                # generic task engine GET only handles list; per-id tasks
-                # are owned by plugin routes (e.g. airdrop tasks PATCH)
-                t = server.tasks().get(int(path[2])) if path[2].isdigit() else None
-                if not t:
-                    return _json_err(self, "task not found", 404)
-                return _json_ok(self, {"ok": True, "data": t})
-            if path == ["api", "memory"] and method == "GET":
-                return _json_ok(self, {"ok": True, "data": server.memory().all(
-                    limit=int(q.get("limit", 100)), category=q.get("category") or None)})
-            if path == ["api", "memory"] and method == "POST":
-                content = (body.get("content") or "").strip()
-                if not content:
-                    return _json_err(self, "content required")
-                try:
-                    _imp = float(body.get("importance", 0.5))
-                except (TypeError, ValueError):
-                    _imp = 0.5
-                m = server.memory().save(
-                    content, body.get("category", "note"),
-                    body.get("tags", ""), source="api",
-                    layer=body.get("layer", "long"), importance=_imp)
-                return _json_ok(self, {"ok": True, "data": m}, 201)
-            if path == ["api", "memory", "search"] and method == "GET":
-                qq = q.get("query", "")
-                try:
-                    _min_imp = float(q.get("min_importance")) if q.get("min_importance") else None
-                except (TypeError, ValueError):
-                    _min_imp = None
-                return _json_ok(self, {"ok": True,
-                                       "data": server.memory().search(
-                                           qq, k=int(q.get("k", 5)),
-                                           layer=q.get("layer") or None,
-                                           min_importance=_min_imp)})
-            if len(path) == 3 and path[0] == "api" and path[1] == "memory" and method == "DELETE":
-                server.memory().forget(path[2])
-                return _json_ok(self, {"ok": True})
-            if path == ["api", "experiences"] and method == "GET":
-                return _json_ok(self, {"ok": True, "data": server.experiences().stats()})
-
-            # workflows + scheduler
-            if path == ["api", "workflows"] and method == "GET":
-                return _json_ok(self, {"ok": True,
-                                       "data": server.workflows().list_definitions()})
-            if path == ["api", "workflows"] and method == "POST":
-                steps = body.get("steps") or []
-                if not isinstance(steps, list):
-                    return _json_err(self, "steps must be a list")
-                wf = server.workflows().define(body.get("name", ""), body.get("description", ""), steps)
-                return _json_ok(self, {"ok": True, "data": wf}, 201)
-            if len(path) == 4 and path[:2] == ["api", "workflows"] and path[3] == "run" and method == "POST":
-                run = server.workflows().run(workflow_id=int(path[2]), params=body.get("params") or {})
-                return _json_ok(self, {"ok": True, "data": run})
-            if path == ["api", "workflows", "runs"] and method == "GET":
-                return _json_ok(self, {"ok": True, "data": server.workflows().list_runs()})
-            if path == ["api", "schedules"] and method == "GET":
-                sched = server.scheduler()
-                return _json_ok(self, {"ok": True,
-                                       "data": (sched.list() if sched else [])})
-            if path == ["api", "schedules"] and method == "POST" and server.scheduler():
-                s = server.scheduler().add(body.get("name", "sched"), body.get("kind", "daily"),
-                                           body.get("value", ""), int(body.get("workflow_id", 0)),
-                                           body.get("params") or {})
-                return _json_ok(self, {"ok": True, "data": s}, 201)
-            if len(path) == 3 and path[:2] == ["api", "schedules"] and method in ("PATCH", "DELETE"):
-                sc = server.scheduler()
-                if not sc:
-                    return _json_err(self, "scheduler disabled", 400)
-                if method == "DELETE":
-                    sc.delete(int(path[2]))
-                    return _json_ok(self, {"ok": True})
-                # PATCH: enable/disable only (schedule fields are fixed)
-                enabled = body.get("enabled")
-                if enabled is None:
-                    return _json_err(self, "enabled required")
-                row = sc.set_enabled(int(path[2]), bool(enabled))
-                return _json_ok(self, {"ok": True, "data": row}) if row else \
-                    _json_err(self, "schedule not found", 404)
-
-            # artifact serving: /api/v1/artifacts/{id}/{filename}
-            if (len(path) == 4 and path[:2] == ["api", "artifacts"]
-                    and method == "GET"):
-                return self._serve_artifact(path[2], path[3])
-            # upload serving: /api/v1/uploads/{filename}
-            if (len(path) == 3 and path[:2] == ["api", "uploads"]
-                    and method == "GET"):
-                return self._serve_upload(path[2])
-
-            # /api/v1 endpoints (v1 prefix already stripped by _resolve_v1)
-            if self._handle_v1(path, method, q, body):
-                return
-
-            # ai providers
-            if path == ["api", "providers"] and method == "GET":
-                data = server.router().stats()
-                # "🔌 AI Providers health" only ever shows providers that
-                # can actually be routed to — an API key AND a base URL
-                # AND at least one model are all required (§3 of the
-                # module docstring: without all three nothing can be
-                # called), so a partially-configured provider is dropped
-                # here rather than shown as a confusing "0 models" row.
-                provs = data.get("providers") or {}
-                data["providers"] = {
-                    n: p for n, p in provs.items()
-                    if p.get("credentials") and p.get("base_url") and p.get("models")
-                }
-                return _json_ok(self, {"ok": True, "data": data})
-
-            # Astra AI Gateway — separate system, reported outside the
-            # provider table (never a provider)
-            if path == ["api", "gateway", "health"] and method == "GET":
-                r = server.router()
-                gw = r.gateway_health() if r is not None else \
-                    {"state": "not_configured", "connections": []}
-                return _json_ok(self, {"ok": True, "data": gw})
-
-            # orchestrator / agents — the orchestrator was removed; chat now
-            # runs through the Gateway pipeline (see astra/ai/chat_pipeline.py).
-            # These routes stay so old clients get a clear answer, not a 500.
-            if path[:2] in (["api", "agents"], ["api", "executions"]):
-                if server.orchestrator() is None:
-                    if path == ["api", "agents"] and method == "GET":
-                        return _json_ok(self, {"ok": True, "data": {
-                            "recent": [], "stats": {}}})
-                    if path == ["api", "executions"] and method == "GET":
-                        return _json_ok(self, {"ok": True, "data": []})
-                    return _json_err(
-                        self, "orchestrator removed — use POST /api/chat", 410)
-            if path == ["api", "agents"] and method == "GET":
-                return _json_ok(self, {"ok": True,
-                                       "data": {"recent": server.orchestrator().recent(),
-                                                "stats": server.orchestrator().stats()}})
-            if path == ["api", "agents"] and method == "POST":
-                goal = (body.get("goal") or "").strip()
-                if not goal:
-                    return _json_err(self, "goal required")
-                r = server.orchestrator().submit(goal, sync=bool(body.get("sync", False)))
-                return _json_ok(self, {"ok": True, "data": r}, 201)
-            if len(path) == 3 and path[0] == "api" and path[1] == "agents" and method == "GET":
-                return _json_ok(self, {"ok": True,
-                                       "data": server.orchestrator().state(path[2])})
-            if len(path) == 4 and path[0] == "api" and path[1] == "agents" and path[3] == "resume" and method == "POST":
-                return _json_ok(self, {"ok": True,
-                                       "data": server.orchestrator().resume(path[2], bool(body.get("allow", True)))})
-            if len(path) == 4 and path[0] == "api" and path[1] == "agents" and path[3] == "cancel" and method == "POST":
-                return _json_ok(self, {"ok": True,
-                                       "data": server.orchestrator().cancel(path[2])})
-            if path == ["api", "executions"] and method == "GET":
-                return _json_ok(self, {"ok": True,
-                                       "data": server.orchestrator().recent()})
-
-            # NOTE: plugin management (GET/enable/disable /api/plugins) and
-            # per-plugin route dispatch removed along with the plugin system.
-            # plugins/ is an empty placeholder — see plugins/README.md.
-            return _json_err(self, "unknown route", 404)
-        except ApiError as e:
-            server.note_request(method, path, error=True)
-            if not e.request_id:
-                e.request_id = self._rid
-            return _json(self, e.to_dict(), e.status)
-        except Exception as e:
-            server.note_request(method, path, error=True)
-            detail = str(e) if self.server.env != "production" else ""
-            msg = f"internal error{': ' + detail if detail else ''}"
-            return _json_err(self, msg, 500, error_code="internal")
-
-    # -- /api/v1 endpoints --------------------------------------------------
-    def _handle_v1(self, path, method, q, body) -> bool:
-        """Production endpoints: model registry, router status/stats,
-        provider admin, Web3 transactions + policy, metrics. Returns True
-        when the route was handled (response already sent)."""
-        s = self.server
-        if path == ["api", "metrics"] and method == "GET":
-            return self._json_ok_rid({"ok": True, "data": s.metrics()})
-        if path == ["api", "models"] and method == "GET":
-            return self._models(s)
-        if path == ["api", "models", "refresh"] and method == "POST":
-            disco = s._get("discovery")
-            if disco is None:
-                return self._err_rid("model discovery unavailable", 400,
-                                     "model_unavailable")
-            disco.refresh_all(force=True)
-            return self._json_ok_rid({"ok": True, "data": {"refreshed": True}})
-        if path == ["api", "router", "status"] and method == "GET":
-            return self._json_ok_rid({"ok": True,
-                                      "data": s.router().health()})
-        if path == ["api", "router", "stats"] and method == "GET":
-            r = s.router()
-            return self._json_ok_rid({"ok": True,
-                                      "data": {"routing": r.routing_stats(),
-                                               "task": r.task_stats(),
-                                               "last_route": r.last_route()}})
-        # provider admin: /api/v1/providers/<name>/refresh|enable|disable|test|reset-health
-        # (fixed off-by-one: "api"+"providers"+<name>+<action> is 4 segments,
-        # not 5 — the old `len(path) == 5` check meant this route, including
-        # refresh/enable/disable, could never actually match a real request)
-        if (len(path) == 4 and path[:2] == ["api", "providers"]
-                and method == "POST"
-                and path[3] in ("refresh", "enable", "disable", "test", "reset-health")):
-            return self._provider_admin(s, path[2], path[3])
-        # single-model test: /api/v1/providers/<name>/test/<model> — probes
-        # just that one (provider, model) pair so the browser gets each
-        # model's result the instant it's ready, instead of waiting for
-        # every model on the provider to finish (see test_provider_model).
-        if (len(path) == 5 and path[:2] == ["api", "providers"]
-                and path[3] == "test" and method == "POST"):
-            return self._provider_model_test(s, path[2], path[4])
-        # one-click "🌐 Gateway test": probes every provider AND every
-        # Astra AI Gateway connection, saving each result as it completes.
-        if path == ["api", "providers", "test-all"] and method == "POST":
-            return self._providers_test_all(s)
-        if path == ["api", "gateway", "test"] and method == "POST":
-            return self._gateway_test(s)
-        # single-connection Gateway test: /api/v1/gateway/<connection>/test
-        if (len(path) == 4 and path[:2] == ["api", "gateway"]
-                and path[3] == "test" and method == "POST"):
-            return self._gateway_test_one(s, path[2])
-        # single-model Gateway test: /api/v1/gateway/<connection>/test/<model>
-        # — probes just that one (connection, model) pair, mirroring the
-        # provider per-model endpoint above, so the browser gets each
-        # model's result the instant it's ready.
-        if (len(path) == 5 and path[:2] == ["api", "gateway"]
-                and path[3] == "test" and method == "POST"):
-            return self._gateway_model_test(s, path[2], path[4])
-        # web3
-        if path[:3] == ["api", "web3", "transactions"] and method == "GET":
-            return self._web3_tx_list(s, path)
-        if path == ["api", "web3", "transaction-policy"] and method == "GET":
-            return self._web3_policy(s)
-        if (path == ["api", "web3", "transaction-policy", "mode"]
-                and method == "POST"):
-            return self._web3_policy_mode(s, body)
-        # operator approve/reject for a CONFIRM-mode WAITING_USER transaction:
-        # /api/v1/web3/transactions/<tx_id>/authorize | reject
-        if (len(path) == 5 and path[:3] == ["api", "web3", "transactions"]
-                and method == "POST" and path[4] in ("authorize", "reject")):
-            return self._web3_tx_action(s, path[3], path[4], body)
-        return False
-
-    def _json_ok_rid(self, payload):
-        _json_ok(self, payload)
-        return True
-
-    def _err_rid(self, message, code=400, error_code="bad_request"):
-        _json_err(self, message, code, error_code)
-        return True
-
-    def _models(self, s) -> bool:
-        reg = s._get("model_registry") or s._get("models")
-        if reg is None:
-            return self._err_rid("model registry unavailable", 400,
-                                 "model_unavailable")
-        router = s.router()
-        health = router.health() if router else {}
-        models = []
-        for m in reg.all_models():
-            row = m.to_dict()
-            row["status"] = health.get(m.provider, {}).get("status", "unknown")
-            models.append(row)
-        summary = {"count": reg.count(),
-                   "by_provider": {p: len(reg.for_provider(p))
-                                   for p in reg.providers()},
-                   "by_status": reg.status_summary()}
-        return self._json_ok_rid({"ok": True,
-                                  "data": {"models": models,
-                                           "summary": summary}})
-
-    def _provider_admin(self, s, name, action) -> bool:
-        reg = s._get("provider_registry")
-        router = s.router()
-        if router is None or reg is None:
-            return self._err_rid("providers unavailable", 400,
-                                 "provider_unavailable")
-        if action == "refresh":
-            disco = s._get("discovery")
-            if disco is not None:
-                disco.discover(name, force=True)
-            router.reset_health(name)
-            return self._json_ok_rid({"ok": True,
-                                      "data": {"provider": name,
-                                               "refreshed": True}})
-        if action in ("enable", "disable"):
-            want = action == "enable"
-            if want:
-                router.enable(name)
-            else:
-                router.disable(name)
-            return self._json_ok_rid({"ok": True,
-                                      "data": {"provider": name,
-                                               "enabled": want}})
-        if action == "test":
-            # manual "🔌 AI Providers health" per-provider Test button: a
-            # real call against this one provider, no fallback to another
-            # provider, result saved (router._record_route /
-            # _mark_down) the instant this call returns.
-            result = router.test_provider(name)
-            return self._json_ok_rid({"ok": True, "data": result})
-        if action == "reset-health":
-            # Called by the UI right before it starts firing per-model test
-            # requests at ONE provider: wipes that provider's previously
-            # saved calls/errors/latency so this test's numbers start clean
-            # instead of adding onto whatever earlier tests had saved — and
-            # touches only this provider, every other provider's saved
-            # health is untouched.
-            router.reset_health(name)
-            info = router.health().get(name, {})
-            return self._json_ok_rid({"ok": True, "data": {
-                "provider": name,
-                "calls": info.get("calls", 0),
-                "errors": info.get("errors", 0),
-                "state": info.get("state"),
-                "healthy": info.get("healthy"),
-            }})
-        return self._err_rid(f"unknown action: {action}", 400)
-
-    def _provider_model_test(self, s, name, model_id) -> bool:
-        """Probe exactly one (provider, model) pair. Backs the per-model UI
-        test calls so the browser can fire one request per model and update
-        each row the moment that model's own response comes back, instead
-        of waiting on the whole provider's model list."""
-        router = s.router()
-        if router is None:
-            return self._err_rid("providers unavailable", 400,
-                                 "provider_unavailable")
-        # optional ?key=<key_id>: force this test through one specific API key
-        # (ids come from /api/providers -> providers.<n>.keys[].key_id)
-        key_id = (self._query().get("key") or "").strip() or None
-        result = router.test_provider_model(name, model_id, key_id)
-        return self._json_ok_rid({"ok": True, "data": result})
-
-    def _providers_test_all(self, s) -> bool:
-        """One-click 'Gateway test': probe every provider AND every Astra AI
-        Gateway connection. Each provider's saved health (calls/errors/
-        latency) is wiped right before this run — via reset_all_health() —
-        so the numbers this produces reflect only THIS run, not history
-        piled up from every earlier test; that reset covers every provider
-        together since this is the "test all" entry point. Each probe's
-        result is then persisted the moment that probe finishes (see
-        AstraRouter.test_provider / AstraAIGateway.test_connection) — this
-        loop doesn't wait for every test to *succeed*, only for each to
-        *finish* before moving on, so a slow/dead provider never blocks the
-        others from being recorded."""
-        router = s.router()
-        if router is None:
-            return self._err_rid("providers unavailable", 400,
-                                 "provider_unavailable")
-        router.reset_all_health()
-        providers = router.test_all_providers()
-        gw = getattr(router, "gateway", None)
-        connections = gw.test_all_connections() if gw is not None else []
-        return self._json_ok_rid({"ok": True, "data": {
-            "providers": providers, "gateway_connections": connections}})
-
-    def _gateway_test(self, s) -> bool:
-        """Test only the Astra AI Gateway's four connections."""
-        router = s.router()
-        gw = getattr(router, "gateway", None) if router else None
-        if gw is None:
-            return self._err_rid("Astra AI Gateway not configured", 400,
-                                 "gateway_unavailable")
-        return self._json_ok_rid({"ok": True,
-                                  "data": {"connections": gw.test_all_connections()}})
-
-    def _gateway_test_one(self, s, name) -> bool:
-        """Test one Astra AI Gateway connection (e.g. 'astra-gw-gemini') —
-        every model it exposes, not just one."""
-        router = s.router()
-        gw = getattr(router, "gateway", None) if router else None
-        if gw is None:
-            return self._err_rid("Astra AI Gateway not configured", 400,
-                                 "gateway_unavailable")
-        return self._json_ok_rid({"ok": True,
-                                  "data": gw.test_connection_by_name(name)})
-
-    def _gateway_model_test(self, s, name, model_id) -> bool:
-        """Probe exactly one (connection, model) pair. Backs the per-model
-        UI test calls so the browser can fire one request per model and
-        update each row the moment that model's own response comes back —
-        same streaming behaviour the provider cards use."""
-        router = s.router()
-        gw = getattr(router, "gateway", None) if router else None
-        if gw is None:
-            return self._err_rid("Astra AI Gateway not configured", 400,
-                                 "gateway_unavailable")
-        result = gw.test_connection_model_by_name(name, model_id)
-        return self._json_ok_rid({"ok": True, "data": result})
-
-    def _web3_tx_list(self, s, path) -> bool:
-        tx = s._get("tx_manager")
-        if tx is None:
-            return self._err_rid("Web3 transaction manager unavailable",
-                                 400, "web3_unavailable")
-        if len(path) == 3:
-            return self._json_ok_rid({"ok": True,
-                                      "data": {"transactions": tx.list(100),
-                                               "stats": tx.stats()}})
-        if len(path) == 4:
-            row = tx.get(path[3])
-            if row is None or row.get("status") == "UNKNOWN":
-                return self._err_rid("transaction not found", 404,
-                                     "transaction_not_found")
-            return self._json_ok_rid({"ok": True, "data": row})
-        return False
-
-    def _web3_policy(self, s) -> bool:
-        policy = s._get("web3_policy") or s._get("tx_policy")
-        if policy is None:
-            return self._err_rid("transaction policy unavailable", 400,
-                                 "web3_unavailable")
-        data = {"policy": policy.describe(),
-                "mode": policy.mode,
-                "stopped": bool(getattr(s._get("tx_manager"), "stopped", False))}
-        return self._json_ok_rid({"ok": True, "data": data})
-
-    def _web3_policy_mode(self, s, body) -> bool:
-        # operator-only: LLM must never change web3 mode; require a token
-        if not s.operator_token:
-            return self._err_rid(
-                "set ASTRA_TOKEN to allow Web3 mode changes", 403,
-                "authorization")
-        policy = s._get("web3_policy") or s._get("tx_policy")
-        tx = s._get("tx_manager")
-        if policy is None or tx is None:
-            return self._err_rid("transaction policy unavailable", 400,
-                                 "web3_unavailable")
-        mode = (body.get("mode") or "").strip().upper()
-        if mode not in ("CONFIRM", "AUTO"):
-            return self._err_rid("mode must be CONFIRM or AUTO", 400,
-                                 "validation")
-        policy.set_mode(mode)
-        return self._json_ok_rid({"ok": True,
-                                  "data": {"mode": policy.mode}})
-
-    def _web3_tx_action(self, s, tx_id: str, action: str, body) -> bool:
-        """Operator-only approve/reject for a pending (CONFIRM-mode)
-        transaction. The LLM tool surface never reaches authorize()/
-        sign_and_broadcast()/reject() directly — only this gated endpoint
-        does, and only when the operator has explicitly set ASTRA_TOKEN.
-        Switching the global mode to AUTO does not touch existing
-        WAITING_USER/PREPARED transactions; they still need this call.
-        """
-        if not s.operator_token:
-            return self._err_rid(
-                "set ASTRA_TOKEN to allow Web3 transaction approval", 403,
-                "authorization")
-        tx = s._get("tx_manager")
-        if tx is None:
-            return self._err_rid("Web3 transaction manager unavailable", 400,
-                                 "web3_unavailable")
-        from astra.web3.policy import (TransactionPolicyError,
-                                       TransactionRejectedError,
-                                       TransactionFailedError)
-        try:
-            if action == "reject":
-                reason = ((body or {}).get("reason")
-                          if isinstance(body, dict) else None) or \
-                    "operator rejected"
-                rec = tx.reject(tx_id, reason=reason)
-            else:
-                tx.authorize(tx_id)
-                rec = tx.sign_and_broadcast(tx_id)
-            return self._json_ok_rid({"ok": True, "data": rec})
-        except (TransactionPolicyError, TransactionRejectedError,
-                TransactionFailedError) as exc:
-            return self._err_rid(str(exc), 400, "transaction_policy")
-
-    # -- SSE ------------------------------------------------------------------
-    def _sse(self):
-        """Server-Sent Events feed. Tails new events (poll inside the request
-        thread); writes `data:` frames and flushes, so the browser Live tab
-        streams activity with no WebSocket dependency."""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
-        self.apply_security_headers()
-        self.apply_cors_headers()
-        self.end_headers()
-        after_q = self._query().get("after_id")
-        after_header = self.headers.get("Last-Event-ID")
-        # Last-Event-ID (sent automatically by EventSource on its own
-        # reconnects) takes priority so a dropped/45s-recycled connection
-        # resumes exactly where it left off instead of skipping or
-        # replaying events. ?after_id= is what the frontend passes on the
-        # very first connect, right after it has loaded history via
-        # GET /api/events, so nothing between "history" and "live" is
-        # missed. With neither, default to "now" (last_id()).
-        if after_header:
-            after = int(after_header)
-        elif after_q:
-            after = int(after_q)
+    def _fill_body(self, req: Request) -> None:
+        if self._is_multipart():
+            req.fields, req.files = self._read_multipart()
         else:
-            after = self.server.events().last_id()
-        written, idle, deadline = 0, 0, time.time() + 45
+            req.body = self._read_json()
+
+    def _emit(self, resp: Response, req: Request, method: str) -> None:
+        """Write a core Response to the socket. This is the only place in the
+        stdlib path that touches response headers."""
+        self._rid = req.rid
         try:
-            while time.time() < deadline:
-                evs = self.server.events().since(after)
-                if evs:
-                    for e in evs:
-                        frame = (f"id: {e['id']}\ndata: " +
-                                 json.dumps(redact({"id": e["id"], "kind": e["kind"],
-                                             "agent": e.get("agent", ""),
-                                             "data": e.get("data", {}),
-                                             "created_at": e.get("created_at", "")}),
-                                            ensure_ascii=False) + "\n\n")
-                        self.wfile.write(frame.encode("utf-8"))
-                        self.wfile.flush()
-                        after = e["id"]
-                        written += 1
-                    idle = 0
-                    if written >= 200:
-                        break
-                else:
-                    idle += 1
-                    time.sleep(0.7)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        except Exception:
-            pass
+            self.send_response(resp.status)
+            for name, value in response_headers(resp, req, self.server, method):
+                self.send_header(name, value)
+            self.end_headers()
+            if resp.stream is None:
+                self.wfile.write(resp.body)
+            else:
+                for chunk in resp.stream:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The browser went away before the response was written (page
+            # refresh, tab closed, request aborted). The work — e.g. a
+            # provider test — was already done and saved, so there is
+            # nobody left to answer: drop it quietly instead of a traceback.
+            self.close_connection = True
+
+    def _dispatch(self, method: str) -> None:
+        req = self._new_request()
+        self._req = req
+        try:
+            self._fill_body(req)
+        except ApiError as e:
+            self._emit(api_error_response(e, req.rid), req, method)
+            return
+        self._emit(WebApp(self.server).handle(req), req, method)
 
     def do_GET(self):    return self._dispatch("GET")
     def do_POST(self):   return self._dispatch("POST")
@@ -1231,14 +276,14 @@ class AstraHandler(BaseHTTPRequestHandler):
     def do_DELETE(self): return self._dispatch("DELETE")
 
     def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("X-Request-Id", getattr(self, "_rid", ""))
-        self.apply_security_headers()
-        self.apply_cors_headers()
-        self.end_headers()
+        req = self._new_request()
+        self._req = req
+        self._emit(WebApp(self.server).options(req), req, "OPTIONS")
 
 
-class AstraServer(ThreadingHTTPServer):
+class AstraServer(AstraSite, ThreadingHTTPServer):
+    """The stdlib (zero-dependency) server: AstraSite + a threaded socket."""
+
     daemon_threads = True
 
     def handle_error(self, request, client_address):
@@ -1250,166 +295,18 @@ class AstraServer(ThreadingHTTPServer):
             return
         super().handle_error(request, client_address)
 
-    def __init__(self, addr, store, agent: Agent, stack=None):
-        super().__init__(addr, AstraHandler)
-        self.store = store
-        self.agent = agent
-        self.chat_log = ChatLog(store, redact=redact)
-        self._stack = stack or {}
-        cfg = self._get("config")
-        # -- security knobs (all safe defaults) --------------------------------
-        self.env = (cfg.get("ENV") if cfg else None) or os.environ.get("ENV", "development")
-        self.operator_token = (cfg.get("ASTRA_TOKEN") if cfg else None) \
-            or os.environ.get("ASTRA_TOKEN") or os.environ.get("ASTRA_API_KEY", "")
-        self.max_body_bytes = int((cfg.getint("ASTRA_MAX_BODY_MB", 50)
-                                   if cfg else 50) * 1024 * 1024)
-        try:
-            rl = (cfg.getint("ASTRA_API_RATE_LIMIT", 300) if cfg else 300)
-        except Exception:
-            rl = 300
-        self.rate_limiter = RateLimiter(rl, 60.0)
-        self._allowed_origins = set(
-            (cfg.getlist("ASTRA_CORS_ORIGINS") if cfg else None) or [])
-        try:
-            self.bind_host = addr[0]
-        except Exception:
-            self.bind_host = "0.0.0.0"
-        # -- observability: tiny in-memory request counters --------------------
-        self._req_lock = __import__("threading").Lock()
-        self._req = {"count": 0, "errors": 0,
-                     "by_path": {}, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
-        self._metrics_start = time.time()
+    def __init__(self, addr, store, agent, stack=None):
+        ThreadingHTTPServer.__init__(self, addr, AstraHandler)
+        AstraSite.__init__(self, addr, store, agent, stack=stack)
 
-    # accessors (safe when a subsystem is absent)
-    def _get(self, key):
-        return self._stack.get(key)
 
-    def events(self):
-        return self._get("events")
-
-    def tasks(self):
-        return self._get("tasks")
-
-    def memory(self):
-        return self._get("memory")
-
-    def experiences(self):
-        return self._get("experiences")
-
-    def registry(self):
-        return self._get("registry")
-
-    def router(self):
-        return self._get("router")
-
-    def workflows(self):
-        return self._get("workflows")
-
-    def scheduler(self):
-        return self._get("scheduler")
-
-    def orchestrator(self):
-        return self._get("orchestrator")
-
-    def cfg(self):
-        return self._get("config")
-
-    # -- security / observability -------------------------------------------
-    def cors_origin(self, origin):
-        """CORS: explicit ASTRA_CORS_ORIGINS wins; else same-origin always,
-        cross-origin allowed for SPA/LAN tools unless production."""
-        if not origin:
-            return None
-        if self._allowed_origins:
-            if "*" in self._allowed_origins:
-                return "*"
-            return origin if origin in self._allowed_origins else None
-        if self.env == "production":
-            return None  # same-origin only
-        return origin  # dev/LAN: reflect request origin
-
-    def note_request(self, method, path, error=False):
-        with self._req_lock:
-            self._req["count"] += 1
-            if error:
-                self._req["errors"] += 1
-            label = "/".join(path) if path else "/"
-            blob = self._req["by_path"].setdefault(label, {"count": 0, "errors": 0})
-            blob["count"] += 1
-            if error:
-                blob["errors"] += 1
-
-    def metrics(self) -> dict:
-        """/api/metrics aggregate — secret-free, cheap, always available."""
-        out = {"app": AGENT_NAME,
-               "uptime_s": round(time.time() - self._metrics_start, 1),
-               "requests": dict(self._req)}
-        if self.router():
-            out["router"] = {name: {k: info[k] for k in
-                                    ("healthy", "state", "calls",
-                                     "errors", "latency_avg_ms")
-                                    if k in info}
-                             for name, info in self.router().health().items()}
-        reg = self.registry()
-        if reg:
-            all_stats = reg.stats()
-            out["tools"] = {"count": len(all_stats),
-                            "calls": sum(s["calls"] for s in all_stats.values()),
-                            "errors": sum(s["errors"] for s in all_stats.values())}
-        orch = self.orchestrator()
-        if orch:
-            out["orchestrator"] = {k: v for k, v in orch.stats().items()
-                                   if not isinstance(v, dict)}
-        tx = self._get("tx_manager")
-        if tx:
-            txs = tx.stats()
-            pol = self._get("web3_policy") or self._get("tx_policy")
-            out["web3"] = {"status_counts": txs.get("by_status", {}),
-                           "mode": (pol.mode if pol else None),
-                           "stopped": bool(getattr(tx, "stopped", False))}
-        if self.scheduler():
-            out["scheduler"] = self.scheduler().stats()
-        return out
-
-    def health(self) -> dict:
-        out = {"app": AGENT_NAME, "ok": True, "checks": {}}
-        try:
-            out["checks"]["database"] = "ok"
-            count = self.store.fetchone("SELECT COUNT(*) c FROM sqlite_master")["c"]
-            out["checks"]["schema_objects"] = count
-        except Exception as e:
-            out["ok"] = False
-            out["checks"]["database"] = f"error: {e}"
-        # NOTE: the plugin system has been removed — "plugins" is always [].
-        out["checks"]["plugins"] = []
-        if self.router():
-            out["checks"]["providers"] = self.router().health()
-        if self.scheduler():
-            out["checks"]["scheduler"] = self.scheduler().stats()
-        # unconfigured providers report "not configured", not unhealthy — a
-        # missing API key must not flip /api/health red
-        provider_unhealthy = any(
-            p.get("healthy") is False
-            for name, p in out["checks"].get("providers", {}).items())
-        if provider_unhealthy:
-            out["ok"] = False
-        return out
-
-    def registry_plugin_tools(self):
-        """NOTE: the plugin system has been removed — no-op kept so any
-        remaining callers don't break."""
-        return
-
-    def manifest(self) -> dict:
-        """Frontend bootstrap: agent name + always-on core tabs.
-
-        NOTE: the plugin system has been removed — no plugin tabs/entries
-        are added anymore (plugins/ is an empty placeholder)."""
-        tabs = [dict(t) for t in CORE_TABS]
-        tabs.append(dict(LOGS_TAB))
-        return {
-            "name": AGENT_NAME,
-            "version": getattr(__import__("astra"), "__version__", "1.0.0"),
-            "plugins": [],
-            "tabs": tabs,
-        }
+if __name__ == "__main__":  # pragma: no cover - manual smoke entry point
+    from .bootstrap import build
+    stack = build()
+    srv = AstraServer(("127.0.0.1", 8787), stack["store"], stack["agent"],
+                      stack=stack)
+    print(f"{AGENT_NAME} on http://127.0.0.1:8787/")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass

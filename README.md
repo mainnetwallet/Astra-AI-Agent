@@ -35,7 +35,7 @@ one plugin, drop it in `plugins/`, restart. The core never changes.
 │  │ policy (CONFIRM/AUTO)│   │ secret redaction · SSRF guard · body cap│ │
 │  └──────────────────────┘   └─────────────────────────────────────────┘ │
 │                                                                          │
-│  Store: SQLite · server: stdlib HTTP + SSE · UI: SPA                   │
+│  Store: SQLite · servers: stdlib HTTP or FastAPI · SSE · UI: SPA       │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -122,6 +122,8 @@ logs, UI, or API responses. Router preference order: `AI_PROVIDER=gemini groq �
 | `NO_BROWSER` | false | Don't auto-open browser on start |
 | `ACTIVE_PLUGINS` | airdrop | Comma-separated plugin whitelist |
 | `ASTRA_SCHEDULER` | 0 | Start the scheduler daemon |
+| `ASTRA_FASTAPI_DOCS` | 0 | FastAPI server only: expose `/docs` + `/openapi.json` |
+| `ASTRA_ASGI_THREADS` | 40 | FastAPI server only: worker-thread pool for blocking work |
 
 ## Web3 transaction safety
 
@@ -182,6 +184,63 @@ All JSON responses carry `request_id`; errors are structured
 gated to non-`production`). Every response is secret-redacted, secured with
 CSP/nosniff/frame headers and optionally rate-limited + body-capped.
 
+### Optional: FastAPI/ASGI server
+
+The default server is stdlib-only (`python3 run.py`). A FastAPI/ASGI variant
+ships beside it for deployments that want uvicorn — process managers,
+multiple workers, ASGI middleware, or an ASGI-based reverse proxy setup:
+
+```bash
+pip install -r requirements-fastapi.txt   # fastapi + uvicorn
+python3 run_fastapi.py                    # same port, same routes
+```
+
+Both servers are adapters over the **same router** (`astra/web_core.py`), so
+the FastAPI one cannot drift from the stdlib one: identical routes, auth,
+rate limit, body cap, CORS, security headers, SSE frames and JSON envelopes.
+Only the HTTP layer differs — uvicorn instead of `ThreadingHTTPServer`. The
+trade-off is stated plainly: the stdlib server installs nothing (recommended
+on Termux/Android), the FastAPI one pulls in fastapi + starlette + uvicorn +
+pydantic for ASGI features the single-process stdlib server does not have.
+
+**Deployment.** `run_fastapi.py` handles the banner/env like `run.py`; for a
+plain ASGI deployment use the factory, which builds the stack on startup and
+stops the scheduler + closes the store on shutdown:
+
+```bash
+uvicorn --factory astra.web_fastapi:create_app --host 127.0.0.1 --port 8787
+```
+
+The app owns the lifecycle only when it was handed a `stack` (or nothing at
+all); pass `site=`/`store=`/`agent=` and the caller keeps ownership, which is
+how the tests run two servers against one stack.
+
+**Concurrency.** Blocking work (an agent turn, a provider probe) runs in
+anyio's worker threadpool, so the event loop stays free — size it with
+`ASTRA_ASGI_THREADS` (default: Starlette's 40). The SSE live feed is driven by
+an async generator, so an idle Live tab costs no worker thread; a sync
+generator would hold one of those slots for the full 45 s connection.
+
+* `ASTRA_FASTAPI_DOCS=1` exposes `/docs` + `/openapi.json`. Off by default —
+  Swagger UI loads its JS from a CDN, which the app's own CSP blocks. The
+  router is mounted as one catch-all (see `astra/web_fastapi.py`), so the
+  generated schema cannot describe individual routes; the API table above is
+  the authoritative reference.
+* `python-multipart` is deliberately **not** required: uploads are parsed by
+  the shared stdlib parser, so both servers handle multipart identically.
+* Behind a reverse proxy, run uvicorn with `--proxy-headers
+  --forwarded-allow-ips=...` so rate limiting keys on the real client instead
+  of the proxy; without it the direct peer address is used (unspoofable).
+* Termux/Android: `pydantic` 2 ships a Rust core with no Android wheel, so the
+  default install tries to build it from source. Use the pure-Python path:
+  `pip install "fastapi<0.119" "uvicorn>=0.27" "pydantic<2"`.
+
+**Before running multiple workers** (`--workers N`), note two process-local
+pieces of the core: the scheduler daemon (`ASTRA_SCHEDULER=1`) would fire every
+schedule once per worker, and the per-IP rate limiter is in-memory, so the
+effective limit is N× the configured one. SSE and the event feed are fine —
+events live in SQLite, so every worker streams the same activity.
+
 ## Security hardening
 
 * **Auth** — `ASTRA_TOKEN` gates all API traffic (Bearer / `X-Astra-Token` /
@@ -232,10 +291,21 @@ Drop it in `plugins/`, add `"myplugin"` to `ACTIVE_PLUGINS`, restart.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v   # 213+ unit tests, stdlib runner
-python3 smoke_test.py                      # end-to-end smoke suite
-python3 -m compileall astra                # syntax sanity
+python3 -m unittest discover -s tests -v        # full suite, stdlib runner
+python3 -m pytest -q tests/test_web_fastapi.py  # live smoke: boots real servers
+                                                # (stdlib + FastAPI) and checks the API
+python3 -m compileall astra                     # syntax sanity
 ```
 
+For a manual end-to-end check, start a server and hit it:
+`NO_BROWSER=1 python3 run.py` (or `run_fastapi.py`) then
+`curl -s localhost:8787/api/health`.
+
 Optional dev extras: `pip install -r requirements-dev.txt` (pytest, Playwright).
+
+Parity tests: `tests/test_web_fastapi.py` runs the stdlib server and the
+FastAPI server side by side and asserts they answer identically (status,
+security headers, JSON bodies, static bytes, SSE frames). The core half always
+runs; the ASGI half is skipped unless the `fastapi` extra is installed.
+
 Docker: `docker build -t astra-agent . && docker run -p 8787:8787 astra-agent`.

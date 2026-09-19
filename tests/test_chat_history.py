@@ -37,6 +37,31 @@ class ChatLogUnit(unittest.TestCase):
         self.log.end(t)
         self.assertFalse(self.log.history()["pending"])
 
+    def test_pending_is_scoped_per_conversation(self):
+        # A turn running in chat 1 must not show "typing…" in an unrelated
+        # chat 2, and vice versa.
+        self.log.add_user("hello")  # chat 1 needs a message or new_conversation() reuses it
+        chat2 = self.log.new_conversation()
+        t = self.log.begin(1)
+        self.assertTrue(self.log.history(conversation_id=1)["pending"])
+        self.assertFalse(self.log.history(conversation_id=chat2)["pending"])
+        self.log.end(t)
+        self.assertFalse(self.log.history(conversation_id=1)["pending"])
+
+    def test_reply_follows_the_chat_it_was_sent_in_not_current(self):
+        # Regression test: send a message in chat 1, then switch "current"
+        # to a new chat (as the UI does when the user opens a new chat)
+        # *before* the reply is recorded. The reply must still land in
+        # chat 1, not whichever chat is "current" when add_reply runs.
+        cid = self.log.add_user("hello from chat 1")
+        chat2 = self.log.new_conversation()          # user opens a new chat
+        self.assertEqual(self.log.current_id, chat2)  # current moved on
+        self.log.add_reply({"reply": "hi", "ok": True}, conversation_id=cid)
+        self.assertEqual(
+            [m["text"] for m in self.log.history(conversation_id=cid)["messages"]],
+            ["hello from chat 1", "hi"])
+        self.assertEqual(self.log.history(conversation_id=chat2)["messages"], [])
+
     def test_secrets_are_redacted_and_clear_works(self):
         self.log.add_reply({"reply": "ok", "data": {"api_key": "sk-supersecretvalue123456"}})
         self.assertNotIn("supersecret", json.dumps(self.log.history()))
@@ -104,6 +129,47 @@ class ChatHistoryHttp(unittest.TestCase):
         self.assertEqual(len(self._req(f"/api/chat/history?after_id={first}")["data"]["messages"]), 1)
         self._req("/api/chat/history", method="DELETE")
         self.assertEqual(self._req("/api/chat/history")["data"]["messages"], [])
+
+    def test_new_chat_then_back_does_not_steal_the_reply(self):
+        """Reproduces the reported bug: ask a question, open a new chat
+        while it's still working, then switch back to the original chat.
+        The reply must show up in the original chat (and only there), and
+        the new chat must never show a stray "typing…" for it."""
+        import socket
+        body = json.dumps({"message": "ping in chat A"}).encode()
+        s = socket.create_connection(("127.0.0.1", self.port))
+        s.sendall(b"POST /api/chat HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+        time.sleep(0.3)
+        s.close()  # simulate navigating away mid-turn
+
+        chat_a = self._req("/api/chat/history")["data"]["conversation_id"]
+
+        # Open a new chat while chat A's reply is still pending.
+        chat_b = self._req("/api/chat/conversations", method="POST")["data"]["id"]
+        self.assertNotEqual(chat_a, chat_b)
+        # Chat B is empty and must NOT show chat A's turn as pending.
+        hb = self._req(f"/api/chat/conversations/{chat_b}")["data"]
+        self.assertEqual(hb["messages"], [])
+        self.assertFalse(hb["pending"])
+
+        # Switch back to chat A — still pending, from A's own point of view.
+        ha = self._req(f"/api/chat/conversations/{chat_a}")["data"]
+        self.assertTrue(ha["pending"])
+
+        self.release.set()  # let the agent finish
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            ha = self._req(f"/api/chat/conversations/{chat_a}")["data"]
+            if not ha["pending"]:
+                break
+            time.sleep(0.1)
+
+        self.assertEqual([(m["role"], m["text"]) for m in ha["messages"]],
+                         [("user", "ping in chat A"), ("ai", "echo: ping in chat A")])
+        # The reply must not have leaked into chat B.
+        hb = self._req(f"/api/chat/conversations/{chat_b}")["data"]
+        self.assertEqual(hb["messages"], [])
 
 
 if __name__ == "__main__":

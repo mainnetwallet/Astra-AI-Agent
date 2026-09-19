@@ -576,22 +576,27 @@ class AstraHandler(BaseHTTPRequestHandler):
                     ctx = fields.get("context", "")
                     names = [f.get("filename", "file") for f in (files or [])[:10]]
                     attachments = self._process_uploads(files)
-                    log.add_user(msg, files=names)
-                    token = log.begin()
+                    # Pin this whole turn to the chat the message actually
+                    # landed in. If the user switches chats (or opens a new
+                    # one) while the agent is still working, `current_id`
+                    # changes — the reply must stay with the original chat,
+                    # not follow the user to wherever they went.
+                    cid = log.add_user(msg, files=names)
+                    token = log.begin(cid)
                     try:
                         reply = server.agent.handle(
                             msg, context=ctx, attachments=attachments or None)
-                        log.add_reply(reply)
+                        log.add_reply(reply, conversation_id=cid)
                     finally:
                         log.end(token)
                 else:
                     msg = body.get("message", "")
-                    log.add_user(msg)
-                    token = log.begin()
+                    cid = log.add_user(msg)
+                    token = log.begin(cid)
                     try:
                         reply = server.agent.handle(
                             msg, context=body.get("context", "") or "")
-                        log.add_reply(reply)
+                        log.add_reply(reply, conversation_id=cid)
                     finally:
                         log.end(token)
                 return _json_ok(self, {"ok": True, "data": reply})
@@ -629,10 +634,14 @@ class AstraHandler(BaseHTTPRequestHandler):
                 eid = (body.get("execution_id") or "").strip()
                 if not eid:
                     return _json_err(self, "execution_id required")
-                token = server.chat_log.begin()
+                # Same pin as /api/chat: capture the chat this approval was
+                # made in now, so a chat switch mid-resume can't send the
+                # follow-up reply to the wrong conversation.
+                cid = server.chat_log.current_id
+                token = server.chat_log.begin(cid)
                 try:
                     reply = server.agent.resume(eid, bool(body.get("allow", True)))
-                    server.chat_log.add_reply(reply)
+                    server.chat_log.add_reply(reply, conversation_id=cid)
                 finally:
                     server.chat_log.end(token)
                 return _json_ok(self, {"ok": True, "data": reply})

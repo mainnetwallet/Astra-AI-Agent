@@ -87,7 +87,9 @@ class ChatLog:
         self.store = store
         self._redact = redact or (lambda x: x)
         self._lock = threading.Lock()
-        self._running: dict[int, float] = {}   # token -> started (monotonic-ish)
+        # token -> (conversation_id, started). Keyed by conversation so a turn
+        # running in one chat can't show a "typing…" indicator in another.
+        self._running: dict[int, tuple[int, float]] = {}
         self._next = 0
         store.install(SCHEMA)
         store.ensure_column("astra_chat_messages", "conversation_id",
@@ -230,11 +232,16 @@ class ChatLog:
 
     def add_user(self, text: str, files: list | None = None,
                  conversation_id: int | None = None) -> int:
+        """Returns the conversation id the message was actually written to,
+        so the caller can pin the rest of the turn (begin/add_reply) to it —
+        `current_id` can change while the agent is still working (the user
+        opened or switched to another chat), and the reply must not follow
+        it there."""
         cid = conversation_id if conversation_id is not None else self.current_id
-        rid = self._insert(cid, "user", self._redact(text or ""),
-                            files=[str(f) for f in (files or [])][:20])
+        self._insert(cid, "user", self._redact(text or ""),
+                      files=[str(f) for f in (files or [])][:20])
         self._touch(cid, first_text=text)
-        return rid
+        return cid
 
     def add_reply(self, reply: dict, conversation_id: int | None = None) -> int:
         cid = conversation_id if conversation_id is not None else self.current_id
@@ -261,24 +268,36 @@ class ChatLog:
         return n
 
     # -- in-flight tracking -----------------------------------------------------
-    def begin(self) -> int:
+    def begin(self, conversation_id: int | None = None) -> int:
+        cid = conversation_id if conversation_id is not None else self.current_id
         with self._lock:
             self._next += 1
-            self._running[self._next] = time.time()
+            self._running[self._next] = (cid, time.time())
             return self._next
 
     def end(self, token: int) -> None:
         with self._lock:
             self._running.pop(token, None)
 
+    def _prune_stale(self) -> None:
+        cutoff = time.time() - PENDING_MAX_AGE_S
+        for t, (_cid, started) in list(self._running.items()):
+            if started < cutoff:
+                del self._running[t]
+
     @property
     def pending(self) -> bool:
-        cutoff = time.time() - PENDING_MAX_AGE_S
+        """True if ANY chat has a turn in flight. Kept for callers that don't
+        care which chat; `history()` uses `pending_for` instead so the typing
+        indicator doesn't leak into unrelated chats."""
         with self._lock:
-            for t, started in list(self._running.items()):
-                if started < cutoff:
-                    del self._running[t]
+            self._prune_stale()
             return bool(self._running)
+
+    def pending_for(self, conversation_id: int) -> bool:
+        with self._lock:
+            self._prune_stale()
+            return any(cid == conversation_id for cid, _started in self._running.values())
 
     # -- reads ------------------------------------------------------------------
     def history(self, after_id: int = 0, limit: int = 200,
@@ -306,5 +325,5 @@ class ChatLog:
                  "created_at": r["created_at"]} for r in rows]
         last = self.store.fetchone(
             "SELECT MAX(id) AS m FROM astra_chat_messages WHERE conversation_id = ?", (cid,))
-        return {"messages": msgs, "pending": self.pending,
+        return {"messages": msgs, "pending": self.pending_for(cid),
                 "last_id": (last or {}).get("m") or 0, "conversation_id": cid}

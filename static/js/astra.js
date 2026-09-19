@@ -696,9 +696,28 @@ function streamModelTests(models, tableEl, resultsArray, testOneFn, onResult) {
   return Promise.allSettled(probes);
 }
 
+// Hide/show toggle state (AI Providers health + Astra AI Gateway model
+// tables), persisted so it survives a real browser refresh — a plain
+// DOM class survives re-renders within the page's lifetime but resets on
+// reload since the whole document/JS is torn down and rebuilt.
+const MODELS_HIDDEN_KEY = "astra_models_hidden";
+function _loadModelsHiddenState() {
+  try { return JSON.parse(localStorage.getItem(MODELS_HIDDEN_KEY) || "{}"); }
+  catch (_e) { return {}; }
+}
+function _saveModelsHiddenState(state) {
+  try { localStorage.setItem(MODELS_HIDDEN_KEY, JSON.stringify(state)); }
+  catch (_e) { /* storage unavailable/full — toggle still works this session */ }
+}
+
 loaders.providers = async function () {
   const r = await api("/api/providers");
   const list = $("#providers-list");
+  // Re-apply the persisted hide/show state on every load — classList
+  // survives re-renders within one page session (innerHTML only replaces
+  // children), but a real browser refresh tears down the whole DOM/JS, so
+  // without this the class (and thus the hidden tables) reset to shown.
+  if (_loadModelsHiddenState().providers) list.classList.add("models-hidden");
   if (!r.ok) {
     // A transient failure (a burst of parallel "Test all" requests is
     // exactly when the backend is most likely to hiccup) must never wipe
@@ -749,6 +768,9 @@ loaders.providers = async function () {
     toggleBtn.onclick = () => {
       const hidden = list.classList.toggle("models-hidden");
       toggleBtn.textContent = hidden ? "👁 Show models" : "🙈 Hide models";
+      const st = _loadModelsHiddenState();
+      st.providers = hidden;
+      _saveModelsHiddenState(st);
     };
   }
   if (toggleBtn) {
@@ -966,6 +988,10 @@ async function runGatewayConnectionTest(key, btn, card) {
 function renderGatewayCard(core) {
   const card = $("#gateway-card");
   if (!card) return;
+  // Same persisted hide/show restore as loaders.providers — must happen
+  // before the early "not configured" return too, so the state is already
+  // applied by the time the connection rows exist on a later render.
+  if (_loadModelsHiddenState().gateway) card.classList.add("models-hidden");
   const conns = Object.entries((core && core.connections) || {});
   if (!core || core.state === "not_configured" || conns.length === 0) {
     card.innerHTML = `<div class="row"><span class="status-dot warn"></span>` +
@@ -1056,6 +1082,9 @@ function renderGatewayCard(core) {
     gwToggleBtn.onclick = () => {
       const hidden = card.classList.toggle("models-hidden");
       gwToggleBtn.textContent = hidden ? "👁 Show models" : "🙈 Hide models";
+      const st = _loadModelsHiddenState();
+      st.gateway = hidden;
+      _saveModelsHiddenState(st);
     };
   }
   if (gwToggleBtn) {

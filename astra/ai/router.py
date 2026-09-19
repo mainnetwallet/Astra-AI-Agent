@@ -342,7 +342,7 @@ class AstraRouter:
 
     def add(self, provider) -> None:
         # Both steps under the lock: `health()` (any request thread, since
-        # the server is a ThreadingHTTPServer) iterates self.providers and
+        # uvicorn serves requests concurrently) iterates self.providers and
         # indexes straight into self._latency[name] — if it observed the
         # provider appended here before _slots() had run, that indexing
         # raised KeyError and 500'd the whole /api/providers response

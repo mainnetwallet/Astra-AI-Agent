@@ -71,7 +71,7 @@ class ChatLogUnit(unittest.TestCase):
 
 class ChatHistoryHttp(unittest.TestCase):
     def setUp(self):
-        from astra.web import AstraServer
+        from tests.helpers import LiveServer
         self.stack = make_stack()
         agent = self.stack["agent"]
         self.release = threading.Event()
@@ -80,15 +80,12 @@ class ChatHistoryHttp(unittest.TestCase):
             self.release.wait(5)
             return {"reply": f"echo: {message}", "action": "none", "ok": True, "data": {}}
         agent.handle = slow_handle
-        self.srv = AstraServer(("127.0.0.1", 0), self.stack["store"], agent, stack=self.stack)
-        self.port = self.srv.server_address[1]
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
-        time.sleep(0.2)
+        self.srv = LiveServer(stack=self.stack, agent=agent)
+        self.port = self.srv.port
 
     def tearDown(self):
         self.release.set()
-        self.srv.shutdown()
-        self.srv.server_close()
+        self.srv.stop()
 
     def _req(self, path, method="GET", body=None, timeout=10):
         req = urllib.request.Request(

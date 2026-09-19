@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
-import time
 import unittest
 import urllib.parse
 import urllib.request
@@ -21,16 +19,13 @@ MODEL = "openai/gpt-oss-120b"     # has a "/" -> travels percent-encoded
 
 class ProviderKeysHttpTests(unittest.TestCase):
     def setUp(self):
-        from astra.web import AstraServer
+        from tests.helpers import LiveServer
         env = {"GROQ_API_KEYS": "good-key,bad-key", "GROQ_MODELS": MODEL}
         self._env = mock.patch.dict(os.environ, env)
         self._env.start()
         self.stack = make_stack()
-        self.srv = AstraServer(("127.0.0.1", 0), self.stack["store"],
-                               self.stack["agent"], stack=self.stack)
-        self.port = self.srv.server_address[1]
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
-        time.sleep(0.2)
+        self.srv = LiveServer(stack=self.stack)
+        self.port = self.srv.port
 
         def fake_post(adapter, url, body, cred):
             if adapter.pool.get_secret_for(cred) == "bad-key":
@@ -43,8 +38,7 @@ class ProviderKeysHttpTests(unittest.TestCase):
     def tearDown(self):
         self._post_patch.stop()
         self._env.stop()
-        self.srv.shutdown()
-        self.srv.server_close()
+        self.srv.stop()
 
     def _req(self, path, method="GET"):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method=method,

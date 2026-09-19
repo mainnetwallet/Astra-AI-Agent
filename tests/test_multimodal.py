@@ -3,7 +3,6 @@ capability-aware routing, and the multipart /api/chat path."""
 import json
 import os
 import tempfile
-import threading
 import unittest
 import zipfile
 
@@ -409,10 +408,10 @@ class TestZeroBypassMultimodal(unittest.TestCase):
         self.assertNotIn("self.llm(", src)
 
     def test_no_direct_provider_in_web(self):
-        from astra import web
         import inspect
-        src = inspect.getsource(web)
-        self.assertNotIn("ProviderRegistry", src)
+        from astra import web, web_fastapi
+        self.assertNotIn("ProviderRegistry", inspect.getsource(web))
+        self.assertNotIn("ProviderRegistry", inspect.getsource(web_fastapi))
 
     def test_routing_request_preserved(self):
         req = RoutingRequest(
@@ -453,20 +452,15 @@ class TestMultipartChat(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from tests.helpers import make_agent
-        from astra.web import AstraServer
+        from tests.helpers import LiveServer, make_agent
         cls.store, cls.plugin, cls.agent = make_agent()
-        cls.server = AstraServer(("127.0.0.1", 0), cls.store, cls.agent)
-        cls.port = cls.server.server_address[1]
-        cls.base = f"http://127.0.0.1:{cls.port}"
-        cls.thread = threading.Thread(target=cls.server.serve_forever,
-                                       daemon=True)
-        cls.thread.start()
+        cls.server = LiveServer(store=cls.store, agent=cls.agent)
+        cls.port = cls.server.port
+        cls.base = cls.server.base
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
+        cls.server.stop()
         cls.store.close()
 
     def _post_json(self, path, payload):

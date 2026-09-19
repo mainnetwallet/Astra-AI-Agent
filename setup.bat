@@ -12,6 +12,10 @@ if errorlevel 1 (
     exit /b 1
 )
 if not exist data mkdir data
+echo.
+echo [..] Installing dependencies...
+python -m pip install --upgrade -r requirements.txt
+if errorlevel 1 echo [WARN] pip install failed - run it manually: python -m pip install -r requirements.txt
 if not exist config.json (
     echo {"PORT": 8787, "NO_BROWSER": "", "BIND": "127.0.0.1"}> config.json
     echo [OK] config.json created

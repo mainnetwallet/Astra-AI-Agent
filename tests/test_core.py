@@ -334,21 +334,15 @@ class TestBootstrap(unittest.TestCase):
 
 # ── Web endpoints (system) ────────────────────────────────────────────────────
 class TestWebSystem(unittest.TestCase):
-    """Live HTTP tests against a real AstraServer on port 0 (ephemeral)."""
+    """Live HTTP tests against the real FastAPI/ASGI server (ephemeral port)."""
     def setUp(self):
-        import threading, time
-        from astra.web import AstraServer
+        from tests.helpers import LiveServer
         self.stack = make_stack(with_scheduler=True)
-        self.srv = AstraServer(("127.0.0.1", 0), self.stack["store"],
-                                self.stack["agent"],
-                                stack=self.stack)
-        self.port = self.srv.server_address[1]
-        self.t = threading.Thread(target=self.srv.serve_forever, daemon=True)
-        self.t.start(); time.sleep(0.3)
+        self.srv = LiveServer(stack=self.stack)
+        self.port = self.srv.port
 
     def tearDown(self):
-        self.srv.shutdown()
-        self.srv.server_close()
+        self.srv.stop()
 
     def _get(self, p):
         import urllib.request

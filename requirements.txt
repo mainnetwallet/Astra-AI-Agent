@@ -1,14 +1,20 @@
-# Astra AI Agent — dependency policy: ZERO runtime dependencies.
+# Astra AI Agent — runtime dependencies.
 #
-# The core (astra/) runs entirely on the Python 3.9+ standard library
-# (http.server, urllib, sqlite3, threading). There is nothing to pip install
-# to run the agent. This file exists so the dependency contract is explicit.
+#   pip install -r requirements.txt
 #
-#   pip install -r requirements.txt        # no-op (correct)
-#   pip install -r requirements-dev.txt    # dev tools (tests, playwright)
-#   pip install -r requirements-fastapi.txt  # optional FastAPI/ASGI server
-#                                            # (run_fastapi.py) — the default
-#                                            # server above is unaffected
+# FastAPI + uvicorn are the only web server: `python3 run.py` launches the
+# ASGI app in astra/web_fastapi.py, which serves the shared router in
+# astra/web.py. There is no stdlib http.server path any more.
+#
+# Everything else the agent uses is the Python 3.9+ standard library
+# (urllib, sqlite3, threading, ...), so there is nothing else to install.
+#
+# ── Termux/Android ─────────────────────────────────────────────────────
+# pydantic 2 ships a compiled Rust core and publishes no Android wheel, so a
+# plain `pip install fastapi` tries to build it from source. Install the
+# pure-Python path instead:
+#
+#   pip install "fastapi<0.119" "uvicorn>=0.27" "pydantic<2"
 #
 # ── optional extras (uncomment only what your setup needs) ─────────────
 #
@@ -20,3 +26,5 @@
 # `requests` — never required by the core (urllib is used), but handy for
 # writing your own plugin adapters / one-off scripts against external APIs.
 # requests>=2.31
+fastapi>=0.110
+uvicorn>=0.27

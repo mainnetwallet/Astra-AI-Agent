@@ -9,8 +9,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import threading
-import time
 import unittest
 import urllib.error
 import urllib.request
@@ -90,20 +88,16 @@ class TestApiError(unittest.TestCase):
 def _server(token="", env="development"):
     from astra.bootstrap import build
     from astra.store import Store
-    from astra.web import AstraServer
+    from tests.helpers import LiveServer
     d = tempfile.mkdtemp()
     stack = build(Store(os.path.join(d, "t.db")))
     if token:
         stack["config"].set("ASTRA_TOKEN", token)
     stack["config"].set("ENV", env)
-    srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
-                      stack=stack)
-    srv.operator_token = token
-    srv.env = env
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
-    th.start()
-    time.sleep(0.2)
-    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+    srv = LiveServer(stack=stack)
+    srv.site.operator_token = token
+    srv.site.env = env
+    return srv, srv.base
 
 
 def _req(url, token="", method="GET", body=None):
@@ -119,15 +113,31 @@ def _req(url, token="", method="GET", body=None):
 
     try:
         with urllib.request.urlopen(r, timeout=5) as resp:
-            return resp.status, _parse(resp.read()), dict(resp.headers)
+            return resp.status, _parse(resp.read()), _CIHeaders(resp.headers.items())
     except urllib.error.HTTPError as e:
-        return e.code, _parse(e.read()), dict(e.headers)
+        return e.code, _parse(e.read()), _CIHeaders(e.headers.items())
+
+
+class _CIHeaders(dict):
+    """Case-insensitive header view — uvicorn lower-cases header names."""
+
+    def __init__(self, items=()):
+        super().__init__((k.lower(), v) for k, v in items)
+
+    def __getitem__(self, key):
+        return super().__getitem__(key.lower())
+
+    def get(self, key, default=None):
+        return super().get(key.lower(), default)
+
+    def __contains__(self, key):
+        return super().__contains__(key.lower())
 
 
 class TestWebHardening(unittest.TestCase):
     def setUp(self):
         self.srv, self.base = _server()
-        self.addCleanup(self.srv.shutdown)
+        self.addCleanup(self.srv.stop)
 
     def test_request_id_header_and_body(self):
         st, body, hdr = _req(self.base + "/api/v1/health")
@@ -194,7 +204,7 @@ class TestWebHardening(unittest.TestCase):
     def test_body_cap(self):
         # The default cap is 50 MB (uploads need room); this test pins an
         # explicit 10 MB cap so it checks enforcement, not the default.
-        self.srv.max_body_bytes = 10 * 1024 * 1024
+        self.srv.site.max_body_bytes = 10 * 1024 * 1024
         r = urllib.request.Request(self.base + "/api/v1/chat",
                                    data=b"x" * (11 * 1024 * 1024), method="POST")
         try:
@@ -205,7 +215,7 @@ class TestWebHardening(unittest.TestCase):
 
     def test_internal_error_hides_detail_in_production(self):
         srv, base = _server(env="production")
-        self.addCleanup(srv.shutdown)
+        self.addCleanup(srv.stop)
         # patch a handler to raise, then confirm the message is generic
         st, body, _ = _req(base + "/api/v1/web3/transactions/BAD")
         # (dev path exercised above); production must not leak a traceback
@@ -215,7 +225,7 @@ class TestWebHardening(unittest.TestCase):
 class TestWebAuth(unittest.TestCase):
     def setUp(self):
         self.srv, self.base = _server(token="sekrit")
-        self.addCleanup(self.srv.shutdown)
+        self.addCleanup(self.srv.stop)
 
     def test_requires_token(self):
         st, body, _ = _req(self.base + "/api/v1/health")
@@ -255,7 +265,7 @@ class TestWeb3TxActionEndpoint(unittest.TestCase):
 
     def test_no_operator_token_blocks_even_without_global_auth(self):
         srv, base = _server()   # no token at all -> server is "open"
-        self.addCleanup(srv.shutdown)
+        self.addCleanup(srv.stop)
         st, body, _ = _req(base + "/api/v1/web3/transactions/x/authorize",
                            method="POST")
         self.assertEqual(st, 403)
@@ -270,7 +280,7 @@ class TestWeb3TxActionEndpoint(unittest.TestCase):
         from astra.core.config import Config
         from astra.store import Store
         from astra.bootstrap import build
-        from astra.web import AstraServer
+        from tests.helpers import LiveServer
         from astra.web3.keystore import SecureKeyStore
         d = tempfile.mkdtemp()
         cfg = Config()
@@ -282,14 +292,10 @@ class TestWeb3TxActionEndpoint(unittest.TestCase):
         stack["keystore"] = SecureKeyStore(stack["store"], master_secret="op")
         stack["keystore"].store_key("default", "01" * 32)
         stack["tx_manager"].keystore = stack["keystore"]
-        srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
-                          stack=stack)
-        srv.operator_token = "sekrit"
-        th = threading.Thread(target=srv.serve_forever, daemon=True)
-        th.start()
-        self.addCleanup(srv.shutdown)
-        time.sleep(0.2)
-        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        srv = LiveServer(stack=stack)
+        srv.site.operator_token = "sekrit"
+        self.addCleanup(srv.stop)
+        base = srv.base
 
         from astra.web3.policy import TxRequest
         rec = stack["tx_manager"].create(
@@ -312,20 +318,16 @@ class TestWeb3TxActionEndpoint(unittest.TestCase):
         from astra.core.config import Config
         from astra.store import Store
         from astra.bootstrap import build
-        from astra.web import AstraServer
+        from tests.helpers import LiveServer
         d = tempfile.mkdtemp()
         cfg = Config()
         cfg.set("ASTRA_TOKEN", "sekrit")
         stack = build(store=Store(os.path.join(d, "t.db")), config=cfg,
                      with_scheduler=False)
-        srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
-                          stack=stack)
-        srv.operator_token = "sekrit"
-        th = threading.Thread(target=srv.serve_forever, daemon=True)
-        th.start()
-        self.addCleanup(srv.shutdown)
-        time.sleep(0.2)
-        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        srv = LiveServer(stack=stack)
+        srv.site.operator_token = "sekrit"
+        self.addCleanup(srv.stop)
+        base = srv.base
 
         from astra.web3.policy import TxRequest
         rec = stack["tx_manager"].create(
@@ -341,8 +343,8 @@ class TestRateLimit(unittest.TestCase):
     def test_429_after_limit(self):
         from astra.security import RateLimiter as RL
         srv, base = _server()
-        srv.rate_limiter = RL(2, 60.0)   # tight window for the test
-        self.addCleanup(srv.shutdown)
+        srv.site.rate_limiter = RL(2, 60.0)   # tight window for the test
+        self.addCleanup(srv.stop)
         codes = [_req(base + "/api/v1/health")[0] for _ in range(4)]
         self.assertIn(429, codes)
 

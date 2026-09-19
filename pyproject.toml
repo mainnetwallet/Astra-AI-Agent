@@ -5,23 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "astra-ai-agent"
 version = "1.0.0"
-description = "Astra AI Agent — plugin-based Personal AI OS (stdlib only, no runtime deps)"
+description = "Astra AI Agent — plugin-based Personal AI OS (FastAPI/ASGI web server)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "mainnetwallet" }]
 classifiers = ["Programming Language :: Python :: 3",
                "Operating System :: OS Independent"]
-dependencies = []
+dependencies = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 [project.optional-dependencies]
 dev = ["pytest", "playwright"]
-# Optional ASGI server (astra/web_fastapi.py + run_fastapi.py). The default
-# server stays zero-dependency: `python3 run.py` installs nothing.
-#   pip install ".[fastapi]"
-# On Termux/Android also pin pydantic<2: pydantic 2 ships a Rust core with
-# no Android wheel, so `pip install pydantic` would build it from source.
-fastapi = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 [tool.setuptools]
 packages = ["astra", "astra.ai", "astra.ai.adapters", "astra.agents",
@@ -31,4 +25,3 @@ include-package-data = true
 
 [project.scripts]
 astra = "run:main"
-astra-fastapi = "run_fastapi:main"

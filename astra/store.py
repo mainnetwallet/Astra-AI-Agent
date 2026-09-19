@@ -4,8 +4,8 @@ The Store is deliberately small and plugin-agnostic: plugins install their
 own tables with `install(sql)` and then use `exec`/`fetch`/`fetchone` with
 parameterised queries. Everything is plain dicts — no ORM, no surprises.
 
-Thread-safety: a single RLock guards every call because the HTTP server is
-threaded (`ThreadingHTTPServer`).
+Thread-safety: a single RLock guards every call because requests can arrive
+concurrently (uvicorn runs the blocking route work on its worker threadpool).
 """
 from __future__ import annotations
 

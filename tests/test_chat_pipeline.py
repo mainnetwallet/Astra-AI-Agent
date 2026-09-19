@@ -377,23 +377,16 @@ class TestChatEndpoint(unittest.TestCase):
     """POST /api/chat -> Agent.handle -> pipeline, over real HTTP."""
 
     def test_api_chat_returns_verified_reply_shape(self):
-        import threading
-        import time
         import urllib.request
-        from astra.web import AstraServer
-        from tests.helpers import make_stack
+        from tests.helpers import LiveServer, make_stack
 
         stack = make_stack()
         pipe, gw, rt = make([understand(), verdict("complete")], ["verified hello"])
         stack["agent"] = Agent(pipeline=pipe)
-        srv = AstraServer(("127.0.0.1", 0), stack["store"], stack["agent"],
-                          stack=stack)
-        self.addCleanup(srv.server_close)
-        self.addCleanup(srv.shutdown)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        time.sleep(0.2)
+        srv = LiveServer(stack=stack)
+        self.addCleanup(srv.stop)
         req = urllib.request.Request(
-            f"http://127.0.0.1:{srv.server_address[1]}/api/chat",
+            f"{srv.base}/api/chat",
             data=json.dumps({"message": "hello"}).encode(), method="POST",
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=5) as r:

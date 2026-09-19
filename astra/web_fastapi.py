@@ -1,52 +1,46 @@
-"""Astra web server — optional FastAPI/ASGI adapter over `astra.web_core`.
+"""Astra's web server: the FastAPI/ASGI adapter over the shared router.
 
-Same routes, same auth, same rate limit, same security headers, same JSON
-envelopes as the stdlib server — because it is literally the same router.
-This file only translates between ASGI and the neutral Request/Response
-objects; it contains no route logic of its own.
-
-Install the extra (kept out of the default dependency set on purpose):
-
-    pip install -r requirements-fastapi.txt        # fastapi + uvicorn
+`astra.web` owns *what* a request means — the route table, operator auth,
+rate limiting, CORS, security headers, secret redaction, uploads, the body
+cap and the SSE live feed — and deals in neutral Request/Response objects.
+This module owns *how* those bytes travel: it binds that router to
+FastAPI/uvicorn through one catch-all route, a lifespan that builds and tears
+down the stack, and a worker threadpool for blocking work. It contains no
+route logic of its own; there is exactly one implementation of the API.
 
 Run it:
 
-    python3 run_fastapi.py                          # banner + env handling
+    python3 run.py                                  # banner + env handling
     uvicorn --factory astra.web_fastapi:create_app  # plain ASGI deployment
 
-What the ASGI layer adds over the stdlib server:
+Design notes:
 
   * `lifespan` — the stack is built on startup and the scheduler stopped plus
     the store closed on shutdown, so `uvicorn --factory` deployments have a
     single owner for the process lifecycle (see `make_app` for the exact
     ownership rules).
   * blocking work (agent turns, provider probes) runs in the anyio worker
-    threadpool, so the event loop stays free — the same concurrency model
-    `ThreadingHTTPServer` gives the stdlib server. Size it with
+    threadpool, so the event loop stays free. Size that pool with
     `ASTRA_ASGI_THREADS` if you run many concurrent turns.
-  * the SSE live feed is driven by an **async** generator
-    (`web_core.sse_frames_async`): an idle Live tab costs no worker thread,
-    where a sync generator would occupy one of the 40 default pool slots for
-    the whole 45s of the connection and could starve agent turns.
-
-Deliberately unchanged from the stdlib server:
-
-  * the body cap (`ASTRA_MAX_BODY_MB`), which is also enforced for a chunked
-    request that carries no Content-Length;
-  * multipart parsed by the shared stdlib parser — `python-multipart` is not
-    required, and both servers decode uploads identically;
-  * static files, traversal rules and cache headers served by the shared
+  * the SSE live feed is driven by an async generator (`web.sse_frames`): an
+    idle Live tab costs no worker thread, where a sync generator would occupy
+    one of the 40 default pool slots for the whole 45s of the connection and
+    could starve agent turns.
+  * the body cap (`ASTRA_MAX_BODY_MB`) is also enforced for a chunked request
+    that carries no Content-Length;
+  * multipart is parsed by the shared stdlib parser, so `python-multipart` is
+    not required;
+  * static files, traversal rules and cache headers are served by the shared
     router rather than Starlette's StaticFiles, so `Cache-Control` and CSP
-    cannot drift between the two servers;
-  * the documented addresses in astra/web.py, which is why the router is
-    mounted as one catch-all instead of re-declared as FastAPI routes: any
-    second declaration would be a copy that can fall out of sync, which is
-    exactly why the first FastAPI attempt in this repo was reverted.
+    stay in one place;
+  * the documented addresses in astra/web.py are why the router is mounted as
+    one catch-all instead of re-declared as FastAPI routes: a second
+    declaration would be a copy that can fall out of sync.
     `ASTRA_FASTAPI_DOCS=1` still exposes /docs + /openapi.json, but with a
     catch-all the generated schema cannot describe individual routes —
     README's API table is the authoritative reference.
 
-Importing this module never fails just because the extra is missing —
+Importing this module never fails just because FastAPI is missing —
 `make_app()` raises a clear RuntimeError instead of an ImportError from
 somewhere deep in a call chain.
 """
@@ -57,13 +51,17 @@ import json
 import os
 
 from .security import make_request_id
-from .web_core import (AGENT_NAME, AstraSite, Headers, Request, Response,
-                       WebApp, check_body_size, error_response,
-                       parse_multipart_body, response_headers)
+from .web import (AGENT_NAME, AstraSite, Headers, Request, Response,
+                  WebApp, check_body_size, error_response,
+                  parse_multipart_body, response_headers)
 
 __all__ = ["make_app", "create_app", "AGENT_NAME", "HAVE_FASTAPI"]
 
-try:  # optional extra — the module must stay importable without it
+# Upper bound on how much of a rejected request body we are willing to drain
+# so the client can read our 413 (see _discard_request_body).
+_MAX_DRAIN_BYTES = 64 * 1024 * 1024
+
+try:  # stay importable even when FastAPI is missing
     from fastapi import FastAPI, Request as ASGIRequest
     from fastapi.responses import Response as ASGIResponse, StreamingResponse
     from starlette.concurrency import run_in_threadpool
@@ -80,7 +78,7 @@ except ImportError as exc:  # pragma: no cover - depends on the extra
 class _AppState:
     """The site/router pair, plus whatever we are responsible for closing.
 
-    Built eagerly when the caller already has the pieces (tests, run_fastapi),
+    Built eagerly when the caller already has the pieces (tests, run.py),
     lazily inside the ASGI lifespan when nothing was supplied — so
     `uvicorn --factory` never builds a stack at import time.
     """
@@ -123,13 +121,30 @@ def _asgi_headers(resp: Response, req: Request, site: AstraSite, method: str) ->
     return out
 
 
+async def _discard_request_body(request: ASGIRequest, budget: int) -> None:
+    """Read and throw away what the client is still sending.
+
+    The body cap is enforced from Content-Length *before* any byte is
+    buffered, but if we then answer without reading the request, uvicorn
+    closes the socket while the client is still writing the body and the
+    client sees a connection reset instead of our 413. Draining the declared
+    bytes lets the client finish its write and read the response; `budget`
+    keeps a lying client from making us read forever.
+    """
+    remaining = budget
+    try:
+        async for chunk in request.stream():
+            remaining -= len(chunk)
+            if remaining <= 0:
+                break
+    except Exception:
+        pass
+
+
 def _render(resp: Response, req: Request, site: AstraSite, method: str):
     headers = _asgi_headers(resp, req, site, method)
-    if resp.astream is not None:
-        # async drive: no worker thread is held while the feed is idle
-        return StreamingResponse(resp.astream, status_code=resp.status,
-                                 headers=headers)
     if resp.stream is not None:
+        # async drive: no worker thread is held while the feed is idle
         return StreamingResponse(resp.stream, status_code=resp.status,
                                  headers=headers)
     return ASGIResponse(content=resp.body, status_code=resp.status,
@@ -158,7 +173,7 @@ def _apply_thread_limit() -> None:
 
 
 class _AstraASGI:
-    """ASGI <-> web_core translation for one app.
+    """ASGI <-> router translation for one app.
 
     Kept as a class (rather than closures) so the annotations on `dispatch`
     resolve from module scope, which is what FastAPI's signature
@@ -169,8 +184,21 @@ class _AstraASGI:
         self.state = state
 
     def build_request(self, asgi_request: ASGIRequest, method: str) -> Request:
-        url = asgi_request.url
-        raw_path = url.path + (("?" + url.query) if url.query else "")
+        # Use scope["raw_path"], not url.path: uvicorn (correctly) percent-
+        # decodes scope["path"], but the router must see an encoded "/" the
+        # way the client sent it — a model id like "openai%2Fgpt-oss-120b"
+        # has to arrive as ONE path segment, not two. scope["raw_path"]
+        # carries the exact bytes the client put on the wire.
+        scope = asgi_request.scope
+        raw = scope.get("raw_path")
+        if raw:
+            raw_path = raw.decode("latin-1") if isinstance(raw, (bytes, bytearray)) \
+                else str(raw)
+        else:  # non-uvicorn ASGI servers may omit raw_path
+            raw_path = asgi_request.url.path
+        query = asgi_request.url.query
+        if query:
+            raw_path += "?" + query
         client = asgi_request.client
         # uvicorn's --proxy-headers rewrites scope["client"] from
         # X-Forwarded-For, so a reverse-proxied deployment keys rate limiting
@@ -189,8 +217,15 @@ class _AstraASGI:
         req = self.build_request(asgi_request, method)
 
         # Reject an oversized body before buffering a single byte of it.
-        too_big = check_body_size(site, req.headers.get("Content-Length"))
+        content_length = req.headers.get("Content-Length")
+        too_big = check_body_size(site, content_length)
         if too_big is not None:
+            try:
+                declared = int(content_length or 0)
+            except (TypeError, ValueError):
+                declared = 0
+            await _discard_request_body(asgi_request,
+                                        min(declared, _MAX_DRAIN_BYTES))
             return _render(too_big, req, site, method)
 
         if method == "OPTIONS":
@@ -214,16 +249,15 @@ class _AstraASGI:
         if not isinstance(req.body, dict):
             req.body = {}
 
-        # The router does blocking work (agent turn, provider probes) —
-        # keep it off the event loop, exactly like ThreadingHTTPServer does
-        # for the stdlib server.
+        # The router does blocking work (agent turn, provider probes) — run it
+        # off the event loop so a slow turn cannot stall the SSE live feed.
         resp = await run_in_threadpool(router.handle, req)
         return _render(resp, req, site, method)
 
 
 def make_app(stack=None, store=None, agent=None, site=None, docs=None,
              manage_lifecycle=None):
-    """Build the ASGI app. Reuses the exact router the stdlib server uses.
+    """Build the ASGI app around the shared router.
 
     Exactly one owner for the stack, chosen by what you pass:
 
@@ -231,7 +265,7 @@ def make_app(stack=None, store=None, agent=None, site=None, docs=None,
         and stops the scheduler + closes the store on shutdown (this is what
         `uvicorn --factory astra.web_fastapi:create_app` does);
       * `stack=` — used as-is; lifecycle defaults to managed (the app shuts
-        down the scheduler/store), matching run_fastapi.py;
+        down the scheduler/store), matching run.py;
       * `store=`/`agent=` — the caller owns the lifecycle;
       * `site=` — a ready-made AstraSite, the caller owns everything (tests).
 
@@ -239,10 +273,9 @@ def make_app(stack=None, store=None, agent=None, site=None, docs=None,
     """
     if not HAVE_FASTAPI:
         raise RuntimeError(
-            "FastAPI is not installed. This server is an optional extra;\n"
-            "the zero-dependency server (python3 run.py) needs nothing.\n"
+            "FastAPI/uvicorn are required. Install them with:\n"
             "\n"
-            "    pip install -r requirements-fastapi.txt\n"
+            "    pip install -r requirements.txt\n"
             "\n"
             "Termux/Android: pydantic 2 has no Android wheel, so install the\n"
             "pure-Python path instead:\n"
@@ -288,8 +321,8 @@ def make_app(stack=None, store=None, agent=None, site=None, docs=None,
     @app.api_route("/{full_path:path}",
                    methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"])
     async def catch_all(fastapi_request: ASGIRequest, full_path: str = ""):
-        """One catch-all, exactly like the stdlib dispatcher: every address
-        the router does not recognise comes back as a structured 404."""
+        """One catch-all: every address the router does not recognise comes
+        back as a structured 404."""
         return await bridge.dispatch(fastapi_request, fastapi_request.method)
 
     return app

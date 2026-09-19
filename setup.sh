@@ -28,6 +28,17 @@ fi
 PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 echo "✅ Python $PYTHON_VERSION found"
 
+# install the FastAPI/uvicorn web-server dependencies
+echo "📦 Installing dependencies…"
+if command -v pkg >/dev/null 2>&1; then
+    # Termux: pydantic 2 has no Android wheel, so use the pure-Python path.
+    python3 -m pip install --upgrade "fastapi<0.119" "uvicorn>=0.27" "pydantic<2" \
+        || python3 -m pip install --upgrade -r requirements.txt
+else
+    python3 -m pip install --upgrade -r requirements.txt
+fi
+echo "✅ Web server deps installed (fastapi + uvicorn)"
+
 # data dir
 DATA_DIR="${DATA_DIR:-./data}"
 mkdir -p "$DATA_DIR"

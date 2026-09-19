@@ -14,6 +14,10 @@ try { python --version | Out-Null } catch {
     exit 1
 }
 
+Write-Host "`u{1F4E6} Installing dependencies..."
+python -m pip install --upgrade -r requirements.txt
+Write-Host "`u{2705} Web server deps installed (fastapi + uvicorn)"
+
 New-Item -ItemType Directory -Force -Path ".\data" | Out-Null
 Write-Host "`u{2705} data/ dir ready"
 

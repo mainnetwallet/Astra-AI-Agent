@@ -1,43 +1,38 @@
-"""Parity tests: the stdlib server and the FastAPI server must answer
-identically.
+"""Tests for the FastAPI/ASGI web layer — the only server Astra ships.
 
-Both are adapters over `astra.web_core`, so any divergence here is a bug in
-an adapter (a dropped security header, a different status, a rewritten
-body) rather than a difference in behaviour anyone asked for. The ASGI half
-is skipped when the optional fastapi/uvicorn extra is not installed — the
-core half always runs.
+There are two levels here:
+
+  * `WebCoreTests` drives the neutral router in `astra.web` with no socket at
+    all — auth, traversal, body cap, streaming and the JSON envelope are
+    properties of the router, not of the HTTP stack.
+  * `LiveApiTests` boots the real FastAPI/uvicorn app on an ephemeral port and
+    checks what only a live server can: headers, statuses, static bytes, SSE
+    framing, CORS preflight.
+
+The lifespan and worker-pool tests then pin the two ASGI-specific contracts:
+who owns the stack, and that an idle SSE feed never holds a worker thread.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import socket
-import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
 from unittest import mock
 
-from astra.store import Store
-from astra.web import AstraServer
-from astra.web_core import AstraSite, Request, WebApp
+from astra.web import AstraSite, Request, WebApp
 
-try:
-    import fastapi  # noqa: F401
-    import uvicorn
-    HAVE_FASTAPI = True
-except Exception:  # pragma: no cover - depends on the extra
-    HAVE_FASTAPI = False
+from tests.helpers import LiveServer, make_stack
 
 
 def _stack():
-    from tests.helpers import make_stack
     return make_stack()
 
 
-# ── core-only tests (no framework needed) ───────────────────────────────────
+# ── core-only tests (no server needed) ──────────────────────────────────────
 class WebCoreTests(unittest.TestCase):
     """The neutral router, exercised with no socket at all."""
 
@@ -96,90 +91,27 @@ class WebCoreTests(unittest.TestCase):
         self.assertEqual(self._call("GET", "/").status, 200)
 
     def test_oversized_body_is_413(self):
+        from astra.web import check_body_size
         self.site.max_body_bytes = 1024
-        site = self.site
-        from astra.web_core import check_body_size
-        self.assertIsNotNone(check_body_size(site, 4096))
-        self.assertIsNone(check_body_size(site, 10))
+        self.assertIsNotNone(check_body_size(self.site, 4096))
+        self.assertIsNone(check_body_size(self.site, 10))
 
     def test_stream_response_has_no_content_length(self):
-        from astra.web_core import response_headers
+        from astra.web import response_headers, sse_frames
+        import inspect
+        # the feed is an async generator, so the ASGI server never has to
+        # drive it inside a worker thread
+        self.assertTrue(inspect.isasyncgenfunction(sse_frames))
         resp = self.app.handle(Request("GET", "/api/events/stream"))
         self.assertEqual(resp.status, 200)
+        self.assertTrue(resp.has_stream)
         self.assertIsNotNone(resp.stream)
-        names = [n.lower() for n, _ in response_headers(resp, Request("GET", "/"), self.site)]
+        names = [n.lower() for n, _ in
+                 response_headers(resp, Request("GET", "/"), self.site)]
         self.assertNotIn("content-length", names)
 
 
-class CompatHelperTests(unittest.TestCase):
-    """`astra.web._json*` stayed importable for any existing caller; they must
-    produce the same hardened envelope as the router does."""
-
-    class _FakeHandler:
-        command = "GET"
-
-        def __init__(self):
-            self._rid = "rid1"
-            self.emitted = None
-
-        def _last_request(self):
-            return Request("GET", "/api/health", rid=self._rid)
-
-        def _emit(self, resp, req, method):
-            self.emitted = resp
-
-    def test_json_err_envelope(self):
-        from astra.web import _json_err
-        h = self._FakeHandler()
-        _json_err(h, "boom", 400, "bad_request")
-        body = json.loads(h.emitted.body.decode("utf-8"))
-        self.assertEqual(h.emitted.status, 400)
-        self.assertEqual(body["error"], "boom")
-        self.assertEqual(body["error_code"], "bad_request")
-        self.assertEqual(body["request_id"], "rid1")
-        self.assertFalse(body["ok"])
-
-    def test_json_ok_adds_request_id(self):
-        from astra.web import _json_ok
-        h = self._FakeHandler()
-        _json_ok(h, {"ok": True, "data": {}})
-        body = json.loads(h.emitted.body.decode("utf-8"))
-        self.assertEqual(h.emitted.status, 200)
-        self.assertEqual(body["request_id"], "rid1")
-
-
-# ── live parity between the two servers ─────────────────────────────────────
-class _UvicornThread:
-    """uvicorn on an ephemeral port, handed a pre-bound socket so there is
-    no bind race with the stdlib server."""
-
-    def __init__(self, app):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", 0))
-        self.sock.setblocking(False)
-        self.port = self.sock.getsockname()[1]
-        self.server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
-        self.thread = threading.Thread(
-            target=self.server.run, kwargs={"sockets": [self.sock]}, daemon=True)
-
-    def start(self):
-        self.thread.start()
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            try:
-                urllib.request.urlopen(
-                    f"http://127.0.0.1:{self.port}/api/health", timeout=1).read()
-                return
-            except Exception:
-                time.sleep(0.1)
-        raise AssertionError("uvicorn did not become ready")
-
-    def stop(self):
-        self.server.should_exit = True
-        self.thread.join(10)
-
-
+# ── live server tests ───────────────────────────────────────────────────────
 def _request(port, method, path, body=None, headers=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
@@ -196,12 +128,7 @@ def _request(port, method, path, body=None, headers=None):
 
 
 def _hdr(headers, name, default=None):
-    """Case-insensitive header lookup.
-
-    Header names are case-insensitive per RFC 9110, and the two stacks emit
-    different casing (stdlib sends the name as written, uvicorn lower-cases
-    everything), so compare them the way a client must.
-    """
+    """Case-insensitive header lookup (uvicorn lower-cases header names)."""
     wanted = name.lower()
     for key, value in headers.items():
         if key.lower() == wanted:
@@ -209,207 +136,129 @@ def _hdr(headers, name, default=None):
     return default
 
 
-def _strip_volatile(value):
-    """Drop fields that legitimately differ between two live servers."""
-    if isinstance(value, dict):
-        return {k: _strip_volatile(v) for k, v in value.items()
-                if k not in ("request_id", "uptime_s", "started")}
-    if isinstance(value, list):
-        return [_strip_volatile(v) for v in value]
-    return value
+SECURITY_HEADERS = ("X-Content-Type-Options", "X-Frame-Options",
+                    "Content-Security-Policy", "Referrer-Policy",
+                    "Cross-Origin-Opener-Policy")
 
 
-@unittest.skipUnless(HAVE_FASTAPI, "fastapi/uvicorn extra not installed")
-class ServerParityTests(unittest.TestCase):
-    """Same stack, two servers, byte-comparable answers."""
+class LiveApiTests(unittest.TestCase):
+    """The real FastAPI/uvicorn server on an ephemeral port."""
 
-    @classmethod
-    def setUpClass(cls):
-        from astra.web_fastapi import make_app
-        cls.stack = _stack()
-        cls.stdlib = AstraServer(("127.0.0.1", 0), cls.stack["store"],
-                                 cls.stack["agent"], stack=cls.stack)
-        cls.stdlib_port = cls.stdlib.server_address[1]
-        cls.thread = threading.Thread(target=cls.stdlib.serve_forever,
-                                      daemon=True)
-        cls.thread.start()
-        # One shared site, so both servers run against the same store and the
-        # same config knobs (the ASGI side gets the stack, never a second one).
-        cls.asgi_site = AstraSite(("127.0.0.1", 0), cls.stack["store"],
-                                  cls.stack["agent"], stack=cls.stack)
-        cls.asgi = _UvicornThread(make_app(site=cls.asgi_site))
-        cls.asgi.start()
+    def setUp(self):
+        self.stack = _stack()
+        self.srv = LiveServer(stack=self.stack)
+        self.addCleanup(self.stack["store"].close)
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.asgi.stop()
-        cls.stdlib.shutdown()
-        cls.stdlib.server_close()
-        cls.stack["store"].close()
+    def tearDown(self):
+        self.srv.stop()
 
-    def _both(self, method, path, body=None, headers=None):
-        a = _request(self.stdlib_port, method, path, body, headers)
-        b = _request(self.asgi.port, method, path, body, headers)
-        return a, b
+    def _get(self, path, **kw):
+        return _request(self.srv.port, "GET", path, **kw)
 
-    def _assert_parity(self, path, method="GET", body=None, headers=None,
-                       compare_body=True, hardened=True):
-        (sa, ba, ha), (sb, bb, hb) = self._both(method, path, body, headers)
-        self.assertEqual(sa, sb, f"status differs for {method} {path}")
-        # security headers are the contract that must never drift
-        if hardened:
-            for name in ("X-Content-Type-Options", "X-Frame-Options",
-                         "Content-Security-Policy", "Referrer-Policy",
-                         "Cross-Origin-Opener-Policy"):
-                self.assertEqual(_hdr(ha, name), _hdr(hb, name),
-                                 f"{name} differs for {method} {path}")
-                self.assertIsNotNone(_hdr(hb, name),
-                                     f"{name} missing from the ASGI response "
-                                     f"for {method} {path}")
-        self.assertTrue(_hdr(ha, "X-Request-Id") and _hdr(hb, "X-Request-Id"),
-                        f"missing request id for {method} {path}")
-        if compare_body and "application/json" in _hdr(ha, "Content-Type", ""):
-            self.assertEqual(_strip_volatile(json.loads(ba)),
-                             _strip_volatile(json.loads(bb)),
-                             f"body differs for {method} {path}")
-        return sa, ba, ha
-
-    # -- stable JSON surfaces ------------------------------------------------
-    def test_manifest(self):
-        self._assert_parity("/api/manifest")
-
-    def test_tools(self):
-        self._assert_parity("/api/tools")
-
-    def test_models(self):
-        self._assert_parity("/api/v1/models")
-
-    def test_router_status(self):
-        self._assert_parity("/api/v1/router/status")
-
-    def test_web3_policy(self):
-        self._assert_parity("/api/v1/web3/transaction-policy")
+    def _assert_hardened(self, status, body, headers):
+        for name in SECURITY_HEADERS:
+            self.assertIsNotNone(_hdr(headers, name), f"{name} missing")
+        self.assertTrue(_hdr(headers, "X-Request-Id"))
+        if "application/json" in _hdr(headers, "Content-Type", ""):
+            self.assertTrue(json.loads(body)["request_id"])
 
     def test_health(self):
-        self._assert_parity("/api/health")
+        status, body, headers = self._get("/api/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+        self._assert_hardened(status, body, headers)
 
-    def test_static_index_is_byte_identical(self):
-        self._assert_parity("/")
+    def test_manifest_and_tools(self):
+        self.assertEqual(self._get("/api/manifest")[0], 200)
+        status, body, _ = self._get("/api/tools")
+        self.assertGreaterEqual(len(json.loads(body)["data"]["tools"]), 13)
 
-    def test_js_asset_is_byte_identical(self):
-        self._assert_parity("/static/js/astra.js")
+    def test_models_and_router_status(self):
+        self.assertEqual(self._get("/api/v1/models")[0], 200)
+        self.assertEqual(self._get("/api/v1/router/status")[0], 200)
 
-    # -- error surfaces ------------------------------------------------------
+    def test_static_index_and_asset(self):
+        status, body, headers = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", _hdr(headers, "Content-Type", ""))
+        self.assertTrue(body)
+        self.assertEqual(self._get("/static/js/astra.js")[0], 200)
+
     def test_unknown_route(self):
-        self._assert_parity("/api/v1/does-not-exist")
-
-    def test_missing_transaction(self):
-        self._assert_parity("/api/v1/web3/transactions/nope")
-
-    def test_mode_change_without_token(self):
-        self._assert_parity("/api/v1/web3/transaction-policy/mode",
-                            method="POST", body={"mode": "AUTO"})
+        status, body, headers = self._get("/api/v1/does-not-exist")
+        self.assertEqual(status, 404)
+        payload = json.loads(body)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error_code"], "bad_request")
 
     def test_traversal(self):
-        self._assert_parity("/static/../run.py")
+        self.assertEqual(self._get("/static/../run.py")[0], 400)
 
     def test_favicon_is_204(self):
-        # the favicon 204 carries only the request id on both servers
-        (sa, _, ha), (sb, _, hb) = self._both("GET", "/favicon.ico")
-        self.assertEqual(sa, sb)
-        self.assertEqual(sa, 204)
-        self.assertTrue(_hdr(ha, "X-Request-Id") and _hdr(hb, "X-Request-Id"))
+        status, _, headers = self._get("/favicon.ico")
+        self.assertEqual(status, 204)
+        self.assertTrue(_hdr(headers, "X-Request-Id"))
         # RFC 9110: a 204 must not carry Content-Length
-        self.assertIsNone(_hdr(ha, "Content-Length"))
-        self.assertIsNone(_hdr(hb, "Content-Length"))
+        self.assertIsNone(_hdr(headers, "Content-Length"))
 
-    # -- preflight -----------------------------------------------------------
-    def test_options_preflight_matches(self):
-        (sa, _, ha), (sb, _, hb) = self._both(
-            "OPTIONS", "/api/health", headers={"Origin": "http://localhost:8787"})
-        self.assertEqual(sa, sb)
-        self.assertEqual(sa, 204)
-        self.assertEqual(_hdr(ha, "Access-Control-Allow-Origin"),
-                         _hdr(hb, "Access-Control-Allow-Origin"))
-        self.assertEqual(_hdr(ha, "Access-Control-Allow-Methods"),
-                         _hdr(hb, "Access-Control-Allow-Methods"))
-        self.assertEqual(_hdr(ha, "Access-Control-Allow-Methods"),
+    def test_options_preflight(self):
+        status, _, headers = _request(
+            self.srv.port, "OPTIONS", "/api/health",
+            headers={"Origin": "http://localhost:8787"})
+        self.assertEqual(status, 204)
+        self.assertEqual(_hdr(headers, "Access-Control-Allow-Origin"),
+                         "http://localhost:8787")
+        self.assertEqual(_hdr(headers, "Access-Control-Allow-Methods"),
                          "GET,POST,PATCH,DELETE,OPTIONS")
-        self.assertIsNone(_hdr(ha, "Content-Length"))
-        self.assertIsNone(_hdr(hb, "Content-Length"))
+        self.assertIsNone(_hdr(headers, "Content-Length"))
 
-    # -- mutations reach the same store --------------------------------------
-    def test_memory_round_trip_both_servers(self):
-        _request(self.stdlib_port, "POST", "/api/memory",
-                 {"content": "parity memo", "category": "note"})
-        a = _request(self.stdlib_port, "GET",
-                     "/api/memory/search?query=parity&k=1")[1]
-        b = _request(self.asgi.port, "GET",
-                     "/api/memory/search?query=parity&k=1")[1]
-        self.assertEqual(json.loads(a)["data"][0]["content"],
-                         json.loads(b)["data"][0]["content"])
+    def test_memory_round_trip(self):
+        _request(self.srv.port, "POST", "/api/memory",
+                 {"content": "live memo", "category": "note"})
+        status, body, _ = self._get("/api/memory/search?query=live&k=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["data"][0]["content"], "live memo")
 
-    def test_chat_turn_answers_on_both(self):
-        # The real agent turn is slow when no provider is configured (it
-        # walks the provider retry/timeout path), and what is being tested
-        # here is the *adapter*: body decoding, chat-log pinning, and the
-        # JSON envelope. Swap in a stub so the check is fast and exact.
+    def test_chat_turn(self):
         class _StubAgent:
             def handle(self, msg, context="", attachments=None):
                 return {"ok": True, "reply": f"echo: {msg}",
                         "action": None, "data": {}}
 
-        real_stdlib, real_asgi = self.stdlib.agent, self.asgi_site.agent
-        self.stdlib.agent = self.asgi_site.agent = _StubAgent()
+        self.srv.site.agent = _StubAgent()
+        status, body, _ = _request(self.srv.port, "POST", "/api/chat",
+                                   {"message": "hi"})
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["reply"], "echo: hi")
+
+    def test_sse_stream_frames(self):
+        # A frame must exist and after_id=0 must be used, otherwise the feed
+        # (correctly) idles without writing anything.
+        self.stack["events"].emit("ai.completed", agent="live")
+        req = urllib.request.Request(
+            f"{self.srv.base}/api/events/stream?after_id=0")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("text/event-stream",
+                          _hdr(dict(resp.headers), "Content-Type", ""))
+            frame = resp.read(1)
+        self.assertTrue(frame)
+
+    def test_auth_token_gate(self):
+        self.srv.site.operator_token = "sekrit"
         try:
-            a = _request(self.stdlib_port, "POST", "/api/chat", {"message": "hi"})
-            b = _request(self.asgi.port, "POST", "/api/chat", {"message": "hi"})
-            self.assertEqual(a[0], b[0])
-            self.assertEqual(a[0], 200)
-            da, db = json.loads(a[1])["data"], json.loads(b[1])["data"]
-            self.assertEqual(da["reply"], "echo: hi")
-            self.assertEqual(da["reply"], db["reply"])
-            self.assertEqual(da["ok"], db["ok"])
-            # the reply is pinned to the chat the turn belongs to
-            self.assertIsInstance(da["conversation_id"], int)
+            status, body, _ = self._get("/api/health")
+            self.assertEqual(status, 401)
+            self.assertEqual(json.loads(body)["error_code"], "authentication")
+            # X-Astra-Token and ?token= both work; static stays public
+            self.assertEqual(
+                _request(self.srv.port, "GET", "/api/health",
+                         headers={"X-Astra-Token": "sekrit"})[0], 200)
+            self.assertEqual(self._get("/")[0], 200)
         finally:
-            self.stdlib.agent, self.asgi_site.agent = real_stdlib, real_asgi
-
-    # -- streaming -----------------------------------------------------------
-    def test_sse_streams_frames(self):
-        # An event must exist and `after_id=0` must be used, otherwise the
-        # feed (correctly) idles without writing anything and the read blocks.
-        self.stack["events"].emit("ai.completed", agent="parity")
-
-        def read_frames(port):
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/api/events/stream?after_id=0")
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                self.assertEqual(resp.status, 200)
-                self.assertIn("text/event-stream",
-                              _hdr(dict(resp.headers), "Content-Type", ""))
-                return resp.read(1)
-
-        self.assertEqual(read_frames(self.stdlib_port), read_frames(self.asgi.port))
-
-    def test_auth_token_gate_matches(self):
-        self.stack["config"].set("ASTRA_TOKEN", "sekrit")
-        self.stdlib.operator_token = "sekrit"
-        self.asgi_site.operator_token = "sekrit"
-        try:
-            a = _request(self.stdlib_port, "GET", "/api/health")
-            b = _request(self.asgi.port, "GET", "/api/health")
-            self.assertEqual(a[0], 401)
-            self.assertEqual(b[0], 401)
-            self.assertEqual(json.loads(a[1])["error_code"],
-                             json.loads(b[1])["error_code"])
-            # static stays public on both
-            self.assertEqual(_request(self.stdlib_port, "GET", "/")[0], 200)
-            self.assertEqual(_request(self.asgi.port, "GET", "/")[0], 200)
-        finally:
-            self.stack["config"].set("ASTRA_TOKEN", "")
-            self.stdlib.operator_token = ""
-            self.asgi_site.operator_token = ""
+            self.srv.site.operator_token = ""
 
 
 class _FakeScheduler:
@@ -426,7 +275,6 @@ async def _drive_lifespan(app):
         pass
 
 
-@unittest.skipUnless(HAVE_FASTAPI, "fastapi/uvicorn extra not installed")
 class LifespanTests(unittest.TestCase):
     """Who owns the stack is decided by what `make_app` was handed."""
 
@@ -491,22 +339,7 @@ class LifespanTests(unittest.TestCase):
         self.assertTrue(callable(app))
         self.assertTrue(hasattr(app, "router"))
 
-    def test_sse_response_offers_an_async_drive(self):
-        """Locks in the design: the feed must expose an async generator, so an
-        ASGI server never has to drive it inside a worker thread."""
-        import inspect
-        self.assertTrue(inspect.isasyncgenfunction(
-            __import__("astra.web_core", fromlist=["x"]).sse_frames_async))
-        stack = _stack()
-        site = AstraSite(("127.0.0.1", 0), stack["store"], stack["agent"],
-                         stack=stack)
-        resp = WebApp(site).handle(Request("GET", "/api/events/stream"))
-        self.assertTrue(resp.has_stream)
-        self.assertIsNotNone(resp.astream)
-        stack["store"].close()
 
-
-@unittest.skipUnless(HAVE_FASTAPI, "fastapi/uvicorn extra not installed")
 class WorkerPoolTests(unittest.TestCase):
     """An idle SSE tab must not consume a worker thread.
 
@@ -516,15 +349,13 @@ class WorkerPoolTests(unittest.TestCase):
     """
 
     def setUp(self):
-        from astra.web_fastapi import make_app
         self.stack = _stack()
         self._env = os.environ.get("ASTRA_ASGI_THREADS")
         os.environ["ASTRA_ASGI_THREADS"] = "1"
         # the limit is applied on ASGI startup, so the env var must be set
         # before the server starts
-        self.server = _UvicornThread(make_app(stack=self.stack))
         try:
-            self.server.start()
+            self.server = LiveServer(stack=self.stack)
         except Exception:
             os.environ.pop("ASTRA_ASGI_THREADS", None)
             raise
@@ -541,7 +372,7 @@ class WorkerPoolTests(unittest.TestCase):
         # an idle feed: no after_id, so nothing is replayed and nothing is
         # written until an event arrives
         stream = urllib.request.urlopen(
-            f"http://127.0.0.1:{self.server.port}/api/events/stream", timeout=10)
+            f"{self.server.base}/api/events/stream", timeout=10)
         try:
             self.assertEqual(stream.status, 200)
             self.assertIn("text/event-stream",

@@ -1,8 +1,9 @@
 # Astra AI Agent 🚀
 
-A **plugin-based local Personal AI OS** — a zero-dependency core that plans,
-routes, remembers and executes goals, plus the **Airdrop Manager** as its
-first plugin. Python 3.9+ standard library only. No `pip install` to run.
+A **plugin-based local Personal AI OS** — a core that plans, routes, remembers
+and executes goals, plus the **Airdrop Manager** as its first plugin. Python
+3.9+; the only runtime dependencies are FastAPI and uvicorn, which serve the
+web API and the SPA.
 
 Astra is a **Personal AI OS**: a generic core (orchestrator, planner, tool
 registry, memory, workflows, scheduler) with domain-specific features living
@@ -35,7 +36,7 @@ one plugin, drop it in `plugins/`, restart. The core never changes.
 │  │ policy (CONFIRM/AUTO)│   │ secret redaction · SSRF guard · body cap│ │
 │  └──────────────────────┘   └─────────────────────────────────────────┘ │
 │                                                                          │
-│  Store: SQLite · servers: stdlib HTTP or FastAPI · SSE · UI: SPA       │
+│  Store: SQLite · server: FastAPI/uvicorn (ASGI) · SSE · UI: SPA         │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -67,10 +68,15 @@ bash start.sh
 # Open http://localhost:8787/
 ```
 
-That's it. No `pip install`. No database setup. Python 3.9+ only.
+`setup.sh` installs the two runtime dependencies (FastAPI + uvicorn). No
+database setup. Python 3.9+.
 
 Windows: double-click `setup.bat` then `start.bat` (or `setup.ps1`/`start.ps1`).
 Termux/Android, macOS: same `setup.sh`/`start.sh` flow.
+
+> Termux/Android: pydantic 2 has no Android wheel. `setup.sh` detects Termux
+> and installs the pure-Python path
+> (`pip install "fastapi<0.119" "uvicorn>=0.27" "pydantic<2"`).
 
 > ⚠️ **Security default:** the server binds **127.0.0.1** (loopback). Add
 > `ASTRA_TOKEN=...` to your `.env` (or env) before opening it to your LAN with
@@ -122,8 +128,8 @@ logs, UI, or API responses. Router preference order: `AI_PROVIDER=gemini groq �
 | `NO_BROWSER` | false | Don't auto-open browser on start |
 | `ACTIVE_PLUGINS` | airdrop | Comma-separated plugin whitelist |
 | `ASTRA_SCHEDULER` | 0 | Start the scheduler daemon |
-| `ASTRA_FASTAPI_DOCS` | 0 | FastAPI server only: expose `/docs` + `/openapi.json` |
-| `ASTRA_ASGI_THREADS` | 40 | FastAPI server only: worker-thread pool for blocking work |
+| `ASTRA_FASTAPI_DOCS` | 0 | Expose `/docs` + `/openapi.json` |
+| `ASTRA_ASGI_THREADS` | 40 | Worker-thread pool used for blocking route work |
 
 ## Web3 transaction safety
 
@@ -184,28 +190,26 @@ All JSON responses carry `request_id`; errors are structured
 gated to non-`production`). Every response is secret-redacted, secured with
 CSP/nosniff/frame headers and optionally rate-limited + body-capped.
 
-### Optional: FastAPI/ASGI server
+### Web server (FastAPI/ASGI)
 
-The default server is stdlib-only (`python3 run.py`). A FastAPI/ASGI variant
-ships beside it for deployments that want uvicorn — process managers,
-multiple workers, ASGI middleware, or an ASGI-based reverse proxy setup:
+FastAPI/uvicorn is the **only** web server. `python3 run.py` starts it with
+the usual banner and env handling:
 
 ```bash
-pip install -r requirements-fastapi.txt   # fastapi + uvicorn
-python3 run_fastapi.py                    # same port, same routes
+pip install -r requirements.txt    # fastapi + uvicorn
+python3 run.py                     # http://localhost:8787/
 ```
 
-Both servers are adapters over the **same router** (`astra/web_core.py`), so
-the FastAPI one cannot drift from the stdlib one: identical routes, auth,
-rate limit, body cap, CORS, security headers, SSE frames and JSON envelopes.
-Only the HTTP layer differs — uvicorn instead of `ThreadingHTTPServer`. The
-trade-off is stated plainly: the stdlib server installs nothing (recommended
-on Termux/Android), the FastAPI one pulls in fastapi + starlette + uvicorn +
-pydantic for ASGI features the single-process stdlib server does not have.
+`astra/web.py` owns *what* a request means — the route table, auth, rate
+limit, body cap, CORS, security headers, SSE frames and JSON envelopes — and
+deals in neutral `Request`/`Response` objects. `astra/web_fastapi.py` is the
+only adapter that turns those into bytes: one catch-all route, so no route can
+drift out of sync. All the routes, auth, rate limits, CORS, headers, uploads,
+body cap and SSE behaviour documented above are unchanged.
 
-**Deployment.** `run_fastapi.py` handles the banner/env like `run.py`; for a
-plain ASGI deployment use the factory, which builds the stack on startup and
-stops the scheduler + closes the store on shutdown:
+**Plain ASGI deployment.** The factory builds the stack on startup and stops
+the scheduler + closes the store on shutdown, so process managers
+(systemd, gunicorn, Docker, k8s) can own the process directly:
 
 ```bash
 uvicorn --factory astra.web_fastapi:create_app --host 127.0.0.1 --port 8787
@@ -213,7 +217,7 @@ uvicorn --factory astra.web_fastapi:create_app --host 127.0.0.1 --port 8787
 
 The app owns the lifecycle only when it was handed a `stack` (or nothing at
 all); pass `site=`/`store=`/`agent=` and the caller keeps ownership, which is
-how the tests run two servers against one stack.
+how the tests run the real server in-process.
 
 **Concurrency.** Blocking work (an agent turn, a provider probe) runs in
 anyio's worker threadpool, so the event loop stays free — size it with
@@ -227,12 +231,12 @@ generator would hold one of those slots for the full 45 s connection.
   generated schema cannot describe individual routes; the API table above is
   the authoritative reference.
 * `python-multipart` is deliberately **not** required: uploads are parsed by
-  the shared stdlib parser, so both servers handle multipart identically.
+  the shared stdlib parser in `astra/web.py`.
 * Behind a reverse proxy, run uvicorn with `--proxy-headers
   --forwarded-allow-ips=...` so rate limiting keys on the real client instead
   of the proxy; without it the direct peer address is used (unspoofable).
-* Termux/Android: `pydantic` 2 ships a Rust core with no Android wheel, so the
-  default install tries to build it from source. Use the pure-Python path:
+* Termux/Android: `pydantic` 2 ships a Rust core with no Android wheel, so a
+  plain install tries to build it from source. Use the pure-Python path:
   `pip install "fastapi<0.119" "uvicorn>=0.27" "pydantic<2"`.
 
 **Before running multiple workers** (`--workers N`), note two process-local
@@ -292,20 +296,19 @@ Drop it in `plugins/`, add `"myplugin"` to `ACTIVE_PLUGINS`, restart.
 
 ```bash
 python3 -m unittest discover -s tests -v        # full suite, stdlib runner
-python3 -m pytest -q tests/test_web_fastapi.py  # live smoke: boots real servers
-                                                # (stdlib + FastAPI) and checks the API
+python3 -m pytest -q tests/test_web_fastapi.py  # live smoke: boots the real
+                                                # FastAPI server and checks the API
 python3 -m compileall astra                     # syntax sanity
 ```
 
 For a manual end-to-end check, start a server and hit it:
-`NO_BROWSER=1 python3 run.py` (or `run_fastapi.py`) then
+`NO_BROWSER=1 python3 run.py` then
 `curl -s localhost:8787/api/health`.
 
 Optional dev extras: `pip install -r requirements-dev.txt` (pytest, Playwright).
 
-Parity tests: `tests/test_web_fastapi.py` runs the stdlib server and the
-FastAPI server side by side and asserts they answer identically (status,
-security headers, JSON bodies, static bytes, SSE frames). The core half always
-runs; the ASGI half is skipped unless the `fastapi` extra is installed.
+Web tests: `tests/test_web_fastapi.py` boots the real FastAPI/uvicorn server
+in-process (ephemeral port) and checks status codes, security headers, JSON
+bodies, static bytes, SSE frames, the lifespan and the worker pool.
 
 Docker: `docker build -t astra-agent . && docker run -p 8787:8787 astra-agent`.

@@ -653,6 +653,23 @@ loaders.providers = async function () {
       PROVIDER_MODEL_RESULTS[name] = models.map((m) => ({ model: m, pending: true }));
       if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(PROVIDER_MODEL_RESULTS[name]);
 
+      // Wipe THIS provider's previously saved calls/errors/latency before
+      // the fresh run starts — a test's numbers should be this test's own
+      // result, not the old save with new numbers piled on top. Scoped to
+      // just this one provider; every other provider's saved health is
+      // left exactly as it was.
+      const countsEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="provider-counts"]`, list);
+      try {
+        const reset = await post(`/api/v1/providers/${encodeURIComponent(name)}/reset-health`);
+        if (countsEl) {
+          const calls = (reset.ok && reset.data && reset.data.calls) || 0;
+          const errors = (reset.ok && reset.data && reset.data.errors) || 0;
+          countsEl.dataset.calls = String(calls);
+          countsEl.dataset.errors = String(errors);
+          countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ${calls} calls · ${errors} err`;
+        }
+      } catch (_e) { /* reset failing shouldn't block the test itself */ }
+
       const updateRow = (result) => {
         const rows = PROVIDER_MODEL_RESULTS[name] || [];
         const idx = rows.findIndex((r) => r.model === result.model);
@@ -664,10 +681,9 @@ loaders.providers = async function () {
       };
 
       // "20 calls · 3 err" in the header — bumped by +1 call (and +1 err on
-      // failure) the instant EACH model's own result lands, on top of
-      // whatever it already showed, instead of waiting for the whole test
-      // batch to finish before the number moves.
-      const countsEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="provider-counts"]`, list);
+      // failure) the instant EACH model's own result lands, on top of the
+      // zeroed count the reset above just set, instead of waiting for the
+      // whole test batch to finish before the number moves.
       const bumpCounts = (ok) => {
         if (!countsEl) return;
         const calls = (parseInt(countsEl.dataset.calls, 10) || 0) + 1;

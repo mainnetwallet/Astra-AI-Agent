@@ -797,13 +797,13 @@ class AstraHandler(BaseHTTPRequestHandler):
                                       "data": {"routing": r.routing_stats(),
                                                "task": r.task_stats(),
                                                "last_route": r.last_route()}})
-        # provider admin: /api/v1/providers/<name>/refresh|enable|disable|test
+        # provider admin: /api/v1/providers/<name>/refresh|enable|disable|test|reset-health
         # (fixed off-by-one: "api"+"providers"+<name>+<action> is 4 segments,
         # not 5 — the old `len(path) == 5` check meant this route, including
         # refresh/enable/disable, could never actually match a real request)
         if (len(path) == 4 and path[:2] == ["api", "providers"]
                 and method == "POST"
-                and path[3] in ("refresh", "enable", "disable", "test")):
+                and path[3] in ("refresh", "enable", "disable", "test", "reset-health")):
             return self._provider_admin(s, path[2], path[3])
         # single-model test: /api/v1/providers/<name>/test/<model> — probes
         # just that one (provider, model) pair so the browser gets each
@@ -895,6 +895,22 @@ class AstraHandler(BaseHTTPRequestHandler):
             # _mark_down) the instant this call returns.
             result = router.test_provider(name)
             return self._json_ok_rid({"ok": True, "data": result})
+        if action == "reset-health":
+            # Called by the UI right before it starts firing per-model test
+            # requests at ONE provider: wipes that provider's previously
+            # saved calls/errors/latency so this test's numbers start clean
+            # instead of adding onto whatever earlier tests had saved — and
+            # touches only this provider, every other provider's saved
+            # health is untouched.
+            router.reset_health(name)
+            info = router.health().get(name, {})
+            return self._json_ok_rid({"ok": True, "data": {
+                "provider": name,
+                "calls": info.get("calls", 0),
+                "errors": info.get("errors", 0),
+                "state": info.get("state"),
+                "healthy": info.get("healthy"),
+            }})
         return self._err_rid(f"unknown action: {action}", 400)
 
     def _provider_model_test(self, s, name, model_id) -> bool:
@@ -911,15 +927,21 @@ class AstraHandler(BaseHTTPRequestHandler):
 
     def _providers_test_all(self, s) -> bool:
         """One-click 'Gateway test': probe every provider AND every Astra AI
-        Gateway connection. Each probe's result is persisted the moment that
-        probe finishes (see AstraRouter.test_provider /
-        AstraAIGateway.test_connection) — this loop doesn't wait for every
-        test to *succeed*, only for each to *finish* before moving on, so a
-        slow/dead provider never blocks the others from being recorded."""
+        Gateway connection. Each provider's saved health (calls/errors/
+        latency) is wiped right before this run — via reset_all_health() —
+        so the numbers this produces reflect only THIS run, not history
+        piled up from every earlier test; that reset covers every provider
+        together since this is the "test all" entry point. Each probe's
+        result is then persisted the moment that probe finishes (see
+        AstraRouter.test_provider / AstraAIGateway.test_connection) — this
+        loop doesn't wait for every test to *succeed*, only for each to
+        *finish* before moving on, so a slow/dead provider never blocks the
+        others from being recorded."""
         router = s.router()
         if router is None:
             return self._err_rid("providers unavailable", 400,
                                  "provider_unavailable")
+        router.reset_all_health()
         providers = router.test_all_providers()
         gw = getattr(router, "gateway", None)
         connections = gw.test_all_connections() if gw is not None else []

@@ -1144,15 +1144,27 @@ class AstraRouter:
         self._down.add(name)
 
     def reset_health(self, name: str) -> None:
-        """Clear transient health bookkeeping (down-state, error counts,
-        latency samples) for one provider without touching its pool."""
+        """Clear ALL of one provider's accumulated health bookkeeping —
+        down-state, call count, error count, latency samples — without
+        touching its pool/credentials. Called right before a fresh manual
+        test run (single-provider or "test all") so that test's numbers
+        start from zero instead of piling onto whatever was saved from
+        every earlier test."""
         self._down.discard(name)
+        self._calls[name] = 0
         for by_name in (self._errors, self._latency):
             bucket = by_name.get(name)
             if isinstance(bucket, list):
                 bucket.clear()
             elif isinstance(bucket, int):
                 by_name[name] = 0
+
+    def reset_all_health(self) -> None:
+        """reset_health() for every provider — used before a "test all" run
+        so each provider's numbers reflect only this run, not history piled
+        up from every previous test."""
+        for p in self.providers:
+            self.reset_health(getattr(p, "name", "?"))
 
     def _credential_count(self, provider) -> int:
         pool = getattr(provider, "pool", None)

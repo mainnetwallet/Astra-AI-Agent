@@ -47,8 +47,13 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def list(self) -> list[dict]:
-        return [t.describe() for t in self._tools.values()]
+    def list(self, category: str | None = None) -> list[dict]:
+        """Registered tools as plain dicts, optionally filtered to one
+        category ("browser", "builtin", "web3", ...). The filter was lost
+        when this module was restored, so `list("browser")` raised
+        TypeError instead of returning the browser tools."""
+        return [t.describe() for t in self._tools.values()
+                if not category or t.category == category]
 
     # -- stats -----------------------------------------------------------
     def _note(self, name: str, errored: bool, ms: float) -> None:

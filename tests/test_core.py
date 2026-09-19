@@ -423,7 +423,9 @@ class TestWebSystem(unittest.TestCase):
     def test_manifest_tabs(self):
         r = self._get("/api/manifest")
         tabs = [t["tab"] for t in r["data"]["tabs"]]
-        self.assertIn("live", tabs)
+        # the ⚡ "live" tab was removed in d550dcb; its SSE feed lives on
+        # under the Activity Log tab, so "logs" is what the manifest advertises.
+        self.assertIn("logs", tabs)
         self.assertIn("dashboard", tabs)
 
     def test_events_returns_list(self):

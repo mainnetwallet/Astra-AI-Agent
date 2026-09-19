@@ -598,6 +598,13 @@ const RESTORED_GATEWAY_PENDING = new Set();
 const LAST_PROVIDER_DATA = {};               // provider name -> last /api/providers entry
 const LAST_GATEWAY_DATA = {};                // connection key -> last gateway connection entry
 let _runningPollTimer = null;
+// A refresh cancels every request the browser had queued but not yet sent
+// (Chrome allows only ~6 parallel connections per host), so those never reach
+// the server and would stay "pending" forever. After this grace period — long
+// enough for requests already in flight at the server to land — the restored
+// page re-fires whatever is still pending (see _maybeResumeRuns).
+const PAGE_LOADED_AT = Date.now();
+const RESUME_GRACE_MS = 3500;
 
 function _loadRunning() {
   let st;
@@ -682,13 +689,28 @@ function _gwRow(modelId, h) {
     ? { model: modelId, ok: true, latency_ms: Math.round(h.average_latency_ms || 0) }
     : { model: modelId, ok: false, error: "last test failed" };
 }
+// Re-fire whatever a refresh left unfinished (see PAGE_LOADED_AT above). Each
+// restored provider/connection becomes a normal live run for just its pending
+// rows, so it streams, persists and finishes exactly like a fresh click.
+function _maybeResumeRuns() {
+  if (Date.now() - PAGE_LOADED_AT < RESUME_GRACE_MS) return;
+  const names = [...RESTORED_PROVIDER_PENDING];
+  const conns = [...RESTORED_GATEWAY_PENDING];
+  if (!names.length && !conns.length) return;
+  const jobs = [
+    ...names.map((n) => testProviderStreaming(n, null, true)),
+    ...conns.map((k) => testGatewayConnectionStreaming(k, null, true)),
+  ];
+  Promise.allSettled(jobs).then(() => loaders.providers());
+}
 // Disable/relabel the bulk buttons while a restored run is still going, and
 // keep polling the server until it's done. Live (this-page) runs own their
 // buttons via dataset.live and are left alone.
 function _syncRunningUi() {
   const st = _loadRunning();
   const pendingCount = RESTORED_PROVIDER_PENDING.size + RESTORED_GATEWAY_PENDING.size;
-  const anyLive = LIVE_PROVIDER_TESTS.size + LIVE_GATEWAY_TESTS.size > 0;
+  const liveCount = LIVE_PROVIDER_TESTS.size + LIVE_GATEWAY_TESTS.size;
+  const anyLive = liveCount > 0;
   if (pendingCount === 0 && !anyLive && (st.testAll || st.gatewayAll)) {
     _runningUpdate((s2) => { s2.testAll = 0; s2.gatewayAll = 0; });
     st.testAll = 0; st.gatewayAll = 0;
@@ -705,9 +727,10 @@ function _syncRunningUi() {
       delete btn.dataset.restored;
     }
   };
-  setBusy($("#btn-providers-test-all"), "⏳ Testing all…", pendingCount > 0 && !!st.testAll);
+  setBusy($("#btn-providers-test-all"), "⏳ Testing all…",
+          (pendingCount + liveCount) > 0 && !!st.testAll);
   setBusy($("#btn-gateway-test"), "⏳ Testing gateway…",
-          RESTORED_GATEWAY_PENDING.size > 0 && !!(st.gatewayAll || st.testAll));
+          (RESTORED_GATEWAY_PENDING.size + LIVE_GATEWAY_TESTS.size) > 0 && !!(st.gatewayAll || st.testAll));
   clearTimeout(_runningPollTimer);
   _runningPollTimer = null;
   if (pendingCount > 0) _runningPollTimer = setTimeout(() => loaders.providers(), 2000);
@@ -810,9 +833,18 @@ function modelHealthRowsHtml(results) {
 // PROVIDER_MODEL_RESULTS / GATEWAY_MODEL_RESULTS) so a later re-render
 // from /api/providers still sees each finished result. Returns the
 // Promise that resolves once every model has settled (success or error).
-function streamModelTests(models, tableEl, resultsArray, testOneFn, onResult) {
-  resultsArray.length = 0;
-  models.forEach((m) => resultsArray.push({ model: m, pending: true }));
+function streamModelTests(models, tableEl, resultsArray, testOneFn, onResult, keep) {
+  if (keep) {
+    // Resume: leave rows that already finished alone, re-mark only `models`.
+    models.forEach((m) => {
+      const i = resultsArray.findIndex((r) => r.model === m);
+      const row = { model: m, pending: true };
+      if (i >= 0) resultsArray[i] = row; else resultsArray.push(row);
+    });
+  } else {
+    resultsArray.length = 0;
+    models.forEach((m) => resultsArray.push({ model: m, pending: true }));
+  }
   if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(resultsArray);
 
   const updateRow = (result) => {
@@ -1018,6 +1050,7 @@ loaders.providers = async function () {
     };
   }
   renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
+  _maybeResumeRuns();
   _syncRunningUi();
 };
 
@@ -1027,9 +1060,13 @@ loaders.providers = async function () {
 // (optional) gets its label updated while this provider's own test runs;
 // omit it when called as part of a bulk Test All (the bulk button owns
 // its own progress label instead).
-async function testProviderStreaming(name, btn) {
+async function testProviderStreaming(name, btn, resume) {
   const models = PROVIDER_MODELS[name] || [];
-  if (models.length) {
+  if (models.length && resume) {
+    LIVE_PROVIDER_TESTS.add(name);
+    RESTORED_PROVIDER_PENDING.delete(name);
+    _runningUpdate((st) => { if (st.providers[name]) st.providers[name].startedAt = Date.now(); });
+  } else if (models.length) {
     // Persist "this provider is testing" so a page refresh can bring the
     // pending rows back (see the running-test persistence block above).
     LIVE_PROVIDER_TESTS.add(name);
@@ -1039,13 +1076,13 @@ async function testProviderStreaming(name, btn) {
     _runningUpdate((st) => { st.providers[name] = entry; });
   }
   try {
-    await _testProviderStreamingInner(name, btn);
+    await _testProviderStreamingInner(name, btn, resume);
   } finally {
     if (LIVE_PROVIDER_TESTS.delete(name)) _runningUpdate((st) => { delete st.providers[name]; });
   }
 }
 
-async function _testProviderStreamingInner(name, btn) {
+async function _testProviderStreamingInner(name, btn, resume) {
   const models = PROVIDER_MODELS[name] || [];
   const tableEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="model-table"]`);
   if (!models.length) {
@@ -1066,11 +1103,13 @@ async function _testProviderStreamingInner(name, btn) {
     countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ` +
       `${countsEl.dataset.keycount || 0} key(s) · ${calls} calls · ${errors} err`;
   };
-  try {
-    const reset = await post(`/api/v1/providers/${encodeURIComponent(name)}/reset-health`);
-    renderCounts((reset.ok && reset.data && reset.data.calls) || 0,
-                 (reset.ok && reset.data && reset.data.errors) || 0);
-  } catch (_e) { /* reset failing shouldn't block the test itself */ }
+  if (!resume) {
+    try {
+      const reset = await post(`/api/v1/providers/${encodeURIComponent(name)}/reset-health`);
+      renderCounts((reset.ok && reset.data && reset.data.calls) || 0,
+                   (reset.ok && reset.data && reset.data.errors) || 0);
+    } catch (_e) { /* reset failing shouldn't block the test itself */ }
+  }
 
   // "20 calls · 3 err" in the header — bumped by +1 call (and +1 err on
   // failure) the instant EACH model's own result lands, on top of the
@@ -1088,20 +1127,26 @@ async function _testProviderStreamingInner(name, btn) {
   // the server saves it against (provider, key, model).
   const keys = PROVIDER_KEYS[name] || [];
   if (keys.length) {
-    await testProviderKeysStreaming(name, models, keys, tableEl, (r) => bumpCounts(r.ok));
+    await testProviderKeysStreaming(name, models, keys, tableEl, (r) => bumpCounts(r.ok),
+                                    resume ? PROVIDER_MODEL_RESULTS[name] : null);
     return;
   }
 
   PROVIDER_MODEL_RESULTS[name] = PROVIDER_MODEL_RESULTS[name] || [];
-  await streamModelTests(models, tableEl, PROVIDER_MODEL_RESULTS[name],
+  const toRun = resume
+    ? PROVIDER_MODEL_RESULTS[name].filter((r) => r.pending).map((r) => r.model)
+    : models;
+  await streamModelTests(toRun, tableEl, PROVIDER_MODEL_RESULTS[name],
     (modelId) => post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
       .then((res) => (res.ok && res.data) ? res.data :
         { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
-    (result) => { bumpCounts(result.ok); _runningNoteLocal(name, result); });
+    (result) => { bumpCounts(result.ok); _runningNoteLocal(name, result); }, !!resume);
 }
 
-async function testProviderKeysStreaming(name, models, keys, tableEl, onResult) {
-  const rows = models.map((m) => ({
+async function testProviderKeysStreaming(name, models, keys, tableEl, onResult, resumeRows) {
+  // resumeRows: rows restored after a refresh — only their still-pending chips
+  // are (re)fired; finished chips keep the result the server saved.
+  const rows = resumeRows || models.map((m) => ({
     model: m,
     keys: keys.map((k) => ({ key_id: k.key_id, label: k.label, pending: true })),
   }));
@@ -1114,6 +1159,7 @@ async function testProviderKeysStreaming(name, models, keys, tableEl, onResult) 
   };
   const probes = [];
   rows.forEach((row) => row.keys.forEach((slot) => {
+    if (!slot.pending) return;
     probes.push(
       post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(row.model)}` +
            `?key=${encodeURIComponent(slot.key_id)}`)
@@ -1163,22 +1209,26 @@ function _connAvgLatency(c) {
 // uses for providers, so a single connection's "🧪 Test" and the bulk
 // Test All look and behave identically. `btn` (optional) gets its label
 // updated while this connection's own test runs.
-async function testGatewayConnectionStreaming(key, btn) {
+async function testGatewayConnectionStreaming(key, btn, resume) {
   const models = GATEWAY_MODELS[key] || [];
-  if (models.length) {
+  if (models.length && resume) {
+    LIVE_GATEWAY_TESTS.add(key);
+    RESTORED_GATEWAY_PENDING.delete(key);
+    _runningUpdate((st) => { if (st.gateway[key]) st.gateway[key].startedAt = Date.now(); });
+  } else if (models.length) {
     LIVE_GATEWAY_TESTS.add(key);
     RESTORED_GATEWAY_PENDING.delete(key);
     const entry = { startedAt: Date.now(), base: _gatewayRunBase(key) };
     _runningUpdate((st) => { st.gateway[key] = entry; });
   }
   try {
-    await _testGatewayConnectionStreamingInner(key, btn);
+    await _testGatewayConnectionStreamingInner(key, btn, resume);
   } finally {
     if (LIVE_GATEWAY_TESTS.delete(key)) _runningUpdate((st) => { delete st.gateway[key]; });
   }
 }
 
-async function _testGatewayConnectionStreamingInner(key, btn) {
+async function _testGatewayConnectionStreamingInner(key, btn, resume) {
   const models = GATEWAY_MODELS[key] || [];
   const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`);
   if (!models.length) {
@@ -1187,10 +1237,14 @@ async function _testGatewayConnectionStreamingInner(key, btn) {
   }
   if (btn) btn.textContent = `⏳ Testing ${models.length} model${models.length === 1 ? "" : "s"}…`;
   GATEWAY_MODEL_RESULTS[key] = GATEWAY_MODEL_RESULTS[key] || [];
-  await streamModelTests(models, tableEl, GATEWAY_MODEL_RESULTS[key],
+  const toRun = resume
+    ? GATEWAY_MODEL_RESULTS[key].filter((r) => r.pending).map((r) => r.model)
+    : models;
+  await streamModelTests(toRun, tableEl, GATEWAY_MODEL_RESULTS[key],
     (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
       .then((res) => (res.ok && res.data) ? res.data :
-        { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }));
+        { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
+    undefined, !!resume);
 }
 
 async function runGatewayConnectionTest(key, btn, card) {

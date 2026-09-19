@@ -56,7 +56,7 @@ EVENT_KINDS = (
     # "router.*"/"ai.*" events so the dashboard Logs panel can filter for
     # the Gateway specifically.
     "astra_gateway.request", "astra_gateway.success", "astra_gateway.error",
-    "astra_gateway.stream_interrupted",
+    "astra_gateway.stream_interrupted", "astra_gateway.test",
     # Gateway-spec supervision (§9-12, §19): deterministic result
     # validation + bounded correction, layered on top of the executor's
     # existing retry/verify pipeline — see astra.core.executor.

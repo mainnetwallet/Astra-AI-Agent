@@ -156,15 +156,22 @@ def _json(handler: "AstraHandler", payload, code: int = 200) -> None:
     if isinstance(payload, dict) and "request_id" not in payload:
         payload = {**payload, "request_id": rid}
     body = json.dumps(redact(payload), ensure_ascii=False).encode("utf-8")
-    handler.send_response(code)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("X-Request-Id", rid)
-    handler.apply_security_headers()
-    handler.apply_cors_headers()
-    handler.send_header("Cache-Control", "no-store")
-    handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.send_response(code)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("X-Request-Id", rid)
+        handler.apply_security_headers()
+        handler.apply_cors_headers()
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        # The browser went away before the response was written (page refresh,
+        # tab closed, request aborted). The work — e.g. a provider test — was
+        # already done and saved, so there is nobody left to answer: drop it
+        # quietly instead of a traceback (and a second one from the 500 path).
+        handler.close_connection = True
 
 
 def _json_ok(handler: "AstraHandler", payload, code: int = 200) -> None:
@@ -1151,6 +1158,15 @@ class AstraHandler(BaseHTTPRequestHandler):
 
 class AstraServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # Client hung up mid-request (refresh / closed tab): not an error.
+        import sys
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError,
+                            ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
 
     def __init__(self, addr, store, agent: Agent, stack=None):
         super().__init__(addr, AstraHandler)

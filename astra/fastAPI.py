@@ -318,12 +318,20 @@ def make_app(stack=None, store=None, agent=None, site=None, docs=None,
     )
     bridge = _AstraASGI(state)
 
-    @app.api_route("/{full_path:path}",
-                   methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"])
     async def catch_all(fastapi_request: ASGIRequest, full_path: str = ""):
         """One catch-all: every address the router does not recognise comes
         back as a structured 404."""
         return await bridge.dispatch(fastapi_request, fastapi_request.method)
+
+    # Registered once per method (rather than one route with methods=[...])
+    # so each gets its own operation_id. FastAPI derives a route's default
+    # operation_id from only the first entry of route.methods, so a single
+    # multi-method route makes every method collide on the same
+    # operation_id in the generated OpenAPI schema (spurious "Duplicate
+    # Operation ID" warnings, and broken per-operation IDs for anything
+    # that reads /openapi.json, e.g. Swagger UI or client codegen).
+    for _method in ("GET", "POST", "PATCH", "DELETE", "OPTIONS"):
+        app.api_route("/{full_path:path}", methods=[_method])(catch_all)
 
     return app
 

@@ -199,7 +199,8 @@ class TestIsolationAcrossAllGatewayRecoveryModules(unittest.TestCase):
         forbidden_modules = ("astra.ai.registry", "astra.ai.provider",
                              "astra.ai.adapters")
         for mod in (gc, gr):
-            tree = ast.parse(open(mod.__file__, encoding="utf-8").read())
+            with open(mod.__file__, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
@@ -220,7 +221,8 @@ class TestIsolationAcrossAllGatewayRecoveryModules(unittest.TestCase):
         ProviderExecutionTarget metadata to the Gateway, never an adapter."""
         import ast
         import astra.ai.router as router_mod
-        tree = ast.parse(open(router_mod.__file__, encoding="utf-8").read())
+        with open(router_mod.__file__, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef) and n.name == "_route_via_gateway")
         for node in ast.walk(fn):

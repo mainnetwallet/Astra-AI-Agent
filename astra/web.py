@@ -1025,13 +1025,19 @@ class WebApp:
             return json_response({"ok": True,
                                   "data": (sched.list() if sched else [])},
                                  rid=req.rid)
-        if path == ["api", "schedules"] and method == "POST" and site.scheduler():
-            s = site.scheduler().add(body.get("name", "sched"),
-                                     body.get("kind", "daily"),
-                                     body.get("value", ""),
-                                     int_arg(body.get("workflow_id"), 0,
-                                             name="workflow_id"),
-                                     body.get("params") or {})
+        if path == ["api", "schedules"] and method == "POST":
+            sc = site.scheduler()
+            if not sc:
+                # Same structured "scheduler disabled" the PATCH/DELETE branch
+                # returns — a bare 404 (the old fall-through) was misleading.
+                return error_response("scheduler disabled", 400, "bad_request",
+                                      req.rid)
+            s = sc.add(body.get("name", "sched"),
+                       body.get("kind", "daily"),
+                       body.get("value", ""),
+                       int_arg(body.get("workflow_id"), 0,
+                               name="workflow_id"),
+                       body.get("params") or {})
             return json_response({"ok": True, "data": s}, 201, req.rid)
         if len(path) == 3 and path[:2] == ["api", "schedules"] and method in ("PATCH", "DELETE"):
             sc = site.scheduler()

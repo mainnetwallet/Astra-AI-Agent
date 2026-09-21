@@ -228,7 +228,8 @@ class TestGatewayRoutingIsolation(unittest.TestCase):
         trip a plain substring search."""
         import ast
         import astra.ai.gateway_routing as gr
-        src = open(gr.__file__, encoding="utf-8").read()
+        with open(gr.__file__, encoding="utf-8") as fh:
+            src = fh.read()
         tree = ast.parse(src)
 
         forbidden_modules = ("astra.ai.registry", "astra.ai.provider",

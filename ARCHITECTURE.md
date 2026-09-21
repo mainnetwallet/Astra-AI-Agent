@@ -277,7 +277,9 @@ tools) in `astra/agents/` and `astra/tools/`, not dropping a file into
 - **Modes**:
   - `CONFIRM` (default) — every tx parks at `PREPARED` for the operator
     to approve (`POST /api/v1/web3/transactions/{tx_id}/authorize`) or
-    reject (`.../reject`). Both require `ASTRA_TOKEN`.
+    reject (`.../reject`). Both require `ASTRA_TOKEN`. `reject` only
+    accepts a tx still `PREPARED`/`VALIDATED`; an unknown or
+    already-decided id returns a structured 400, not a fake success.
   - `AUTO` — only txs that pass the deterministic policy send
     automatically, for user-authorized wallets; anything outside policy
     is never auto-approved.
@@ -311,7 +313,9 @@ tools) in `astra/agents/` and `astra/tools/`, not dropping a file into
   `{{step_id.param}}` data flow between steps; persisted so runs can be
   paused/resumed/audited. The scheduler fires workflows on
   oneshot/interval/daily/weekly/deadline triggers via a tick-thread
-  daemon (no external cron).
+  daemon (no external cron). Every step is executed with the same
+  shared `ToolContext` the API tools use, so context-dependent tools
+  (`remember`/`recall`/`create_task`/…) work inside a workflow too.
 - **`EventBus`** (`core/events.py`) — every subsystem publishes here;
   events persist to SQLite (audit trail + Activity Log history) and
   stream to the frontend over SSE (`/api/v1/events/stream`).

@@ -192,7 +192,14 @@ def build(store: Store | None = None, config=None,
         max_tokens=config.getint("CHAT_MAX_TOKENS", 1500))
 
     # workflows + scheduler
-    workflows = WorkflowEngine(store, registry, events)
+    # ToolContext: shared subsystems a workflow step's tool may legitimately
+    # touch (memory, tasks, web3). Without it context-dependent tools fail
+    # when run as workflow steps.
+    from astra.core.context import ToolContext
+    tool_context = ToolContext(store=store, config=config, events=events,
+                               memory=memory, tasks=tasks,
+                               web3_manager=tx_manager, registry=registry)
+    workflows = WorkflowEngine(store, registry, events, context=tool_context)
     scheduler = None
     if with_scheduler:
         scheduler = SchedulerManager(store, workflows, events)

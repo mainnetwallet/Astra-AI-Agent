@@ -68,7 +68,7 @@ Orchestrator/Planner loop was removed, and `ToolRegistry` now runs standalone
 | **AgentManager + specialists** (`astra/agents/`) | Declarative task specialists (`general`, `research`, `browser`, `coding`, `files`, `web3`, `airdrop`) the manager scores; not providers and not plugins. Chat does not plan through them today. |
 | **ToolRegistry** (`astra/tools/registry.py`) | Builtin + web3 + browser tools with schema validation, permission policy, timeout/retry, audit trail. Runs standalone. |
 | **MemorySystem** (`astra/memory/memory.py`) | Layered memory (working/short/long/semantic/episodic) with importance scoring + search; `ExperienceStore` learns from past outcomes. |
-| **WorkflowEngine + SchedulerManager** (`astra/workflows/`) | Step workflows with `{{step_id.param}}` data flow, run on demand or on oneshot/interval/daily/weekly/deadline triggers (no external cron). |
+| **WorkflowEngine + SchedulerManager** (`astra/workflows/`) | Step workflows with `{{step_id.param}}` data flow, run on demand or on oneshot/interval/daily/weekly/deadline triggers (no external cron). Steps run with the shared `ToolContext`, so context-dependent tools (`remember`, `recall`, `create_task`, …) work as steps, not just direct tool calls. |
 | **EventBus** (`astra/core/events.py`) | Persisted events + SSE streaming to the Activity Log tab. |
 | **TaskEngine** (`astra/core/tasks.py`) | Generic DAG task engine workflows dispatch through. |
 | **Web3 Manager** (`astra/web3/`) | Lifecycle-tracked transactions (CREATED→…→CONFIRMED/FAILED), deterministic CONFIRM/AUTO policy, never-sign-twice, on-chain recovery. Private keys never leave the secure keystore. |

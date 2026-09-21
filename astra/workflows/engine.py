@@ -46,10 +46,15 @@ def _now() -> str:
 
 
 class WorkflowEngine:
-    def __init__(self, store, registry, events=None):
+    def __init__(self, store, registry, events=None, context=None):
         self.store = store
         self.registry = registry
         self.events = events
+        # Optional ToolContext handed to every step. Without it a
+        # context-dependent tool (remember/recall/create_task/…) raised
+        # AttributeError on `ctx.store` and the step silently recorded an
+        # error; the built-in tools that need shared state get it from here.
+        self.context = context
         if not store.table_exists("workflow_definitions"):
             store.install(SCHEMA)
 
@@ -185,7 +190,8 @@ class WorkflowEngine:
                 self.events.emit("task.started", agent="workflows",
                                  workflow=run.get("name"), step=sid)
             try:
-                out = self.registry.execute(step["tool"], call_params, ctx=None,
+                out = self.registry.execute(step["tool"], call_params,
+                                            ctx=self.context,
                                             allow_confirmation=False)
                 if out.get("decision") == "ask":
                     results[sid] = {"blocked": True, "reason": out.get("reason")}

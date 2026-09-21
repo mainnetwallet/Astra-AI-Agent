@@ -353,7 +353,8 @@ class TestFailOpenAndIsolation(unittest.TestCase):
     def test_no_provider_system_imports_in_supervision_module(self):
         import astra.ai.gateway_supervision as mod
         forbidden = ("astra.ai.registry", "astra.ai.provider", "astra.ai.adapters")
-        tree = ast.parse(open(mod.__file__, encoding="utf-8").read())
+        with open(mod.__file__, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""

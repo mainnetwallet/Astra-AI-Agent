@@ -330,10 +330,20 @@ class TransactionManager:
         return {"stopped": False}
 
     def reject(self, tx_id: str, reason: str = "") -> dict:
-        self.store.exec(
-            "UPDATE web3_transactions SET status='REJECTED', error=?, "
-            "updated_at=? WHERE tx_id=?", (reason[:200], _now(), tx_id))
-        return {"tx_id": tx_id, "status": "REJECTED"}
+        with self._lock:
+            rec = self._row(tx_id)
+            if rec is None:
+                raise TransactionRejectedError(f"unknown tx {tx_id}")
+            if rec["status"] not in ("PREPARED", "VALIDATED"):
+                raise TransactionRejectedError(
+                    f"tx {tx_id} not rejectable (status={rec['status']})")
+            self.store.exec(
+                "UPDATE web3_transactions SET status='REJECTED', error=?, "
+                "updated_at=? WHERE tx_id=?", (reason[:200], _now(), tx_id))
+            if self.events:
+                self.events.emit("web3.transaction.rejected", tx=tx_id,
+                                 reason=reason[:200])
+            return {"tx_id": tx_id, "status": "REJECTED"}
 
     # -- internals -----------------------------------------------------------
     def _row(self, tx_id: str):

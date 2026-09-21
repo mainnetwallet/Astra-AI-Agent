@@ -255,7 +255,7 @@ class LiveApiTests(unittest.TestCase):
 
     def test_chat_turn(self):
         class _StubAgent:
-            def handle(self, msg, context="", attachments=None):
+            def handle(self, msg, context="", history=None, attachments=None):
                 return {"ok": True, "reply": f"echo: {msg}",
                         "action": None, "data": {}}
 

@@ -76,7 +76,7 @@ class ChatHistoryHttp(unittest.TestCase):
         agent = self.stack["agent"]
         self.release = threading.Event()
 
-        def slow_handle(message, context="", attachments=None):
+        def slow_handle(message, context="", history=None, attachments=None):
             self.release.wait(5)
             return {"reply": f"echo: {message}", "action": "none", "ok": True, "data": {}}
         agent.handle = slow_handle

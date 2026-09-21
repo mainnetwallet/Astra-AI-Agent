@@ -145,6 +145,36 @@ def _clean(text) -> str:
     return " ".join(str(text or "").split()).strip()
 
 
+def _normalize_history(history) -> list[dict]:
+    """Accepts `None`, a `ConversationContext`
+    (astra.ai.conversation_context), or a plain list of
+    {"role": "user"|"assistant", "content": str} dicts, and always returns
+    the plain list form (chronological, oldest first) — the one shape the
+    rest of this module deals with. Unknown/malformed entries are dropped
+    rather than raising, so a bad history never breaks the whole turn."""
+    if history is None:
+        return []
+    msgs = getattr(history, "messages", history)
+    out = []
+    for m in msgs or []:
+        if not isinstance(m, dict):
+            continue
+        role = "user" if m.get("role") == "user" else "assistant"
+        content = m.get("content")
+        if not content:
+            continue
+        out.append({"role": role, "content": content})
+    return out
+
+
+def _history_as_text(hist_turns: list[dict]) -> str:
+    lines = []
+    for m in hist_turns:
+        speaker = "User" if m["role"] == "user" else "Assistant"
+        lines.append(f"{speaker}: {m['content']}")
+    return "\n".join(lines)
+
+
 def _describe_attachments(attachments) -> str:
     names = []
     for a in attachments or []:
@@ -362,7 +392,18 @@ class ChatPipeline:
         return out
 
     # -- public entry point ---------------------------------------------------------
-    def run(self, message: str, *, context: str = "", attachments=None) -> dict:
+    def run(self, message: str, *, context: str = "", history=None,
+            attachments=None) -> dict:
+        """`history`, when given, is the canonical provider-independent
+        conversation history for this turn (a list of {"role", "content"}
+        dicts, oldest first — see `astra.ai.conversation_context`, or a
+        `ConversationContext` instance directly). It is built ONCE by the
+        caller (from the SAME ChatLog conversation the current message was
+        just appended to) and is handed to both the Gateway's understand
+        call and the Provider call below, so they never see divergent
+        context. `context` (a plain string) is kept for backward
+        compatibility with callers that have no structured history; when
+        both are given, `history` wins."""
         raw = _clean(message)
         # Correlation id for this chat turn: every event, Gateway call and
         # Router request made below carries it, so the Activity Log can pair
@@ -379,13 +420,15 @@ class ChatPipeline:
         self._emit("chat.pipeline.started", gateway=trace["gateway"],
                    op=f"chat:{req}", request=req, trace=req)
 
+        hist_turns = _normalize_history(history)
+
         # Any unexpected error must still close this turn's root operation:
         # without a terminal event the "Request received" row would stay
         # "… running" in the Activity Log forever (reconciliation keys off
         # the correlation ids, it never filters running rows away).
         try:
-            return self._run_turn(raw, context, attachments, req, gateway_ok,
-                                  trace)
+            return self._run_turn(raw, context, hist_turns, attachments, req,
+                                  gateway_ok, trace)
         except Exception as e:
             self._emit("chat.pipeline.failed",
                        error=f"{type(e).__name__}: {e}",
@@ -393,14 +436,20 @@ class ChatPipeline:
                        terminal=True)
             raise
 
-    def _run_turn(self, raw, context, attachments, req, gateway_ok,
-                  trace) -> dict:
+    def _run_turn(self, raw, context, hist_turns, attachments, req,
+                  gateway_ok, trace) -> dict:
         """The rest of one chat turn, split out of `run()` so it can
         guarantee a terminal event even when a step raises unexpectedly."""
 
+        # A flattened text view of the SAME history, used everywhere a
+        # single string is needed (the Gateway's understand prompt, and the
+        # legacy `context` fallback below). Built once so the Gateway and
+        # the Provider are always looking at identical prior turns.
+        ctx_text = _history_as_text(hist_turns) if hist_turns else _clean(context)
+
         # 1) Gateway understands + assigns
         if gateway_ok:
-            brief = self._understand(raw, context, attachments, req=req)
+            brief = self._understand(raw, ctx_text, attachments, req=req)
         else:
             brief = {"final_request": raw, "was_incomplete": False,
                      "provider": "", "model": "", "criteria": [],
@@ -416,15 +465,23 @@ class ChatPipeline:
                    request=req, trace=req)
 
         # 2) Provider executes (output stays internal until verified)
-        ctx = _clean(context)
-        user_text = brief["final_request"]
-        if ctx:
-            user_text = ("Recent conversation (for reference):\n" + ctx +
-                         "\n\nCurrent request:\n" + user_text)
         vision = _has_image(attachments)
-        content = build_multimodal_content(user_text, attachments)
-        messages = [{"role": "system", "content": PROVIDER_SYSTEM_PROMPT},
-                    {"role": "user", "content": content}]
+        content = build_multimodal_content(brief["final_request"], attachments)
+        messages = [{"role": "system", "content": PROVIDER_SYSTEM_PROMPT}]
+        if hist_turns:
+            # The SAME canonical history the Gateway just saw, as real
+            # conversation turns (not squashed into the current message) —
+            # this is what lets the Provider itself resolve a bare "why?"
+            # or "continue" against what it said last time.
+            messages.extend(hist_turns)
+        elif ctx_text:
+            # Legacy path: only a flat `context` string was supplied (no
+            # structured history) — fall back to embedding it in the
+            # current turn's text, exactly as before this fix.
+            content = build_multimodal_content(
+                "Recent conversation (for reference):\n" + ctx_text +
+                "\n\nCurrent request:\n" + brief["final_request"], attachments)
+        messages.append({"role": "user", "content": content})
         task_type = self._task_type(brief["final_request"], attachments)
         rr = self._route(task_type, messages, brief["provider"],
                          brief["model"], vision, req=req)

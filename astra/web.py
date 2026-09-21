@@ -104,6 +104,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from .agent import Agent
 from .chat_log import ChatLog
+from .ai.conversation_context import ConversationContextBuilder
 from .security import (ApiError, RateLimiter, make_request_id, redact)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
@@ -465,6 +466,15 @@ class AstraSite:
         self.chat_log = ChatLog(store, redact=redact)
         self._stack = stack or {}
         cfg = self._get("config")
+        # Single source of prior-turn context for /api/chat (see
+        # astra/ai/conversation_context.py): reads the SAME ChatLog every
+        # turn is persisted to, so the Gateway and the Provider are always
+        # shown the real, isolated-per-conversation transcript — never
+        # whatever (if anything) a client happened to send.
+        self.context_builder = ConversationContextBuilder(
+            self.chat_log,
+            max_chars=(cfg.getint("CHAT_CONTEXT_MAX_CHARS", 6000) if cfg else 6000),
+            max_turns=(cfg.getint("CHAT_CONTEXT_MAX_TURNS", 20) if cfg else 20))
         # -- security knobs (all safe defaults) --------------------------------
         self.env = (cfg.get("ENV") if cfg else None) or os.environ.get("ENV", "development")
         self.operator_token = (cfg.get("ASTRA_TOKEN") if cfg else None) \
@@ -812,35 +822,53 @@ class WebApp:
             # loses nothing: the reloaded page reads it back from
             # /api/chat/history (see astra/chat_log.py).
             log = site.chat_log
+            # Pin this whole turn — history lookup, the message write, and
+            # the reply write — to the chat the message actually landed in.
+            # `current_id` can change while the agent is still working (the
+            # user switches chats or opens a new one); none of that may
+            # move this turn to a different conversation.
+            cid = log.current_id
+            # Build the canonical conversation history BEFORE the current
+            # message is persisted, from THIS conversation only (never
+            # another one), so it can never include — let alone duplicate —
+            # the message the user just sent. See
+            # astra/ai/conversation_context.py.
+            history = site.context_builder.build(cid)
             if "multipart/form-data" in (req.headers.get("Content-Type") or ""):
                 fields, files = req.fields, req.files
                 msg = fields.get("message", "")
-                ctx = fields.get("context", "")
                 names = [f.get("filename", "file") for f in (files or [])[:10]]
                 attachments = self._process_uploads(files)
-                # Pin this whole turn to the chat the message actually
-                # landed in. If the user switches chats (or opens a new
-                # one) while the agent is still working, `current_id`
-                # changes — the reply must stay with the original chat,
-                # not follow the user to wherever they went.
-                cid = log.add_user(msg, files=names)
-                token = log.begin(cid)
-                try:
-                    reply = site.agent.handle(
-                        msg, context=ctx, attachments=attachments or None)
-                    log.add_reply(reply, conversation_id=cid)
-                finally:
-                    log.end(token)
+                if log.is_duplicate_pending(cid, msg):
+                    # A refresh/retry resubmitted the exact message whose
+                    # turn is still running — do not start a second agent
+                    # run (and a second persisted reply) for it. The
+                    # in-flight turn already covers this message; the
+                    # client should keep polling /api/chat/history.
+                    reply = {"reply": "", "action": "none", "ok": True,
+                            "data": {"duplicate_of_pending": True}}
+                else:
+                    cid = log.add_user(msg, files=names, conversation_id=cid)
+                    token = log.begin(cid)
+                    try:
+                        reply = site.agent.handle(
+                            msg, history=history, attachments=attachments or None)
+                        log.add_reply(reply, conversation_id=cid)
+                    finally:
+                        log.end(token)
             else:
                 msg = body.get("message", "")
-                cid = log.add_user(msg)
-                token = log.begin(cid)
-                try:
-                    reply = site.agent.handle(
-                        msg, context=body.get("context", "") or "")
-                    log.add_reply(reply, conversation_id=cid)
-                finally:
-                    log.end(token)
+                if log.is_duplicate_pending(cid, msg):
+                    reply = {"reply": "", "action": "none", "ok": True,
+                            "data": {"duplicate_of_pending": True}}
+                else:
+                    cid = log.add_user(msg, conversation_id=cid)
+                    token = log.begin(cid)
+                    try:
+                        reply = site.agent.handle(msg, history=history)
+                        log.add_reply(reply, conversation_id=cid)
+                    finally:
+                        log.end(token)
             # The browser may have switched to a different chat (or
             # opened a new one) while this was running — tell it which
             # chat this reply actually belongs to, so it only paints the

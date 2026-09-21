@@ -70,6 +70,61 @@ retries and audits every tool call. It just isn't driven by an
 Orchestrator any more; today it's invoked directly (Web3 tool flows,
 workflow steps, tests).
 
+### 1.1 Conversation history / memory (multi-turn chat)
+
+Every chat turn is persisted to **`ChatLog`** (`astra/chat_log.py`,
+SQLite-backed, one row per message, scoped by `conversation_id`). Before
+this fix, that transcript was never read back into a turn: `/api/chat`
+read a `context` string straight off the incoming request body, and the
+browser never sent one (`static/js/astra.js`), so the Gateway and the
+Provider always saw an empty prior conversation — a follow-up like "why?"
+or "continue" had nothing to resolve against.
+
+**`ConversationContextBuilder`** (`astra/ai/conversation_context.py`) is
+now the single source of prior-turn context for a turn:
+
+```
+astra/web.py  (POST /api/chat)
+      │  cid = chat_log.current_id
+      │  history = context_builder.build(cid)   # BEFORE the current
+      │                                          # message is persisted
+      ▼
+astra/agent.py :: Agent.handle(message, history=..., ...)
+      ▼
+astra/ai/chat_pipeline.py :: ChatPipeline.run(message, history=..., ...)
+      │
+      ├──► Gateway call #1 (UNDERSTAND) — sees history as flattened text
+      └──► Provider call    — sees the SAME history as real
+                              {"role","content"} turns, prepended to
+                              the current user message
+```
+
+Key properties:
+
+- **Isolation** — `ConversationContextBuilder.build(conversation_id)` only
+  ever reads rows for that `conversation_id`; conversations can never mix.
+- **No current-message duplication** — `astra/web.py` builds `history`
+  from `ChatLog` *before* calling `chat_log.add_user()` for the current
+  message, so there is nothing to accidentally echo back. (The builder
+  also accepts `exclude_message_id` for callers that persist first.)
+- **Same context, both calls** — `ChatPipeline.run(history=...)` builds one
+  canonical turn list and hands it to both the Gateway's understand prompt
+  and the Provider's `messages[]`, so they can't silently disagree about
+  "the conversation so far".
+- **Deterministic trimming** — bounded by `CHAT_CONTEXT_MAX_CHARS` (default
+  6000) and `CHAT_CONTEXT_MAX_TURNS` (default 20); always keeps the newest
+  turns and always keeps at least the single latest turn even if it alone
+  exceeds the budget.
+- **Retry/refresh safe** — `ChatLog.add_user()` (and the public
+  `is_duplicate_pending()` check `astra/web.py` makes first) detects a
+  resubmission of the exact same text while that conversation's turn is
+  still in flight and skips both the duplicate log row and a second
+  pipeline run, rather than producing two persisted replies.
+- **Separate from long-term memory** — `MemorySystem` (§6) is a distinct
+  subsystem (working/short/long/semantic/episodic layers) and is never
+  used as a substitute for thread history; `ConversationContextBuilder`
+  only ever reads `ChatLog`.
+
 ---
 
 ## 2. Directory map

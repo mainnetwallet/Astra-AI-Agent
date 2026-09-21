@@ -236,12 +236,41 @@ class ChatLog:
         so the caller can pin the rest of the turn (begin/add_reply) to it —
         `current_id` can change while the agent is still working (the user
         opened or switched to another chat), and the reply must not follow
-        it there."""
+        it there.
+
+        Retry/refresh guard: if this exact text is resubmitted for the same
+        conversation while a turn there is still `pending` (e.g. a page
+        refresh mid-turn fires the same POST /api/chat again, or a flaky
+        connection causes the browser to retry), the message is NOT written
+        a second time — the in-flight turn already covers it. Once the
+        turn ends (`end()`), the guard lifts: sending the same text again on
+        purpose creates a normal new message."""
         cid = conversation_id if conversation_id is not None else self.current_id
-        self._insert(cid, "user", self._redact(text or ""),
+        redacted = self._redact(text or "")
+        if self._is_duplicate_pending_submit(cid, redacted):
+            return cid
+        self._insert(cid, "user", redacted,
                       files=[str(f) for f in (files or [])][:20])
         self._touch(cid, first_text=text)
         return cid
+
+    def _is_duplicate_pending_submit(self, conversation_id: int, text: str) -> bool:
+        if not text.strip() or not self.pending_for(conversation_id):
+            return False
+        last = self.store.fetchone(
+            "SELECT role, text FROM astra_chat_messages "
+            "WHERE conversation_id = ? ORDER BY id DESC LIMIT 1", (conversation_id,))
+        return bool(last) and last.get("role") == "user" and last.get("text") == text
+
+    def is_duplicate_pending(self, conversation_id: int, text: str) -> bool:
+        """Public check a caller (e.g. the `/api/chat` route) can make
+        BEFORE doing any work: True if `text` looks like a retry/refresh of
+        a message whose turn is still running for `conversation_id` — same
+        text (after the same redaction `add_user` applies) as the most
+        recent user message there, while that conversation still has a
+        turn in flight. Callers should skip starting a second agent run
+        entirely in that case, not just skip the duplicate log row."""
+        return self._is_duplicate_pending_submit(conversation_id, self._redact(text or ""))
 
     def add_reply(self, reply: dict, conversation_id: int | None = None) -> int:
         cid = conversation_id if conversation_id is not None else self.current_id

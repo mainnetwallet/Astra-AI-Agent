@@ -32,16 +32,24 @@ class Agent:
         self.orchestrator = orchestrator   # legacy; no longer used for chat
         self.pipeline = pipeline           # astra.ai.chat_pipeline.ChatPipeline
 
-    def handle(self, message: str, context: str = "",
+    def handle(self, message: str, context: str = "", history=None,
                attachments: list | None = None) -> dict:
         """Chat entry point. Always returns the reply shape the frontend
-        renders: {reply, action, ok, data[, artifacts]}."""
+        renders: {reply, action, ok, data[, artifacts]}.
+
+        `history`: the canonical conversation history for this turn (see
+        `astra.ai.conversation_context.ConversationContextBuilder`), built
+        by the caller from the SAME conversation the current message
+        belongs to. Forwarded as-is to the pipeline, which hands it to both
+        the Gateway and the Provider call. `context` (a plain string) is
+        kept for backward compatibility."""
         if self.pipeline is None:
             return {"reply": "Chat pipeline configure kora nei — Gateway/"
                              "Provider setup check korun.",
                     "action": "none", "ok": False, "data": {}}
         try:
             return self.pipeline.run(message, context=context or "",
+                                     history=history,
                                      attachments=attachments)
         except Exception as e:          # never let a bug become a blank 500
             return {"reply": f"Chat e ekta problem hoyeche — `{e}`",

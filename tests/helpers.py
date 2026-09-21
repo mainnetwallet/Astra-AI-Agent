@@ -80,7 +80,8 @@ class LiveServer:
             try:
                 urllib.request.urlopen(self.base + "/api/health", timeout=1).read()
                 return self
-            except urllib.error.HTTPError:
+            except urllib.error.HTTPError as e:
+                e.close()  # release the response body
                 return self  # any HTTP status at all means it is serving
             except Exception:
                 time.sleep(0.05)

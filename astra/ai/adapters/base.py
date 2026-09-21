@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 
 from astra.ai.credentials import CredentialPool
-from astra.ai.provider import AIProvider, _read_sse
+from astra.ai.provider import AIProvider, _read_sse, close_http_error
 from astra.core.exceptions import ProviderError, TimeoutError
 
 DEFAULT_TIMEOUT = 60
@@ -94,6 +94,7 @@ class CompatibleAdapter(AIProvider):
             with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
+            close_http_error(e)
             self._classify_http(e, cred)
             raise
         except urllib.error.URLError as e:
@@ -200,6 +201,7 @@ class CompatibleAdapter(AIProvider):
                         yield text
         except urllib.error.HTTPError as e:
             self._emit_stream_failed(used_model, f"http {getattr(e, 'code', '?')}")
+            close_http_error(e)
             self._classify_http(e, cred)
             raise
         except urllib.error.URLError as e:
@@ -262,6 +264,7 @@ class CompatibleAdapter(AIProvider):
             with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
                 audio_bytes = resp.read()
         except urllib.error.HTTPError as e:
+            close_http_error(e)
             self._classify_http(e, cred)
             raise
         except urllib.error.URLError as e:

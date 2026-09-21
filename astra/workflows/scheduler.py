@@ -117,6 +117,8 @@ class SchedulerManager:
         self.tick_every_s = tick_every_s
         self.clock = clock or (lambda: datetime.now())
         self._stop = threading.Event()
+        self._start_lock = threading.Lock()
+        self._started = False
         if not store.table_exists("schedules"):
             store.install(SCHEMA)
 
@@ -238,6 +240,12 @@ class SchedulerManager:
 
     # -- thread --------------------------------------------------------------
     def start(self) -> None:
+        # Idempotent: two callers (e.g. a rebuild + a lifecycle hook) must not
+        # start two tick loops that fire every schedule twice.
+        with self._start_lock:
+            if self._started:
+                return
+            self._started = True
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self) -> None:

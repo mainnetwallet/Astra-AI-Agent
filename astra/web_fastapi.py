@@ -304,6 +304,12 @@ def make_app(stack=None, store=None, agent=None, site=None, docs=None,
                         scheduler.stop()
                     except Exception:
                         pass
+                browser = state.stack.get("browser_manager")
+                if browser is not None:
+                    try:
+                        browser.close_all()
+                    except Exception:
+                        pass
                 try:
                     state.stack["store"].close()
                 except Exception:

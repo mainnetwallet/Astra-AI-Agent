@@ -157,7 +157,8 @@ def _request(port, method, path, body=None, headers=None):
         with urllib.request.urlopen(req, timeout=20) as resp:
             return resp.status, resp.read(), dict(resp.headers)
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), dict(e.headers)
+        with e:
+            return e.code, e.read(), dict(e.headers)
 
 
 def _hdr(headers, name, default=None):

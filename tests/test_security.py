@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -84,6 +85,19 @@ class TestRateLimiterRequestId(unittest.TestCase):
     def test_request_ids_unique(self):
         self.assertNotEqual(make_request_id(), make_request_id())
 
+    def test_stale_keys_are_pruned(self):
+        """A unique client key must not leak a list entry forever: once the
+        map grows past the sweep threshold and the window has passed, the
+        stale keys are reclaimed."""
+        rl = RateLimiter(1, 60.0)
+        for i in range(rl._PRUNE_AT + 10):
+            rl.allow(f"ip-{i}")
+        self.assertGreater(len(rl._hits), rl._PRUNE_AT)
+        rl.window = 1e-9                 # every recorded hit is now stale
+        time.sleep(0.001)
+        self.assertTrue(rl.allow("fresh"))
+        self.assertLessEqual(len(rl._hits), 2)
+
 
 class TestApiError(unittest.TestCase):
     def test_envelope(self):
@@ -125,7 +139,8 @@ def _req(url, token="", method="GET", body=None):
         with urllib.request.urlopen(r, timeout=5) as resp:
             return resp.status, _parse(resp.read()), _CIHeaders(resp.headers.items())
     except urllib.error.HTTPError as e:
-        return e.code, _parse(e.read()), _CIHeaders(e.headers.items())
+        with e:
+            return e.code, _parse(e.read()), _CIHeaders(e.headers.items())
 
 
 class _CIHeaders(dict):
@@ -221,7 +236,8 @@ class TestWebHardening(unittest.TestCase):
             urllib.request.urlopen(r, timeout=5)
             self.fail("oversized body accepted")
         except urllib.error.HTTPError as e:
-            self.assertEqual(e.code, 413)
+            with e:
+                self.assertEqual(e.code, 413)
 
     def test_internal_error_hides_detail_in_production(self):
         srv, base = _server(env="production")

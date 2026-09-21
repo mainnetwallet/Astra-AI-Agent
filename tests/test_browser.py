@@ -174,6 +174,22 @@ class TestBrowserMockedLive(unittest.TestCase):
             self.assertEqual(r["url"], bad)
         mgr.close_session("ssrf")
 
+    def test_sessions_are_per_manager_and_close_all_releases_them(self):
+        """Sessions used to live in a module-global dict: a second manager
+        inherited the first's open browser and nothing closed them on
+        shutdown. They must be per-manager and closeable in one call."""
+        from astra.browser.manager import BrowserManager
+        mgr1 = BrowserManager()
+        mgr2 = BrowserManager()
+        mgr1.browser_open({"url": "https://example.com", "session": "a"})
+        self.assertIn("a", mgr1._sessions)
+        self.assertEqual(mgr2._sessions, {})   # no cross-manager leakage
+        session = mgr1._sessions["a"]
+        mgr1.close_all()
+        self.assertEqual(mgr1._sessions, {})
+        self.assertFalse(session._opened)      # close() ran
+        self.assertIsNone(session._page)
+
 
 if __name__ == "__main__":
     unittest.main()

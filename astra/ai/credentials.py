@@ -127,11 +127,13 @@ class CredentialPool:
 
     @property
     def count(self) -> int:
-        return len(self._creds)
+        with self._lock:
+            return len(self._creds)
 
     @property
     def healthy_count(self) -> int:
-        return sum(1 for c in self._creds if c.healthy and not c.in_cooldown)
+        with self._lock:
+            return sum(1 for c in self._creds if c.healthy and not c.in_cooldown)
 
     def __bool__(self) -> bool:
         return self.healthy_count > 0
@@ -212,7 +214,12 @@ class CredentialPool:
         return cred._secret
 
     def report_success(self, cred: Credential | None) -> None:
-        if cred:
+        if not cred:
+            return
+        # Credential health/counters are shared across request threads; mutate
+        # them under the pool lock so a success and a failure racing on the
+        # same key cannot tear `healthy`/`cooldown_until` or lose a call count.
+        with self._lock:
             cred.mark_success()
             if self.pinned_key() == cred.key_id:
                 # A manual per-key test just proved this key works: bring it
@@ -224,7 +231,9 @@ class CredentialPool:
                        rate_limited: bool = False,
                        auth_failure: bool = False,
                        cooldown_s: float = 30.0) -> None:
-        if cred:
+        if not cred:
+            return
+        with self._lock:
             cred.mark_failure(reason, rate_limited=rate_limited,
                               auth_failure=auth_failure, block_s=cooldown_s)
 
@@ -234,12 +243,15 @@ class CredentialPool:
             return [c.to_metadata() for c in self._creds]
 
     def summary(self) -> dict:
-        return {
-            "provider": self.provider,
-            "credentials": self.healthy_count,
-            "total_credentials": self.count,
-            "in_cooldown": sum(1 for c in self._creds if c.in_cooldown),
-            "calls": sum(c.calls for c in self._creds),
-            "errors": sum(c.errors for c in self._creds),
-            "healthy": bool(self),
-        }
+        with self._lock:
+            return {
+                "provider": self.provider,
+                "credentials": sum(1 for c in self._creds
+                                   if c.healthy and not c.in_cooldown),
+                "total_credentials": len(self._creds),
+                "in_cooldown": sum(1 for c in self._creds if c.in_cooldown),
+                "calls": sum(c.calls for c in self._creds),
+                "errors": sum(c.errors for c in self._creds),
+                "healthy": any(c.healthy and not c.in_cooldown
+                               for c in self._creds),
+            }

@@ -80,13 +80,18 @@ class ToolRegistry:
         if tool.rate_limit_per_min <= 0:
             return
         interval = 60.0 / tool.rate_limit_per_min
-        last = self._rate_limit_last.get(tool.name)
         now = time.monotonic()
-        if last is not None:
-            wait = interval - (now - last)
-            if wait > 0:
-                time.sleep(wait)
-        self._rate_limit_last[tool.name] = time.monotonic()
+        # Reserve this call's slot atomically, then sleep OUTSIDE the lock.
+        # The old read-then-sleep-then-write let two concurrent callers both
+        # read the same `last` and both proceed, admitting more than the limit;
+        # sleeping under the lock would instead serialize every tool call.
+        with self._lock:
+            last = self._rate_limit_last.get(tool.name)
+            start_at = max(now, last + interval) if last is not None else now
+            self._rate_limit_last[tool.name] = start_at
+        wait = start_at - now
+        if wait > 0:
+            time.sleep(wait)
 
     # -- invocation (timeout) -------------------------------------------------
     def _invoke(self, tool: Tool, args: dict, ctx):

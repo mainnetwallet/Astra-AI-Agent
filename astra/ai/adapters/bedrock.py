@@ -28,7 +28,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from astra.ai.credentials import CredentialPool
-from astra.ai.provider import AIProvider
+from astra.ai.provider import AIProvider, close_http_error
 from astra.core.exceptions import ProviderError
 
 SERVICE = "bedrock"
@@ -164,6 +164,7 @@ class BedrockAdapter(AIProvider):
             self.pool.report_failure(cred, reason=f"bedrock http {e.code}",
                                      auth_failure=e.code in (401, 403))
             code = e.code
+            close_http_error(e)
             if code in (401, 403):
                 raise ProviderError("bedrock authentication/authorization failed")
             if code == 429:
@@ -280,7 +281,9 @@ class BedrockAdapter(AIProvider):
             if self.events:
                 self.events.emit("ai.failed", agent="provider", provider=self.name,
                                  model=model, error=f"http {e.code}")
-            raise ProviderError(f"bedrock stream http {e.code}") from e
+            code = e.code
+            close_http_error(e)
+            raise ProviderError(f"bedrock stream http {code}") from e
         self.pool.report_success(cred)
         if self.events:
             self.events.emit("ai.completed", agent="provider", provider=self.name,

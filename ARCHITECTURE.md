@@ -146,8 +146,12 @@ astra/
 │   └── transactions.py, raw_tx.py   Transaction lifecycle + persistence
 │
 ├── browser/              Optional Playwright-backed browsing subsystem
-│   └── __init__.py         register_browser_tools(): browser_open/observe/
-│                            action/extract/screenshot/close
+│   ├── __init__.py         register_browser_tools(): browser_open/observe/
+│   │                        action/extract/screenshot/close
+│   ├── manager.py          BrowserManager — per-manager session map (locked);
+│   │                        close_all() releases Playwright on shutdown
+│   └── sessions.py         BrowserSession — page lifecycle, bounded observe,
+│                            SSRF-guarded open, CAPTCHA/MFA pause
 │
 ├── memory/               Layered memory + learned experience
 │   └── memory.py           MemorySystem (working/short/long/semantic/

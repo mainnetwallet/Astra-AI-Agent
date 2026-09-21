@@ -236,6 +236,15 @@ class TestScheduler(unittest.TestCase):
         self.sched = SchedulerManager(self.stack["store"], self.stack["workflows"],
                                       self.stack["events"])
 
+    def test_start_is_idempotent(self):
+        """Two start() calls (e.g. a rebuild plus a lifecycle hook) must not
+        spawn two tick loops that fire every schedule twice."""
+        from unittest import mock
+        with mock.patch("astra.workflows.scheduler.threading.Thread") as T:
+            self.sched.start()
+            self.sched.start()
+            self.assertEqual(T.return_value.start.call_count, 1)
+
     def test_add_list_set_enabled_delete(self):
         s = self.sched.add("morning", "daily", "09:00")
         self.assertTrue(s["enabled"])
@@ -447,7 +456,10 @@ class TestWebSystem(unittest.TestCase):
             headers={"Content-Type": "application/json"}, method="POST")
         with self.assertRaises(urllib.error.HTTPError) as cm:
             urllib.request.urlopen(req, timeout=5)
-        self.assertEqual(cm.exception.code, 410)
+        # HTTPError owns the response body; close it explicitly so the
+        # temporary file isn't garbage-collected with a ResourceWarning.
+        with cm.exception:
+            self.assertEqual(cm.exception.code, 410)
 
     def test_config_has_app_keys(self):
         r = self._get("/api/config")

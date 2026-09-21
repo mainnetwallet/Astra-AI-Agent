@@ -100,7 +100,21 @@ class RateLimiter:
                 return False
             hits.append(now)
             self._hits[key] = hits
+            self._maybe_prune(now)
             return True
+
+    #: Sweep the map only once it has grown large; a unique client key
+    #: otherwise accumulated a list that was never reclaimed, so a long-lived
+    #: server leaked one entry per distinct IP forever.
+    _PRUNE_AT = 4096
+
+    def _maybe_prune(self, now: float) -> None:
+        if len(self._hits) < self._PRUNE_AT:
+            return
+        stale = [k for k, ts in self._hits.items()
+                 if not ts or now - ts[-1] >= self.window]
+        for k in stale:
+            self._hits.pop(k, None)
 
     def count(self, key: str) -> int:
         with self._lock:

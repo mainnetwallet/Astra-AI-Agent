@@ -45,6 +45,17 @@ from astra.ai.credentials import CredentialPool
 from astra.core.exceptions import ProviderError, TimeoutError
 
 
+def _close_http_error(exc) -> None:
+    """Release an HTTPError's response body (urlopen raises before the `with`
+    body runs, so the socket would otherwise stay open until GC)."""
+    try:
+        close = getattr(exc, "close", None)
+        if close is not None:
+            close()
+    except Exception:
+        pass
+
+
 def _short_provider(conn) -> str:
     """Short display id of a Gateway connection (astra-gw-groq -> groq), the
     same naming the routed path and the Logs panel use."""
@@ -110,6 +121,7 @@ class _GatewayCompatibleConnection:
             with urllib.request.urlopen(req, timeout=GW_DEFAULT_TIMEOUT) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
+            _close_http_error(e)
             self._classify_http(e, cred)
             raise
         except urllib.error.URLError as e:
@@ -200,6 +212,7 @@ class _GatewayCompatibleConnection:
                         full += text
                         yield text
         except urllib.error.HTTPError as e:
+            _close_http_error(e)
             self._classify_http(e, cred)
             raise
         except urllib.error.URLError as e:
@@ -408,6 +421,7 @@ class AstraGatewayBedrock:
                                      rate_limited=e.code == 429,
                                      cooldown_s=(45 if e.code == 429 else 30))
             code = e.code
+            _close_http_error(e)
             if code in (401, 403):
                 raise ProviderError(f"{self.name} authentication/authorization failed")
             if code == 429:
@@ -483,7 +497,9 @@ class AstraGatewayBedrock:
                         full += text
                         yield text
         except urllib.error.HTTPError as e:
-            raise ProviderError(f"{self.name} stream http {e.code}") from e
+            code = e.code
+            _close_http_error(e)
+            raise ProviderError(f"{self.name} stream http {code}") from e
         self.pool.report_success(cred)
         if self.events:
             self.events.emit("ai.completed", agent="gateway", provider=self.name,

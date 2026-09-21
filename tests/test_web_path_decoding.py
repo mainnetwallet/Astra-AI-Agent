@@ -56,7 +56,8 @@ class LivePathDecodingTests(unittest.TestCase):
             with urllib.request.urlopen(self.srv.base + path, timeout=10) as r:
                 return r.status, json.loads(r.read())
         except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read())
+            with e:
+                return e.code, json.loads(e.read())
 
     def test_encoded_separator_stays_in_one_segment(self):
         # "abc%2Fdef" is a single (decoded) segment, so the router reaches the

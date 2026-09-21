@@ -1254,5 +1254,60 @@ class TestGatewayIntentClassification(unittest.TestCase):
         self.assertTrue(result["is_task"])
 
 
+class TestCredentialPoolConcurrency(unittest.TestCase):
+    """Per-key counters are shared across request threads; concurrent
+    success/failure reports must not lose increments or tear health state."""
+
+    def test_concurrent_reports_do_not_lose_calls(self):
+        import threading
+        from astra.ai.credentials import CredentialPool
+        pool = CredentialPool("p", ["k1", "k2", "k3"])
+        creds = list(pool._creds)
+        threads = [
+            threading.Thread(target=lambda c=c: [
+                pool.report_success(c) for _ in range(500)])
+            for c in creds * 3]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sum(c.calls for c in creds), 500 * len(threads))
+        self.assertEqual(pool.summary()["calls"], 500 * len(threads))
+
+    def test_concurrent_full_failure_reports_stay_consistent(self):
+        import threading
+        from astra.ai.credentials import CredentialPool
+        pool = CredentialPool("p", ["k1"])
+        cred = pool._creds[0]
+        threads = [threading.Thread(
+            target=lambda: [pool.report_failure(cred, reason="x",
+                                                auth_failure=True,
+                                                cooldown_s=0.0)
+                            for _ in range(300)]) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(cred.calls, 1200)
+        self.assertEqual(cred.errors, 1200)
+        self.assertFalse(pool.summary()["healthy"])
+
+
+class TestCloseHttpError(unittest.TestCase):
+    """urlopen raises HTTPError before its `with` body runs, so the adapter
+    must close the response explicitly instead of leaking the socket."""
+
+    def test_closes_and_tolerates_non_closable(self):
+        from unittest import mock
+        from astra.ai.provider import close_http_error
+        closable = mock.MagicMock()
+        close_http_error(closable)
+        closable.close.assert_called_once()
+        close_http_error(object())            # no .close -> no-op
+        boom = mock.MagicMock()
+        boom.close.side_effect = OSError("already gone")
+        close_http_error(boom)                # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

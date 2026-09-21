@@ -26,6 +26,22 @@ import urllib.request
 from astra.core.exceptions import ProviderError
 
 
+def close_http_error(exc) -> None:
+    """Close an `urllib.error.HTTPError` response body.
+
+    `urlopen()` raises before the `with` block is entered, so the HTTPError
+    (which owns the socket/response body) is never closed by the caller. Left
+    to the garbage collector it keeps the connection open until GC and emits a
+    ResourceWarning; closing it here releases it deterministically. Safe to
+    call with any object (no-op when it has no `close`)."""
+    try:
+        close = getattr(exc, "close", None)
+        if close is not None:
+            close()
+    except Exception:
+        pass
+
+
 class AIProvider:
     name: str = "base"
     models: list[str] = []
@@ -138,6 +154,7 @@ class ClaudeProvider(AIProvider):
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except Exception as e:
+            close_http_error(e)
             raise ProviderError(f"anthropic unavailable: {type(e).__name__}") from e
         blocks = data.get("content", [])
         return "".join(b.get("text", "") for b in blocks).strip() or "(no reply)"
@@ -172,6 +189,7 @@ class ClaudeProvider(AIProvider):
                 self.events.emit("ai.failed", agent="provider",
                                  provider=self.name,
                                  model=model or self.models[0], error=str(e))
+            close_http_error(e)
             raise ProviderError(f"anthropic unavailable: {type(e).__name__}") from e
 
     def health_check(self) -> bool:
@@ -219,6 +237,7 @@ class OpenAICompatibleProvider(AIProvider):
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except Exception as e:
+            close_http_error(e)
             raise ProviderError(f"{self.name} unavailable: {type(e).__name__}") from e
         return data.get("choices", [{}])[0].get("message", {}).get("content", "") or "(no reply)"
 
@@ -256,6 +275,7 @@ class OpenAICompatibleProvider(AIProvider):
                 self.events.emit("ai.failed", agent="provider",
                                  provider=self.name,
                                  model=model or self.models[0], error=str(e))
+            close_http_error(e)
             raise ProviderError(f"{self.name} unavailable: {type(e).__name__}") from e
 
     def health_check(self) -> bool:

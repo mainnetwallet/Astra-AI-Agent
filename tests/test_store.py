@@ -43,6 +43,22 @@ class TestStore(unittest.TestCase):
         self.s.insert("t", name="y")
         self.assertEqual(len(self.s.fetch("SELECT * FROM t")), 1)
 
+    def test_close_is_idempotent(self):
+        """close() is safe to call from both the owner's shutdown and the
+        __del__ safety net; a second call must be a no-op, not an error."""
+        self.s.close()
+        self.s.close()
+        with self.assertRaises(Exception):
+            self.s.fetch("SELECT * FROM t")
+
+    def test_del_after_close_is_safe(self):
+        import gc
+        s = Store(":memory:")
+        s.install("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)")
+        s.close()
+        del s
+        gc.collect()   # must not raise inside Store.__del__
+
 
 if __name__ == "__main__":
     unittest.main()

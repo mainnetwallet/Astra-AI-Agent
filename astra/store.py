@@ -33,6 +33,7 @@ class Store:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL" if path != ":memory:" else "PRAGMA journal_mode = MEMORY")
         self._lock = threading.RLock()
+        self._closed = False
 
     # -- core operations -----------------------------------------------------
     def install(self, sql: str) -> None:
@@ -111,15 +112,21 @@ class Store:
 
     # -- lifecycle -----------------------------------------------------------
     def close(self) -> None:
-        try:
-            self._conn.close()
-        except Exception:
-            pass
+        """Close the connection. Idempotent: safe to call from both the owner's
+        shutdown path and the `__del__` safety net."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._conn.close()
+            except Exception:
+                pass
 
     def __del__(self) -> None:
         """Safety net: close the connection if the owner forgot to. Debug loop
         safety only — the app and tests close explicitly where practical."""
         try:
-            self._conn.close()
+            self.close()
         except Exception:
             pass

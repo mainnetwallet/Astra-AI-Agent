@@ -386,9 +386,15 @@ appends a new row or updates the row for its operation in place, so a
 updates) resolves to a single row and concurrent operations of the same
 kind each keep their own row. An update refines the row in place: its
 displayed time and timeline position stay pinned to the original start
-event, so completion order never changes the visual order. A terminal
-event also closes the still-running children it owns (matched by the
-request `trace` / `run_id`), marking them `warn`/interrupted; every chat turn, workflow
+event, so completion order never changes the visual order. A finished
+operation shows the full span (`23:21:19 → 23:22:07`) and a duration —
+the explicit `duration_ms`/`latency_ms` when present, otherwise derived
+from the two backend timestamps — and the expandable details list
+Started/Completed/Duration/Status plus the `op`/`trace` correlation ids.
+The run's own row is never closed by one of its steps (only descendants
+are), so a workflow run stays a single row. A terminal event also closes
+the still-running children it owns (matched by the request `trace` /
+`run_id`), marking them `warn`/interrupted; every chat turn, workflow
 run and tool call emits such a terminal event, so a finished request
 never leaves an operation stuck on "running".
 

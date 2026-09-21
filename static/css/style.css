@@ -333,7 +333,7 @@ a[class*="hl-"] { pointer-events: none; }
 /* one timeline row */
 .tl-row {
   display: grid;
-  grid-template-columns: 14px 58px minmax(0, 1fr) auto;
+  grid-template-columns: 14px 132px minmax(0, 1fr) auto;
   align-items: center; gap: 8px;
   padding: 6px 8px; border-radius: 8px;
   border-left: 2px solid transparent;
@@ -376,6 +376,19 @@ a[class*="hl-"] { pointer-events: none; }
 .tl-time {
   font: 11px/1.4 ui-monospace, "Cascadia Code", Consolas, monospace;
   color: var(--muted); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.tl-time-sep { color: var(--line); }
+.tl-time-end { color: var(--text); }
+.tl-row[data-status="ok"] .tl-time-end { color: var(--good); }
+.tl-row[data-status="err"] .tl-time-end { color: var(--bad); }
+.tl-row[data-status="warn"] .tl-time-end { color: var(--warn); }
+/* Narrow screens: keep the start stamp only and let the expandable details
+   carry the completion time, so the range cannot crush the row layout. */
+@media (max-width: 640px) {
+  .tl-row { grid-template-columns: 14px 58px minmax(0, 1fr) auto; }
+  .tl-time-sep, .tl-time-end { display: none; }
 }
 .tl-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .tl-title {

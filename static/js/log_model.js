@@ -193,6 +193,32 @@
     return "";
   }
 
+  // Backend timestamps are "YYYY-MM-DD HH:MM:SS" (local time). Parse them the
+  // same way for both endpoints so a derived duration can never be affected by
+  // the reader's clock or by when the DOM inserted the row.
+  function parseStamp(ts) {
+    var s = String(ts == null ? "" : ts).trim();
+    if (!s) return NaN;
+    return Date.parse(s.indexOf("T") >= 0 ? s : s.replace(" ", "T"));
+  }
+
+  function elapsedMs(a, b) {
+    var ta = parseStamp(a), tb = parseStamp(b);
+    if (isNaN(ta) || isNaN(tb)) return null;
+    return tb - ta;
+  }
+
+  // An operation with both endpoints derives its duration from those backend
+  // timestamps when the event itself carries no explicit duration_ms/latency.
+  function withDuration(m) {
+    if (!m || m.duration) return m;
+    if (m.startTs && m.endTs && m.endTs !== m.startTs) {
+      var ms = elapsedMs(m.startTs, m.endTs);
+      if (ms != null && ms > 0) m.duration = fmtMs(ms);
+    }
+    return m;
+  }
+
   function targetOf(d) {
     var provider = d.provider || "";
     var model = d.model || "";
@@ -217,7 +243,12 @@
   // Which data keys become the expanded "details" grid (order matters).
   var FIELD_ORDER = ["provider", "model", "tool", "category", "status",
                      "task", "workflow", "step", "tx", "tx_id", "network",
-                     "attempt", "attempts", "verdict", "reason", "route"];
+                     "attempt", "attempts", "verdict", "reason", "error",
+                     "op", "trace", "request", "route"];
+  // Friendlier labels for the identifier fields (op/trace are the lifecycle
+  // correlation ids; showing them makes "one operation = one row" auditable).
+  var FIELD_LABELS = { op: "Operation", trace: "Trace", request: "Request",
+                       tx_id: "Tx", run_id: "Run", error: "Error" };
 
   function fieldValue(v) {
     if (v == null || v === "") return "";
@@ -238,7 +269,7 @@
     for (var i = 0; i < FIELD_ORDER.length; i++) {
       var key = FIELD_ORDER[i];
       if (key === "status") continue;
-      push(humanize(key), fieldValue(d[key]));
+      push(FIELD_LABELS[key] || humanize(key), fieldValue(d[key]));
     }
     push("Agent", fieldValue(event.agent));
     return fields;
@@ -281,6 +312,8 @@
     var t = titleOf(kind);
     var status = statusOf(kind, d);
     var dur = durationOf(d);
+    var startTs = stampOf(e.created_at);
+    var terminal = phaseOf(kind, d) === "terminal";
     var subject = clip(scrub(subjectOf(kind, d)), 80);
     var detail;
     if (status === "err") detail = clip(scrub(d.error || d.reason || "failed"), 120);
@@ -296,7 +329,10 @@
       kind: kind,
       agent: e.agent || "",
       time: timeOf(e.created_at),
-      sortTs: stampOf(e.created_at),
+      endTime: terminal ? timeOf(e.created_at) : "",
+      startTs: startTs,
+      endTs: terminal ? startTs : "",
+      sortTs: startTs,               // chronological position = START time
       sortId: Number(e.id) || 0,
       category: categoryOf(kind),
       status: status,
@@ -311,7 +347,7 @@
     };
     out.search = [out.kind, out.agent, out.title, out.subject, out.detail,
                   out.category].join(" ").toLowerCase();
-    return out;
+    return withDuration(out);
   }
 
   /* ------------------------------------------------- live-scroll behaviour */
@@ -437,8 +473,13 @@
     if (lc.phase === "terminal") {
       var req = lc.request || (lc.key.indexOf("req:") === 0 ? lc.key.slice(4) : "");
       var run = lc.run_id;
+      // The run's OWN row (`op:wf:<run>`) is an ancestor, not a child — a
+      // step's terminal must never close it (doing so orphans the run row and
+      // makes the later workflow.completed append a duplicate).
+      var runKey = run ? "op:wf:" + run : "";
       state.active.forEach(function (info, k) {
         if (k === lc.key) return;
+        if (runKey && k === runKey) return;
         var sameReq = req && (info.request === req || info.trace === req);
         var sameRun = run && (info.run_id === run || info.trace === "wf:" + run);
         if (sameReq || sameRun) closeKeys.push(k);
@@ -481,18 +522,49 @@
   }
 
   // A lifecycle continuation (started -> completed/failed/retrying) refines the
-  // SAME operation row. Its timeline identity — id, displayed time and the
-  // (timestamp, id) sort key — must stay pinned to the ORIGINAL start event, so
-  // a completion never makes the row jump or look like it happened later.
+  // SAME operation row. Its timeline identity — id, START time and the
+  // (timestamp, id) sort key — stays pinned to the original start event, so a
+  // completion never makes the row jump. The terminal event contributes the END
+  // timestamp (+ duration), so the row can show "start → end" without losing
+  // its chronological position.
   function mergeLifecycle(oldModel, newModel) {
     var merged = Object.assign({}, newModel);
     if (oldModel) {
       merged.id = oldModel.id;
       merged.time = oldModel.time;
+      merged.startTs = oldModel.startTs || oldModel.sortTs;
       merged.sortTs = oldModel.sortTs;
       merged.sortId = oldModel.sortId;
+      if (newModel.endTs) {
+        merged.endTime = newModel.endTime || "";
+      } else {
+        // intermediate/retry refinement: keep any end already recorded
+        merged.endTs = oldModel.endTs || "";
+        merged.endTime = oldModel.endTime || "";
+      }
+      if (!newModel.duration) merged.duration = oldModel.duration || "";
     }
-    return merged;
+    return withDuration(merged);
+  }
+
+  // Displayed time span: the start time always; the terminal time too once the
+  // operation has ended (a same-second completion collapses to one stamp).
+  function timeRangeOf(m) {
+    var mm = m || {};
+    var start = mm.time || "";
+    var end = mm.endTime || "";
+    if (!end || end === start) end = "";
+    return { start: start, end: end };
+  }
+
+  function statusLabel(m) {
+    var mm = m || {};
+    if (mm.endTs) {
+      if (mm.status === "err") return "FAILED";
+      if (mm.status === "warn") return "WARNING";
+      if (mm.status === "ok") return "COMPLETE";
+    }
+    return String(mm.status || "").toUpperCase();
   }
 
   function createState() {
@@ -572,6 +644,9 @@
     count: count,
     recount: recount,
     mergeLifecycle: mergeLifecycle,
+    timeRangeOf: timeRangeOf,
+    statusLabel: statusLabel,
+    elapsedMs: elapsedMs,
     reset: reset,
     matchesRow: matchesRow,
     compareChron: compareChron,

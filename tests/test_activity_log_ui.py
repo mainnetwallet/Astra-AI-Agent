@@ -50,6 +50,9 @@ class TestActivityLogUI(unittest.TestCase):
         # start's timestamp); ordering uses the canonical (created_at, id) key.
         self.assertIn("AstraLog.mergeLifecycle(", self.js)
         self.assertIn("AstraLog.compareChron(", self.js)
+        # ...and the terminal time is shown as a start -> end range.
+        self.assertIn("AstraLog.timeRangeOf(", self.js)
+        self.assertIn("AstraLog.statusLabel(", self.js)
 
     def test_lifecycle_continuations_update_the_same_row(self):
         # start/running rows must be reconciled in place by their terminal
@@ -75,7 +78,7 @@ class TestActivityLogUI(unittest.TestCase):
 
     def test_timeline_and_jump_styles_exist(self):
         for rule in (".tl-row", ".tl-detail", ".logs-jump", ".logs-live",
-                     ".tl-dot.running"):
+                     ".tl-dot.running", ".tl-time-end", ".tl-time-sep"):
             self.assertIn(rule, self.css, f"missing style {rule}")
         # no terminal-only classes left behind
         self.assertNotIn(".term-line", self.css)

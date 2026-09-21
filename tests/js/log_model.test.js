@@ -590,3 +590,147 @@ test("gateway.recovery_target_selected is not an empty standalone row", () => {
     agent: "gateway.execution_recovery", data: { fallback_to: "p/m" },
   }), false);
 });
+
+/* ------------------------------------------------ lifecycle time presentation
+ * Position stays the START; the terminal event adds an END timestamp and a
+ * duration, so a finished row can show "start → end" without moving. */
+
+test("completed lifecycle keeps the start sort key and records the end", () => {
+  const { rows } = simulate([
+    at(1, "tool.started", "2026-09-21 23:21:19", { op: "T", tool: "web_search" }),
+    at(2, "tool.completed", "2026-09-21 23:22:07",
+       { op: "T", tool: "web_search", terminal: true, duration_ms: 48000 }),
+  ]);
+  assert.strictEqual(rows.length, 1, "one operation = one row");
+  const m = rows[0].model;
+  assert.strictEqual(m.sortTs, "2026-09-21 23:21:19");   // sorting = start
+  assert.strictEqual(m.startTs, "2026-09-21 23:21:19");
+  assert.strictEqual(m.time, "23:21:19");                // displayed start
+  assert.strictEqual(m.endTs, "2026-09-21 23:22:07");    // terminal kept
+  assert.strictEqual(m.endTime, "23:22:07");
+  assert.strictEqual(m.duration, "48s");
+  assert.deepStrictEqual(Log.timeRangeOf(m),
+                         { start: "23:21:19", end: "23:22:07" });
+  assert.strictEqual(Log.statusLabel(m), "COMPLETE");
+});
+
+test("duration is derived from backend timestamps when the event has none", () => {
+  const { rows } = simulate([
+    at(1, "chat.pipeline.started", "2026-09-21 23:21:19",
+       { op: "chat:R", request: "R", trace: "R" }, "chat.pipeline"),
+    at(2, "chat.pipeline.finished", "2026-09-21 23:22:07",
+       { op: "chat:R", request: "R", trace: "R", terminal: true,
+         status: "COMPLETE" }, "chat.pipeline"),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.duration, "48s");
+  assert.strictEqual(rows[0].model.status, "ok");
+});
+
+test("running operation shows only its start time", () => {
+  const { rows } = simulate([
+    at(1, "ai.started", "2026-09-21 23:21:19",
+       { op: "A", provider: "groq", model: "m" }),
+  ]);
+  const m = rows[0].model;
+  assert.strictEqual(m.status, "running");
+  assert.strictEqual(m.endTs, "");
+  assert.strictEqual(m.duration, "");
+  assert.deepStrictEqual(Log.timeRangeOf(m), { start: "23:21:19", end: "" });
+  assert.strictEqual(Log.statusLabel(m), "RUNNING");
+});
+
+test("failed operation shows start -> failure time", () => {
+  const { rows } = simulate([
+    at(1, "ai.started", "2026-09-21 23:21:28",
+       { op: "F", provider: "x", model: "m" }),
+    at(2, "ai.failed", "2026-09-21 23:21:34",
+       { op: "F", provider: "x", model: "m", terminal: true, error: "boom",
+         duration_ms: 6000 }),
+  ]);
+  const m = rows[0].model;
+  assert.strictEqual(m.status, "err");
+  assert.deepStrictEqual(Log.timeRangeOf(m),
+                         { start: "23:21:28", end: "23:21:34" });
+  assert.strictEqual(m.duration, "6s");
+  assert.strictEqual(Log.statusLabel(m), "FAILED");
+});
+
+test("concurrent operations order by start, independent of completion", () => {
+  const { rows } = simulate([
+    at(1, "ai.started", "2026-09-21 10:00:00", { op: "A", provider: "p", model: "m" }),
+    at(2, "ai.started", "2026-09-21 10:01:00", { op: "B", provider: "p", model: "m" }),
+    at(3, "ai.completed", "2026-09-21 10:02:00",
+       { op: "B", terminal: true, latency_ms: 100 }),
+    at(4, "ai.completed", "2026-09-21 10:03:00",
+       { op: "A", terminal: true, latency_ms: 200 }),
+  ]);
+  assert.deepStrictEqual(rows.map((r) => r.model.startTs),
+                         ["2026-09-21 10:00:00", "2026-09-21 10:01:00"]);
+  assert.deepStrictEqual(rows.map((r) => r.model.endTs),
+                         ["2026-09-21 10:03:00", "2026-09-21 10:02:00"]);
+});
+
+test("out-of-order completion updates in place, start position unchanged", () => {
+  const { rows } = simulate([
+    at(1, "tool.started", "2026-09-21 10:00:00", { op: "X", tool: "t" }),
+    at(2, "tool.started", "2026-09-21 10:01:00", { op: "Y", tool: "t" }),
+    at(3, "tool.completed", "2026-09-21 10:02:00",
+       { op: "X", tool: "t", terminal: true, duration_ms: 120000 }),
+  ]);
+  assert.deepStrictEqual(rows.map((r) => r.key), ["op:X", "op:Y"]);
+  assert.strictEqual(rows[0].model.time, "10:00:00");
+  assert.strictEqual(rows[0].model.endTs, "2026-09-21 10:02:00");
+});
+
+test("history and live SSE agree on both start and end timestamps", () => {
+  const start = at(1, "tool.started", "2026-09-21 10:00:00", { op: "T", tool: "t" });
+  const end = at(2, "tool.completed", "2026-09-21 10:02:00",
+                 { op: "T", tool: "t", terminal: true, duration_ms: 1000 });
+  const { rows: hist } = simulate(Log.orderHistory([end, start]));
+  assert.strictEqual(hist[0].model.startTs, "2026-09-21 10:00:00");
+  assert.strictEqual(hist[0].model.endTs, "2026-09-21 10:02:00");
+  const { rows: live } = simulate([start, end]);   // start from history, end live
+  assert.strictEqual(live[0].model.startTs, "2026-09-21 10:00:00");
+  assert.strictEqual(live[0].model.endTs, "2026-09-21 10:02:00");
+});
+
+test("a same-second completion collapses to a single timestamp", () => {
+  assert.deepStrictEqual(
+    Log.timeRangeOf({ time: "10:00:00", endTime: "10:00:00" }),
+    { start: "10:00:00", end: "" });
+});
+
+test("status label reflects the terminal state, not always COMPLETE", () => {
+  assert.strictEqual(Log.statusLabel({ status: "ok", endTs: "x" }), "COMPLETE");
+  assert.strictEqual(Log.statusLabel({ status: "err", endTs: "x" }), "FAILED");
+  assert.strictEqual(Log.statusLabel({ status: "warn", endTs: "x" }), "WARNING");
+  assert.strictEqual(Log.statusLabel({ status: "running", endTs: "" }), "RUNNING");
+});
+
+test("expanded details expose the correlation ids", () => {
+  const m = Log.normalize(at(1, "tool.completed", "2026-09-21 10:00:00",
+    { op: "OP1", trace: "TR1", tool: "t", terminal: true }));
+  const labels = m.fields.map((f) => f[0]);
+  assert.ok(labels.includes("Operation"), "details should show the op id");
+  assert.ok(labels.includes("Trace"), "details should show the trace id");
+});
+
+test("a workflow step terminal never closes the workflow's own row", () => {
+  const { state, rows } = simulate([
+    at(1, "workflow.started", "2026-09-21 10:00:00",
+       { op: "wf:1", run_id: 1, workflow: "w" }, "workflows"),
+    at(2, "task.started", "2026-09-21 10:00:00",
+       { op: "wf:1:s1", run_id: 1, step: "s1" }, "workflows"),
+    at(3, "task.completed", "2026-09-21 10:00:05",
+       { op: "wf:1:s1", run_id: 1, step: "s1", terminal: true }, "workflows"),
+    at(4, "workflow.completed", "2026-09-21 10:00:05",
+       { op: "wf:1", run_id: 1, workflow: "w", terminal: true }, "workflows"),
+  ]);
+  assert.strictEqual(rows.length, 2, "one row per run + one per step");
+  const wf = rows.find((r) => r.key === "op:wf:1");
+  assert.strictEqual(wf.model.status, "ok");         // not stuck in warn
+  assert.strictEqual(wf.model.time, "10:00:00");     // start position kept
+  assert.strictEqual(wf.model.endTs, "2026-09-21 10:00:05");
+  assert.strictEqual(state.active.size, 0);
+});

@@ -640,10 +640,15 @@ function showJump(unread) {
 }
 
 function metaText(m) {
-  if (m.status === "err") return "✖ " + (m.detail || "error");
+  const dur = m.duration ? " · " + m.duration : "";
+  if (m.status === "err") {
+    return m.endTime ? "✖ FAILED" + dur : "✖ " + (m.detail || "error");
+  }
   if (m.status === "warn") return "⚠ " + (m.detail || "warning");
-  if (m.status === "running") return "… running";
-  if (m.status === "ok") return "✓ " + (m.detail || "done");
+  if (m.status === "running") return "… RUNNING";
+  if (m.status === "ok") {
+    return m.endTime ? "✓ COMPLETE" + dur : "✓ " + (m.detail || "done");
+  }
   return m.detail ? "• " + m.detail : "•";
 }
 
@@ -662,8 +667,14 @@ function buildDetails(m) {
   const frag = document.createDocumentFragment();
   const dl = document.createElement("dl");
   dl.className = "tl-fields";
-  const fields = [["Status", m.status]].concat(m.fields);
+  // Started/Completed come straight from the backend event timestamps (never
+  // DOM insertion time); the sort position stays the start.
+  const fields = [];
+  if (m.time) fields.push(["Started", m.time]);
+  if (m.endTime && m.endTime !== m.time) fields.push(["Completed", m.endTime]);
   if (m.duration) fields.push(["Duration", m.duration]);
+  fields.push(["Status", AstraLog.statusLabel(m)]);
+  for (const f of m.fields) fields.push(f);
   fields.forEach(([label, value]) => {
     const dt = document.createElement("dt");
     dt.textContent = label;
@@ -696,7 +707,17 @@ function fillRow(row, m) {
 
   const time = document.createElement("span");
   time.className = "tl-time";
-  time.textContent = m.time;
+  const span = AstraLog.timeRangeOf(m);
+  time.appendChild(document.createTextNode(span.start));
+  if (span.end) {
+    const sep = document.createElement("span");
+    sep.className = "tl-time-sep";
+    sep.textContent = " → ";
+    const end = document.createElement("span");
+    end.className = "tl-time-end";
+    end.textContent = span.end;
+    time.append(sep, end);
+  }
 
   const main = document.createElement("span");
   main.className = "tl-main";

@@ -141,16 +141,23 @@ def fetch_url(args: dict, ctx=None) -> dict:
 
 
 def wallet_balances(args: dict, ctx=None) -> dict:
-    """Fetch native-token balances for wallets known to the airdrop plugin.
+    """Fetch native-token balances for known wallets.
 
     Each wallet is checked against every known EVM RPC in web3.chains.
     A wallet whose chain field is set to 'ETH', 'BASE', etc. is queried on
     that chain specifically; 'TBD' wallets are probed on every EVM chain.
+
+    NOTE: the plugin system that used to supply the wallet list has been
+    removed and no core wallet registry exists yet, so with no wallet source
+    this returns an empty list plus an honest note (never raises).
     """
     from astra.web3 import chains, rpc
-    airdrop = ctx.plugin("airdrop") if ctx else None
+    # `ToolContext` has no plugin lookup any more; keep the optional hook
+    # for a caller that injects one, without assuming the method exists.
+    lookup = getattr(ctx, "plugin", None) if ctx is not None else None
+    airdrop = lookup("airdrop") if callable(lookup) else None
     if not airdrop or not hasattr(airdrop, "list_wallets"):
-        return {"wallets": [], "note": "airdrop plugin missing"}
+        return {"wallets": [], "note": "no wallet source registered"}
     wallets = airdrop.list_wallets()
     balances = []
     target = args.get("network", "").upper() or None
@@ -314,8 +321,10 @@ def get_health(args: dict, ctx=None) -> dict:
     NOTE: the plugin system has been removed — "plugins" is always [].
     """
     import astra
+    reg = getattr(ctx, "registry", None) if ctx else None
     info = {"version": astra.__version__, "plugins": [],
-            "database": "ok", "tools": len(ctx.tools._tools) if ctx and hasattr(ctx, "tools") else 0}
+            "database": "ok",
+            "tools": len(reg.list()) if reg is not None else 0}
     return info
 
 

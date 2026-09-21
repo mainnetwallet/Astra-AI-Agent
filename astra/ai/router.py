@@ -440,8 +440,8 @@ class AstraRouter:
         self._normalize_requirements(req)
         self._emit("router.request", task=req.task_type)
         # Strict mandatory-Gateway enforcement (Gap 1 defense-in-depth):
-        # `req.task_contract` is how a caller (Planner, or the post-
-        # execution final-verification pass in Orchestrator) declares
+        # `req.task_contract` is how a caller (the chat pipeline, or any
+        # post-execution final-verification pass) declares
         # "this is a normal AI request that MUST be Gateway-verified."
         # `build_astra_ai_gateway` now always returns a real Gateway
         # instance in production (see its docstring), so `self.gateway`
@@ -692,7 +692,7 @@ class AstraRouter:
         # That is a materially different situation from "we called N
         # providers and each one failed", so it gets the same wording the
         # earlier `if not candidates` early-return already uses — callers
-        # (e.g. Planner._ai_steps) key off that exact phrase to give the
+        # key off that exact phrase to give the
         # user an accurate "no configured Provider/Model supports this"
         # message instead of a generic, misleading one.
         if attempts == 0:

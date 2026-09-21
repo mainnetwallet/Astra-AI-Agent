@@ -1,4 +1,4 @@
-"""Generic Store tests — the shared SQLite base under every plugin."""
+"""Generic Store tests — the shared SQLite base under every subsystem."""
 import unittest
 
 from astra.store import Store

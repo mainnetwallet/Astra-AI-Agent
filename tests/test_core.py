@@ -1,5 +1,5 @@
 """Tests for the Personal-OS core subsystems (EventBus, TaskEngine, ToolRegistry,
-Memory, Experience, Workflow, Scheduler, Orchestrator, Provider,
+Memory, Experience, Workflow, Scheduler, Provider,
 Config, Context/State/Timeutil, bootstrap)."""
 import io, json, os, time, unittest
 import http.server
@@ -116,6 +116,17 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIn("results", out["result"])
         self.assertIn("query", out["result"])
 
+    def test_execute_wallet_balances_with_real_ctx_never_raises(self):
+        """Regression: wallet_balances used to call ctx.plugin('airdrop'),
+        but ToolContext no longer has a plugin lookup (the plugin system was
+        removed). It must degrade to a structured empty result instead of an
+        AttributeError, both with no context and with a real ToolContext."""
+        for ctx in (None, self._ctx()):
+            out = self.reg.execute("wallet_balances", {}, ctx)
+            self.assertTrue(out.get("ok"), out)
+            self.assertEqual(out["result"]["wallets"], [])
+            self.assertIn("note", out["result"])
+
     def test_execute_search_web_offline_graceful_on_network_failure(self):
         """search_web must not raise when the network is down — it returns a
         structured offline result (Section 4: offline-graceful)."""
@@ -138,6 +149,15 @@ class TestToolRegistry(unittest.TestCase):
         """Successful executions are counted in tool stats (Section 7)."""
         out = self.reg.execute("get_health", {}, None)
         self.assertTrue(out["ok"])
+
+    def test_get_health_reports_tool_count_with_real_ctx(self):
+        """get_health reads the registry off the ToolContext it is handed;
+        the count must match the registry, not silently be 0."""
+        ctx = self._ctx()
+        out = self.reg.execute("get_health", {}, ctx)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["result"]["tools"], len(self.reg.list()))
+        self.assertGreater(out["result"]["tools"], 0)
         st = self.reg.stats("get_health")
         self.assertEqual(st["calls"], 1)
         self.assertEqual(st["errors"], 0)

@@ -51,10 +51,10 @@ class TestAutoModeRealToolRegistryPath(unittest.TestCase):
 
     def test_auto_valid_tx_signs_and_broadcasts_via_registry_execute(self):
         registry, mgr, ctx = _build_registry("AUTO")
-        with patch("astra.web3.txtx.receipt", return_value=None), \
-             patch("astra.web3.txtx.broadcast", return_value="0xdeadbeef"), \
-             patch("astra.web3.txtx.get_nonce", return_value=0), \
-             patch("astra.web3.txtx.get_gas_price", return_value=10 ** 9):
+        with patch("astra.web3.raw_tx.receipt", return_value=None), \
+             patch("astra.web3.raw_tx.broadcast", return_value="0xdeadbeef"), \
+             patch("astra.web3.raw_tx.get_nonce", return_value=0), \
+             patch("astra.web3.raw_tx.get_gas_price", return_value=10 ** 9):
             out = registry.execute(
                 "tx_prepare", {"to": RECIPIENT, "value_wei": 10 ** 15}, ctx=ctx)
         # the generic layer let the call through without an "ask" detour

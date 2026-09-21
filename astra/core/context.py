@@ -1,4 +1,4 @@
-"""Execution context handed to tools, planners and the orchestrator.
+"""Execution context handed to tools and workflow steps.
 
 A ToolContext carries the shared subsystems (store, config, event bus,
 memory, generic task engine) so a tool fn can do real work without
@@ -15,12 +15,13 @@ class ToolContext:
     """Everything a tool may legitimately touch, by dependency injection."""
 
     def __init__(self, store=None, config=None, events=None, memory=None,
-                 tasks=None, web3_manager=None):
+                 tasks=None, web3_manager=None, registry=None):
         self.store = store
         self.config = config
         self.events = events
         self.memory = memory
         self.tasks = tasks
+        self.registry = registry       # ToolRegistry, for diagnostics tools
         self.web3_manager = web3_manager
         self.tx_manager = web3_manager   # alias used by web3 tools
 

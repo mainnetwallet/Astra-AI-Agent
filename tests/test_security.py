@@ -302,10 +302,10 @@ class TestWeb3TxActionEndpoint(unittest.TestCase):
             TxRequest("default", "0x" + "35" * 20, 10 ** 15))
         self.assertTrue(rec["requires_approval"])
 
-        with patch("astra.web3.txtx.receipt", return_value=None), \
-             patch("astra.web3.txtx.broadcast", return_value="0xdeadbeef"), \
-             patch("astra.web3.txtx.get_nonce", return_value=0), \
-             patch("astra.web3.txtx.get_gas_price", return_value=10 ** 9):
+        with patch("astra.web3.raw_tx.receipt", return_value=None), \
+             patch("astra.web3.raw_tx.broadcast", return_value="0xdeadbeef"), \
+             patch("astra.web3.raw_tx.get_nonce", return_value=0), \
+             patch("astra.web3.raw_tx.get_gas_price", return_value=10 ** 9):
             st, body, _ = _req(
                 base + f"/api/v1/web3/transactions/{rec['tx_id']}/authorize",
                 token="sekrit", method="POST")

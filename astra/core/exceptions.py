@@ -1,6 +1,6 @@
 """Categorized, recoverable errors shared across Astra subsystems.
 
-Every error knows its category and whether it is retryable so the orchestrator
+Every error knows its category and whether it is retryable so callers
 and executor can choose recovery (retry / backoff / fallback / alternative tool
 / alternative provider / resume) without guessing from message text.
 """

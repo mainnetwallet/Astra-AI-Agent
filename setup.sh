@@ -58,12 +58,13 @@ else
     echo "ℹ️  config.json already exists — skipping"
 fi
 
-# optional: install Anthropic SDK for AI Q&A (offline works without it)
-if [ -n "$ANTHROPIC_API_KEY" ]; then
-    echo "💡 ANTHROPIC_API_KEY detected — AI chat will use Claude"
+# AI providers are configured with key lists in .env (or the environment).
+if [ -f .env ]; then
+    echo "💡 .env found — AI providers will be read from it"
 else
-    echo "💡 No ANTHROPIC_API_KEY — running offline (no AI chat)"
-    echo "   Set it later: export ANTHROPIC_API_KEY=sk-ant-..."
+    echo "💡 No .env yet — copy the template and add at least one provider key:"
+    echo "     cp .env.example .env   # then set e.g. GEMINI_API_KEYS or GROQ_API_KEYS"
+    echo "   Without any provider key the UI still runs; chat has nothing to route to."
 fi
 
 echo ""

@@ -1,19 +1,18 @@
 # Astra AI Agent 🚀
 
-A **local Personal AI OS** — a core that routes chat through a
-verification gateway, remembers, and runs task-specialist agents,
-including a built-in **Airdrop** specialist. Python 3.9+; the only
-runtime dependencies are FastAPI and uvicorn, which serve the web API
-and the SPA.
+A **local Personal AI OS** — a core that routes every chat message through a
+verification gateway, remembers what happens, and ships task-specialist agents,
+tool registry, web3 wallet safety and a live web UI. Python 3.9+; the only
+runtime dependencies are **FastAPI** and **uvicorn**, which serve the web API
+and the single-page frontend.
 
-Astra's chat path is: every message goes through the **Astra AI
-Gateway** (understands + assigns the best provider/model, then verifies
-the answer before it reaches you) before hitting a real AI provider.
-Domain-specific work (airdrop tracking, web3, browsing, coding, files,
-research) is handled by **specialist agents** the `AgentManager` picks
-between — these ship built into the core today. A standalone plugin
-system (`plugins/`) exists as an empty placeholder for future
-third-party extensions; nothing is loaded from it yet.
+Astra's chat path: every message goes through the **Astra AI Gateway**
+(understands the request, assigns the best provider/model, then verifies the
+answer before it reaches you) before a real AI provider — reached through the
+**AstraRouter** — produces it. Domain-specific work (airdrop tracking, web3,
+browsing, coding, files, research) ships as built-in **specialist agents**
+(`astra/agents/`), but chat no longer *plans* through them: like the plugin
+system, they are registered for introspection and routing hints only.
 
 ---
 
@@ -21,62 +20,57 @@ third-party extensions; nothing is loaded from it yet.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  Astra AI Agent — Personal AI OS                                        │
+│  Astra AI Agent — Personal AI OS                                         │
 │                                                                          │
-│  User message                                                          │
-│     │                                                                  │
-│     ▼                                                                  │
-│  ┌──────────────────────┐   ┌─────────────────────────────────────────┐ │
-│  │ Astra AI Gateway     │   │  AstraRouter                            │ │
-│  │ UNDERSTAND+ASSIGN,   │──▶│  scores task type, ranks provider/model │ │
-│  │ then VERIFY the      │◀──│  candidates, rotates credentials,       │ │
-│  │ provider's answer    │   │  routes to a Provider Adapter (10)      │ │
-│  └──────────────────────┘   └─────────────────────────────────────────┘ │
-│                                             │                          │
-│                                             ▼                          │
-│              gemini groq mistral openrouter cerebras cloudflare        │
-│              sambanova cohere zai bedrock (+claude / openai-compat)    │
+│  User message ──▶ Agent.handle() ──▶ ChatPipeline.run()                  │
+│                                              │                           │
+│                 ┌────────────────────────────┼─────────────────────────┐ │
+│                 ▼                            ▼                         ▼ │
+│        Gateway call #1                 Provider execution        Gateway call #2
+│        UNDERSTAND + ASSIGN          (AstraRouter → adapters)         VERIFY
+│        (astra/ai/gateway.py)                                  (bounded fix/redo loop)
+│                 │                            │                         │
+│                 └──────▶ reply to user ◀─────┴─────────────────────────┘ │
 │                                                                          │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  ┌─────────────┐ │
-│  │ AgentManager │  │   Memory     │  │  Workflows    │  │  ToolRegistry│ │
-│  │ (specialist  │  │ (layered)    │  │  (DAG engine) │  │  (builtin +  │ │
-│  │  selection)  │  │              │  │               │  │   web3+browser)│ │
-│  └─────────────┘  └──────────────┘  └───────────────┘  └─────────────┘ │
+│  ┌─────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐ │
+│  │ AgentManager│ │   Memory     │ │  Workflows   │ │  ToolRegistry    │ │
+│  │ (specialist │ │ (layered)    │ │ + Scheduler  │ │ (builtin + web3  │ │
+│  │  selection) │ │              │ │  (DAG)       │ │  + browser)      │ │
+│  └─────────────┘ └──────────────┘ └──────────────┘ └──────────────────┘ │
 │                                                                          │
 │  ┌──────────────────────┐   ┌─────────────────────────────────────────┐ │
 │  │ Web3 Transaction     │   │ Security layer                          │ │
 │  │ Manager + deterministic   │ auth · rate-limit · CORS · request_id  │ │
-│  │ policy (CONFIRM/AUTO)│   │ secret redaction · SSRF guard · body cap│ │
+│  │ policy (CONFIRM/AUTO)│   │ redaction · SSRF guard · body cap       │ │
 │  └──────────────────────┘   └─────────────────────────────────────────┘ │
 │                                                                          │
-│  Store: SQLite · server: FastAPI/uvicorn (ASGI) · SSE · UI: SPA         │
+│  Store: SQLite · server: FastAPI/uvicorn (ASGI) · SSE · UI: vanilla SPA  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Note: an earlier Orchestrator/Planner execution loop (UNDERSTAND → PLAN →
-SELECT TOOL → EXECUTE → OBSERVE → VERIFY → LEARN → CONTINUE) has been
-**removed** from the codebase. Every chat message now goes through the
-Gateway/ChatPipeline flow above instead; there is no multi-step planning
-loop and no resumable `WAITING_USER` chat run — `resume()` reports
-honestly that this no longer applies. `ToolRegistry` still exists and
-still executes tools (used directly by Web3 flows and tests), it's just
-no longer driven by a deleted Orchestrator.
+The Gateway is a **separate, isolated system** with its own four AI
+connections (`GW_*` config). It is *not* a provider and is never in the
+provider registry; if it is unusable the pipeline **fails open** — the message
+still reaches a provider via the router and the reply is returned with an
+honest "unverified" note. There is exactly one AI execution path; an earlier
+Orchestrator/Planner loop was removed, and `ToolRegistry` now runs standalone
+(workflow steps, web3 flows and tests call it directly).
 
 ### Key subsystems
 
 | Subsystem | What it does |
 |-----------|-------------|
-| **Astra AI Gateway + ChatPipeline** | The path every chat message takes: Gateway call #1 understands the request and assigns it to the best provider/model; the provider executes; Gateway call #2 verifies the output and triggers a bounded fix/redo loop if it's incomplete. Fails open — if the Gateway is unusable, the message still reaches a provider via the router, just unverified. |
-| **AstraRouter** | Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes, and records routing stats. Consumes the 10 adapters + model registry. Never registered as a provider itself, and the Gateway is never used as a fallback provider when every real provider fails (source-level regression test enforces this). |
-| **Provider adapters (10)** | Gemini, Groq, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova, Cohere, Z.ai, Bedrock — one shared OpenAI-compatible adapter class + a real AWS SigV4 Bedrock adapter. Unlimited credentials per provider via key pools. |
-| **Model registry** | Capabilities, context window, streaming/tools/vision support, cost/speed/quality classes, preferred/disabled status. |
-| `AgentManager` + specialist agents | Declarative task specialists (`general`, `research`, `browser`, `coding`, `files`, `web3`, `airdrop`) the manager scores and picks between for a goal. Not providers, not plugins — they describe what kind of work this is and which tools fit. |
-| `ToolRegistry` | Builtin + web3 + browser tools with schema validation, permission policy, timeout/retry/rate-limit, audit trail. Runs standalone (no Orchestrator drives it any more). |
-| `MemorySystem` | Layered memory (working/short/long/semantic/episodic) with importance scoring + search. |
-| `ExperienceStore` | Learns from past successes/failures. |
-| `WorkflowEngine` + `SchedulerManager` | Multi-step workflows, run on demand or cron-like schedules. |
-| `EventBus` | Persisted events + SSE streaming to the Live tab. |
-| `Web3 Manager` | Lifecycle-tracked transactions (CREATED→…→CONFIRMED/FAILED), deterministic CONFIRM/AUTO policy, never-sign-twice, on-chain recovery. Private keys never leave the secure keystore. |
+| **Astra AI Gateway + ChatPipeline** | The path every chat message takes: Gateway call #1 understands the request and assigns the best provider/model; the provider executes; Gateway call #2 verifies the output and drives a bounded fix/redo loop if it is incomplete. Fails open. |
+| **AstraRouter** (`astra/ai/router.py`) | Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes and records routing stats. Never registered as a provider itself, and the Gateway is never a fallback provider when every real provider fails. |
+| **Provider adapters (10)** (`astra/ai/adapters/`) | Gemini, Groq, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova, Cohere, Z.ai, Bedrock. Nine share an OpenAI-compatible adapter base; Bedrock is a real AWS SigV4 / Converse adapter. Unlimited credentials per provider via key pools. |
+| **Model registry** (`astra/ai/models.py`) | Capabilities, context window, streaming/tools/vision support, cost/speed/quality classes, preferred/disabled status. |
+| **AgentManager + specialists** (`astra/agents/`) | Declarative task specialists (`general`, `research`, `browser`, `coding`, `files`, `web3`, `airdrop`) the manager scores; not providers and not plugins. Chat does not plan through them today. |
+| **ToolRegistry** (`astra/tools/registry.py`) | Builtin + web3 + browser tools with schema validation, permission policy, timeout/retry, audit trail. Runs standalone. |
+| **MemorySystem** (`astra/memory/memory.py`) | Layered memory (working/short/long/semantic/episodic) with importance scoring + search; `ExperienceStore` learns from past outcomes. |
+| **WorkflowEngine + SchedulerManager** (`astra/workflows/`) | Step workflows with `{{step_id.param}}` data flow, run on demand or on oneshot/interval/daily/weekly/deadline triggers (no external cron). |
+| **EventBus** (`astra/core/events.py`) | Persisted events + SSE streaming to the Activity Log tab. |
+| **TaskEngine** (`astra/core/tasks.py`) | Generic DAG task engine workflows dispatch through. |
+| **Web3 Manager** (`astra/web3/`) | Lifecycle-tracked transactions (CREATED→…→CONFIRMED/FAILED), deterministic CONFIRM/AUTO policy, never-sign-twice, on-chain recovery. Private keys never leave the secure keystore. |
 
 ---
 
@@ -94,23 +88,23 @@ bash start.sh
 database setup. Python 3.9+.
 
 Windows: double-click `setup.bat` then `start.bat` (or `setup.ps1`/`start.ps1`).
-Termux/Android, macOS: same `setup.sh`/`start.sh` flow.
+Linux / macOS / Termux: the same `setup.sh` + `start.sh` flow.
 
 > Termux/Android: pydantic 2 has no Android wheel. `setup.sh` detects Termux
 > and installs the pure-Python path
 > (`pip install "fastapi<0.119" "uvicorn>=0.27" "pydantic<2"`).
 
 > ⚠️ **Security default:** the server binds **127.0.0.1** (loopback). Add
-> `ASTRA_TOKEN=...` to your `.env` (or env) before opening it to your LAN with
-> `BIND=0.0.0.0` — every `/api/*` call then requires the token.
+> `ASTRA_TOKEN=...` to your `.env` (or environment) before opening it to your
+> LAN with `BIND=0.0.0.0` — every `/api/*` call then requires the token.
 
 ---
 
 ## Setting up AI providers
 
-Copy `.env.example` to `.env` and fill in at least one provider key list.
-Each value is a space/comma-separated list — unlimited credentials, rotated
-per request by the router:
+Copy `.env.example` to `.env` and fill in at least one provider key list. Each
+value is a space/comma-separated list — unlimited credentials, rotated per
+request by the router:
 
 | Provider | Env (keys) | Env (models, optional) |
 |----------|-----------|------------------------|
@@ -123,12 +117,14 @@ per request by the router:
 | SambaNova | `SAMBA_API_KEYS` | `SAMBA_MODELS` |
 | Cohere | `COHERE_API_KEYS` | `COHERE_MODELS` |
 | Z.ai | `ZAI_API_KEYS` | `ZAI_MODELS` |
-| Bedrock | `BEDROCK_CREDENTIALS` (`access_key:secret_key:region`) | `BEDROCK_MODELS` |
+| Bedrock | `BEDROCK_API_KEYS` (bearer token) **or** `BEDROCK_CREDENTIALS` (`access_key:secret_key` IAM pairs) | `BEDROCK_MODELS` |
 
-Single-provider chat also works via `ANTHROPIC_API_KEY` (Claude) or
-`AI_BASE_URL`/`AI_MODEL`/`AI_API_KEY` (any OpenAI-compatible endpoint —
-OpenRouter, Ollama, LM Studio…). All keys stay in env/`.env` — never in the DB,
-logs, UI, or API responses. Router preference order: `AI_PROVIDER=gemini groq …`.
+Bedrock's region comes from `BEDROCK_BASE_URL` / `AWS_REGION` (default
+`us-east-1`). Single-provider chat also works via `ANTHROPIC_API_KEY` (Claude)
+or `AI_BASE_URL`/`AI_MODEL`/`AI_API_KEY` (any OpenAI-compatible endpoint —
+OpenAI, Ollama, LM Studio…). All keys stay in env/`.env` — never in the DB,
+logs, UI or API responses. Force a router preference order with
+`AI_PROVIDER=gemini groq …`.
 
 ## Environment Variables
 
@@ -136,105 +132,124 @@ logs, UI, or API responses. Router preference order: `AI_PROVIDER=gemini groq �
 |----------|---------|-------------|
 | `PORT` | 8787 | HTTP server port |
 | `BIND` | 127.0.0.1 | Bind address (secure local default) |
-| `ASTRA_TOKEN` | *(none)* | Operator token — protects every `/api/*`+`/api/v1/*` |
+| `ASTRA_TOKEN` | *(none)* | Operator token — protects every `/api/*` + `/api/v1/*` (`ASTRA_API_KEY` is an alias) |
 | `ENV` | development | `production` hides error details |
 | `ASTRA_API_RATE_LIMIT` | 300 | Per-IP requests/minute |
 | `ASTRA_MAX_BODY_MB` | 50 | Max request body size |
-| `ASTRA_CORS_ORIGINS` | *(reflect)* | Allowlisted origins (space-separated) |
-| `ASTRA_ALLOW_PRIVATE_URLS` | 0 | SSRF guard override for research |
+| `ASTRA_CORS_ORIGINS` | *(reflect in dev)* | Allowlisted origins (space-separated) |
+| `ASTRA_ALLOW_PRIVATE_URLS` | 0 | SSRF guard override for URL research |
+| `AI_PROVIDER` | *(auto)* | Force/opt-in a provider order (`AI_PROVIDER=gemini groq`) |
+| `AI_ROUTING_PREFERENCE` | balanced | AstraRouter scoring preference |
+| `CHAT_MAX_TOKENS` | 1500 | Provider completion budget per chat turn |
+| `ASTRA_STARTUP_DISCOVERY` | 0 | Run model discovery once at boot |
+| `GRANTED_PERMISSIONS` | `read low_risk_write browser_action` | Tool permission levels granted to the agent |
+| `DATA_DIR` | ./data | SQLite data directory |
+| `DATABASE` | `<DATA_DIR>/astra.db` | Explicit SQLite file path |
+| `ASTRA_MASTER_SECRET` | *(key file)* | Web3 keystore master secret |
 | `WEB3_TRANSACTION_MODE` | CONFIRM | `CONFIRM` (manual) or `AUTO` (policy-only) |
-| `WEB3_MAX_TX_VALUE_WEI` / `WEB3_MAX_DAILY_TX_VALUE_WEI` / `WEB3_MAX_GAS_LIMIT` | — | Deterministic policy limits |
+| `WEB3_MAX_TX_VALUE_WEI` / `WEB3_MAX_DAILY_TX_VALUE_WEI` / `WEB3_MAX_GAS_LIMIT` | 0 (unlimited) | Deterministic policy limits |
 | `WEB3_ALLOWED_RECIPIENTS` / `WEB3_ALLOWED_CONTRACTS` / `WEB3_ALLOWED_WALLETS` | — | Space-separated allowlists |
 | `WEB3_CHAIN_IDS` | 1 8453 137 56 42161 10 11155111 | Chain whitelist |
-| `DATA_DIR` | ./data | SQLite + config storage |
-| `NO_BROWSER` | false | Don't auto-open browser on start |
-| `ACTIVE_PLUGINS` | airdrop | Comma-separated plugin whitelist |
+| `NO_BROWSER` | unset | Set to `1` to not auto-open the browser on start |
 | `ASTRA_SCHEDULER` | 0 | Start the scheduler daemon |
 | `ASTRA_FASTAPI_DOCS` | 0 | Expose `/docs` + `/openapi.json` |
-| `ASTRA_ASGI_THREADS` | 0 (uses Starlette's own default of 40) | Worker-thread pool used for blocking route work |
+| `ASTRA_ASGI_THREADS` | 0 (Starlette's default of 40) | Worker-thread pool used for blocking route work |
 
 ## Web3 transaction safety
 
-* **CONFIRM** (default): every transaction stops at `WAITING_USER` for your
-  review — the LLM can only *prepare* a send, never authorise or sign. The
-  operator approves via `POST .../transactions/{tx_id}/authorize` (signs +
+* **CONFIRM** (default): every transaction parks at `PREPARED` for your review —
+  the LLM can only *prepare* a send, never authorise or sign. The operator
+  approves via `POST /api/v1/web3/transactions/{tx_id}/authorize` (signs +
   broadcasts) or rejects via `.../reject` — both require `ASTRA_TOKEN`.
-* **AUTO**: only transactions that pass the *deterministic* policy
-  (sender/recipient/contract allowlist, max per-tx, daily budget, gas, chain)
-  send automatically — no per-transaction confirmation — for user-authorized
-  wallets. A tx outside AUTO policy is never auto-approved. The LLM can
-  **never** change mode, policy, or add wallets — only the operator (with
-  `ASTRA_TOKEN`) can.
-* Emergency stop halts all sends. A `WAITING_USER` tx is never silently
-  approved on a mode switch.
-* Never-sign-twice is enforced cryptographically (deterministic tx hash + MAC)
-  and an uncertain tx is resolved by querying the chain by hash — never blindly
-  re-submitted. Private keys never appear in logs, events, API responses or
-  plaintext DB rows — signing uses the secure keystore only.
+* **AUTO**: only transactions that pass the *deterministic* policy (sender /
+  recipient / contract allowlist, max per-tx, daily budget, gas, chain) send
+  automatically, for user-authorised wallets. A tx outside AUTO policy is never
+  auto-approved. The LLM can **never** change mode, policy or wallets — only the
+  operator (with `ASTRA_TOKEN`) can.
+* Never-sign-twice is enforced with a deterministic tx hash + MAC; an uncertain
+  tx is resolved by querying the chain by hash, never blindly re-submitted.
+  Private keys stay in the encrypted keystore and never appear in logs, events,
+  API responses or plaintext DB rows.
 
 ## Web UI tabs
 
 | Tab | What it shows |
 |-----|-------------|
-| **Dashboard** | Overview cards — empty placeholder until a plugin/specialist wires data in (no plugin system is loaded today) |
-| **Assistant** | Chat interface — natural language commands |
-| **Live** | Real-time SSE event stream, health, tools, executions |
-| **Providers** | AI provider health, latency, calls/errors, model refresh |
+| **Dashboard** | Overview cards — empty placeholder (no plugin registers data today) |
+| **Assistant** | Chat interface, with multi-chat history persisted server-side |
+| **AI Providers health** | Provider health, latency, calls/errors, per-key and per-model tests |
 | **Router** | Model registry + task routing stats (the AstraRouter's view) |
 | **Wallet** | Web3 transaction policy (mode, limits, allowlists) + recent txs |
-| **Backup** | Export/import as one JSON file — currently a placeholder (`_exports: {}`) since no plugin/specialist registers exportable data yet |
+| **Backup** | Export/import as one JSON file — currently a placeholder (`_exports: {}`) |
+| **Activity Log** | Real-time SSE event stream |
 
-## API (versioned)
+## API
 
-Every route works under `/api/...` (legacy) **and** `/api/v1/...` (same
-handler). New endpoints below are documented under `/api/v1`.
+Every route works under `/api/...` (legacy) **and** `/api/v1/...` (the same
+handler; the `v1` segment is stripped before dispatch). `?token=` is accepted
+for SSE, where headers cannot be sent.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/v1/health` | DB / plugins / providers / scheduler checks |
-| GET | `/api/v1/manifest` | Plugin + tab manifest for the SPA |
-| POST | `/api/v1/chat` | Natural-language chat `{"message": "..."}` |
+| GET | `/api/health` | DB / providers / scheduler diagnostics (`plugins` is always empty) |
+| GET | `/api/manifest` | App name + tab manifest for the SPA |
+| GET | `/api/config` | Public (non-secret) config snapshot |
+| POST | `/api/chat` | Natural-language chat `{"message": "..."}` |
+| GET/DELETE | `/api/chat/history` | Saved transcript (`after_id`, `limit`, `conversation_id`) |
+| GET/POST | `/api/chat/conversations` | List / open saved chats |
+| GET/DELETE | `/api/chat/conversations/{id}` | Switch to / delete a chat |
+| POST | `/api/chat/resume` | Legacy approve/reject route (orchestrator removed) |
+| GET | `/api/events` · `/api/events/stream` · `/api/events/last` | Live events + SSE feed |
+| GET | `/api/tools` | Tool registry listing + stats |
+| GET/POST | `/api/tasks` (+`/{id}`) | Generic task engine |
+| GET/POST | `/api/memory` · GET `/api/memory/search` | Memory save/list/search (DELETE `/{id}` forgets one) |
+| GET | `/api/experiences` | Experience-store stats |
+| GET/POST | `/api/workflows` (+`/{id}/run`, `/runs`) | Workflow definitions + runs |
+| GET/POST/PATCH/DELETE | `/api/schedules` | Scheduler CRUD |
+| GET | `/api/providers` | Routable provider health |
+| GET | `/api/gateway/health` | Astra AI Gateway status (4 connections + fallback) |
+| GET | `/api/metrics` | Server + subsystem metrics |
 | GET | `/api/v1/models` | Model registry + per-provider health |
 | POST | `/api/v1/models/refresh` | Re-run model discovery |
 | GET | `/api/v1/router/status` · `/api/v1/router/stats` | Routing health / stats |
-| POST | `/api/v1/providers/&lt;name&gt;/refresh\|enable\|disable` | Provider admin |
+| POST | `/api/v1/providers/{name}/refresh\|enable\|disable\|test\|reset-health` | Provider admin |
+| POST | `/api/v1/providers/{name}/test/{model}` | Test one provider/model pair |
+| POST | `/api/v1/providers/test-all` | Test every provider + Gateway connection |
+| POST | `/api/v1/gateway/test` · `/api/v1/gateway/{name}/test[/{model}]` | Test the Gateway's connections |
 | GET | `/api/v1/web3/transactions` (+`/{tx_id}`) | Transaction ledger |
-| GET | `/api/v1/web3/transaction-policy` | Mode + limits + allowlists + stop |
+| GET | `/api/v1/web3/transaction-policy` | Mode + limits + allowlists |
 | POST | `/api/v1/web3/transaction-policy/mode` | Operator-only mode switch |
-| POST | `/api/v1/web3/transactions/{tx_id}/authorize` | Operator-only: approve + sign + broadcast a `CONFIRM`-mode send |
-| POST | `/api/v1/web3/transactions/{tx_id}/reject` | Operator-only: reject a pending send |
-| GET | `/api/metrics` | Server + subsystem metrics (requests, router, tools, web3) |
-| GET | `/api/v1/tasks` · `/api/v1/memory` · `/api/v1/workflows` · `/api/v1/schedules` | Task/memory/workflow/schedule APIs |
-| GET | `/api/v1/events/stream` | SSE live feed |
+| POST | `/api/v1/web3/transactions/{tx_id}/authorize\|reject` | Operator-only approve/reject |
+| GET | `/api/v1/artifacts/{id}/{filename}` · `/api/v1/uploads/{filename}` | Generated artifacts / uploaded files |
 
-All JSON responses carry `request_id`; errors are structured
-`{ok, error, error_code, request_id}` and never leak stack traces (details
-gated to non-`production`). Every response is secret-redacted, secured with
-CSP/nosniff/frame headers and optionally rate-limited + body-capped.
+Legacy `/api/agents` + `/api/executions` routes still answer (empty list /
+`410`), so old clients get a clear message instead of a 500. All JSON responses
+carry `request_id`; errors are structured `{ok, error, error_code, request_id}`
+and never leak stack traces (details gated to non-`production`).
 
 ### Web server (FastAPI/ASGI)
 
-FastAPI/uvicorn is the **only** web server. `python3 run.py` starts it with
-the usual banner and env handling:
+FastAPI/uvicorn is the **only** web server. `python3 run.py` starts it with the
+usual banner and env handling:
 
 ```bash
 pip install -r requirements.txt    # fastapi + uvicorn
 python3 run.py                     # http://localhost:8787/
 ```
 
-`astra/web.py` owns *what* a request means — the route table, auth, rate
-limit, body cap, CORS, security headers, SSE frames and JSON envelopes — and
-deals in neutral `Request`/`Response` objects. `astra/fastAPI.py` is the
-only adapter that turns those into bytes: one catch-all route, so no route can
-drift out of sync. All the routes, auth, rate limits, CORS, headers, uploads,
-body cap and SSE behaviour documented above are unchanged.
+`astra/web.py` owns *what* a request means — the route table, auth, rate limit,
+body cap, CORS, security headers, SSE framing and JSON envelopes — and deals in
+neutral `Request`/`Response` objects. `astra/web_fastapi.py` is the only adapter
+that turns those into bytes: one catch-all route, so no route can drift out of
+sync. All the routes, auth, rate limits, CORS, headers, uploads, body cap and
+SSE behaviour documented above are unchanged.
 
 **Plain ASGI deployment.** The factory builds the stack on startup and stops
-the scheduler + closes the store on shutdown, so process managers
-(systemd, gunicorn, Docker, k8s) can own the process directly:
+the scheduler + closes the store on shutdown, so process managers (systemd,
+gunicorn, Docker, k8s) can own the process directly:
 
 ```bash
-uvicorn --factory astra.fastAPI:create_app --host 127.0.0.1 --port 8787
+uvicorn --factory astra.web_fastapi:create_app --host 127.0.0.1 --port 8787
 ```
 
 The app owns the lifecycle only when it was handed a `stack` (or nothing at
@@ -244,28 +259,22 @@ how the tests run the real server in-process.
 **Concurrency.** Blocking work (an agent turn, a provider probe) runs in
 anyio's worker threadpool, so the event loop stays free — size it with
 `ASTRA_ASGI_THREADS` (default: Starlette's 40). The SSE live feed is driven by
-an async generator, so an idle Live tab costs no worker thread; a sync
-generator would hold one of those slots for the full 45 s connection.
+an async generator, so an idle Activity Log tab costs no worker thread.
 
 * `ASTRA_FASTAPI_DOCS=1` exposes `/docs` + `/openapi.json`. Off by default —
   Swagger UI loads its JS from a CDN, which the app's own CSP blocks. The
-  router is mounted as one catch-all (see `astra/fastAPI.py`), so the
+  router is mounted as one catch-all (see `astra/web_fastapi.py`), so the
   generated schema cannot describe individual routes; the API table above is
   the authoritative reference.
 * `python-multipart` is deliberately **not** required: uploads are parsed by
   the shared stdlib parser in `astra/web.py`.
 * Behind a reverse proxy, run uvicorn with `--proxy-headers
   --forwarded-allow-ips=...` so rate limiting keys on the real client instead
-  of the proxy; without it the direct peer address is used (unspoofable).
-* Termux/Android: `pydantic` 2 ships a Rust core with no Android wheel, so a
-  plain install tries to build it from source. Use the pure-Python path:
-  `pip install "fastapi<0.119" "uvicorn>=0.27" "pydantic<2"`.
-
-**Before running multiple workers** (`--workers N`), note two process-local
-pieces of the core: the scheduler daemon (`ASTRA_SCHEDULER=1`) would fire every
-schedule once per worker, and the per-IP rate limiter is in-memory, so the
-effective limit is N× the configured one. SSE and the event feed are fine —
-events live in SQLite, so every worker streams the same activity.
+  of the proxy.
+* **Multiple workers** (`--workers N`): the scheduler daemon
+  (`ASTRA_SCHEDULER=1`) would fire every schedule once per worker, and the
+  per-IP rate limiter is in-memory, so the effective limit is N× the configured
+  one. Events live in SQLite, so every worker streams the same activity.
 
 ## Security hardening
 
@@ -275,61 +284,88 @@ events live in SQLite, so every worker streams the same activity.
   to same-origin only.
 * **Rate limiting** — per-IP fixed window (429 on overflow).
 * **Body cap** — oversized JSON bodies are rejected (413).
-* **Headers** — `X-Content-Type-Options`, `X-Frame-Options`,
-  `Referrer-Policy`, `Cross-Origin-Opener-Policy`, Content-Security-Policy.
+* **Headers** — `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
+  `Cross-Origin-Opener-Policy`, Content-Security-Policy.
 * **Redaction** — a global generator redacts api keys/tokens/seeds/passwords/
-  private keys from every outbound API response and SSE frame, so a leaky
-  subsystem can't egress a secret.
+  private keys from every outbound API response and SSE frame.
 * **SSRF guard** — URL research refuses loopback/private/link-local targets
   unless `ASTRA_ALLOW_PRIVATE_URLS=1`.
 * **Path traversal** — static file serving resolves inside `static/` only.
 
-## Plugin system
+## Specialist agents & the plugin system
 
-**Not implemented yet.** The `astra.core.Plugin`/`Registry` system has
-been removed from the codebase; `plugins/` is an empty placeholder
-folder for future third-party plugins (see `plugins/README.md`).
-`ACTIVE_PLUGINS` is read but currently only affects a health-check
-count — nothing is discovered, loaded, or wired from `plugins/` today.
+**There is no plugin loader.** The `astra.core.Plugin`/`Registry` system was
+removed from the codebase; `plugins/` is an empty placeholder folder for future
+third-party plugins (see `plugins/README.md`). `ACTIVE_PLUGINS` is still read
+for a public-config count, but nothing is discovered, loaded or wired from
+`plugins/` today. The SPA keeps dormant plugin hooks, but the manifest reports
+zero plugin tabs.
 
 Domain-specific work instead ships as a built-in **specialist agent**
-(`astra/agents/`) that `AgentManager` selects between — Airdrop tracking
-is one of these (`astra/agents/airdrop.py`), alongside `general`,
-`research`, `browser`, `coding`, `files`, and `web3`. Adding a new
-capability today means adding a specialist agent + its tools in core,
-not dropping a file into `plugins/`.
+(`astra/agents/`) — `general`, `research`, `browser`, `coding`, `files`,
+`web3`, `airdrop` — registered with `AgentManager` for introspection and
+routing hints. Adding a capability today means adding a specialist agent + its
+tools in core, not dropping a file into `plugins/`.
 
 ### Built-in tools
 
-**Core** (`astra/tools/builtins.py`): `remember` · `recall` ·
-`search_memory` · `create_task` · `list_tasks` · `search_web` ·
-`fetch_url` · `wallet_balances` · `list_files` · `read_file` ·
-`write_file` · `search_files` · `get_health` · `generate_document`
+**Core** (`astra/tools/builtins.py`): `remember` · `recall` · `search_memory` ·
+`create_task` · `list_tasks` · `search_web` · `fetch_url` · `wallet_balances` ·
+`list_files` · `read_file` · `write_file` · `search_files` · `get_health` ·
+`generate_document`
 
 **Web3** (`astra/web3/tools.py`): `token_balance` · `chain_status` ·
 `rpc_status` · `tx_prepare` · `tx_status`
 
 **Browser** (`astra/browser/`, registered when a browser is available):
-`browser_open` · `browser_observe` · `browser_action` ·
-`browser_extract` · `browser_screenshot` · `browser_close`
+`browser_open` · `browser_observe` · `browser_action` · `browser_extract` ·
+`browser_screenshot` · `browser_close`
+
+## Project layout
+
+```
+astra/
+├── agent.py            Chat entry point (Agent.handle/resume/dashboard/…)
+├── bootstrap.py         Wires the entire stack — the one source of truth
+├── web_fastapi.py       ASGI adapter: turns web.py's Request/Response into
+│                        real bytes; one catch-all route
+├── web.py               Route table, auth, rate limit, CORS, SSE, headers
+├── chat_log.py          Server-side chat transcript (survives refresh)
+├── store.py             Generic SQLite storage (plain dicts, no ORM)
+├── security.py          Redaction, SSRF guard, rate limiter, request_id
+├── ai/                  Providers, adapters, router, Gateway, pipeline
+├── agents/              Specialist agents + AgentManager
+├── core/                Config, events, permissions, tasks, state, …
+├── tools/               ToolRegistry + built-in tools
+├── web3/                Wallet / transaction subsystem (+ raw_tx codec)
+├── browser/             Optional Playwright-backed browsing
+├── memory/              Layered memory + learned experience
+├── research/            stdlib URL/metadata lookup helper
+└── workflows/           Step workflow engine + scheduler
+plugins/                  Empty placeholder (no loader)
+static/                   SPA frontend (vanilla JS + CSS)
+tests/                    unittest + pytest suite
+```
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v        # full suite, stdlib runner
+python3 -m unittest discover -s tests -v            # full suite, stdlib runner
 python3 -m pytest -q tests/test_fastapi_server.py   # live smoke: boots the real
                                                     # FastAPI server and checks the API
-python3 -m compileall astra                     # syntax sanity
+python3 -m compileall astra                         # syntax sanity
 ```
 
 For a manual end-to-end check, start a server and hit it:
-`NO_BROWSER=1 python3 run.py` then
-`curl -s localhost:8787/api/health`.
+`NO_BROWSER=1 python3 run.py` then `curl -s localhost:8787/api/health`.
 
 Optional dev extras: `pip install -r requirements-dev.txt` (pytest, Playwright).
 
-Web tests: `tests/test_fastapi_server.py` boots the real FastAPI/uvicorn server
-in-process (ephemeral port) and checks status codes, security headers, JSON
-bodies, static bytes, SSE frames, the lifespan and the worker pool.
+Notable tests: `test_zero_bypass_hardening.py` (architectural regression guard:
+one AI path, Gateway never a fallback provider, disjoint credentials),
+`test_gateway_*.py` (Gateway routing/recovery/supervision/task completion),
+`test_web3*.py` (policy engine + tool wiring), `test_fastapi_server.py` (real
+server over HTTP), `test_security.py` / `test_per_key_health.py` /
+`test_provider_error_isolation.py` (redaction, credential health, isolation).
 
 Docker: `docker build -t astra-agent . && docker run -p 8787:8787 astra-agent`.

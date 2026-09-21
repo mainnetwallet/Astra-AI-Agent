@@ -1225,7 +1225,7 @@ GW_UNDERSTANDING_MAX_TOKENS = 400
 # visible on bare greetings, where "hi" can come back as "Hello! How can I
 # assist you today?". If the "rewrite" reads like the assistant replying
 # rather than the user's own request restated, it is not safe to hand to
-# the planner as the goal, so we fail open to the original raw text
+# the chat pipeline as the goal, so we fail open to the original raw text
 # instead of silently feeding the hallucination downstream.
 _ASSISTANT_VOICE_MARKERS = (
     "how can i assist", "how can i help", "how may i assist",
@@ -1245,9 +1245,9 @@ def _looks_like_assistant_voice(text: str) -> bool:
 #
 # Not every message is a goal. A greeting, "thanks", small talk, or a vague
 # opener has no task in it, and forcing it through the full plan -> Provider
-# pipeline is exactly how the Planner ends up exposing internal machinery to
-# the user (e.g. a raw "your goal is a greeting" reply). That decision
-# belongs to the Gateway, once, up front — not to the Planner/Provider
+# pipeline is exactly how internal machinery ends up leaking to the user
+# (e.g. a raw "your goal is a greeting" reply). That decision
+# belongs to the Gateway, once, up front — not to the Provider
 # guessing after the fact. `classify()` is that decision: it never plans,
 # never picks a tool, and fails open (treats anything uncertain as a real
 # task) so a genuine request is never silently swallowed.
@@ -1356,7 +1356,7 @@ class GatewayRequestIntelligence:
         if _looks_like_assistant_voice(improved):
             # The model answered the message instead of rewriting it (e.g.
             # "hi" -> "Hello! How can I assist you today?"). Handing that
-            # to the planner as the "goal" would make it look like the
+            # to the pipeline as the "goal" would make it look like the
             # assistant's own greeting is the user's request — fail open
             # to the original raw text instead.
             return {"text": text, "enriched": False,
@@ -1368,9 +1368,9 @@ class GatewayRequestIntelligence:
     def classify(self, raw_text: str, *, context: str = "",
                 max_tokens: int = GW_CLASSIFY_MAX_TOKENS) -> dict:
         """Decide whether `raw_text` is an actual task or just small talk —
-        the Gateway managing this up front, so the Planner never has to
-        guess and never forces a greeting/thanks/vague opener through the
-        full plan -> Provider pipeline.
+        the Gateway managing this up front, so the chat pipeline never has
+        to guess and never forces a greeting/thanks/vague opener through the
+        full Provider pipeline.
 
         Returns {"is_task": bool, "reply": str, "classified": bool}.
         `classified` is False whenever the Gateway is absent, unusable,

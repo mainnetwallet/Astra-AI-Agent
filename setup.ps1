@@ -34,11 +34,11 @@ if (-not (Test-Path ".\config.json")) {
     Write-Host "`u{2139} config.json already exists — skipping"
 }
 
-if ($env:ANTHROPIC_API_KEY) {
-    Write-Host "`u{1F4A1} ANTHROPIC_API_KEY set — AI chat will use Claude"
+if (Test-Path ".\.env") {
+    Write-Host "`u{1F4A1} .env found — AI providers will be read from it"
 } else {
-    Write-Host "`u{1F4A1} No ANTHROPIC_API_KEY — running offline"
-    Write-Host "      Set:  `$env:ANTHROPIC_API_KEY = 'sk-ant-...'"
+    Write-Host "`u{1F4A1} No .env yet — copy the template and add a provider key:"
+    Write-Host "      Copy-Item .env.example .env   # then set e.g. GEMINI_API_KEYS"
 }
 
 Write-Host ""

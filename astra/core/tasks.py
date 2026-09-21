@@ -1,6 +1,6 @@
 """Generic task engine for Astra.
 
-A task is a unit of work with optional dependencies (a DAG). The orchestrator
+A task is a unit of work with optional dependencies (a DAG). The workflow
 and workflows both dispatch through here so every unit of work has one home
 for persistence, retries, priorities and state. Supports the spec's example:
 

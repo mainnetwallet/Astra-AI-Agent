@@ -1,8 +1,8 @@
 """Multi-agent system (Phase B).
 
-The AgentManager selects a task specialist per goal; the Orchestrator persists
-that selection and a per-step execution_steps trail; AI routing stays in the
-AstraRouter (agents are not providers).
+The AgentManager scores and selects a task specialist per goal and exposes
+routing hints; AI routing stays in the AstraRouter and chat runs through the
+Gateway/ChatPipeline (agents are not providers and do not plan chat).
 """
 from __future__ import annotations
 

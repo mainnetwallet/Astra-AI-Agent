@@ -20,7 +20,7 @@ from datetime import datetime
 
 from .signer import sign
 from .keystore import SecureKeyStore
-from . import txtx
+from . import raw_tx
 from . import chains
 from astra.core.exceptions import AstraError
 from .policy import (TransactionPolicyEngine, PolicyConfig, TxRequest,
@@ -168,7 +168,7 @@ class TransactionManager:
             if rec.get("signed_raw_wrapped"):
                 ct, tag, salt = rec["signed_raw_wrapped"].split("::", 2)
                 raw_hex = self.keystore._open(ct, tag, salt)
-                det_hash = txtx.tx_hash(bytes.fromhex(raw_hex[2:])
+                det_hash = raw_tx.tx_hash(bytes.fromhex(raw_hex[2:])
                                         if raw_hex.startswith("0x")
                                         else bytes.fromhex(raw_hex))
             else:
@@ -177,7 +177,7 @@ class TransactionManager:
                 on_chain = None
                 for url in chain.get("rpcs", [])[:3]:
                     try:
-                        on_chain = txtx.receipt([url], det_hash)
+                        on_chain = raw_tx.receipt([url], det_hash)
                         break
                     except Exception:
                         continue
@@ -207,7 +207,7 @@ class TransactionManager:
                 (sig["nonce"], _now(), tx_id))
             if self.events:
                 self.events.emit("web3.transaction.submitted", tx=tx_id, nonce=sig["nonce"])
-            hash_broadcast = txtx.broadcast(chain.get("rpcs", []), raw_hex)
+            hash_broadcast = raw_tx.broadcast(chain.get("rpcs", []), raw_hex)
             self.store.exec(
                 "UPDATE web3_transactions SET status='BROADCAST', "
                 "submitted_hash=?, broadcast_at=?, updated_at=? WHERE tx_id=?",
@@ -235,7 +235,7 @@ class TransactionManager:
         last = None
         while True:
             try:
-                rcpt = txtx.receipt(chain.get("rpcs", []), h)
+                rcpt = raw_tx.receipt(chain.get("rpcs", []), h)
             except Exception as exc:
                 rcpt, last = None, str(exc)[:120]
             if rcpt and rcpt.get("status") == "0x1":
@@ -380,19 +380,19 @@ class TransactionManager:
         chain_id = int(rec["chain_id"])
         nonce = rec["nonce"]
         if nonce is None:
-            nonce = txtx.get_nonce(chain.get("rpcs", []), rec["from_address"])
+            nonce = raw_tx.get_nonce(chain.get("rpcs", []), rec["from_address"])
         value = int(rec["value_wei"] or 0)
         gas_limit = int(rec.get("gas_limit") or 21000)
         max_fee = int(rec.get("max_fee_per_gas") or 0)
         max_prio = int(rec.get("max_priority_fee_per_gas") or 0)
         if not max_fee:
-            max_fee = txtx.get_gas_price(chain.get("rpcs", []))
-        item = txtx.build_unsigned_eip1559(
+            max_fee = raw_tx.get_gas_price(chain.get("rpcs", []))
+        item = raw_tx.build_unsigned_eip1559(
             chain_id=chain_id, nonce=nonce, max_priority_fee=max_prio,
             max_fee=max_fee, gas_limit=gas_limit, to=rec["to_address"],
             value_wei=value, data_hex=rec["data_hex"])
-        sig = sign(priv_int, txtx.signing_hash_eip1559(item), chain_id=chain_id)
-        raw = txtx.serialize_eip1559(
+        sig = sign(priv_int, raw_tx.signing_hash_eip1559(item), chain_id=chain_id)
+        raw = raw_tx.serialize_eip1559(
             item, y_parity=sig["recovery_id"] & 1,
             r=int(sig["r"], 16), s=int(sig["s"], 16))
         return {"nonce": nonce, "max_fee": max_fee,

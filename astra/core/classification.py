@@ -1,6 +1,6 @@
 """Error classification + retry policy (Phase E).
 
-One canonical classification for any failure the orchestrator/executor sees,
+One canonical classification for any failure a subsystem sees,
 so recovery is chosen by *kind*, never by scraping message text:
 
     validation, authentication, authorization, rate_limit, timeout, network,

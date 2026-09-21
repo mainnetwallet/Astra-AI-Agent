@@ -32,7 +32,7 @@ class SpecialistAgent:
                 "required_capabilities": list(self.required_model_capabilities)}
 
     def decorate_plan(self, plan: list[dict], goal: str) -> list[dict]:
-        """Optional: adjust planner steps before execution (else unchanged)."""
+        """Optional: adjust plan steps before execution (else unchanged)."""
         return plan
 
     def describe(self) -> dict:

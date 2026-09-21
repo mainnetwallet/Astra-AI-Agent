@@ -1,10 +1,11 @@
 """Multi-agent system for Astra.
 
-Agents are *task specialists* — declarative, tool-oriented skill buckets that
-the AgentManager selects based on a goal. They are NOT AI providers and NOT
-plugins: agents know *what kind of work* this is and *which tools* fit; the
-Orchestrator plans and executes through the ToolRegistry, and AI reasoning goes
-through the AstraRouter. Boundaries stay clean (§63).
+Agents are *task specialists* — declarative, tool-oriented skill buckets the
+AgentManager scores for a goal. They are NOT AI providers and NOT a plugin
+system: agents know *what kind of work* this is and *which tools* fit; tool
+calls run through the ToolRegistry, and AI reasoning goes through the chat
+pipeline (Astra AI Gateway + AstraRouter). Chat no longer plans through
+specialists — the manager is registered for introspection/routing hints only.
 """
 from __future__ import annotations
 

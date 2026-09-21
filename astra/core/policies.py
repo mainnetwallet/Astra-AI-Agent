@@ -1,4 +1,4 @@
-"""High-level policies: whether a tool/plugin may act autonomously.
+"""High-level policies: whether a tool may act autonomously.
 
 The Policy in `astra.core.permissions` maps a permission level to a decision;
 this module attaches a human reason and handles overrides (allowing a specific

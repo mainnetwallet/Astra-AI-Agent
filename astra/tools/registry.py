@@ -149,6 +149,14 @@ class ToolRegistry:
         tool.satisfies(args)   # ValidationError raises here, never retried
         self._enforce_rate_limit(tool)
 
+        # Diagnostics tools (e.g. get_health) read `ctx.registry`; attach
+        # ourselves if the caller handed in a context without one.
+        if ctx is not None and getattr(ctx, "registry", None) is None:
+            try:
+                ctx.registry = self
+            except Exception:
+                pass
+
         start = time.perf_counter()
         try:
             result = self._invoke_with_retry(tool, args, ctx)

@@ -50,15 +50,15 @@ class TestSignerVectors(unittest.TestCase):
 
     def test_eip155_official_vector(self):
         """The EIP-155 spec's example signed transaction reproduces exactly."""
-        from astra.web3 import txtx
+        from astra.web3 import raw_tx
         priv = int("0x4646464646464646464646464646464646464646464646464646464646464646", 16)
-        item = txtx.build_unsigned_legacy(
+        item = raw_tx.build_unsigned_legacy(
             nonce=9, gas_price=20000000000, gas_limit=21000,
             to="0x3535353535353535353535353535353535353535",
             value_wei=10 ** 18, data_hex="")
-        h = txtx.signing_hash_legacy(item, chain_id=1)
+        h = raw_tx.signing_hash_legacy(item, chain_id=1)
         sig = sign(priv, h, chain_id=1)
-        raw = txtx.serialize_legacy(item, chain_id=1,
+        raw = raw_tx.serialize_legacy(item, chain_id=1,
                                     y_parity=sig["recovery_id"] & 1,
                                     r=int(sig["r"], 16), s=int(sig["s"], 16))
         expected = ("0xf86c098504a817c80082520894353535353535353535353535"
@@ -185,10 +185,10 @@ class TestManagerLifecycle(unittest.TestCase):
 
     def _mgrs(self, mode="CONFIRM"):
         patches = [
-            patch("astra.web3.txtx.receipt", return_value=None),
-            patch("astra.web3.txtx.broadcast", return_value="0xdeadbeef"),
-            patch("astra.web3.txtx.get_nonce", return_value=0),
-            patch("astra.web3.txtx.get_gas_price", return_value=10 ** 9),
+            patch("astra.web3.raw_tx.receipt", return_value=None),
+            patch("astra.web3.raw_tx.broadcast", return_value="0xdeadbeef"),
+            patch("astra.web3.raw_tx.get_nonce", return_value=0),
+            patch("astra.web3.raw_tx.get_gas_price", return_value=10 ** 9),
         ]
         for p in patches:
             p.start()

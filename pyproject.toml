@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "astra-ai-agent"
 version = "1.0.0"
-description = "Astra AI Agent — plugin-based Personal AI OS (FastAPI/ASGI web server)"
+description = "Astra AI Agent — a local Personal AI OS with a multi-provider router (FastAPI/ASGI web server)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -21,6 +21,7 @@ dev = ["pytest", "playwright"]
 packages = ["astra", "astra.ai", "astra.ai.adapters", "astra.agents",
             "astra.browser", "astra.core", "astra.memory", "astra.research",
             "astra.tools", "astra.web3", "astra.workflows"]
+py-modules = ["run"]
 include-package-data = true
 
 [project.scripts]

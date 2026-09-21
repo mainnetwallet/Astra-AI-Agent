@@ -78,7 +78,7 @@ workflow steps, tests).
 astra/
 ├── agent.py            Chat entry point (Agent.handle/resume/dashboard/...)
 ├── bootstrap.py         Wires the entire stack — the one source of truth
-├── fastAPI.py           ASGI adapter: turns web.py's Request/Response into
+├── web_fastapi.py       ASGI adapter: turns web.py's Request/Response into
 │                        real bytes; one catch-all route
 ├── web.py               The actual route table, auth, rate limit, CORS,
 │                        SSE, security headers — server-framework-neutral
@@ -145,7 +145,7 @@ astra/
 │   ├── keystore.py           Secure private-key storage (never leaves it)
 │   ├── rpc.py                RPC call plumbing
 │   ├── signer.py             Transaction signing
-│   └── transactions.py, txtx.py   Transaction lifecycle + persistence
+│   └── transactions.py, raw_tx.py   Transaction lifecycle + persistence
 │
 ├── browser/              Optional Playwright-backed browsing subsystem
 │   └── __init__.py         register_browser_tools(): browser_open/observe/
@@ -155,13 +155,14 @@ astra/
 │   └── memory.py           MemorySystem (working/short/long/semantic/
 │                            episodic) + ExperienceStore
 │
+├── research/             stdlib URL/metadata lookup helper
+│   └── lookup.py            quick_lookup / extract_url (SSRF-guarded)
+│
 ├── workflows/             Multi-step, resumable workflows
 │   ├── engine.py            WorkflowEngine — steps reference
 │   │                        {{step_id.param}}, run through ToolRegistry
 │   └── scheduler.py          SchedulerManager — oneshot/interval/daily/
 │                             weekly/deadline triggers, tick-thread daemon
-│
-└── research.py-style modules, etc. (see individual docstrings)
 
 plugins/                  Empty placeholder — see §4
 static/                   SPA frontend (vanilla JS + CSS, served by web.py)
@@ -232,7 +233,7 @@ They are **not** AI providers and **not** a plugin system.
 **There is no separate plugin loader.** `astra.core.Plugin`/`Registry`
 was removed from the codebase; `plugins/` is an empty folder
 (`plugins/README.md` says so explicitly) and `ACTIVE_PLUGINS` only
-affects a health-check count today. Adding a new capability currently
+affects the public-config count today. Adding a new capability currently
 means adding a specialist agent (+ its tools) in `astra/agents/` and
 `astra/tools/`, not dropping a file into `plugins/`.
 
@@ -289,7 +290,7 @@ means adding a specialist agent (+ its tools) in `astra/agents/` and
   oneshot/interval/daily/weekly/deadline triggers via a tick-thread
   daemon (no external cron).
 - **`EventBus`** (`core/events.py`) — every subsystem publishes here;
-  events persist to SQLite (audit trail + dashboard history) and
+  events persist to SQLite (audit trail + Activity Log history) and
   stream to the frontend over SSE (`/api/v1/events/stream`).
 - **`TaskEngine`** (`core/tasks.py`) — a generic DAG task engine that
   workflows dispatch through; a failed child task fails only itself,
@@ -310,7 +311,7 @@ means adding a specialist agent (+ its tools) in `astra/agents/` and
 `astra/web.py` owns *what* a request means (route table, auth, rate
 limit, body cap, CORS, security headers, SSE framing, JSON envelopes)
 against neutral `Request`/`Response` objects — it has no ASGI/Starlette
-import. `astra/fastAPI.py` is the only adapter that turns those into
+import. `astra/web_fastapi.py` is the only adapter that turns those into
 real bytes via **one catch-all route**, so no individual route can ever
 drift out of sync between the two layers. Every route is served under
 both `/api/...` (legacy) and `/api/v1/...` (same handler).

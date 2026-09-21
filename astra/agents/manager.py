@@ -1,9 +1,9 @@
 """AgentManager — selects the right specialist for a goal.
 
 Selection combines the AstraRouter's task-type classification with per-agent
-keyword scoring. The winner steers routing hints and may decorate the plan;
-multi-step work still runs through the Orchestrator → Planner → ToolRegistry
-pipeline. AgentManager is not a provider and not a plugin.
+keyword scoring. The winner steers routing hints and may decorate a plan.
+AgentManager is not a provider and not a plugin; the live chat path does not
+plan through it (see astra/ai/chat_pipeline.py).
 """
 from __future__ import annotations
 

@@ -16,7 +16,7 @@
 FROM python:3.11-slim
 
 LABEL org.opencontainers.image.title="Astra AI Agent" \
-      org.opencontainers.image.description="Personal AI OS — plugin-based local agent" \
+      org.opencontainers.image.description="Personal AI OS — local AI agent with a provider router" \
       org.opencontainers.image.source="https://github.com/mainnetwallet/Astra-AI-Agent"
 
 WORKDIR /app

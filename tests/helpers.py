@@ -1,7 +1,7 @@
 """Shared harness for Astra tests. Import as `from helpers import ...`
 (discover -s tests puts this directory on sys.path).
-No plugins are registered — plugins/ is empty pending future additions
-(see plugins/README.md)."""
+The plugin system has been removed — `plugins/` is an empty placeholder
+(see plugins/README.md), so the legacy `plugins` list is always empty."""
 import os
 import sys
 
@@ -25,8 +25,8 @@ def make_plugin():
 
 
 def make_stack(**kw):
-    """Full stack (orchestrator, tools, memory, workflows, scheduler, …) on a
-    fresh in-memory store — the same wiring run.py uses."""
+    """Full stack (tools, memory, workflows, scheduler, router, …) on a fresh
+    in-memory store — the same wiring run.py uses."""
     from astra.bootstrap import build
     return build(store=Store(":memory:"), **kw)
 
@@ -54,7 +54,7 @@ class LiveServer:
         import uvicorn
 
         from astra.web import AstraSite
-        from astra.fastAPI import make_app
+        from astra.web_fastapi import make_app
 
         if stack is not None:
             store = store or stack["store"]

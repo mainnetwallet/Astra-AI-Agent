@@ -193,10 +193,10 @@ class TestAutoModeToolAutoExecutes(unittest.TestCase):
     def test_auto_mode_tool_signs_and_broadcasts_without_second_confirm(self):
         from astra.web3.tools import tool_tx_prepare
         ctx, mgr = self._ctx("AUTO")
-        with patch("astra.web3.txtx.receipt", return_value=None), \
-             patch("astra.web3.txtx.broadcast", return_value="0xdeadbeef"), \
-             patch("astra.web3.txtx.get_nonce", return_value=0), \
-             patch("astra.web3.txtx.get_gas_price", return_value=10 ** 9):
+        with patch("astra.web3.raw_tx.receipt", return_value=None), \
+             patch("astra.web3.raw_tx.broadcast", return_value="0xdeadbeef"), \
+             patch("astra.web3.raw_tx.get_nonce", return_value=0), \
+             patch("astra.web3.raw_tx.get_gas_price", return_value=10 ** 9):
             out = tool_tx_prepare(
                 {"to": self.RECIPIENT, "value_wei": 10 ** 15}, ctx)
         self.assertTrue(out["ok"])

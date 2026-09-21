@@ -22,11 +22,11 @@ Specifically proves (see the pass's final report for the full audit):
      orchestration modules (Planner, Orchestrator, Agent, bootstrap) —
      source-level regression guard against a future reintroduction.
 
-Items 7-9 of the pass's requirements (Executor evidence reaching Gateway
-final verification, already-succeeded steps never replayed, and bounded
-correction/replan) are covered by the existing
-tests/test_gateway_gaps.py::TestGap2AutomaticEvidenceVerification suite
-and are not duplicated here.
+Items 7-9 of the pass's requirements (evidence reaching the Gateway's final
+verification, already-succeeded steps never replayed, and bounded
+correction/replan) are covered by the existing tests/test_gateway_*.py
+suites (execution recovery, runtime wiring, task completion) and are not
+duplicated here.
 """
 from __future__ import annotations
 

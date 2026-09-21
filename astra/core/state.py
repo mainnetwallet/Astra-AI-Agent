@@ -1,8 +1,8 @@
 """Explicit execution state for the agent loop and task engine.
 
-States are plain strings (JSON-friendly for the frontend): the orchestrator
-holds an execution in one state at a time and reports `state` transitions in
-events so the Live view can follow what the agent is doing.
+States are plain strings (JSON-friendly for the frontend). The task engine and
+workflows move a unit of work through these states and report `state`
+transitions in events so the Activity Log can follow what is happening.
 """
 from __future__ import annotations
 

@@ -43,7 +43,7 @@ def main() -> int:
         print("Install them:  pip install -r requirements.txt")
         return 1
 
-    from astra.fastAPI import make_app
+    from astra.web_fastapi import make_app
 
     stack = build(with_scheduler=os.environ.get("ASTRA_SCHEDULER") == "1")
     store = stack["store"]

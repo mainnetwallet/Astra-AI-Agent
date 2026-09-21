@@ -1,6 +1,6 @@
 """Live event bus for Astra.
 
-Every subsystem (orchestrator, tasks, tools, workflows, scheduler, plugins)
+Every subsystem (tasks, tools, workflows, scheduler, chat pipeline)
 publishes events here. Events are persisted in SQLite (audit trail + dashboard
 history) and can be streamed to the frontend over SSE. A tiny in-process
 subscription list lets local components react immediately.
@@ -21,14 +21,14 @@ CREATE TABLE IF NOT EXISTS events (
 """
 
 # Kinds actually emitted by the current codebase, plus the EventBus contract
-# kinds for upcoming modules (browser, web3, plugin manager, AI providers).
+# kinds for upcoming modules (browser, web3, AI providers).
 EVENT_KINDS = (
     # agent execution loop
     "agent.started", "agent.thinking", "agent.planning",
     "agent.completed", "agent.failed",
     "agent.step.started", "agent.step.completed", "agent.step.failed",
     # generic task engine (status map mirrors TaskEngine.mark(); task.started
-    # is also emitted by the orchestrator and the workflow engine)
+    # is also emitted by the workflow engine)
     "task.created", "task.started", "task.pending", "task.ready", "task.running",
     "task.done", "task.completed", "task.failed", "task.cancelled", "task.skipped",
     # tool registry

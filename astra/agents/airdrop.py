@@ -1,4 +1,4 @@
-"""AirdropAgent — campaign/task planning for the Airdrop plugin.
+"""AirdropAgent — campaign/task planning for airdrop work.
 
 Plans airdrop work (eligibility checks, campaigns, tasks, browser runs) and
 delegates: BrowserAgent handles browser operations, Web3Agent/Transaction

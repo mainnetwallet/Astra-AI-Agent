@@ -1,6 +1,6 @@
 """Shared harness: builds a Store + Agent the way run.py does.
-No plugins are registered — plugins/ is empty pending future additions
-(see plugins/README.md)."""
+The plugin system has been removed — `plugins/` is an empty placeholder
+(see plugins/README.md), so the legacy `plugins` list is always empty."""
 import os
 import sys
 

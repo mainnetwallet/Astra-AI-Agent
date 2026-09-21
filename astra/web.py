@@ -7,7 +7,7 @@ free of sockets and frameworks: it deals in `Request`/`Response` objects, and
 `WebApp.handle()` is a pure function of the request plus the `AstraSite`. That
 is what lets the entire API be unit-tested with no server running at all.
 
-`astra/fastAPI.py` owns *how* those bytes travel — it binds this router to
+`astra/web_fastapi.py` owns *how* those bytes travel — it binds this router to
 FastAPI/uvicorn (one catch-all route, a lifespan that builds and tears down the
 stack, and a worker threadpool for blocking work), and `run.py` is the
 launcher. There is exactly one server: FastAPI/ASGI.
@@ -28,9 +28,9 @@ Versioning: every /api/... route is ALSO served under /api/v1/... (the v1
 segment is stripped before dispatch, so there is no duplicated code path).
 New endpoints exist only under /api/v1.
 
-Core (non-plugin) endpoints (all old routes stay backward-compatible):
+Core endpoints (all old routes stay backward-compatible):
 
-  GET  /api/manifest        agent name + plugin tabs + core tabs
+  GET  /api/manifest        agent name + tab manifest for the SPA
   POST /api/chat            {message} -> agent reply {reply, action, data, ok}
   GET  /api/chat/history[?after_id=N][&conversation_id=N]  saved transcript
                              (defaults to the CURRENT chat) + {pending}
@@ -41,16 +41,17 @@ Core (non-plugin) endpoints (all old routes stay backward-compatible):
                              (reuses the current one if it's still empty)
   GET  /api/chat/conversations/<id>    switch current chat + its history
   DELETE /api/chat/conversations/<id>  delete one chat
-  POST /api/chat/resume     {execution_id, allow} -> approve/reject a pending
-                             WAITING_USER tool call inline from chat (same
-                             reply shape as /api/chat; no separate tab needed)
-  GET  /api/dashboard       aggregated plugin summary() blocks
-  GET  /api/export          aggregated plugin export()
-  POST /api/import          aggregate import across plugins
+  POST /api/chat/resume     {execution_id, allow} -> legacy approve/reject
+                             round-trip; the orchestrator that owned it was
+                             removed, so this answers honestly that there is
+                             nothing to resume (same reply shape as /api/chat)
+  GET  /api/dashboard       dashboard blocks (currently empty placeholder)
+  GET  /api/export          export everything (currently a placeholder)
+  POST /api/import          import everything (currently a placeholder)
 
 System endpoints:
 
-  GET  /api/health          database/plugins/providers/scheduler diagnostics
+  GET  /api/health          database/providers/tools/scheduler diagnostics
   GET  /api/config          public (non-secret) config snapshot
   GET  /api/events          recent live events; ?after_id= for tailing
   GET  /api/events/stream   Server-Sent Events feed (Live tab)
@@ -62,11 +63,9 @@ System endpoints:
   GET/POST /api/schedules   scheduler CRUD
   GET  /api/providers       AI provider health/latency/cost
   GET  /api/gateway/health  Astra AI Gateway status (4 connections + fallback)
-  GET  /api/agents          recent executions; GET {exec}/… state
-  POST /api/agents          submit a goal to the orchestrator
-  POST /api/agents/{exec}/resume | /cancel   control WAITING_USER runs
-  GET  /api/executions      alias for /api/agents
-  GET  /api/plugins         list plugins (+enabled); POST {slug}/enable|disable
+  GET  /api/agents          legacy execution routes — the orchestrator was
+                             removed, so these return an empty list / 410
+  GET  /api/executions      alias for /api/agents (same legacy behaviour)
 
 New /api/v1 endpoints:
 
@@ -143,7 +142,7 @@ CORE_TABS = [
     {"tab": "backup", "label": "\U0001f4be Backup", "core": True},
 ]
 
-# Appended after every plugin tab (Airdrops, etc.) — see AstraSite.manifest().
+# Always appended after the core tabs — see AstraSite.manifest().
 LOGS_TAB = {"tab": "logs", "label": "\U0001f4e1 Activity Log", "core": True}
 
 # Header templates for a hardened server.
@@ -931,8 +930,8 @@ class WebApp:
                                     description=body.get("description", ""))
             return json_response({"ok": True, "data": t}, 201, req.rid)
         if len(path) == 3 and path[0] == "api" and path[1] == "tasks" and method == "GET":
-            # generic task engine GET only handles list; per-id tasks
-            # are owned by plugin routes (e.g. airdrop tasks PATCH)
+            # generic task engine: per-id lookup (the old plugin-owned
+            # per-id PATCH routes were removed with the plugin system)
             t = site.tasks().get(int(path[2])) if path[2].isdigit() else None
             if not t:
                 return error_response("task not found", 404, "bad_request",

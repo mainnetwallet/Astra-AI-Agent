@@ -385,8 +385,22 @@ class ChatPipeline:
 
     @staticmethod
     def _reply(text, ok, data, artifacts=None, note=""):
-        out = {"reply": (text + note) if note else text, "action": "none",
-               "ok": ok, "data": data}
+        """Build the {reply, action, ok, data[, artifacts]} shape returned
+        to the caller (and, from there, straight into ChatLog + the chat
+        UI's message bubble).
+
+        `note`, when given, is an internal diagnostic caveat — Gateway
+        verification failed/couldn't confirm, what was still "Missing: ...",
+        etc. That text must NEVER reach the user-facing `reply` string: it
+        used to be concatenated onto `text` here, which is exactly how
+        debug/verification detail leaked into the chat UI. It is recorded
+        under `data["internal_note"]` instead, alongside the rest of this
+        turn's trace (`data["verification"]`), for the Activity Log /
+        server logs only — see test_no_internal_debug_text_in_chat_reply
+        in tests/test_chat_pipeline.py."""
+        out = {"reply": text, "action": "none", "ok": ok, "data": data}
+        if note:
+            data["internal_note"] = note.strip()
         if artifacts:
             out["artifacts"] = artifacts
         return out

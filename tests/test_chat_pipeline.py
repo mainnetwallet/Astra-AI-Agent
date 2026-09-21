@@ -222,10 +222,14 @@ class TestFixAndRedoLoop(unittest.TestCase):
         # provider ran once + one per allowed correction, then it stops
         self.assertEqual(len(rt.requests), 1 + MAX_CORRECTION_ATTEMPTS)
         self.assertTrue(out["ok"])                       # user still gets the best answer
-        self.assertIn("still bad", out["reply"])
-        self.assertIn("100% confirm hoyni", out["reply"])  # ...honestly flagged
-        self.assertIn("the numbers", out["reply"])
+        self.assertEqual(out["reply"], "still bad")       # exactly the answer, no caveat text
+        self.assertNotIn("100% confirm hoyni", out["reply"])   # not leaked into chat...
+        self.assertNotIn("Missing:", out["reply"])
+        # ...but still honestly flagged for the Activity Log / server logs
+        self.assertIn("100% confirm hoyni", out["data"]["internal_note"])
+        self.assertIn("the numbers", out["data"]["internal_note"])
         self.assertNotEqual(out["data"]["verification"]["status"], "COMPLETE")
+        self.assertIn("the numbers", out["data"]["verification"]["missing"])
 
 
 class TestFailOpen(unittest.TestCase):
@@ -250,14 +254,17 @@ class TestFailOpen(unittest.TestCase):
         pipe, gw, rt = make([understand(), RuntimeError("gw down")], ["answer"])
         out = pipe.run("hello")
         self.assertTrue(out["ok"])
-        self.assertIn("answer", out["reply"])
-        self.assertIn("verify korte parenni", out["reply"])
+        self.assertEqual(out["reply"], "answer")   # no internal caveat appended
+        self.assertNotIn("verify korte parenni", out["reply"])
+        self.assertIn("verify korte parenni", out["data"]["internal_note"])
         self.assertEqual(len(rt.requests), 1)   # no wasted correction round-trips
 
     def test_unparsable_verifier_reply_is_treated_as_unavailable(self):
         pipe, gw, rt = make([understand(), "I think it looks fine!"], ["answer"])
         out = pipe.run("hello")
-        self.assertIn("verify korte parenni", out["reply"])
+        self.assertEqual(out["reply"], "answer")
+        self.assertNotIn("verify korte parenni", out["reply"])
+        self.assertIn("verify korte parenni", out["data"]["internal_note"])
         self.assertEqual(len(rt.requests), 1)
 
     def test_provider_failure_is_reported_honestly(self):
@@ -272,6 +279,93 @@ class TestFailOpen(unittest.TestCase):
         out = pipe.run("   ")
         self.assertFalse(out["ok"])
         self.assertEqual((gw.calls, rt.requests), ([], []))
+
+
+class TestNoInternalDebugLeak(unittest.TestCase):
+    """Regression coverage for the chat-output bug where Gateway/verification
+    debug text ("Missing: ...", "...100% confirm hoyni", "verify korte
+    parenni", routing/assignment detail) was concatenated onto the
+    user-facing `reply` string. `reply` is exactly what ChatLog stores and
+    the chat UI renders (see astra/web.py `add_reply` + static/js/astra.js
+    `chatBubble`), so any of this text landing there is a leak straight into
+    the chat window. Every scenario below must produce a `reply` containing
+    ONLY the assistant's actual answer; the diagnostic detail must still be
+    retrievable from `data` for the Activity Log / server logs.
+    """
+
+    FORBIDDEN = ("Missing:", "confirm hoyni", "verify korte parenni",
+                 "verify kora hoyni", "Gateway", "⚠️", "assign_reason",
+                 "criteria")
+
+    def _assert_clean(self, out):
+        for phrase in self.FORBIDDEN:
+            self.assertNotIn(phrase, out["reply"],
+                             f"leaked internal text {phrase!r} into reply: "
+                             f"{out['reply']!r}")
+
+    def test_bounded_correction_loop_reply_is_clean(self):
+        never = [verdict("incomplete", ["the numbers"], "fix", "Add the numbers.")
+                 for _ in range(MAX_CORRECTION_ATTEMPTS + 1)]
+        pipe, gw, rt = make([understand()] + never,
+                            ["a1"] + ["still bad"] * MAX_CORRECTION_ATTEMPTS)
+        out = pipe.run("give me the numbers")
+        self._assert_clean(out)
+        self.assertEqual(out["reply"], "still bad")
+        # the same detail must still reach the logs, just not the chat
+        self.assertIn("Missing", out["data"]["internal_note"])
+        self.assertEqual(out["data"]["verification"]["missing"], ["the numbers"])
+
+    def test_verifier_crash_reply_is_clean(self):
+        pipe, gw, rt = make([understand(), RuntimeError("gw down")], ["answer"])
+        out = pipe.run("hello")
+        self._assert_clean(out)
+        self.assertEqual(out["reply"], "answer")
+        self.assertIn("verify korte parenni", out["data"]["internal_note"])
+
+    def test_unparsable_verdict_reply_is_clean(self):
+        pipe, gw, rt = make([understand(), "I think it looks fine!"], ["answer"])
+        out = pipe.run("hello")
+        self._assert_clean(out)
+        self.assertEqual(out["reply"], "answer")
+
+    def test_gateway_verify_supervision_error_reply_is_clean(self):
+        """`supervise_task` itself raising is a separate branch from a bad
+        verifier reply (astra/ai/chat_pipeline.py's `except Exception as e`
+        around `self.gateway.supervise_task`) and carries its own note."""
+        class BoomingGateway:
+            def is_usable(self):
+                return True
+
+            def chat(self, *a, **k):
+                return understand()
+
+            def supervise_task(self, *a, **k):
+                raise RuntimeError("supervisor exploded")
+
+        rt = FakeRouter(["answer"])
+        pipe = ChatPipeline(BoomingGateway(), rt, max_tokens=800)
+        out = pipe.run("hello")
+        self._assert_clean(out)
+        self.assertEqual(out["reply"], "answer")
+        self.assertIn("supervisor exploded", out["data"]["verification"]["reason"])
+
+    def test_complete_happy_path_reply_is_clean(self):
+        pipe, gw, rt = make(
+            [understand(was_incomplete=False), verdict("complete")],
+            ["Paris is the capital of France."])
+        out = pipe.run("What is the capital of France?")
+        self._assert_clean(out)
+        self.assertEqual(out["reply"], "Paris is the capital of France.")
+
+    def test_reply_field_is_exactly_what_chat_log_and_ui_would_store(self):
+        """Guards the wiring itself: `_reply`'s `text` argument must be the
+        only thing that ends up as `out["reply"]` — `note` may only affect
+        `data`. If a future change reintroduces string concatenation this
+        catches it directly, independent of any particular wording."""
+        pipe, gw, rt = make([understand()], ["clean answer"], usable=False)
+        out = pipe.run("hi")
+        self.assertEqual(out["reply"], "clean answer")
+        self.assertNotIn("\n\n⚠️", out["reply"])
 
 
 class TestAgentHandle(unittest.TestCase):

@@ -15,7 +15,8 @@ class ToolContext:
     """Everything a tool may legitimately touch, by dependency injection."""
 
     def __init__(self, store=None, config=None, events=None, memory=None,
-                 tasks=None, web3_manager=None, registry=None):
+                 tasks=None, web3_manager=None, registry=None,
+                 terminal=None, terminal_session_id=None):
         self.store = store
         self.config = config
         self.events = events
@@ -24,6 +25,12 @@ class ToolContext:
         self.registry = registry       # ToolRegistry, for diagnostics tools
         self.web3_manager = web3_manager
         self.tx_manager = web3_manager   # alias used by web3 tools
+        # Shared terminal capability (astra/terminal/): the manager and the
+        # session this tool call belongs to. Terminal tools read these when
+        # no explicit session_id argument is given, which is what keeps two
+        # unrelated conversations from sharing cwd/history.
+        self.terminal = terminal
+        self.terminal_session_id = terminal_session_id
 
     def emit(self, kind: str, **data):
         if self.events:

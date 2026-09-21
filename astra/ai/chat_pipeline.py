@@ -51,9 +51,11 @@ from astra.ai.gateway_task_completion import (COMPLETE, FAILED, INCOMPLETE,
                                               build_task_completion_contract)
 from astra.ai.json_extract import loads_lenient
 from astra.ai.multimodal_messages import build_multimodal_content
-from astra.ai.router import RoutingRequest, classify
+from astra.ai.execution_history import AgentExecutionHistory
+from astra.ai.router import RoutingRequest, RoutingResult, classify
 from astra.core.exceptions import ProviderError
 from astra.core.events import new_op_id
+from astra.terminal.manager import default_session_id_for
 
 # Task types that are safe to hand the router for a plain chat turn.
 # Everything else `classify()` can return (image/audio/video generation,
@@ -188,6 +190,40 @@ def _describe_attachments(attachments) -> str:
     return ", ".join(names)
 
 
+def _cid_from_history(history):
+    """Conversation id, when the caller handed us a ConversationContext
+    (which carries one) instead of a bare list. Keeps terminal session and
+    execution-history scoping correct even for callers that only pass the
+    history object."""
+    return getattr(history, "conversation_id", None)
+
+
+def _with_tool_summary(messages: list, steps: list) -> list:
+    """Clone provider messages and append a compact, bounded summary of the
+    tool actions already taken — with NO tool protocol — for the Gateway's
+    correction phase."""
+    clone = [dict(m) for m in (messages or [])]
+    if not steps or not clone or clone[-1].get("role") != "user":
+        return clone
+    lines = []
+    for s in steps:
+        line = f"- {s.tool}: status={s.status or 'ok'}"
+        code = s.result.get("exit_code") if isinstance(s.result, dict) else None
+        if code is not None:
+            line += f", exit_code={code}"
+        if not s.ok and s.error:
+            line += f", error={s.error[:120]}"
+        lines.append(line)
+    block = ("\n\nTool actions ALREADY performed for this task (do not repeat "
+             "them; use their results):\n" + "\n".join(lines))
+    content = clone[-1].get("content")
+    if isinstance(content, str):
+        clone[-1]["content"] = content + block
+    elif isinstance(content, list):
+        clone[-1]["content"] = list(content) + [{"type": "text", "text": block}]
+    return clone
+
+
 def _has_image(attachments) -> bool:
     for a in attachments or []:
         fam = a.get("family") if isinstance(a, dict) else getattr(a, "family", "")
@@ -225,14 +261,59 @@ class _ChatPort(ProviderExecutionPort):
         return rr.text
 
 
+class _GatewayPort(ProviderExecutionPort):
+    """Sends a Gateway-driven turn's correction back to the Gateway (its own
+    connections), so a gateway-brained loop is corrected by the same brain
+    that produced it instead of falling back to the Provider system."""
+
+    def __init__(self, gateway, trace: str = ""):
+        self._gateway = gateway
+        self._trace = trace
+        self.last_text = ""
+
+    def execute(self, target, messages: list, max_tokens: int = 500,
+                **kwargs) -> str:
+        text = self._gateway.chat(messages, max_tokens=max_tokens,
+                                  category="general", trace=self._trace)
+        if not (text or "").strip():
+            raise ProviderError("gateway correction produced no output")
+        self.last_text = text
+        return text
+
+
 # ── the pipeline ────────────────────────────────────────────────────────────
 class ChatPipeline:
     def __init__(self, gateway, router, events=None, *,
-                 max_tokens: int = 1500):
+                 max_tokens: int = 1500, registry=None, terminal=None,
+                 execution_history=None, max_tool_steps: int = 8,
+                 agent_brain: str = "provider"):
         self.gateway = gateway
         self.router = router
         self.events = events
         self.max_tokens = int(max_tokens or 1500)
+        # Shared Terminal + tool surface. When wired (production, via
+        # astra.bootstrap), the provider step becomes a real multi-step
+        # agent tool loop over the SAME ToolRegistry the Gateway uses.
+        # When a caller constructs the pipeline without them (many unit
+        # tests), the original single-call provider path is used unchanged.
+        self.registry = registry
+        self.terminal = terminal
+        self.max_tool_steps = max(1, int(max_tool_steps or 8))
+        self.execution_history = execution_history or AgentExecutionHistory()
+        # Which AI drives the agent tool loop: the Provider system (default)
+        # or the Gateway's own connections ("gateway"). Both reach the same
+        # ToolRegistry and therefore the same shared Terminal — see
+        # astra/ai/agent_tool_loop.py.
+        self.agent_brain = (str(agent_brain or "provider").strip().lower()
+                            or "provider")
+
+    def _tool_loop_usable(self) -> bool:
+        if self.registry is None:
+            return False
+        try:
+            return bool(self.registry.list("terminal"))
+        except Exception:
+            return False
 
     # -- plumbing ------------------------------------------------------------
     def _emit(self, kind: str, **data) -> None:
@@ -250,7 +331,7 @@ class ChatPipeline:
 
     # -- step 1: Gateway call #1 (understand + assign) ------------------------
     def _understand(self, message: str, context: str, attachments,
-                    req: str = "") -> dict:
+                    req: str = "", extra_context: str = "") -> dict:
         """Returns {"final_request", "was_incomplete", "provider", "model",
         "criteria", "reason", "ok"}. `ok` False means the call failed and
         the raw message is being used as-is."""
@@ -272,6 +353,13 @@ class ChatPipeline:
         if ctx:
             parts.append("Prior conversation (only to resolve references in the "
                          "message; not a new request):\n" + ctx)
+        # Terminal session state + agent/tool execution history: the Gateway
+        # must see the same execution context the Provider sees (see the
+        # module docstring and astra/ai/execution_history.py).
+        extra = (extra_context or "").strip()
+        if extra:
+            parts.append("Current execution context (terminal session + "
+                         "actions already taken):\n" + extra)
         att = _describe_attachments(attachments)
         if att:
             parts.append("Attachments sent with the message: " + att)
@@ -309,19 +397,30 @@ class ChatPipeline:
                 "reason": _clean(data.get("reason")), "ok": True}
 
     # -- step 3: Gateway call #2 (verify) -------------------------------------
-    def _make_verifier(self, brief: dict, state: dict, req: str = ""):
+    def _make_verifier(self, brief: dict, state: dict, req: str = "",
+                       session_id=None, scope=None):
         """Semantic verifier for `supervise_task`. It closes over `brief`, so
-        verification knows everything call #1 decided."""
+        verification knows everything call #1 decided — and it is shown the
+        same current terminal/execution context the Provider saw, so it can
+        judge whether the work is actually done rather than guess."""
         def verifier(contract, result, evidence):
             state["verifications"] += 1
             output = (result.text or "")[:MAX_OUTPUT_CHARS_IN_VERIFY]
             crit = "\n".join(f"- {c}" for c in brief["criteria"]) or "- (none)"
+            exec_ctx = self.execution_history.context_text(scope or "") \
+                if scope else ""
+            term_ctx = self._terminal_context(session_id) if session_id else ""
+            extra = "\n\n".join(b for b in (term_ctx, exec_ctx) if b)
             prompt = (
                 f"Original user message:\n{brief['raw']}\n\n"
                 f"Request you assigned (call #1):\n{brief['final_request']}\n\n"
                 f"Completion criteria you defined:\n{crit}\n\n"
                 f"Assigned to: {brief['assigned'] or 'automatic routing'}\n\n"
                 f"Provider output to verify:\n{output}")
+            if extra:
+                prompt += ("\n\nExecution context (live terminal session + "
+                           "tool actions already taken; use it only to judge "
+                           "whether the work is really done):\n" + extra)
             try:
                 raw = self.gateway.chat(
                     [{"role": "system", "content": VERIFY_SYSTEM_PROMPT},
@@ -349,6 +448,82 @@ class ChatPipeline:
                     {"missing": missing, "action": data.get("action"),
                      "instructions": instructions})
         return verifier
+
+    # -- terminal context + agent tool loop ---------------------------------------
+    def _terminal_context(self, session_id) -> str:
+        """Deterministic, bounded view of the terminal session this
+        conversation owns. Empty when no terminal is wired."""
+        if self.terminal is None:
+            return ""
+        try:
+            return self.terminal.context_text(session_id) or ""
+        except Exception:
+            return ""
+
+    def _run_tool_loop(self, brief, hist_turns, ctx_text, task_type, vision,
+                       scope, session_id, terminal_context, exec_context,
+                       req, trace, base_messages=None):
+        """Run the shared `AgentToolLoop` with the Provider system as the
+        brain. Returns a `RoutingResult` (so the verify stage is unchanged)
+        or None on failure. The loop's final message list is attached so
+        Gateway corrections carry the tool exchanges too."""
+        from astra.ai.agent_tool_loop import (AgentToolLoop,
+                                              GatewayToolCaller,
+                                              ProviderToolCaller)
+        use_gateway = (self.agent_brain == "gateway" and self._gateway_usable())
+        if use_gateway:
+            caller = GatewayToolCaller(self.gateway, category="tool_use")
+        else:
+            caller = ProviderToolCaller(
+                self.router, task_type=task_type, vision=vision,
+                provider=brief["provider"] or None,
+                model=brief["model"] or None, trace=req)
+        loop = AgentToolLoop(self.registry, terminal=self.terminal,
+                             events=self.events,
+                             max_steps=self.max_tool_steps,
+                             execution_history=self.execution_history)
+        blocks = []
+        if ctx_text and not hist_turns:
+            blocks.append("Recent conversation (for reference):\n" + ctx_text)
+        if terminal_context:
+            blocks.append("Live terminal session state:\n" + terminal_context)
+        if exec_context:
+            blocks.append(exec_context)
+        try:
+            result = loop.run(brief["final_request"], caller,
+                              system_prompt=PROVIDER_SYSTEM_PROMPT,
+                              history=hist_turns, context_blocks=blocks,
+                              session_id=session_id, scope=scope,
+                              max_tokens=self.max_tokens, trace=req)
+        except Exception as e:
+            trace["error"] = f"{type(e).__name__}: {e}"
+            self._emit("chat.pipeline.tool_loop_error", error=trace["error"],
+                       op=f"chat:{req}", request=req, trace=req)
+            return None
+        trace["tool_loop"] = {"tool_calls": result.tool_calls,
+                              "stopped_reason": result.stopped_reason,
+                              "steps": [s.to_dict() for s in result.steps]}
+        if not result.ok:
+            trace["error"] = (result.error or getattr(caller, "last_error", "")
+                              or "agent tool loop failed")
+            return None
+        if use_gateway:
+            provider, model = "astra_ai_gateway", (self.gateway.last_model or "")
+        else:
+            last = getattr(caller, "last_result", None)
+            provider = (getattr(last, "provider", "")
+                        or (brief["provider"] or "agent"))
+            model = getattr(last, "model", "") or (brief["model"] or "")
+        rr = RoutingResult(ok=True, text=result.text, provider=provider,
+                           model=model)
+        rr._port_kind = "gateway" if use_gateway else "provider"
+        # Corrections must NOT see the tool protocol (a correcting model
+        # could otherwise reply with a tool call instead of a fixed answer).
+        # They get the original prompt plus a compact summary of what the
+        # tools already did, so it can fix a missing/incomplete answer.
+        rr._loop_messages = _with_tool_summary(base_messages or [],
+                                               result.steps)
+        return rr
 
     # -- helpers -----------------------------------------------------------------
     @staticmethod
@@ -407,7 +582,7 @@ class ChatPipeline:
 
     # -- public entry point ---------------------------------------------------------
     def run(self, message: str, *, context: str = "", history=None,
-            attachments=None) -> dict:
+            attachments=None, conversation_id=None) -> dict:
         """`history`, when given, is the canonical provider-independent
         conversation history for this turn (a list of {"role", "content"}
         dicts, oldest first — see `astra.ai.conversation_context`, or a
@@ -435,6 +610,11 @@ class ChatPipeline:
                    op=f"chat:{req}", request=req, trace=req)
 
         hist_turns = _normalize_history(history)
+        # The conversation id scopes BOTH the terminal session and the
+        # agent/tool execution history, so unrelated conversations never
+        # share cwd, processes or "what I already did".
+        if conversation_id in (None, "", 0):
+            conversation_id = _cid_from_history(history)
 
         # Any unexpected error must still close this turn's root operation:
         # without a terminal event the "Request received" row would stay
@@ -442,7 +622,7 @@ class ChatPipeline:
         # the correlation ids, it never filters running rows away).
         try:
             return self._run_turn(raw, context, hist_turns, attachments, req,
-                                  gateway_ok, trace)
+                                  gateway_ok, trace, conversation_id)
         except Exception as e:
             self._emit("chat.pipeline.failed",
                        error=f"{type(e).__name__}: {e}",
@@ -451,7 +631,7 @@ class ChatPipeline:
             raise
 
     def _run_turn(self, raw, context, hist_turns, attachments, req,
-                  gateway_ok, trace) -> dict:
+                  gateway_ok, trace, conversation_id=None) -> dict:
         """The rest of one chat turn, split out of `run()` so it can
         guarantee a terminal event even when a step raises unexpectedly."""
 
@@ -461,9 +641,22 @@ class ChatPipeline:
         # the Provider are always looking at identical prior turns.
         ctx_text = _history_as_text(hist_turns) if hist_turns else _clean(context)
 
+        # Execution context (terminal session state + actions already taken)
+        # is built ONCE and shown to BOTH the Gateway and the Provider.
+        scope = (str(conversation_id) if conversation_id not in (None, "", 0)
+                 else req)
+        session_id = default_session_id_for(conversation_id)
+        terminal_context = self._terminal_context(session_id)
+        exec_context = self.execution_history.context_text(scope)
+        extra_context = "\n\n".join(
+            b for b in (terminal_context, exec_context) if b)
+        trace["terminal_session"] = session_id
+        trace["scope"] = scope
+
         # 1) Gateway understands + assigns
         if gateway_ok:
-            brief = self._understand(raw, ctx_text, attachments, req=req)
+            brief = self._understand(raw, ctx_text, attachments, req=req,
+                                     extra_context=extra_context)
         else:
             brief = {"final_request": raw, "was_incomplete": False,
                      "provider": "", "model": "", "criteria": [],
@@ -497,10 +690,23 @@ class ChatPipeline:
                 "\n\nCurrent request:\n" + brief["final_request"], attachments)
         messages.append({"role": "user", "content": content})
         task_type = self._task_type(brief["final_request"], attachments)
-        rr = self._route(task_type, messages, brief["provider"],
-                         brief["model"], vision, req=req)
+
+        # The Provider is the AI that does the work. With the shared
+        # Terminal/tool surface wired, that work is a real multi-step agent
+        # tool loop (inspect -> run -> read failure -> edit -> retest) whose
+        # results return to the SAME execution. Without it, the original
+        # single provider call is used unchanged.
+        if self._tool_loop_usable():
+            rr = self._run_tool_loop(
+                brief, hist_turns, ctx_text, task_type, vision, scope,
+                session_id, terminal_context, exec_context, req, trace,
+                messages)
+        else:
+            rr = self._route(task_type, messages, brief["provider"],
+                             brief["model"], vision, req=req)
         if rr is None or not rr.ok:
-            err = (rr.error if rr is not None else "") or "unknown error"
+            err = (trace.get("error") or getattr(rr, "error", "") or
+                   "unknown error")
             trace["error"] = err
             self._emit("chat.pipeline.failed", error=err, op=f"chat:{req}",
                        request=req, trace=req, terminal=True)
@@ -508,6 +714,9 @@ class ChatPipeline:
                 "Provider theke kono uttor pawa jayni. Kichukkhon pore abar "
                 f"try korun. (`{err}`)", False, trace)
         trace["served_by"] = f"{rr.provider}/{rr.model}"
+        # Corrections go back through the loop's final message list (which
+        # carries the tool exchanges), not just the opening prompt.
+        supervised_messages = getattr(rr, "_loop_messages", None) or messages
 
         # gateway can't verify -> honest pass-through
         if not gateway_ok:
@@ -527,14 +736,19 @@ class ChatPipeline:
         contract = build_task_completion_contract(
             user_request=raw, goal=brief["final_request"],
             completion_criteria=brief["criteria"], require_semantic=True)
-        port = _ChatPort(self.router, task_type, vision, trace=req)
+        if getattr(rr, "_port_kind", "") == "gateway":
+            port = _GatewayPort(self.gateway, trace=req)
+        else:
+            port = _ChatPort(self.router, task_type, vision, trace=req)
         port.last_text = rr.text
         target = ProviderExecutionTarget(rr.provider, rr.model)
         try:
             final, outcome, attempts = self.gateway.supervise_task(
-                port, target, messages,
+                port, target, supervised_messages,
                 ProviderExecutionResult(ok=True, text=rr.text), contract,
-                semantic_verifier=self._make_verifier(verify_brief, state, req=req),
+                semantic_verifier=self._make_verifier(
+                    verify_brief, state, req=req, session_id=session_id,
+                    scope=scope),
                 max_tokens=self.max_tokens)
         except Exception as e:      # a Gateway bug must not lose a good answer
             self._emit("chat.pipeline.verify_error", error=str(e),

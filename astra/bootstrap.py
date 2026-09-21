@@ -39,6 +39,8 @@ from astra.browser import BrowserManager, register_browser_tools
 from astra.memory.memory import MemorySystem, ExperienceStore
 from astra.tools.registry import ToolRegistry
 from astra.tools import builtins
+from astra.terminal import TerminalManager, register_terminal_tools
+from astra.ai.execution_history import AgentExecutionHistory
 from astra.workflows.engine import WorkflowEngine
 from astra.workflows.scheduler import SchedulerManager
 from astra.agent import Agent
@@ -75,9 +77,16 @@ def build(store: Store | None = None, config=None,
     # start rows once so the Activity Log never shows a permanent "… running"
     # operation with no terminal event ever arriving.
     events.reconcile_stale_operations()
+    # `system_action` is granted by default because it is what powers the
+    # shared Terminal (astra/terminal/) — the one capability the AI Gateway
+    # and every Provider need to run a real development workflow. An operator
+    # who does not want shell access simply removes it from
+    # GRANTED_PERMISSIONS; every terminal tool then fails closed ("denied by
+    # policy") exactly like any other ungranted system tool.
     policy = Policy(granted=config.getlist("GRANTED_PERMISSIONS",
                                            default=["read", "low_risk_write",
-                                                    "browser_action"]))
+                                                    "browser_action",
+                                                    "system_action"]))
     memory = MemorySystem(store, events)
     experiences = ExperienceStore(store, events)
     tasks = TaskEngine(store, events)
@@ -87,6 +96,11 @@ def build(store: Store | None = None, config=None,
     builtins.register_builtins(registry)
     browser_manager = BrowserManager(config=config, events=events)
     register_browser_tools(registry, browser_manager)
+    # Shared Terminal capability: ONE manager, ONE set of terminal tools on
+    # the ONE ToolRegistry. The AI Gateway and every Provider reach the same
+    # sessions through it — see astra/terminal/.
+    terminal_manager = TerminalManager(events=events, config=config)
+    register_terminal_tools(registry, terminal_manager)
 
     # Web3 transaction manager: deterministic policy + encrypted keystore.
     # The LLM may only *prepare*; authorize/sign/broadcast stay out of the
@@ -193,7 +207,11 @@ def build(store: Store | None = None, config=None,
     from astra.ai.chat_pipeline import ChatPipeline
     chat_pipeline = ChatPipeline(
         gateway, router, events=events,
-        max_tokens=config.getint("CHAT_MAX_TOKENS", 1500))
+        max_tokens=config.getint("CHAT_MAX_TOKENS", 1500),
+        registry=registry, terminal=terminal_manager,
+        execution_history=AgentExecutionHistory(),
+        max_tool_steps=config.getint("CHAT_MAX_TOOL_STEPS", 8),
+        agent_brain=config.get("CHAT_AGENT_BRAIN", "provider"))
 
     # workflows + scheduler
     # ToolContext: shared subsystems a workflow step's tool may legitimately
@@ -202,7 +220,8 @@ def build(store: Store | None = None, config=None,
     from astra.core.context import ToolContext
     tool_context = ToolContext(store=store, config=config, events=events,
                                memory=memory, tasks=tasks,
-                               web3_manager=tx_manager, registry=registry)
+                               web3_manager=tx_manager, registry=registry,
+                               terminal=terminal_manager)
     workflows = WorkflowEngine(store, registry, events, context=tool_context)
     scheduler = None
     if with_scheduler:
@@ -224,6 +243,7 @@ def build(store: Store | None = None, config=None,
         "model_registry": model_registry, "provider_registry": provider_registry,
         "discovery": discovery, "agent_manager": agent_manager,
         "browser_manager": browser_manager,
+        "terminal": terminal_manager,
         "tx_manager": tx_manager, "keystore": keystore,
         "web3_policy": policy_engine,
         "gateway_intelligence": gateway_intelligence,

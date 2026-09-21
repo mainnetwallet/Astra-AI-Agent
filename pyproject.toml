@@ -20,7 +20,7 @@ dev = ["pytest", "playwright"]
 [tool.setuptools]
 packages = ["astra", "astra.ai", "astra.ai.adapters", "astra.agents",
             "astra.browser", "astra.core", "astra.memory", "astra.research",
-            "astra.tools", "astra.web3", "astra.workflows"]
+            "astra.terminal", "astra.tools", "astra.web3", "astra.workflows"]
 py-modules = ["run"]
 include-package-data = true
 

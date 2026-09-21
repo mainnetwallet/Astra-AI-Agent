@@ -310,6 +310,15 @@ def make_app(stack=None, store=None, agent=None, site=None, docs=None,
                         browser.close_all()
                     except Exception:
                         pass
+                # Kill every terminal process/session the shared Terminal
+                # manager owns, so no dev server or child process outlives
+                # the app.
+                terminal = state.stack.get("terminal")
+                if terminal is not None:
+                    try:
+                        terminal.close_all()
+                    except Exception:
+                        pass
                 try:
                     state.stack["store"].close()
                 except Exception:

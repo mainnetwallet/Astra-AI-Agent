@@ -1145,6 +1145,27 @@ class AstraAIGateway:
             port, target, messages, result, contract, evidence=evidence,
             semantic_verifier=semantic_verifier, max_tokens=max_tokens)
 
+    # -- shared agent tool loop (Gateway as the driving brain) ---------------
+    def run_tool_loop(self, task, *, registry, system_prompt="", history=None,
+                      context_blocks=None, terminal=None, session_id=None,
+                      scope=None, execution_history=None,
+                      max_steps: int = 8, max_tokens: int = 1500,
+                      trace: str = ""):
+        """Drive the shared `AgentToolLoop` with the Gateway's own AI
+        connections. The tools it can call are the same `ToolRegistry`
+        tools — including the shared Terminal — that the Provider path
+        uses, so both brains execute identical capabilities.
+
+        Returns an `astra.ai.agent_tool_loop.ToolLoopResult`."""
+        from astra.ai.agent_tool_loop import AgentToolLoop, GatewayToolCaller
+        loop = AgentToolLoop(registry, terminal=terminal, events=self.events,
+                             max_steps=max_steps,
+                             execution_history=execution_history)
+        return loop.run(task, GatewayToolCaller(self),
+                        system_prompt=system_prompt, history=history,
+                        context_blocks=context_blocks, session_id=session_id,
+                        scope=scope, max_tokens=max_tokens, trace=trace)
+
 
 def build_astra_ai_gateway(config=None, store=None,
                           events=None) -> "AstraAIGateway":

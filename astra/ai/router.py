@@ -1223,6 +1223,31 @@ class AstraRouter:
             })
         return out
 
+    # -- shared agent tool loop (Provider as the driving brain) --------------
+    def run_tool_loop(self, task, *, registry, system_prompt="", history=None,
+                      context_blocks=None, terminal=None, execution_history=None,
+                      session_id=None, scope=None, task_type: str = "coding",
+                      vision: bool = False, provider: str | None = None,
+                      model: str | None = None, no_fallback: bool = False,
+                      max_steps: int = 8, max_tokens: int = 1500,
+                      trace: str = ""):
+        """Drive the shared `AgentToolLoop` with the existing Provider
+        system (`route_request`). Identical loop, identical `ToolRegistry`,
+        therefore the identical shared Terminal as the Gateway path.
+
+        Returns an `astra.ai.agent_tool_loop.ToolLoopResult`."""
+        from astra.ai.agent_tool_loop import AgentToolLoop, ProviderToolCaller
+        loop = AgentToolLoop(registry, terminal=terminal, events=self.events,
+                             max_steps=max_steps,
+                             execution_history=execution_history)
+        caller = ProviderToolCaller(self, task_type=task_type, vision=vision,
+                                    provider=provider, model=model,
+                                    no_fallback=no_fallback, trace=trace)
+        return loop.run(task, caller, system_prompt=system_prompt,
+                        history=history, context_blocks=context_blocks,
+                        session_id=session_id, scope=scope,
+                        max_tokens=max_tokens, trace=trace)
+
     def _candidates_ranked(self, req):
         candidates = self._candidates(req)
         if self.policy:

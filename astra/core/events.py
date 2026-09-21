@@ -93,6 +93,19 @@ EVENT_KINDS = (
     "chat.pipeline.understand_failed", "chat.pipeline.verified",
     "chat.pipeline.verify_error", "chat.pipeline.finished",
     "chat.pipeline.failed",
+    # Shared Terminal capability (astra/terminal/): one persistent session
+    # implementation the AI Gateway and every Provider/model drive through
+    # the ToolRegistry. Output events are capped snippets, never raw
+    # unlimited terminal text (see TerminalSession._emit_output).
+    "terminal.session_created", "terminal.session_closed",
+    "terminal.started", "terminal.output", "terminal.completed",
+    "terminal.failed", "terminal.timeout", "terminal.stopped",
+    # Agent tool loop (astra/ai/agent_tool_loop.py): the iterative
+    # understand -> tool -> result -> continue loop that lets the AI decide
+    # when to use the terminal/file/git/browser tools.
+    "agent.tool_loop.started", "agent.tool_loop.step",
+    "agent.tool_loop.finished", "agent.tool_loop.failed",
+    "agent.tool_call", "agent.tool_result",
     # Startup reconciliation (EventBus.reconcile_stale_operations): closes an
     # operation that began in a previous run and can therefore never finish,
     # so its start row does not stay "… running" in the Activity Log forever.

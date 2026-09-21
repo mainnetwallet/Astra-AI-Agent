@@ -1,0 +1,117 @@
+"""Agent/tool execution history — what the AI already did, kept separate
+from the conversation transcript.
+
+Three histories exist in Astra, deliberately distinct:
+
+A. **Conversation history** — user/assistant messages. Owned by `ChatLog`
+   and `ConversationContextBuilder`; never touched by this module.
+B. **Agent/tool execution history** — this module. Which tools ran, with
+   what arguments, and how they turned out. Never mixed into ChatLog.
+C. **Terminal session state** — owned by `astra.terminal.TerminalSession`
+   (cwd, shell, processes, command history).
+
+Before every Gateway/Provider AI call the pipeline composes a bounded,
+deterministic view of B and C so the model knows what has already been
+attempted and what the terminal currently looks like — without ever
+replaying unlimited output.
+
+Scope isolation: entries are keyed by a scope id (the conversation id for
+chat, or an explicit run id). Two unrelated conversations can never read
+each other's execution history.
+"""
+from __future__ import annotations
+
+import threading
+from collections import deque
+
+DEFAULT_MAX_ENTRIES = 40
+DEFAULT_CONTEXT_ENTRIES = 12
+DEFAULT_CONTEXT_CHARS = 2500
+
+
+def _summarize(value, limit: int = 240) -> str:
+    """Small, deterministic, JSON-safe summary of a tool result."""
+    import json
+    try:
+        if isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    text = " ".join(text.split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+class ExecutionEntry:
+    __slots__ = ("tool", "ok", "summary", "status", "args", "step")
+
+    def __init__(self, tool: str, ok: bool, summary: str = "",
+                 status: str = "", args: dict | None = None, step: int = 0):
+        self.tool = tool
+        self.ok = ok
+        self.summary = summary
+        self.status = status
+        self.args = args or {}
+        self.step = step
+
+    def to_dict(self) -> dict:
+        return {"tool": self.tool, "ok": self.ok, "status": self.status,
+                "summary": self.summary, "step": self.step}
+
+
+class AgentExecutionHistory:
+    """Bounded, thread-safe, per-scope log of tool executions."""
+
+    def __init__(self, max_entries: int = DEFAULT_MAX_ENTRIES):
+        self.max_entries = max(1, int(max_entries))
+        self._scopes: dict[str, deque] = {}
+        self._lock = threading.RLock()
+
+    def record(self, scope: str, tool: str, *, ok: bool, status: str = "",
+               result=None, args: dict | None = None, step: int = 0) -> None:
+        key = str(scope or "default")
+        entry = ExecutionEntry(tool, bool(ok), _summarize(result), status,
+                               args, step)
+        with self._lock:
+            bucket = self._scopes.get(key)
+            if bucket is None:
+                bucket = deque(maxlen=self.max_entries)
+                self._scopes[key] = bucket
+            bucket.append(entry)
+
+    def entries(self, scope: str, limit: int = DEFAULT_CONTEXT_ENTRIES) -> list[dict]:
+        with self._lock:
+            bucket = list(self._scopes.get(str(scope or "default")) or [])
+        if limit and limit > 0:
+            bucket = bucket[-limit:]
+        return [e.to_dict() for e in bucket]
+
+    def clear(self, scope: str | None = None) -> None:
+        with self._lock:
+            if scope is None:
+                self._scopes.clear()
+            else:
+                self._scopes.pop(str(scope or "default"), None)
+
+    def context_text(self, scope: str, *, max_entries: int = DEFAULT_CONTEXT_ENTRIES,
+                     max_chars: int = DEFAULT_CONTEXT_CHARS,
+                     exclude_step: int | None = None) -> str:
+        rows = self.entries(scope, limit=max_entries)
+        if exclude_step is not None:
+            rows = [r for r in rows if r.get("step") != exclude_step]
+        if not rows:
+            return ""
+        lines = ["Actions already taken (agent/tool execution history):"]
+        for r in rows:
+            mark = "ok" if r["ok"] else "FAILED"
+            line = f"  - {r['tool']} [{mark}]"
+            if r.get("status"):
+                line += f" status={r['status']}"
+            if r.get("summary"):
+                line += f": {r['summary']}"
+            lines.append(line)
+        text = "\n".join(lines)
+        if max_chars and len(text) > max_chars:
+            text = text[:max_chars] + "…"
+        return text

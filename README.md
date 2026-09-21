@@ -60,13 +60,15 @@ Orchestrator/Planner loop was removed, and `ToolRegistry` now runs standalone
 
 | Subsystem | What it does |
 |-----------|-------------|
-| **Astra AI Gateway + ChatPipeline** | The path every chat message takes: Gateway call #1 understands the request and assigns the best provider/model; the provider executes; Gateway call #2 verifies the output and drives a bounded fix/redo loop if it is incomplete. Fails open. |
+| **Astra AI Gateway + ChatPipeline** | The path every chat message takes: Gateway call #1 understands the request and assigns the best provider/model; the provider executes through the **agent tool loop** (inspect → terminal → read/edit → test → retry) using the shared ToolRegistry; Gateway call #2 verifies the output and drives a bounded fix/redo loop if it is incomplete. Fails open. |
 | **AstraRouter** (`astra/ai/router.py`) | Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes and records routing stats. Never registered as a provider itself, and the Gateway is never a fallback provider when every real provider fails. |
 | **Provider adapters (10)** (`astra/ai/adapters/`) | Gemini, Groq, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova, Cohere, Z.ai, Bedrock. Nine share an OpenAI-compatible adapter base; Bedrock is a real AWS SigV4 / Converse adapter. Unlimited credentials per provider via key pools. |
 | **Backward-compatible providers** (`astra/ai/provider.py`) | The two original single-provider paths: `ClaudeProvider` (`ANTHROPIC_API_KEY`) and `OpenAICompatibleProvider` (`AI_BASE_URL`/`AI_API_KEY`). Routed when configured; legacy, no key pool. |
 | **Model registry** (`astra/ai/models.py`) | Capabilities, context window, streaming/tools/vision support, cost/speed/quality classes, preferred/disabled status. |
 | **AgentManager + specialists** (`astra/agents/`) | Declarative task specialists (`general`, `research`, `browser`, `coding`, `files`, `web3`, `airdrop`) the manager scores; not providers and not plugins. Chat does not plan through them today. |
-| **ToolRegistry** (`astra/tools/registry.py`) | Builtin + web3 + browser tools with schema validation, permission policy, timeout/retry, audit trail. Runs standalone. |
+| **ToolRegistry** (`astra/tools/registry.py`) | Builtin + web3 + browser + **terminal** tools with schema validation, permission policy, timeout/retry, audit trail. The single tool surface the AI Gateway, every Provider/model, the workflow engine and the agent tool loop all execute through. |
+| **Shared Terminal** (`astra/terminal/`) | ONE persistent terminal for the whole system: durable cwd/env/history per session, background processes, timeout/stop/kill, capped streaming output, and per-conversation isolation. Exposed as `terminal_*` tools on the ToolRegistry, so the Gateway and every Provider drive the identical implementation. |
+| **Agent tool loop** (`astra/ai/agent_tool_loop.py`) | The iterative AI loop: the model decides the next action (tool or answer), tools run through the shared registry, structured results feed back into the SAME execution, repeat until done. Brain-agnostic — `AstraRouter.run_tool_loop` (provider) or `AstraAIGateway.run_tool_loop` (gateway). |
 | **MemorySystem** (`astra/memory/memory.py`) | Layered memory (working/short/long/semantic/episodic) with importance scoring + search; `ExperienceStore` learns from past outcomes. |
 | **WorkflowEngine + SchedulerManager** (`astra/workflows/`) | Step workflows with `{{step_id.param}}` data flow, run on demand or on oneshot/interval/daily/weekly/deadline triggers (no external cron). Steps run with the shared `ToolContext`, so context-dependent tools (`remember`, `recall`, `create_task`, …) work as steps, not just direct tool calls. |
 | **EventBus** (`astra/core/events.py`) | Persisted events + SSE streaming to the Activity Log tab; closes operations interrupted by a previous run at startup. |
@@ -164,7 +166,12 @@ configured.
 | `AI_BACKOFF` | 1.0 | Base seconds for exponential retry backoff |
 | `CHAT_MAX_TOKENS` | 1500 | Provider completion budget per chat turn |
 | `ASTRA_STARTUP_DISCOVERY` | 0 | Run model discovery once at boot |
-| `GRANTED_PERMISSIONS` | `read low_risk_write browser_action` | Tool permission levels granted to the agent |
+| `GRANTED_PERMISSIONS` | `read low_risk_write browser_action system_action` | Tool permission levels granted to the agent (`system_action` powers the shared Terminal; remove it to fail terminal tools closed) |
+| `CHAT_MAX_TOOL_STEPS` | 8 | Max tool calls per chat turn before the agent tool loop stops |
+| `CHAT_AGENT_BRAIN` | provider | Which AI drives the tool loop: `provider` (AstraRouter) or `gateway` (Gateway's own connections). Both use the same shared Terminal. |
+| `ASTRA_TERMINAL_SHELL` | *(auto-detect)* | Override the terminal shell (e.g. `/bin/sh`, `pwsh`); auto-detects bash/sh, PowerShell/cmd and Termux |
+| `TERMINAL_MAX_OUTPUT_CHARS` | 20000 | Per-command stdout/stderr cap held in the terminal session |
+| `TERMINAL_HISTORY_LIMIT` | 50 | Commands retained in each terminal session's history |
 | `DATA_DIR` | ./data | Runtime data directory (SQLite DB + `uploads/`) |
 | `DATABASE` | `<DATA_DIR>/astra.db` | Explicit SQLite file path |
 | `ASTRA_WORKSPACE` | `./workspace` | Root the file tools may read/write (path escapes rejected) |
@@ -341,6 +348,13 @@ tools in core, not dropping a file into `plugins/`.
 `list_files` · `read_file` · `write_file` · `search_files` · `get_health` ·
 `generate_document`
 
+**Terminal** (`astra/terminal/tools.py`, `SYSTEM_ACTION` risk):
+`terminal_exec` · `terminal_start` · `terminal_status` · `terminal_stop` ·
+`terminal_kill` · `terminal_history` · `terminal_sessions` · `terminal_close`
+
+Git is done through `terminal_exec` (`git status`, `git diff`, …) — there is
+deliberately no separate git tool duplicating what the shell already does.
+
 **Web3** (`astra/web3/tools.py`): `token_balance` · `chain_status` ·
 `rpc_status` · `tx_prepare` · `tx_status`
 
@@ -364,6 +378,7 @@ astra/
 ├── agents/              Specialist agents + AgentManager
 ├── core/                Config, events, permissions, tasks, state, …
 ├── tools/               ToolRegistry + built-in tools
+├── terminal/            Shared persistent Terminal (sessions, manager, tools)
 ├── web3/                Wallet / transaction subsystem (+ raw_tx codec)
 ├── browser/             Optional Playwright-backed browsing
 ├── memory/              Layered memory + learned experience

@@ -96,3 +96,26 @@ class LiveServer:
 
     def __exit__(self, *exc):
         self.stop()
+
+
+class ScriptedBrain:
+    """A deterministic stand-in for a model inside the agent tool loop.
+
+    Returns the scripted replies in order, recording every message list it
+    was shown. It speaks the same JSON tool protocol a real model would, so
+    the surrounding loop, ToolRegistry and Terminal are all the real thing —
+    only the model call itself is scripted (there is no live model offline).
+    """
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def chat(self, messages, *, max_tokens=1500, trace=""):
+        self.calls.append(list(messages))
+        if not self.replies:
+            return "done"
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply

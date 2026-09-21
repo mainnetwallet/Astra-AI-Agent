@@ -25,9 +25,10 @@ user-facing quick start; this file is the internals map.
         ┌────────────────────────────────┼────────────────────────────────┐
         │                                │                                │
         ▼                                ▼                                ▼
-  Gateway call #1                 Provider execution              Gateway call #2
-  UNDERSTAND + ASSIGN        (via AstraRouter.route_request())        VERIFY
-  (astra/ai/gateway.py)        (astra/ai/router.py + adapters)   (astra/ai/gateway.py)
+  Gateway call #1            Provider execution + AGENT TOOL LOOP   Gateway call #2
+  UNDERSTAND + ASSIGN        (AstraRouter.route_request() ->          VERIFY
+  (astra/ai/gateway.py)       astra/ai/agent_tool_loop.py ->     (astra/ai/gateway.py)
+                               ToolRegistry -> Terminal/files/git)
         │                                │                                │
         └──────────────► bounded fix/redo loop if incomplete ◄────────────┘
                        (astra/ai/gateway_task_completion.py,
@@ -66,9 +67,12 @@ honestly that there is nothing to resume any more — chat no longer has
 an approve/reject round-trip.
 
 `ToolRegistry` itself was **not** deleted — it still validates, gates,
-retries and audits every tool call. It just isn't driven by an
-Orchestrator any more; today it's invoked directly (Web3 tool flows,
-workflow steps, tests).
+retries and audits every tool call. It is no longer driven by an
+Orchestrator: it is invoked directly by Web3 tool flows, workflow steps,
+tests, and — for chat — by the **agent tool loop** described in §1.2,
+which lets the AI choose tools (including the shared Terminal) step by
+step. There is still exactly one registry and one execution path per tool
+call.
 
 ### 1.1 Conversation history / memory (multi-turn chat)
 
@@ -127,6 +131,62 @@ Key properties:
 
 ---
 
+### 1.2 Shared Terminal + agent tool loop (development workflow)
+
+Astra can now run a real, multi-step development workflow — the same shape
+Claude Code / Codex use — without a second execution path:
+
+```
+AI call -> decide: use a tool, or answer
+        -> ToolRegistry.execute(...)          (the ONE registry)
+        -> structured result back into the SAME AI execution
+        -> AI call again ... until it answers
+```
+
+- **One shared Terminal.** `astra/terminal/` owns the single terminal
+  capability: `TerminalSession` (persistent cwd/env/history, background
+  processes, timeout, stop/kill, capped streaming output) and
+  `TerminalManager` (session registry + lifecycle). `astra/terminal/tools.py`
+  registers `terminal_exec`, `terminal_start`, `terminal_status`,
+  `terminal_stop`, `terminal_kill`, `terminal_history`, `terminal_sessions`
+  and `terminal_close` on the SAME `ToolRegistry` as the file/git/browser/
+  web3 tools. There is no provider-specific terminal and no parallel tool
+  framework.
+- **Both brains can call it.** `AgentToolLoop`
+  (`astra/ai/agent_tool_loop.py`) is brain-agnostic: `ProviderToolCaller`
+  drives it through `AstraRouter` (the chat default) and
+  `GatewayToolCaller` drives it through the Gateway's own connections
+  (`AstraAIGateway.run_tool_loop`; `AstraRouter.run_tool_loop` is the
+  provider-side entry). Both reach the identical `ToolRegistry`, so both
+  reach the identical terminal sessions. `CHAT_AGENT_BRAIN=provider|gateway`
+  selects which one drives a chat turn (default `provider`); corrections for
+  a gateway-driven turn go back to the Gateway (`_GatewayPort`).
+- **Structured results, dynamic next step.** Every command returns
+  `{command, cwd, session_id, process_id, shell, status, exit_code, stdout,
+  stderr, duration}`. A failed command is data, not a crash, so the AI can
+  diagnose, edit and retry. No command sequence is hard-coded. Models
+  without native tool-calling use a tiny JSON protocol; a plain-text reply
+  is treated as final, so ordinary chat is unchanged.
+- **Three separate histories.** Conversation history (`ChatLog` /
+  `ConversationContextBuilder`) is untouched; agent/tool execution history
+  (`astra/ai/execution_history.py`) records what was attempted; terminal
+  session state lives in the session. Before each Gateway/Provider call the
+  pipeline composes a *bounded, deterministic* view of the execution +
+  terminal context and gives it to BOTH. Nothing replays unlimited output.
+- **Isolation and lifecycle.** A conversation's terminal session id is
+  `conv-<conversation_id>`, so unrelated chats never share cwd, processes or
+  history. Sessions are closed (and their process trees killed) on shutdown
+  (`web_fastapi.py` lifespan), on `terminal_close`, and by `close_idle`.
+- **Events.** `terminal.started`, `terminal.output` (capped snippets),
+  `terminal.completed`, `terminal.failed`, `terminal.timeout`,
+  `terminal.stopped`, plus `agent.tool_loop.*` / `agent.tool_call` /
+  `agent.tool_result`, all correlated by `op`/`trace` in the Activity Log.
+
+Permission model: terminal tools are `SYSTEM_ACTION` risk and run without a
+per-command prompt so an autonomous loop is possible; the real gate is the
+operator's `GRANTED_PERMISSIONS` list (`system_action` is granted by default
+in `bootstrap.py` — remove it and every terminal tool fails closed).
+
 ## 2. Directory map
 
 ```
@@ -158,10 +218,21 @@ astra/
 │   ├── gateway_routing.py    Gateway-side provider short-name mapping
 │   ├── gateway_supervision.py Supervises a task end-to-end through the loop
 │   ├── chat_pipeline.py    The single path every chat message takes (§1)
+│   ├── agent_tool_loop.py    Iterative AI tool loop (Gateway- or
+│   │                         Provider-brained) over the shared ToolRegistry
+│   ├── execution_history.py  Bounded agent/tool execution history, scoped
+│   │                         per conversation (separate from ChatLog)
 │   ├── capabilities.py      Capability tags (chat/streaming/tools/vision/...)
 │   ├── multimodal_messages.py  Builds multimodal message payloads
 │   ├── artifact_extraction.py  Detects + extracts code/doc artifacts from replies
 │   └── json_extract.py      Lenient JSON extraction from model output
+│
+├── terminal/            ONE shared persistent Terminal for the Gateway AND
+│                        every Provider/model (via the shared ToolRegistry)
+│   ├── session.py         TerminalSession — cwd/env/history, background
+│   │                      processes, timeout, stop/kill, streaming
+│   ├── manager.py          TerminalManager — session registry + lifecycle
+│   └── tools.py            terminal_exec/start/status/stop/kill/history/...
 │
 ├── agents/              Specialist agents (task-type skill buckets; NOT
 │                        plugins, NOT providers — see §4)

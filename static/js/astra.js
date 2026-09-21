@@ -795,13 +795,12 @@ function updateRow(row, m) {
 }
 
 // A child operation that was still "running" when its request/run ended.
+// The decision is `AstraLog.interruptedModel()` (pure + unit-tested); this
+// only applies it to the live row.
 function resolveRow(row, reason) {
-  const m = row._astraModel;
-  if (!m || m.status !== "running") return;
-  updateRow(row, Object.assign({}, m, {
-    status: "warn", detail: reason, icon: m.icon,
-    search: (m.search + " " + reason).toLowerCase(),
-  }));
+  const next = AstraLog.interruptedModel(row._astraModel, reason);
+  if (next === row._astraModel) return;   // already terminal, nothing to do
+  updateRow(row, next);
 }
 
 function trimBuffer(feed) {
@@ -887,7 +886,7 @@ function upsertEvent(event, quiet) {
   // A request/run that just ended resolves any child it left "running".
   plan.closeKeys.forEach((k) => {
     const ci = LOGS.active.get(k);
-    if (ci && ci.el) resolveRow(ci.el, "interrupted when the request ended");
+    if (ci && ci.el) resolveRow(ci.el, AstraLog.INTERRUPTED_REASON);
   });
 
   AstraLog.commit(LOGS, plan, m);

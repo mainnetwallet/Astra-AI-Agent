@@ -585,6 +585,24 @@
     return String(mm.status || "").toUpperCase();
   }
 
+  // Canonical reason shared with astra.js, so the DOM and the tests can never
+  // disagree about why a child row was resolved.
+  var INTERRUPTED_REASON = "interrupted when the request ended";
+
+  // The model a child operation gets when its request/run ends while the
+  // child itself never reported a terminal: it is marked interrupted
+  // (warning) and keeps its icon and its timeline identity. Returns the SAME
+  // model object when there is nothing to do, so callers can cheaply tell
+  // whether the row needs re-rendering.
+  function interruptedModel(m, reason) {
+    if (!m || m.status !== "running") return m;
+    var why = reason || INTERRUPTED_REASON;
+    return Object.assign({}, m, {
+      status: "warn", detail: why, icon: m.icon,
+      search: (m.search + " " + why).toLowerCase(),
+    });
+  }
+
   function createState() {
     return {
       filter: "all", query: "", paused: false,
@@ -662,6 +680,8 @@
     count: count,
     recount: recount,
     mergeLifecycle: mergeLifecycle,
+    interruptedModel: interruptedModel,
+    INTERRUPTED_REASON: INTERRUPTED_REASON,
     timeRangeOf: timeRangeOf,
     statusLabel: statusLabel,
     elapsedMs: elapsedMs,

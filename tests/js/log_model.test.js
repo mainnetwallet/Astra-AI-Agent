@@ -298,15 +298,11 @@ function simulate(events) {
     }
     plan.closeKeys.forEach((k) => {
       const ci = state.active.get(k);
-      if (ci && ci.el && ci.el.model.status === "running") {
-        // mirrors astra.js resolveRow(): a child still running when its
-        // request/run ended is marked interrupted with a reason.
-        const reason = "interrupted when the request ended";
-        const prev = ci.el.model;
-        ci.el.model = Object.assign({}, prev, {
-          status: "warn", detail: reason, icon: prev.icon,
-          search: (prev.search + " " + reason).toLowerCase(),
-        });
+      if (ci && ci.el) {
+        // mirrors astra.js resolveRow(): the SAME pure decision function the
+        // live DOM calls, so this harness cannot drift from the panel.
+        ci.el.model = Log.interruptedModel(ci.el.model,
+                                           Log.INTERRUPTED_REASON);
       }
     });
     Log.commit(state, plan, m);
@@ -936,4 +932,135 @@ test("live auto-follow still pauses when the reader scrolls up", () => {
   // back at the bottom resumes following
   Log.onScroll(state, { scrollTop: 900, scrollHeight: 1000, clientHeight: 100 });
   assert.strictEqual(state.follow, true);
+});
+
+/* ---------------------------------- final-state reconciliation (live DOM)
+ * After the root terminal event ("Response generated COMPLETE" / failed /
+ * cancelled / timeout) the live feed must already show a terminal state for
+ * EVERY operation of that request — no row may be left "… RUNNING".
+ * `simulate()` drives the same AstraLog.planRender/commit/interruptedModel
+ * calls astra.js's upsertEvent() makes against the DOM, in arrival order. */
+
+test("interruptedModel only rewrites a still-running child", () => {
+  const running = { status: "running", detail: "", icon: "🧠", search: "x" };
+  const done = { status: "ok", detail: "1s", icon: "🧠", search: "y" };
+  const fixed = Log.interruptedModel(running, Log.INTERRUPTED_REASON);
+  assert.notStrictEqual(fixed, running);
+  assert.strictEqual(fixed.status, "warn");
+  assert.strictEqual(fixed.detail, Log.INTERRUPTED_REASON);
+  assert.match(metaText(fixed), /interrupted/);
+  // an already-terminal row is returned untouched (same object reference)
+  assert.strictEqual(Log.interruptedModel(done, Log.INTERRUPTED_REASON), done);
+  assert.strictEqual(Log.interruptedModel(null, "x"), null);
+});
+
+// A realistic completed turn: the understand call resolves, the router picks a
+// provider, a second provider call and the verify Gateway call are still in
+// flight when the root terminal lands.
+function liveTurn(rootKind, extraRoot) {
+  const R = "req-live";
+  return [
+    at(1, "chat.pipeline.started", "2026-09-21 23:38:56",
+       { op: "chat:" + R, request: R, trace: R }, "chat.pipeline"),
+    at(2, "astra_gateway.request", "2026-09-21 23:38:56",
+       { op: "G1", trace: R }, "gateway"),
+    at(3, "astra_gateway.success", "2026-09-21 23:38:57",
+       { op: "G1", trace: R, terminal: true, provider: "gemini",
+         model: "g" }, "gateway"),
+    at(4, "chat.pipeline.assigned", "2026-09-21 23:38:57",
+       { request: R, trace: R }, "chat.pipeline"),
+    at(5, "router.request", "2026-09-21 23:39:07", { op: "RT", trace: R }),
+    at(6, "ai.started", "2026-09-21 23:39:07",
+       { op: "A1", trace: R, provider: "groq", model: "m" }),
+    at(7, "ai.completed", "2026-09-21 23:39:09",
+       { op: "A1", trace: R, provider: "groq", model: "m", terminal: true,
+         latency_ms: 2630 }),
+    // still in flight when the request ends:
+    at(8, "ai.started", "2026-09-21 23:39:10",
+       { op: "A2", trace: R, provider: "gemini", model: "g" }),
+    at(9, "astra_gateway.request", "2026-09-21 23:39:12",
+       { op: "G2", trace: R }, "gateway"),
+    at(10, "chat.pipeline.verified", "2026-09-21 23:39:18",
+       { verdict: "complete", request: R, trace: R }, "chat.pipeline"),
+    at(11, rootKind, "2026-09-21 23:39:20",
+       Object.assign({ op: "chat:" + R, request: R, trace: R, terminal: true },
+                     extraRoot), "chat.pipeline"),
+  ];
+}
+
+function assertNoRunningRows(rows) {
+  const running = rows.filter((r) => r.model.status === "running");
+  assert.strictEqual(running.length, 0,
+    "stale RUNNING rows: " + running.map((r) => r.model.title).join(", "));
+  rows.forEach((r) => assert.doesNotMatch(metaText(r.model), /RUNNING/,
+    r.model.title + " is still shown as running"));
+}
+
+test("live DOM after Response generated COMPLETE has no stale RUNNING row", () => {
+  const events = liveTurn("chat.pipeline.finished", { status: "COMPLETE" });
+  // before the root terminal, children really are mid-flight — otherwise the
+  // assertion below would be vacuous.
+  const before = simulate(events.slice(0, -1));
+  assert.ok(before.rows.some((r) => r.model.status === "running"));
+  assert.ok(before.state.active.size > 0);
+
+  // the root terminal alone must resolve the whole request, immediately.
+  const { state, rows } = simulate(events);
+  assertNoRunningRows(rows);
+  assert.strictEqual(state.active.size, 0);
+  assert.strictEqual(rows.find((r) => r.key === "op:chat:req-live").model.status,
+                     "ok");
+  // never terminated -> interrupted, with the start -> terminal span intact
+  ["op:RT", "op:A2", "op:G2"].forEach((k) => {
+    const row = rows.find((r) => r.key === k);
+    assert.strictEqual(row.model.status, "warn", k + " should be interrupted");
+    assert.strictEqual(row.model.detail, Log.INTERRUPTED_REASON);
+  });
+  // the attempt that DID report a terminal keeps its own result
+  assert.strictEqual(rows.find((r) => r.key === "op:A1").model.status, "ok");
+  assert.strictEqual(rows.find((r) => r.key === "op:G1").model.status, "ok");
+});
+
+test("live DOM after a failed request has no stale RUNNING row", () => {
+  const { state, rows } = simulate(
+    liveTurn("chat.pipeline.failed", { error: "provider exploded" }));
+  assertNoRunningRows(rows);
+  assert.strictEqual(state.active.size, 0);
+  assert.strictEqual(rows.find((r) => r.key === "op:chat:req-live").model.status,
+                     "err");
+});
+
+test("live DOM after a cancelled/timed-out request has no RUNNING row", () => {
+  ["chat.pipeline.failed"].forEach((kind) => {
+    const { state, rows } = simulate(
+      liveTurn(kind, { error: "request timed out", terminal: true }));
+    assertNoRunningRows(rows);
+    assert.strictEqual(state.active.size, 0);
+  });
+});
+
+test("history replay then live SSE converges with no running rows", () => {
+  const events = liveTurn("chat.pipeline.finished", { status: "COMPLETE" });
+  // the page opens mid-request: everything so far is replayed from history
+  const mid = simulate(Log.orderHistory(events.slice(0, 9)));
+  assert.ok(mid.rows.some((r) => r.model.status === "running"),
+            "mid-request replay must show the in-flight children");
+
+  // the remaining events then arrive over SSE; the panel must end the same
+  // way as when the whole turn is replayed in one history batch.
+  const live = simulate(Log.orderHistory(events));
+  assertNoRunningRows(live.rows);
+  assert.strictEqual(live.state.active.size, 0);
+  // only the verify step is a new row; the terminal refines the root row
+  assert.strictEqual(live.rows.length, mid.rows.length + 1);
+
+  // re-delivery of an already-rendered id is ignored (no duplicate rows)
+  const s2 = Log.createState();
+  Log.orderHistory(events).forEach((e) => {
+    if (Log.admit(s2, e) === "render") Log.markRendered(s2, e);
+  });
+  Log.orderHistory(events).forEach((e) => {
+    assert.strictEqual(Log.admit(s2, e), "skip",
+                       "event " + e.id + " must not render twice");
+  });
 });

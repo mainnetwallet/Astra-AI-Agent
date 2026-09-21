@@ -61,6 +61,24 @@ class TestActivityLogUI(unittest.TestCase):
                      "AstraLog.recount(", "resolveRow("):
             self.assertIn(call, self.js, f"astra.js does not use {call}")
 
+    def test_request_terminal_resolves_child_rows_in_the_live_dom(self):
+        # after a root terminal (chat.pipeline.finished/failed) the live feed
+        # must resolve every child it left running: upsertEvent() walks the
+        # plan's closeKeys and applies AstraLog.interruptedModel() to the
+        # child's DOM row element. This is the wiring the node regression
+        # tests exercise through the same pure function.
+        self.assertIn("plan.closeKeys.forEach", self.js)
+        self.assertIn("AstraLog.interruptedModel(", self.js)
+        self.assertIn("AstraLog.INTERRUPTED_REASON", self.js)
+        close_loop = self.js[self.js.index("plan.closeKeys.forEach"):]
+        close_loop = close_loop[:close_loop.index("AstraLog.commit(")]
+        self.assertIn("LOGS.active.get(k)", close_loop)
+        self.assertIn("resolveRow(", close_loop)
+        # the decision is the shared, DOM-free function — never re-implemented
+        model = _read("static", "js", "log_model.js")
+        self.assertIn("function interruptedModel(", model)
+        self.assertIn("INTERRUPTED_REASON", model)
+
     def test_rendering_uses_the_shared_model(self):
         for call in ("AstraLog.normalize(", "AstraLog.isMeaningful(",
                      "AstraLog.onAppend(", "AstraLog.onScroll(",

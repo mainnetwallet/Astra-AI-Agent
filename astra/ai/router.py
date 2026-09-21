@@ -540,15 +540,22 @@ class AstraRouter:
                     "reason": getattr(rr, "_reason", ""),
                     "candidates_considered": considered,
                 }
-                self._emit("router.decision", task=req.task_type, provider=rr.provider,
-                           model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
-                           latency_ms=rr.latency_ms, fallback=fallback,
-                           op=op, trace=req.trace, terminal=True)
+                # The fallback notice is progress on the SAME route
+                # operation, so it is emitted before the terminal decision
+                # and carries the same `op`/`trace` — the Activity Log then
+                # refines one "Agent Router" row instead of appending a
+                # second, orphan one.
                 if fallback:
                     self._emit("router.fallback", task=req.task_type, provider=rr.provider,
                                model=rr.model, candidates_considered=considered,
                                fallback_from=req.preferred_model or "",
-                               fallback_reason=last_failure_category)
+                               fallback_reason=last_failure_category,
+                               reason=last_failure_category or "switched to the next provider",
+                               op=op, trace=req.trace, terminal=False)
+                self._emit("router.decision", task=req.task_type, provider=rr.provider,
+                           model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
+                           latency_ms=rr.latency_ms, fallback=fallback,
+                           op=op, trace=req.trace, terminal=True)
                 self._record_route(req, rr)
                 return rr
             if rr is not None:
@@ -632,7 +639,8 @@ class AstraRouter:
             if rr is not None and rr.ok:
                 if gateway_ok:
                     self._report_gateway_recovery(current, success=True,
-                                                  latency_ms=rr.latency_ms)
+                                                  latency_ms=rr.latency_ms,
+                                                  op=op, trace=req.trace)
                     # §6-§12: Gateway-owned result validation + bounded
                     # correction — same target first (see
                     # _maybe_supervise_result's docstring). If the Gateway
@@ -648,7 +656,7 @@ class AstraRouter:
                     # answered (just badly) could block every other
                     # configured provider from ever being tried.
                     supervised_ok = self._maybe_supervise_result(
-                        current, rr, req, by_key)
+                        current, rr, req, by_key, op=op)
                     if not supervised_ok:
                         if rr.completion_status:
                             last_completion_status = rr.completion_status
@@ -659,7 +667,7 @@ class AstraRouter:
                             current = self.gateway.recover_execution_target(
                                 gw_targets, current, last_failure_category,
                                 required_capabilities=req.required_capabilities,
-                                exclude=tried)
+                                exclude=tried, op=op, trace=req.trace)
                         except Exception:
                             gateway_ok, current = False, None
                         continue
@@ -676,15 +684,17 @@ class AstraRouter:
                     "reason": getattr(rr, "_reason", ""),
                     "candidates_considered": considered,
                 }
-                self._emit("router.decision", task=req.task_type, provider=rr.provider,
-                           model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
-                           latency_ms=rr.latency_ms, fallback=fallback,
-                           op=op, trace=req.trace, terminal=True)
                 if fallback:
                     self._emit("router.fallback", task=req.task_type, provider=rr.provider,
                                model=rr.model, candidates_considered=considered,
                                fallback_from=req.preferred_model or "",
-                               fallback_reason=last_failure_category)
+                               fallback_reason=last_failure_category,
+                               reason=last_failure_category or "switched to the next provider",
+                               op=op, trace=req.trace, terminal=False)
+                self._emit("router.decision", task=req.task_type, provider=rr.provider,
+                           model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
+                           latency_ms=rr.latency_ms, fallback=fallback,
+                           op=op, trace=req.trace, terminal=True)
                 self._record_route(req, rr)
                 return rr
 
@@ -697,7 +707,7 @@ class AstraRouter:
                     current = self.gateway.recover_execution_target(
                         gw_targets, current, last_failure_category,
                         required_capabilities=req.required_capabilities,
-                        exclude=tried)
+                        exclude=tried, op=op, trace=req.trace)
                 except Exception:
                     gateway_ok, current = False, None
             else:
@@ -750,7 +760,8 @@ class AstraRouter:
         return out
 
     def _report_gateway_recovery(self, target, *, success: bool,
-                                 latency_ms: int = 0, error: str = "") -> str:
+                                 latency_ms: int = 0, error: str = "",
+                                 op: str = "", trace: str = "") -> str:
         """Best-effort report to the attached Gateway's recovery API. Never
         raises into the caller — a Gateway hiccup must never affect routing.
         Returns the classified §7 category on failure (empty on success),
@@ -759,18 +770,21 @@ class AstraRouter:
             return ""
         try:
             if success:
-                self.gateway.report_execution_success(target, latency_ms=latency_ms)
+                self.gateway.report_execution_success(
+                    target, latency_ms=latency_ms, op=op, trace=trace)
                 return ""
             from astra.ai.gateway_contract import classify_execution_failure
             category = classify_execution_failure(message=error)
-            self.gateway.report_execution_failure(target, category)
+            self.gateway.report_execution_failure(
+                target, category, op=op, trace=trace)
             return category
         except Exception:
             return ""
 
     # -- Gateway-owned result supervision (§6-§12; additive, fail-open) -------
     def _maybe_supervise_result(self, target, rr: RoutingResult,
-                                req: RoutingRequest, by_key: dict) -> bool:
+                                req: RoutingRequest, by_key: dict,
+                                op: str = "") -> bool:
         """After a successful attempt, give the attached Gateway a chance to
         deterministically validate the response and — if it's invalid or
         incomplete — drive a bounded correction round-trip back through
@@ -815,7 +829,7 @@ class AstraRouter:
                 self._emit("router.gateway_task_completion", task=req.task_type,
                            provider=target.provider_id, model=target.model_id,
                            status=outcome.status, reason=outcome.reason,
-                           attempts=attempts)
+                           attempts=attempts, op=op, trace=req.trace)
                 # INCOMPLETE/UNCERTAIN with real text is a legitimate
                 # best-effort answer (e.g. a multi-step task the model
                 # partially finished) — the caller still gets it, same as
@@ -854,7 +868,8 @@ class AstraRouter:
                 rr.text = supervised.text
             self._emit("router.gateway_supervision", task=req.task_type,
                        provider=target.provider_id, model=target.model_id,
-                       ok=outcome.ok, reason=outcome.reason)
+                       ok=outcome.ok, reason=outcome.reason,
+                       op=op, trace=req.trace)
             if not outcome.ok:
                 rr.ok = False
                 rr.error = (f"{target.provider_id}: {outcome.reason or 'supervision rejected response'}")

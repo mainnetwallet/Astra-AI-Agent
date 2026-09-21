@@ -76,6 +76,15 @@ class TestActivityLogUI(unittest.TestCase):
                           "innerHTML = event."):
             self.assertNotIn(dangerous, self.js)
 
+    def test_no_primary_row_renders_a_bare_bullet_state(self):
+        # The visible row state is built in metaText(); a bare "•" (the old
+        # "info" fallback) is not a meaningful lifecycle state, so the
+        # fallback must always name one.
+        self.assertNotIn('"• " + m.detail : "•"', self.js)
+        self.assertIn('"• " + (m.detail || "event")', self.js)
+        model = _read("static", "js", "log_model.js")
+        self.assertNotIn('return "info"', model)
+
     def test_timeline_and_jump_styles_exist(self):
         for rule in (".tl-row", ".tl-detail", ".logs-jump", ".logs-live",
                      ".tl-dot.running", ".tl-time-end", ".tl-time-sep"):

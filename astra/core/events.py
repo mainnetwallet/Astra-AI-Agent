@@ -93,6 +93,10 @@ EVENT_KINDS = (
     "chat.pipeline.understand_failed", "chat.pipeline.verified",
     "chat.pipeline.verify_error", "chat.pipeline.finished",
     "chat.pipeline.failed",
+    # Startup reconciliation (EventBus.reconcile_stale_operations): closes an
+    # operation that began in a previous run and can therefore never finish,
+    # so its start row does not stay "… running" in the Activity Log forever.
+    "operation.interrupted",
 )
 
 
@@ -148,6 +152,98 @@ class EventBus:
             except Exception:
                 pass
         return record
+
+    # Terminal suffixes the Activity Log treats as "this operation ended"
+    # (mirrors static/js/log_model.js). Kept in sync by
+    # tests/test_lifecycle_terminal_events.py.
+    _TERMINAL_SUFFIXES = ("completed", "succeeded", "failed", "error",
+                          "timeout", "cancelled", "rejected", "confirmed",
+                          "done", "finished", "exhausted", "interrupted")
+
+    @classmethod
+    def _is_terminal(cls, kind: str, data: dict) -> bool:
+        if (data or {}).get("terminal") is True:
+            return True
+        return str(kind or "").rsplit(".", 1)[-1] in cls._TERMINAL_SUFFIXES
+
+    def reconcile_stale_operations(self, scan: int = 500,
+                                   limit: int = 50) -> int:
+        """Close operations that can never finish because the process that
+        started them is gone.
+
+        Called once at startup (before any new event is emitted): any
+        `op`-correlated operation that has a start event but no terminal
+        event in the recent history belonged to the previous run, so it gets
+        one synthetic `operation.interrupted` terminal. Without this, an
+        interrupted request (server restart, crash, aborted stream) leaves a
+        permanent "… running" row in the Activity Log with no matching
+        terminal event ever arriving. Returns how many rows were closed.
+        """
+        try:
+            rows = list(reversed(self.history(limit=scan)))
+        except Exception:
+            return 0
+        starts: dict[str, dict] = {}
+        terminals: set[str] = set()
+        for r in rows:
+            d = r.get("data") or {}
+            op = d.get("op")
+            if not op:
+                continue
+            if self._is_terminal(r.get("kind"), d):
+                terminals.add(op)
+            else:
+                starts.setdefault(op, r)
+        stale = [(op, r) for op, r in starts.items() if op not in terminals]
+
+        # A child operation whose `trace`/`request` is the `request` of
+        # another stale operation is resolved by that parent's own terminal
+        # (the Activity Log closes a request's still-running children), so
+        # emitting a second terminal for it would append a duplicate row.
+        # Only the parent(s) get one.
+        parents: dict[str, set] = {}
+        for op, r in stale:
+            req = (r.get("data") or {}).get("request")
+            if req:
+                parents.setdefault(req, set()).add(op)
+        # Requests that already have a terminal in the window: their children
+        # are resolved by that terminal too (now, or when a client replays
+        # this history), so they must not be double-closed here.
+        closed_requests = set()
+        for r in rows:
+            d = r.get("data") or {}
+            if self._is_terminal(r.get("kind"), d) and d.get("request"):
+                closed_requests.add(d["request"])
+
+        def _covered(op, r):
+            d = r.get("data") or {}
+            for field in ("trace", "request"):
+                val = d.get(field)
+                if not val:
+                    continue
+                if val in closed_requests:
+                    return True
+                owners = parents.get(val)
+                if owners and any(o != op for o in owners):
+                    return True
+            return False
+
+        stale = [(op, r) for op, r in stale if not _covered(op, r)]
+        closed = 0
+        for op, r in stale[:limit]:
+            d = r.get("data") or {}
+            try:
+                self.emit(
+                    "operation.interrupted", agent=r.get("agent") or "",
+                    op=op, trace=d.get("trace", ""),
+                    request=d.get("request", ""),
+                    original_kind=r.get("kind", ""),
+                    reason="interrupted when the app stopped",
+                    terminal=True)
+                closed += 1
+            except Exception:
+                pass
+        return closed
 
     def _prune(self) -> None:
         if not self._limit:

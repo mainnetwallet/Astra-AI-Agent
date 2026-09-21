@@ -133,16 +133,19 @@ class GatewayExecutionRecovery:
 
     # -- reporting (§4, §8, §12) -----------------------------------------------
     def report_execution_success(self, target: ProviderExecutionTarget,
-                                 latency_ms: float = 0.0) -> None:
+                                 latency_ms: float = 0.0, *,
+                                 op: str = "", trace: str = "") -> None:
         self.routing_state.record_success(_ns(target.provider_id),
                                           target.model_id, latency_ms)
         self._emit("gateway.execution_recovered" if latency_ms else
                    "gateway.execution_completed",
-                   provider=target.provider_id, model=target.model_id)
+                   provider=target.provider_id, model=target.model_id,
+                   op=op, trace=trace)
 
     def report_execution_failure(self, target: ProviderExecutionTarget,
                                  category: str,
-                                 cooldown_s: float | None = None) -> None:
+                                 cooldown_s: float | None = None, *,
+                                 op: str = "", trace: str = "") -> None:
         cd = (cooldown_s if cooldown_s is not None else
               CATEGORY_COOLDOWN_S.get(category, DEFAULT_COOLDOWN_S))
         self.routing_state.record_failure(_ns(target.provider_id),
@@ -150,7 +153,8 @@ class GatewayExecutionRecovery:
         self._emit("gateway.target_cooldown" if category in COOLDOWN_CATEGORIES
                    else "gateway.execution_failed",
                    provider=target.provider_id, model=target.model_id,
-                   category=category, cooldown_s=cd)
+                   category=category, cooldown_s=cd,
+                   op=op, trace=trace)
 
     # -- recovery (§4, §5) ------------------------------------------------------
     def recover_execution_target(
@@ -158,12 +162,13 @@ class GatewayExecutionRecovery:
             failed_target: ProviderExecutionTarget, category: str, *,
             required_capabilities: tuple[str, ...] | list[str] = (),
             exclude: set[tuple[str, str]] | None = None,
+            op: str = "", trace: str = "",
     ) -> ProviderExecutionTarget | None:
         """Report `failed_target`'s failure, then select the next suitable
         target from `candidates` — excluding `failed_target` itself and
         anything already in `exclude` (the caller's own "already tried this
         run" set, keeping recovery bounded — §10)."""
-        self.report_execution_failure(failed_target, category)
+        self.report_execution_failure(failed_target, category, op=op, trace=trace)
         exclude = set(exclude or set())
         exclude.add(failed_target.key())
         target = self.select_execution_target(

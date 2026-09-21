@@ -734,3 +734,206 @@ test("a workflow step terminal never closes the workflow's own row", () => {
   assert.strictEqual(wf.model.endTs, "2026-09-21 10:00:05");
   assert.strictEqual(state.active.size, 0);
 });
+
+/* ---------------------------------------------- lifecycle correctness (UI)
+ * The real UI showed (a) duplicate "Agent Router" rows because the router's
+ * decision/supervision/fallback events did not share the route's `op`, and
+ * (b) rows whose visible state was a meaningless "•". These pin both fixes. */
+
+// Mirrors astra.js metaText(): the visible one-line state of a row.
+function metaText(m) {
+  const dur = m.duration ? " · " + m.duration : "";
+  if (m.status === "err") return m.endTime ? "✖ FAILED" + dur : "✖ " + (m.detail || "error");
+  if (m.status === "warn") return "⚠ " + (m.detail || "warning");
+  if (m.status === "running") return "… RUNNING";
+  if (m.status === "ok") return m.endTime ? "✓ COMPLETE" + dur : "✓ " + (m.detail || "done");
+  return m.detail ? "• " + m.detail : "•";
+}
+
+test("router.decision renders as a completed Agent Router row, not a '•'", () => {
+  const m = Log.normalize(lifeEvent("router.decision",
+    { op: "RT", provider: "gemini", model: "gemini-pro", latency_ms: 184,
+      terminal: true }, 1));
+  assert.strictEqual(m.status, "ok");
+  assert.strictEqual(m.title, "Agent Router");
+  assert.match(metaText(m), /✓ COMPLETE/);
+});
+
+test("no primary row can end in the meaningless info/'•' state", () => {
+  const kinds = ["chat.pipeline.assigned", "router.decision", "router.fallback",
+                 "router.gateway_task_completion", "router.gateway_supervision",
+                 "gateway.execution_completed", "gateway.execution_recovered",
+                 "gateway.execution_failed", "task.created",
+                 "browser.navigation", "memory.saved", "chat.pipeline.verified"];
+  kinds.forEach((kind) => {
+    const m = Log.normalize(ev(kind, {}));
+    assert.notStrictEqual(m.status, "info", kind + " must not render as '•'");
+    assert.notStrictEqual(metaText(m), "•", kind + " renders '\u2022'");
+  });
+});
+
+test("chat.pipeline.assigned is labelled distinctly from the router", () => {
+  const m = Log.normalize(ev("chat.pipeline.assigned",
+    { provider: "gemini", model: "gemini-pro" }));
+  assert.notStrictEqual(m.title, "Agent Router");
+  assert.match(m.title, /assigned/i);
+});
+
+test("router progress events refine the SAME Agent Router row", () => {
+  const R = "req-x";
+  const { state, rows } = simulate([
+    lifeEvent("chat.pipeline.started", { op: "chat:" + R, request: R, trace: R }, 1),
+    lifeEvent("router.request", { op: "RT", trace: R, task: "coding" }, 2),
+    lifeEvent("ai.started", { op: "AI", trace: R, provider: "groq", model: "m" }, 3),
+    lifeEvent("ai.completed", { op: "AI", trace: R, provider: "groq", model: "m",
+                                terminal: true, latency_ms: 50 }, 4),
+    // a supervision progress event on the route's op must NOT append a row
+    lifeEvent("router.gateway_task_completion", { op: "RT", trace: R,
+               provider: "groq", model: "m", status: "COMPLETE" }, 5),
+    lifeEvent("router.fallback", { op: "RT", trace: R, provider: "gemini",
+               model: "g", fallback_from: "m", reason: "RATE_LIMIT",
+               terminal: false }, 6),
+    lifeEvent("router.decision", { op: "RT", trace: R, provider: "gemini",
+               model: "g", terminal: true, latency_ms: 184 }, 7),
+    lifeEvent("chat.pipeline.finished", { op: "chat:" + R, request: R, trace: R,
+                                          terminal: true, status: "COMPLETE" }, 8),
+  ]);
+  const routers = rows.filter((r) => r.model.title === "Agent Router");
+  assert.strictEqual(routers.length, 1, "one Agent Router row per route op");
+  assert.strictEqual(routers[0].model.status, "ok");
+  assert.strictEqual(routers[0].model.time, Log.normalize(
+    lifeEvent("router.request", { op: "RT", trace: R }, 2)).time);
+  assert.strictEqual(state.active.size, 0);
+  assert.strictEqual(rows.filter((r) => r.model.status === "running").length, 0);
+});
+
+test("two concurrent router operations stay separate and ordered by start", () => {
+  const { state, rows } = simulate([
+    at(1, "router.request", "2026-09-21 10:00:00", { op: "RA", trace: "A" }),
+    at(2, "router.request", "2026-09-21 10:01:00", { op: "RB", trace: "B" }),
+    at(3, "router.decision", "2026-09-21 10:02:00",
+       { op: "RB", trace: "B", terminal: true, provider: "p", model: "m" }),
+    at(4, "router.decision", "2026-09-21 10:03:00",
+       { op: "RA", trace: "A", terminal: true, provider: "p", model: "m" }),
+  ]);
+  assert.deepStrictEqual(rows.map((r) => r.key), ["op:RA", "op:RB"]);
+  assert.deepStrictEqual(rows.map((r) => r.model.time), ["10:00:00", "10:01:00"]);
+  assert.deepStrictEqual(rows.map((r) => r.model.status), ["ok", "ok"]);
+  assert.strictEqual(state.active.size, 0);
+});
+
+test("gateway routing resolves to the same row on its terminal", () => {
+  const R = "req-g";
+  const { state, rows } = simulate([
+    at(1, "chat.pipeline.started", "2026-09-21 10:00:00",
+       { op: "chat:" + R, request: R, trace: R }),
+    at(2, "astra_gateway.request", "2026-09-21 10:00:01",
+       { op: "G1", trace: R, category: "general" }),
+    at(3, "astra_gateway.success", "2026-09-21 10:00:03",
+       { op: "G1", trace: R, terminal: true, provider: "gemini", model: "g" }),
+    at(4, "chat.pipeline.finished", "2026-09-21 10:00:04",
+       { op: "chat:" + R, request: R, trace: R, terminal: true, status: "COMPLETE" }),
+  ]);
+  const gw = rows.find((r) => r.key === "op:G1");
+  assert.strictEqual(gw.model.status, "ok");
+  assert.strictEqual(gw.model.title, "Gateway call");
+  assert.strictEqual(state.active.size, 0);
+  assert.strictEqual(rows.filter((r) => r.model.status === "running").length, 0);
+});
+
+test("a failed request leaves no running child and closes the root", () => {
+  const R = "req-f";
+  const { state, rows } = simulate([
+    lifeEvent("chat.pipeline.started", { op: "chat:" + R, request: R, trace: R }, 1),
+    lifeEvent("astra_gateway.request", { op: "G9", trace: R }, 2),
+    lifeEvent("chat.pipeline.failed", { op: "chat:" + R, request: R, trace: R,
+                                        terminal: true, error: "boom" }, 3),
+  ]);
+  assert.strictEqual(state.active.size, 0);
+  const root = rows.find((r) => r.key === "op:chat:" + R);
+  assert.strictEqual(root.model.status, "err");
+  assert.strictEqual(rows.find((r) => r.key === "op:G9").model.status, "warn");
+  assert.strictEqual(rows.filter((r) => r.model.status === "running").length, 0);
+});
+
+test("startup reconciliation resolves a stale start and keeps its title", () => {
+  const { state, rows } = simulate([
+    at(1, "chat.pipeline.started", "2026-09-21 09:00:00",
+       { op: "chat:old", request: "old", trace: "old" }),
+    // emitted at the next app start: the previous run's request can't finish
+    at(2, "operation.interrupted", "2026-09-21 10:00:00",
+       { op: "chat:old", request: "old", trace: "old", terminal: true,
+         original_kind: "chat.pipeline.started",
+         reason: "interrupted when the app stopped" }),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "warn");
+  assert.strictEqual(rows[0].model.title, "Request received");
+  assert.match(metaText(rows[0].model), /interrupted/);
+  assert.strictEqual(state.active.size, 0);
+});
+
+test("interrupted rows expose start -> interruption time", () => {
+  const { rows } = simulate([
+    at(1, "astra_gateway.request", "2026-09-21 09:00:00", { op: "G7", trace: "T" }),
+    at(2, "operation.interrupted", "2026-09-21 09:05:00",
+       { op: "G7", trace: "T", terminal: true,
+         original_kind: "astra_gateway.request" }),
+  ]);
+  assert.strictEqual(rows[0].model.title, "Gateway routing");
+  const tr = Log.timeRangeOf(rows[0].model);
+  assert.strictEqual(tr.start, "09:00:00");
+  assert.strictEqual(tr.end, "09:05:00");
+});
+
+test("a parent terminal does not close an unrelated request's children", () => {
+  const { state, rows } = simulate([
+    lifeEvent("chat.pipeline.started", { op: "chat:A", request: "A", trace: "A" }, 1),
+    lifeEvent("chat.pipeline.started", { op: "chat:B", request: "B", trace: "B" }, 2),
+    lifeEvent("astra_gateway.request", { op: "GA", trace: "A" }, 3),
+    lifeEvent("astra_gateway.request", { op: "GB", trace: "B" }, 4),
+    lifeEvent("chat.pipeline.finished", { op: "chat:A", request: "A", trace: "A",
+                                          terminal: true, status: "COMPLETE" }, 5),
+  ]);
+  assert.strictEqual(rows.find((r) => r.key === "op:GA").model.status, "warn");
+  assert.strictEqual(rows.find((r) => r.key === "op:GB").model.status, "running");
+  assert.deepStrictEqual([...state.active.keys()].sort(), ["op:GB", "op:chat:B"]);
+});
+
+test("history + SSE remain chronological and deduplicated", () => {
+  const history = [
+    at(9, "router.decision", "2026-09-21 10:00:02",
+       { op: "RT", terminal: true, provider: "p", model: "m" }),
+    at(7, "router.request", "2026-09-21 10:00:01", { op: "RT", trace: "T" }),
+    at(8, "ai.completed", "2026-09-21 10:00:01",
+       { op: "AI", terminal: true, provider: "p", model: "m" }),
+  ];
+  const ordered = Log.orderHistory(history);
+  assert.deepStrictEqual(ordered.map((e) => e.id), [7, 8, 9]);
+  const { state, rows } = simulate(ordered);
+  assert.strictEqual(rows.length, 2);
+  assert.strictEqual(state.active.size, 0);
+  // a replay of the same ids is skipped by the id de-dupe
+  const s2 = Log.createState();
+  ordered.forEach((e) => {
+    if (Log.admit(s2, e) === "render") Log.markRendered(s2, e);
+  });
+  assert.strictEqual(Log.admit(s2, ordered[0]), "skip");
+});
+
+test("live auto-follow still pauses when the reader scrolls up", () => {
+  const state = Log.createState();
+  // at the bottom: a new row follows
+  let m = { scrollTop: 900, scrollHeight: 1000, clientHeight: 100 };
+  assert.deepStrictEqual(Log.onAppend(state, m, 1),
+                         { scrollToBottom: true, showIndicator: false, unread: 0 });
+  // scrolled up: no jump, indicator shown
+  m = { scrollTop: 100, scrollHeight: 1000, clientHeight: 100 };
+  const dec = Log.onAppend(state, m, 3);
+  assert.strictEqual(dec.scrollToBottom, false);
+  assert.strictEqual(dec.showIndicator, true);
+  assert.strictEqual(dec.unread, 3);
+  // back at the bottom resumes following
+  Log.onScroll(state, { scrollTop: 900, scrollHeight: 1000, clientHeight: 100 });
+  assert.strictEqual(state.follow, true);
+});

@@ -61,7 +61,11 @@
     // Gateway call is already reported (with provider+model) by the
     // astra_gateway.* wrapper — showing both would double-count one call.
     if (kind.indexOf("ai.") === 0 && e.agent === "gateway") return false;
-    if (categoryOf(kind) === "system" && !/(failed|error)$/.test(kind)) return false;
+    // `operation.interrupted` is the startup reconciliation terminal — it
+    // must stay visible or the stale start row it closes would look
+    // permanently running again.
+    if (categoryOf(kind) === "system" &&
+        !/(failed|error|interrupted)$/.test(kind)) return false;
     return true;
   }
 
@@ -77,8 +81,9 @@
     if (k === "web3.transaction.confirmed") return "ok";
     if (k === "web3.transaction.rejected") return "warn";
     if (/^web3\.transaction\.(prepared|submitted|broadcast)$/.test(k)) return "running";
+    if (k === "operation.interrupted") return "warn";
     if (/correction_(failed|exhausted)$/.test(k)) return "err";
-    if (/(^|\.)(error|failed)$/.test(k) || /\.failed$/.test(k)) return "err";
+    if (/(^|[._])(error|failed)$/.test(k)) return "err";
     if (k === "astra_gateway.stream_interrupted") return "err";
     if (k === "provider.health_changed") return d.healthy === false ? "err" : "ok";
     if (k === "correction_requested" || /correction_requested$/.test(k)) return "warn";
@@ -91,9 +96,13 @@
     if (/\.(completed|succeeded|confirmed|broadcast|submitted|saved|recalled|learned|done)$/.test(k)) return "ok";
     if (k === "astra_gateway.success" || k === "chat.pipeline.verified" ||
         k === "chat.pipeline.finished" || k === "gateway.execution_recovered" ||
-        k === "gateway.execution_completed" || k === "provider.selected") return "ok";
+        k === "gateway.execution_completed" || k === "provider.selected" ||
+        k === "router.decision" || k === "chat.pipeline.assigned") return "ok";
     if (k === "gateway.execution_failed") return "err";
-    return "info";
+    // Anything else is a discrete, non-lifecycle step that already
+    // happened; treating it as info left a meaningless "•" as the visible
+    // row state, so it reads as a completed step instead.
+    return "ok";
   }
 
   /* --------------------------------------------------- human-readable copy */
@@ -127,7 +136,7 @@
     "provider.failed": ["🩺", "Provider failed"],
     "credential.rotation": ["🔑", "Credential rotation"],
     "chat.pipeline.started":  ["🚀", "Request received"],
-    "chat.pipeline.assigned": ["🧠", "Agent Router"],
+    "chat.pipeline.assigned": ["🧭", "Agent assigned"],
     "chat.pipeline.verified": ["✅", "Response verified"],
     "chat.pipeline.finished": ["✅", "Response generated"],
     "chat.pipeline.failed":   ["❌", "Request failed"],
@@ -160,10 +169,17 @@
     "gateway.execution_failed":    ["🔁", "Gateway execution failed"],
     "gateway.target_cooldown":     ["🔁", "Target cooldown"],
     "gateway.recovery_target_selected": ["🔁", "Recovery target"],
+    // Emitted by the backend when the app starts and finds an operation
+    // that began in a previous run and can never finish — it keeps the
+    // original title so the row still reads as the operation it was.
+    "operation.interrupted": ["⚠️", "Interrupted"],
   };
 
-  function titleOf(kind) {
+  function titleOf(kind, data) {
     var k = String(kind == null ? "" : kind);
+    var d = data || {};
+    if (k === "operation.interrupted" && d.original_kind &&
+        TITLES[d.original_kind]) return TITLES[d.original_kind];
     if (TITLES[k]) return TITLES[k];
     if (/^gateway\.(task_completion|supervision)\.correction_/.test(k)) {
       return ["🔁", "Result supervision"];
@@ -309,7 +325,7 @@
     var e = event || {};
     var kind = String(e.kind == null ? "" : e.kind);
     var d = e.data && typeof e.data === "object" ? e.data : {};
-    var t = titleOf(kind);
+    var t = titleOf(kind, d);
     var status = statusOf(kind, d);
     var dur = durationOf(d);
     var startTs = stampOf(e.created_at);
@@ -317,6 +333,8 @@
     var subject = clip(scrub(subjectOf(kind, d)), 80);
     var detail;
     if (status === "err") detail = clip(scrub(d.error || d.reason || "failed"), 120);
+    else if (status === "warn" && (d.reason || d.error || d.status))
+      detail = clip(scrub(d.reason || d.error || d.status), 120);
     else if (dur) detail = dur;
     else if (d.status) detail = clip(scrub(d.status), 60);
     else detail = "";
@@ -424,7 +442,7 @@
   var START_SUFFIX = /\.(started|request)$/;
   var TERMINAL_SUFFIX = /\.(completed|succeeded|failed|error|timeout|cancelled|rejected|confirmed|done|finished|exhausted)$/;
   var WEB3_TERMINAL = /^web3\.transaction\.(confirmed|failed|rejected)$/;
-  var UPDATE_KINDS = /^(router\.(retry|fallback)|credential\.rotation|gateway\.target_cooldown)$/;
+  var UPDATE_KINDS = /^(router\.(retry|fallback|gateway_task_completion|gateway_supervision)|credential\.rotation|gateway\.(target_cooldown|execution_completed|execution_recovered|execution_failed))$/;
 
   function phaseOf(kind, d) {
     var k = String(kind == null ? "" : kind);
@@ -496,7 +514,7 @@
     if (!plan.key) return state;
     if (plan.phase === "terminal") {
       state.active.delete(plan.key);
-    } else if (plan.running) {
+    } else if (plan.running || state.active.has(plan.key)) {
       var info = state.active.get(plan.key) || {};
       info.request = plan.request;
       info.trace = plan.trace;

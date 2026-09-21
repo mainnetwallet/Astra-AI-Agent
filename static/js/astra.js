@@ -649,7 +649,10 @@ function metaText(m) {
   if (m.status === "ok") {
     return m.endTime ? "✓ COMPLETE" + dur : "✓ " + (m.detail || "done");
   }
-  return m.detail ? "• " + m.detail : "•";
+  // statusOf() only ever returns running/ok/warn/err, so this is a purely
+  // defensive fallback for an unknown status — it still names a state
+  // instead of leaving a primary row with a bare, meaningless bullet.
+  return "• " + (m.detail || "event");
 }
 
 function buildBlock(title, text) {
@@ -696,7 +699,9 @@ function fillRow(row, m) {
   row.dataset.category = m.category;
   row.dataset.status = m.status;
   row.dataset.text = m.search;
-  row.dataset.cats = m.category + (m.status === "err" ? ",errors" : "");
+  row.dataset.cats = m.category +
+    ((m.status === "err" || m.kind === "operation.interrupted")
+      ? ",errors" : "");
   row.innerHTML = "";
 
   const ind = document.createElement("span");

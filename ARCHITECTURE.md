@@ -326,6 +326,9 @@ tools) in `astra/agents/` and `astra/tools/`, not dropping a file into
 - **`EventBus`** (`core/events.py`) — every subsystem publishes here;
   events persist to SQLite (audit trail + Activity Log history) and
   stream to the frontend over SSE (`/api/v1/events/stream`).
+  `reconcile_stale_operations()` runs once per start (from
+  `bootstrap.py`) to close operations the previous process left running —
+  see "Interrupted operations" under the Activity Log.
 - **`TaskEngine`** (`core/tasks.py`) — a generic DAG task engine that
   workflows dispatch through; a failed child task fails only itself,
   the workflow decides whether to abort or continue.
@@ -372,7 +375,9 @@ panel cannot grow without limit. `AstraLog.isMeaningful()` drops
 heartbeats (`scheduler.tick`, `ai.token`) and the Gateway's duplicate
 `ai.*` mirror of an `astra_gateway.*` call; everything else is mapped by
 `AstraLog.normalize()` to a timeline row (icon, title, subject, status,
-duration) with expandable, redacted details. The pure mapping + scroll
+duration) with expandable, redacted details. Every visible row carries a
+real state — RUNNING / COMPLETE / FAILED / WARNING — so no row renders
+the old meaningless "•" `info` fallback. The pure mapping + scroll
 state machine live in `static/js/log_model.js` (unit-tested under node);
 `static/js/astra.js` only does DOM work.
 
@@ -397,6 +402,27 @@ the still-running children it owns (matched by the request `trace` /
 `run_id`), marking them `warn`/interrupted; every chat turn, workflow
 run and tool call emits such a terminal event, so a finished request
 never leaves an operation stuck on "running".
+
+Internal steps that belong to an operation carry that operation's `op`
+rather than creating a row of their own: the router's `router.fallback`
+and `router.gateway_task_completion` / `router.gateway_supervision`
+progress events, and the Gateway recovery reports
+(`gateway.execution_completed/_recovered/_failed`, `gateway.target_cooldown`)
+all refine the same "Agent Router" row. The Gateway's assignment step
+(`chat.pipeline.assigned`) keeps its own, distinctly labelled row
+("Agent assigned") so it is never confused with the router's row.
+
+**Interrupted operations.** `ChatPipeline.run()` always emits a terminal
+event for the turn, even when a step raises unexpectedly. If the process
+itself dies mid-operation (server restart, crash, aborted request) no
+terminal can be written; on the next start
+`EventBus.reconcile_stale_operations()` scans the recent history and
+closes every `op`-correlated start with no terminal by emitting one
+synthetic `operation.interrupted` (`terminal=True`,
+`original_kind=<the start kind>`), so the row keeps its title and shows
+`⚠ interrupted when the app stopped` with start → interruption time.
+Children whose request already has a terminal are skipped there (that
+terminal resolves them), which keeps the reconciliation idempotent.
 
 ---
 

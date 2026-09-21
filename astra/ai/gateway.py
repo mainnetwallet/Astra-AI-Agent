@@ -1076,22 +1076,29 @@ class AstraAIGateway:
             candidates, required_capabilities=required_capabilities,
             exclude=exclude)
 
-    def report_execution_success(self, target, latency_ms: float = 0.0) -> None:
+    def report_execution_success(self, target, latency_ms: float = 0.0, *,
+                                 op: str = "", trace: str = "") -> None:
         """Record that `target` (a ProviderExecutionTarget) just succeeded —
         clears its cooldown and becomes the new soft last-successful
-        preference (§12)."""
-        self.execution_recovery.report_execution_success(target, latency_ms)
+        preference (§12). `op`/`trace` (optional) are the calling route
+        operation's correlation ids, so its success event refines that
+        operation's Activity Log row instead of appearing as an orphan."""
+        self.execution_recovery.report_execution_success(
+            target, latency_ms, op=op, trace=trace)
 
     def report_execution_failure(self, target, category: str,
-                                 cooldown_s: float | None = None) -> None:
+                                 cooldown_s: float | None = None, *,
+                                 op: str = "", trace: str = "") -> None:
         """Record that `target` just failed with §7 category `category` —
         cools down that (provider, model) pair only (§6/§8), never the
-        whole provider."""
+        whole provider. `op`/`trace` correlate the failure event with the
+        route operation that reported it."""
         self.execution_recovery.report_execution_failure(
-            target, category, cooldown_s=cooldown_s)
+            target, category, cooldown_s=cooldown_s, op=op, trace=trace)
 
     def recover_execution_target(self, candidates, failed_target, category, *,
-                                 required_capabilities=(), exclude=None):
+                                 required_capabilities=(), exclude=None,
+                                 op: str = "", trace: str = ""):
         """Report `failed_target`'s failure, then select the next suitable
         target from `candidates` (excluding `failed_target` and anything in
         `exclude`) — the single call the Existing Provider system needs on
@@ -1099,7 +1106,8 @@ class AstraAIGateway:
         task (§5, §9)."""
         return self.execution_recovery.recover_execution_target(
             candidates, failed_target, category,
-            required_capabilities=required_capabilities, exclude=exclude)
+            required_capabilities=required_capabilities, exclude=exclude,
+            op=op, trace=trace)
 
     # ═══════════════════════════════════════════════════════════════════
     # §6-§12: Gateway-OWNED result supervision for the EXISTING Provider

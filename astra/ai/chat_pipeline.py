@@ -379,6 +379,25 @@ class ChatPipeline:
         self._emit("chat.pipeline.started", gateway=trace["gateway"],
                    op=f"chat:{req}", request=req, trace=req)
 
+        # Any unexpected error must still close this turn's root operation:
+        # without a terminal event the "Request received" row would stay
+        # "… running" in the Activity Log forever (reconciliation keys off
+        # the correlation ids, it never filters running rows away).
+        try:
+            return self._run_turn(raw, context, attachments, req, gateway_ok,
+                                  trace)
+        except Exception as e:
+            self._emit("chat.pipeline.failed",
+                       error=f"{type(e).__name__}: {e}",
+                       op=f"chat:{req}", request=req, trace=req,
+                       terminal=True)
+            raise
+
+    def _run_turn(self, raw, context, attachments, req, gateway_ok,
+                  trace) -> dict:
+        """The rest of one chat turn, split out of `run()` so it can
+        guarantee a terminal event even when a step raises unexpectedly."""
+
         # 1) Gateway understands + assigns
         if gateway_ok:
             brief = self._understand(raw, context, attachments, req=req)

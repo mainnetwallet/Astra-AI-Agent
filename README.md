@@ -69,7 +69,7 @@ Orchestrator/Planner loop was removed, and `ToolRegistry` now runs standalone
 | **ToolRegistry** (`astra/tools/registry.py`) | Builtin + web3 + browser tools with schema validation, permission policy, timeout/retry, audit trail. Runs standalone. |
 | **MemorySystem** (`astra/memory/memory.py`) | Layered memory (working/short/long/semantic/episodic) with importance scoring + search; `ExperienceStore` learns from past outcomes. |
 | **WorkflowEngine + SchedulerManager** (`astra/workflows/`) | Step workflows with `{{step_id.param}}` data flow, run on demand or on oneshot/interval/daily/weekly/deadline triggers (no external cron). Steps run with the shared `ToolContext`, so context-dependent tools (`remember`, `recall`, `create_task`, …) work as steps, not just direct tool calls. |
-| **EventBus** (`astra/core/events.py`) | Persisted events + SSE streaming to the Activity Log tab. |
+| **EventBus** (`astra/core/events.py`) | Persisted events + SSE streaming to the Activity Log tab; closes operations interrupted by a previous run at startup. |
 | **TaskEngine** (`astra/core/tasks.py`) | Generic DAG task engine workflows dispatch through. |
 | **Web3 Manager** (`astra/web3/`) | Lifecycle-tracked transactions (CREATED→…→CONFIRMED/FAILED), deterministic CONFIRM/AUTO policy, never-sign-twice, on-chain recovery. Private keys never leave the secure keystore. |
 
@@ -205,7 +205,7 @@ configured.
 | **Router** | Model registry + task routing stats (the AstraRouter's view) |
 | **Wallet** | Web3 transaction policy (mode, limits, allowlists) + recent txs |
 | **Backup** | Export/import as one JSON file — currently a placeholder (`_exports: {}`) |
-| **Activity Log** | Live execution timeline (SSE): chronological by backend event time, newest at the bottom (out-of-order events land in place), auto-follow with "↓ New logs", category filters (Agents/AI/Tools/Browser/Web3/Errors), search, pause/resume, copy, clear, expandable details. Start/terminal events are reconciled by a correlation id, so a running row is updated in place — keeping its original timestamp/position — instead of leaving a stale entry |
+| **Activity Log** | Live execution timeline (SSE): chronological by backend event time, newest at the bottom (out-of-order events land in place), auto-follow with "↓ New logs", category filters (Agents/AI/Tools/Browser/Web3/Errors), search, pause/resume, copy, clear, expandable details. Start/terminal events are reconciled by a correlation id, so a running row is updated in place — keeping its original timestamp/position — instead of leaving a stale entry; internal router/gateway progress events refine their operation's row (no duplicates), every row shows a real RUNNING/COMPLETE/FAILED/WARNING state, and a request interrupted by a restart is closed as `⚠ interrupted` on the next start |
 
 ## API
 

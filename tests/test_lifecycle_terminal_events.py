@@ -12,7 +12,7 @@ import json
 import unittest
 
 from astra.ai.chat_pipeline import ChatPipeline
-from astra.ai.router import RoutingResult
+from astra.ai.router import RoutingRequest, RoutingResult
 from astra.ai.gateway_task_completion import GatewayTaskCompletionSupervisor
 from tests.helpers import make_stack
 
@@ -202,6 +202,153 @@ class TestWorkflowTerminalEvents(unittest.TestCase):
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0]["op"], started["op"])
         self.assertTrue(failed[0]["terminal"])
+
+
+class _BoomRouter:
+    """Router that raises unexpectedly (a bug, not an honest routing error)."""
+
+    def available_targets(self):
+        return list(TARGETS)
+
+    def route_request(self, req):
+        raise RuntimeError("router exploded")
+
+
+class TestUnexpectedErrorsStillTerminate(unittest.TestCase):
+    def test_unexpected_step_error_still_closes_the_request(self):
+        bus = Bus()
+        pipe = ChatPipeline(GW([understand()]), _BoomRouter(), events=bus)
+        with self.assertRaises(RuntimeError):
+            pipe.run("hello")
+        term = bus.by("chat.pipeline.failed")
+        self.assertEqual(len(term), 1,
+                         "an unexpected error must still emit a terminal event")
+        self.assertTrue(term[0]["data"]["terminal"])
+        self.assertEqual(term[0]["data"]["op"],
+                         bus.by("chat.pipeline.started")[0]["data"]["op"])
+        self.assertIn("RuntimeError", term[0]["data"]["error"])
+
+
+class TestRouterGatewayCorrelation(unittest.TestCase):
+    """The fallback + gateway-recovery events must carry the ROUTE's op/trace
+    so the Activity Log refines one "Agent Router" row instead of appending
+    orphan rows for each internal step."""
+
+    def _run(self):
+        from astra.ai.gateway import AstraAIGateway
+        from astra.ai.router import AstraRouter
+        from astra.core.events import EventBus
+        from astra.store import Store
+        from tests.test_gateway_runtime_wiring import RecordingProvider
+        store = Store(":memory:")
+        bus = EventBus(store)
+        gw = AstraAIGateway(connections=[], store=store, events=bus)
+        router = AstraRouter(
+            providers=[
+                RecordingProvider("groq", ["m1"],
+                                  fail_models={"m1": (9, "rate limit exceeded")}),
+                RecordingProvider("gemini", ["m2"])],
+            gateway=gw)
+        router.attach_events(bus)
+        rr = router.route_request(RoutingRequest(
+            task_type="simple_chat",
+            messages=[{"role": "user", "content": "hi"}]))
+        return rr, bus.history(limit=200)
+
+    def test_fallback_carries_the_route_op_and_precedes_the_decision(self):
+        rr, rows = self._run()
+        self.assertTrue(rr.ok)
+        start = [r for r in rows if r["kind"] == "router.request"][0]
+        op = start["data"]["op"]
+        self.assertTrue(op)
+        decisions = [r for r in rows if r["kind"] == "router.decision"]
+        self.assertEqual(len(decisions), 1, "one terminal decision per route")
+        self.assertEqual(decisions[0]["data"]["op"], op)
+        self.assertTrue(decisions[0]["data"]["terminal"])
+        fallbacks = [r for r in rows if r["kind"] == "router.fallback"]
+        self.assertEqual(len(fallbacks), 1)
+        self.assertEqual(fallbacks[0]["data"]["op"], op,
+                         "fallback must refine the route's own row")
+        self.assertEqual(fallbacks[0]["data"]["trace"],
+                         decisions[0]["data"]["trace"])
+        self.assertLess(fallbacks[0]["id"], decisions[0]["id"],
+                        "fallback must be emitted before the route terminal")
+
+    def test_gateway_recovery_events_carry_the_route_op(self):
+        _, rows = self._run()
+        start = [r for r in rows if r["kind"] == "router.request"][0]
+        op = start["data"]["op"]
+        recovery = [r for r in rows
+                    if r["kind"] in ("gateway.target_cooldown",
+                                     "gateway.execution_failed",
+                                     "gateway.execution_completed",
+                                     "gateway.execution_recovered")]
+        self.assertTrue(recovery, "a failed attempt must report recovery state")
+        for r in recovery:
+            self.assertEqual(r["data"].get("op"), op,
+                             "%s must carry the route op" % r["kind"])
+
+    def test_every_route_op_is_closed(self):
+        _, rows = self._run()
+        starts = {r["data"]["op"] for r in rows if r["kind"] == "router.request"}
+        terminals = {r["data"]["op"] for r in rows
+                     if r["kind"] == "router.decision"}
+        self.assertTrue(starts)
+        self.assertEqual(starts, terminals,
+                         "no route operation may be left running")
+
+
+class TestEventBusStartupReconciliation(unittest.TestCase):
+    """A previous run's in-flight operations can never finish; the next app
+    start must close them so the Activity Log shows no permanent RUNNING row."""
+
+    def test_stale_root_is_closed_and_its_child_is_covered(self):
+        from astra.core.events import EventBus
+        from astra.store import Store
+        store = Store(":memory:")
+        bus = EventBus(store)
+        bus.emit("chat.pipeline.started", op="chat:dead", request="dead",
+                 trace="dead")
+        # the child shares the request's trace -> the root's own terminal
+        # already resolves it, so it must NOT get a second, duplicate one
+        bus.emit("ai.started", op="ai-1", trace="dead")
+        bus.emit("tool.failed", op="done-1", tool="x", terminal=True)
+
+        next_run = EventBus(store)          # the app starting again
+        closed = next_run.reconcile_stale_operations()
+        self.assertEqual(closed, 1)
+        rows = next_run.history(limit=50)
+        interrupted = [r for r in rows if r["kind"] == "operation.interrupted"]
+        self.assertEqual([r["data"]["op"] for r in interrupted], ["chat:dead"])
+        self.assertTrue(interrupted[0]["data"]["terminal"])
+        self.assertEqual(interrupted[0]["data"]["original_kind"],
+                         "chat.pipeline.started")
+        # running again changes nothing: the operation is already closed
+        self.assertEqual(next_run.reconcile_stale_operations(), 0)
+
+    def test_unrelated_stale_starts_each_get_their_own_terminal(self):
+        from astra.core.events import EventBus
+        from astra.store import Store
+        store = Store(":memory:")
+        bus = EventBus(store)
+        bus.emit("tool.started", op="T1", tool="a")
+        bus.emit("astra_gateway.request", op="G1", trace="other")
+        bus.emit("operation.interrupted", op="G1", terminal=True)
+        next_run = EventBus(store)
+        self.assertEqual(next_run.reconcile_stale_operations(), 1)
+        ops = {r["data"].get("op") for r in next_run.history(limit=50)
+               if r["kind"] == "operation.interrupted"}
+        self.assertEqual(ops, {"T1", "G1"})
+
+    def test_recovered_operation_is_not_reported_as_interrupted(self):
+        from astra.core.events import EventBus
+        from astra.store import Store
+        store = Store(":memory:")
+        bus = EventBus(store)
+        bus.emit("router.request", op="R", trace="T")
+        bus.emit("ai.failed", op="R", retrying=True, terminal=False)
+        bus.emit("router.decision", op="R", terminal=True)
+        self.assertEqual(bus.reconcile_stale_operations(), 0)
 
 
 if __name__ == "__main__":

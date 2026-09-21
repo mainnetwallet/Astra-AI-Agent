@@ -71,6 +71,10 @@ def build(store: Store | None = None, config=None,
 
     # core subsystems
     events = EventBus(store)
+    # The previous run's in-flight operations are gone for good; close their
+    # start rows once so the Activity Log never shows a permanent "… running"
+    # operation with no terminal event ever arriving.
+    events.reconcile_stale_operations()
     policy = Policy(granted=config.getlist("GRANTED_PERMISSIONS",
                                            default=["read", "low_risk_write",
                                                     "browser_action"]))

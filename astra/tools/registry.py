@@ -75,6 +75,37 @@ class ToolRegistry:
                        "average_duration": 0.0, "last_called": ""}))
         return {n: dict(s) for n, s in self._stats.items()}
 
+    # -- activity events -----------------------------------------------------
+    @staticmethod
+    def _brief(obj, limit: int = 240) -> str:
+        """A tiny, redacted, JSON-safe summary of a tool's args/result for the
+        Activity Log. Capped so a large payload never bloats the event table,
+        and run through security.redact so no secret leaves the process."""
+        try:
+            from astra.security import redact as _redact
+            safe = _redact(obj)
+            if isinstance(safe, str):
+                text = safe
+            else:
+                import json
+                text = json.dumps(safe, ensure_ascii=False, default=str)
+        except Exception:
+            return ""
+        return text[:limit] + ("…" if len(text) > limit else "")
+
+    def _emit_tool(self, kind: str, tool: Tool, **data) -> None:
+        """Publish one tool-lifecycle event for the Activity Log.
+
+        Best-effort: a subscriber/event-bus failure must never break the tool
+        call it is describing, so this swallows everything."""
+        if self.events is None:
+            return
+        try:
+            self.events.emit(kind, agent="tools", tool=tool.name,
+                             category=tool.category, **data)
+        except Exception:
+            pass
+
     # -- rate limiting --------------------------------------------------------
     def _enforce_rate_limit(self, tool: Tool) -> None:
         if tool.rate_limit_per_min <= 0:
@@ -163,13 +194,18 @@ class ToolRegistry:
                 pass
 
         start = time.perf_counter()
+        self._emit_tool("tool.started", tool, input=self._brief(args))
         try:
             result = self._invoke_with_retry(tool, args, ctx)
-        except Exception:
+        except Exception as e:
             ms = (time.perf_counter() - start) * 1000.0
             self._note(name, errored=True, ms=ms)
+            self._emit_tool("tool.failed", tool, duration_ms=ms,
+                            error=str(e)[:200], input=self._brief(args))
             raise
         ms = (time.perf_counter() - start) * 1000.0
         self._note(name, errored=False, ms=ms)
+        self._emit_tool("tool.completed", tool, duration_ms=ms,
+                        output=self._brief(result))
         return {"ok": True, "decision": "allow", "result": result,
                 "duration_ms": ms}

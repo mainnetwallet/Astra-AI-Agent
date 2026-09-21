@@ -28,17 +28,25 @@
   <!-- ======== ACTIVITY LOG (core) ======== -->
   <section id="tab-logs" class="tabview">
     <div class="panel">
-      <div class="panel-head"><h3>📡 Activity Log</h3>
-        <span class="hint muted" id="logs-count" style="margin:0">0 events</span></div>
-      <div class="cards mini" id="logs-stats"></div>
+      <div class="panel-head logs-head">
+        <h3>📡 Activity Log</h3>
+        <div class="logs-head-right">
+          <span class="logs-live" id="logs-live" data-state="idle">● LIVE</span>
+          <span class="hint muted" id="logs-count" style="margin:0">0 events</span>
+        </div>
+      </div>
+
+      <div class="cards mini log-stats" id="logs-stats"></div>
 
       <div class="logs-toolbar">
         <div class="chips" id="logs-filters">
           <span class="chip active" data-filter="all">All</span>
-          <span class="chip" data-filter="gateway">Gateway</span>
-          <span class="chip" data-filter="providers">Provider</span>
+          <span class="chip" data-filter="agents">Agents</span>
+          <span class="chip" data-filter="ai">AI</span>
+          <span class="chip" data-filter="tools">Tools</span>
+          <span class="chip" data-filter="browser">Browser</span>
+          <span class="chip" data-filter="web3">Web3</span>
           <span class="chip" data-filter="errors">Errors</span>
-          <span class="chip" data-filter="success">Success</span>
         </div>
       </div>
       <div class="logs-toolbar">
@@ -48,7 +56,12 @@
         <button class="btn mini" id="btn-logs-clear">🗑️ Clear</button>
       </div>
 
-      <div id="live-feed" class="list log-list"><div class="empty">listening…</div></div>
+      <div class="log-wrap">
+        <div id="live-feed" class="list log-list">
+          <div class="empty">Listening for activity…</div>
+        </div>
+        <button type="button" id="logs-jump" class="logs-jump" hidden>↓ New logs</button>
+      </div>
     </div>
   </section>
 
@@ -155,6 +168,7 @@
 
 </main>
 
+<script src="/static/js/log_model.js"></script>
 <script src="/static/js/astra.js"></script>
 </body>
 </html>

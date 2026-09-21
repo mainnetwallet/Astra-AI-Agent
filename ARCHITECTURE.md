@@ -168,6 +168,7 @@ astra/
 
 plugins/                  Empty placeholder — see §4
 static/                   SPA frontend (vanilla JS + CSS, served by web.py)
+                          js/log_model.js — Activity Log timeline model
 tests/                    unittest + pytest suite (see §7)
 ```
 
@@ -302,7 +303,10 @@ tools) in `astra/agents/` and `astra/tools/`, not dropping a file into
   through schema validation, a permission-level gate
   (`core/permissions.py`: `READ` → `LOW_RISK_WRITE` → `BROWSER_ACTION`
   → `FINANCIAL_ACTION` → `SYSTEM_ACTION`), timeout/retry/backoff, and
-  an audit trail. Runs standalone today (see §1) — Web3 flows and
+  an audit trail. Each executed call also emits `tool.started` then one
+  terminal `tool.completed`/`tool.failed` event (tool name, category,
+  duration, and a redacted input/output summary) for the Activity Log.
+  Runs standalone today (see §1) — Web3 flows and
   `tests/test_web3_toolregistry_auto_integration.py` call it directly.
 - **`MemorySystem`** (`memory/memory.py`) — five layers (working,
   short, long, semantic, episodic), all SQLite-backed, no secrets, no
@@ -349,6 +353,23 @@ embedding code can instead pass `site=`/`store=`/`agent=` directly and
 keep ownership themselves — that's how the test suite boots a real
 server in-process on an ephemeral port.
 
+### Activity Log panel
+
+The panel is a *view* over the existing `/api/events` history and
+`/api/events/stream` SSE feed — there is no second logging system. Rows
+render oldest → newest with live events appended at the bottom, and the
+scroll position drives follow mode: near the bottom it auto-scrolls and
+keeps the newest row visible, scrolling up stops auto-follow and shows a
+"↓ New logs" pill that jumps back and resumes. The DOM is capped at 300
+rows and the in-memory dedupe/pause buffers are bounded, so a long-lived
+panel cannot grow without limit. `AstraLog.isMeaningful()` drops
+heartbeats (`scheduler.tick`, `ai.token`) and the Gateway's duplicate
+`ai.*` mirror of an `astra_gateway.*` call; everything else is mapped by
+`AstraLog.normalize()` to a timeline row (icon, title, subject, status,
+duration) with expandable, redacted details. The pure mapping + scroll
+state machine live in `static/js/log_model.js` (unit-tested under node);
+`static/js/astra.js` only does DOM work.
+
 ---
 
 ## 8. Tests
@@ -367,6 +388,13 @@ server smoke test. Notable files:
 - `test_fastapi_server.py` — boots the real FastAPI/uvicorn server
   in-process and checks status codes, security headers, JSON bodies,
   static bytes, SSE frames, lifespan, and the worker pool.
+- `test_tool_events.py` — the `tool.started`/`tool.completed`/
+  `tool.failed` lifecycle contract (one terminal event per call,
+  redacted input/output, a broken bus never breaks a tool).
+- `test_log_model_js.py` + `tests/js/log_model.test.js` — runs the pure
+  Activity Log mapping/scroll/pause/filter logic under node (skipped
+  when node is absent); `test_activity_log_ui.py` locks the static
+  panel contract (anchors, chips, append-not-prepend, no HTML injection).
 - `test_security.py`, `test_per_key_health.py`,
   `test_provider_error_isolation.py` — redaction, credential health,
   and failure-isolation guarantees.

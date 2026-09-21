@@ -540,50 +540,37 @@ loaders.logs = async function () {
     const lastId = await loadLogsHistory();
     if (window.EventSource) openSse(lastId);
     else setInterval(eventsPoll, 3000);   // fallback for older browsers
+  } else if (LOGS.follow) {
+    // Returning to the tab: snap back to the newest entry so live-follow
+    // resumes at the bottom instead of the top of the scroll area.
+    jumpToLatest();
   }
 };
 
-// The Logs panel is meant for the stuff that actually matters operationally
-// — Gateway calls, provider/API calls, and provider health — not every
-// internal step of a chat turn (agent/task/tool/memory/workflow/router
-// events all fire per chat message and would drown those out).
-const IMPORTANT_EVENT_HEADS = new Set(["astra_gateway", "ai", "provider"]);
-function isImportantEvent(e) {
-  const kind = (e && e.kind) || "";
-  if (isCorrectionEvent(kind)) return true;
-  if (!IMPORTANT_EVENT_HEADS.has(kind.split(".")[0])) return false;
-  // The Gateway's own connections also emit ai.started/completed while
-  // streaming, but every Gateway call is already reported (with its
-  // AI + model) by the astra_gateway.* wrapper events — showing both
-  // would list — and count — the same call twice.
-  if (kind.startsWith("ai.") && e.agent === "gateway") return false;
-  return true;
-}
-// Gateway result-supervision events ("the reply wasn't what was asked for,
-// asking the Provider again") — shown so a rejected reply is explainable.
-function isCorrectionEvent(kind) {
-  return /^gateway\.(task_completion|supervision)\.correction_/.test(kind || "");
-}
+// The timeline shows real application activity, not every internal step.
+// AstraLog.isMeaningful() drops pure heartbeats and duplicate call events
+// (scheduler.tick, streamed ai.token, the Gateway's own ai.* mirror of an
+// astra_gateway.* call) while keeping chat/agent/ai/tool/browser/web3 work.
+const isImportantEvent = (e) => AstraLog.isMeaningful(e);
 
 // Everything that already happened before the Logs tab/SSE connection
 // opened lives in the events table — load it once up front so the panel
-// shows the full picture, not just events from this moment forward.
-// Returns the newest id loaded (0 if none), so the live SSE stream can
-// pick up from exactly there with no gap and no duplicates.
+// shows the full picture, not just events from this moment forward. Rows
+// render oldest -> newest (newest at the bottom); the newest id is returned
+// so the live SSE stream resumes exactly there — no gap, no duplicates.
 async function loadLogsHistory() {
   const feed = $("#live-feed");
   try {
-    // fetch more than the display buffer needs since most rows get
-    // filtered out by isImportantEvent() below.
+    // fetch more than the display buffer needs since some rows get filtered.
     const r = await api("/api/events?limit=500");
     const rows = (r && r.ok && r.data) ? r.data : [];
     if (!rows.length) return 0;
     if (feed && feed.firstElementChild && feed.firstElementChild.classList.contains("empty"))
       feed.innerHTML = "";
-    // rows arrive newest-first; feedLine() always prepends, so process
-    // oldest-first to end up with the same newest-on-top order live
-    // events get.
-    [...rows].reverse().forEach(feedLine);
+    // /api/events returns newest-first; the timeline is chronological, so
+    // order by id and append. Then snap to the bottom in follow mode.
+    AstraLog.orderHistory(rows).forEach((e) => appendEvent(e, true));
+    jumpToLatest();
     return rows[0].id || 0;
   } catch (_) {
     return 0;
@@ -595,20 +582,15 @@ async function loadLogsHistory() {
  * feed. Purely client-side: every rendered feed-line carries the event kind
  * + a resolved category as data attributes, and the toolbar just toggles
  * visibility / appends nothing while paused. */
-const LOGS = {
-  filter: "all", query: "", paused: false, buffer: [],
-  counts: { total: 0, gateway: 0, provider: 0, errors: 0, success: 0 },
-};
-const LOGS_MAX_BUFFER = 300;
+const LOGS = AstraLog.createState();
+const LOGS_MAX_BUFFER = 300;   // bounded DOM: oldest rows drop off the top
 
-// Two separate API-call counters: Gateway (its own 4 AI services) and
-// Provider (the Provider system's providers). Success/Errors count the
-// outcomes of those same calls, so Success + Errors = Gateway + Provider.
+// Compact breakdown shown above the timeline (matches the filter chips).
 const LOG_STAT_DEFS = [
   { key: "total", label: "Total" },
-  { key: "gateway", label: "Gateway API calls" },
-  { key: "provider", label: "Provider API calls" },
-  { key: "success", label: "Success" },
+  { key: "agents", label: "Agents" },
+  { key: "ai", label: "AI" },
+  { key: "tools", label: "Tools" },
   { key: "errors", label: "Errors" },
 ];
 
@@ -621,58 +603,198 @@ function renderLogStats() {
   if (count) count.textContent = `${LOGS.counts.total} events`;
 }
 
-// Which system an event belongs to: the Astra AI Gateway (its own four AI
-// services) or the Provider system.
-function logSource(e) {
-  const k = (e && e.kind) || "";
-  const head = k.split(".")[0];
-  if (head === "astra_gateway" || isCorrectionEvent(k)) return "gateway";
-  if (head === "ai") return e.agent === "gateway" ? "gateway" : "provider";
-  if (head === "provider") return "provider";
-  return "";
+// header live state: ● LIVE | ○ RECONNECTING | Ⅱ PAUSED
+function setLiveState(state) {
+  const el = $("#logs-live");
+  if (!el) return;
+  el.textContent = state === "live" ? "● LIVE"
+                 : state === "paused" ? "Ⅱ PAUSED"
+                 : "○ RECONNECTING";
+  el.dataset.state = state;
+}
+function refreshLiveState() {
+  setLiveState(LOGS.paused ? "paused" : SSE_STATE);
 }
 
-// "ok" | "err" | "info" — how the line is coloured / filtered.
-function logStatus(e) {
-  const k = (e && e.kind) || "";
-  const d = (e && e.data) || {};
-  if (k === "astra_gateway.success" || k === "ai.completed") return "ok";
-  if (isCorrectionEvent(k))
-    return /correction_(failed|exhausted)$/.test(k) ? "err"
-         : /correction_succeeded$/.test(k) ? "ok" : "info";
-  if (k === "astra_gateway.error" || k === "astra_gateway.stream_interrupted" ||
-      k === "ai.failed" || k === "provider.failed") return "err";
-  if (k === "provider.health_changed") return d.healthy === false ? "err" : "ok";
-  return "info";
+function feedMetrics() {
+  const feed = $("#live-feed");
+  if (!feed) return {};
+  return { scrollTop: feed.scrollTop, scrollHeight: feed.scrollHeight,
+           clientHeight: feed.clientHeight };
 }
 
-// "ok" | "err" | null — set ONLY for the terminal event of one real API
-// call. Every call fires a start/request event and exactly one terminal
-// event, so counting terminals counts calls (not log lines). Aggregate
-// "all providers failed" summaries and stream_interrupted follow-ups are
-// not extra calls.
-function logOutcome(e) {
-  const k = (e && e.kind) || "";
-  const d = (e && e.data) || {};
-  if (k === "astra_gateway.success") return "ok";
-  if (k === "astra_gateway.error") return "err";
-  if (logSource(e) === "provider" && !d.aggregate) {
-    if (k === "ai.completed") return "ok";
-    if (k === "ai.failed") return "err";
+// Scroll to the newest row and resume live-follow.
+function jumpToLatest() {
+  const feed = $("#live-feed");
+  AstraLog.onJumpToLatest(LOGS);
+  if (feed) feed.scrollTop = feed.scrollHeight;
+  const jump = $("#logs-jump");
+  if (jump) jump.hidden = true;
+}
+
+function showJump(unread) {
+  const jump = $("#logs-jump");
+  if (!jump) return;
+  jump.textContent = unread > 0 ? `↓ New logs · ${unread}` : "↓ New logs";
+  jump.hidden = false;
+}
+
+function metaText(m) {
+  if (m.status === "err") return "✖ " + (m.detail || "error");
+  if (m.status === "warn") return "⚠ " + (m.detail || "warning");
+  if (m.status === "running") return "… running";
+  if (m.status === "ok") return "✓ " + (m.detail || "done");
+  return m.detail ? "• " + m.detail : "•";
+}
+
+function buildBlock(title, text) {
+  const wrap = document.createElement("div");
+  wrap.className = "tl-block";
+  const h = document.createElement("h5");
+  h.textContent = title;
+  const pre = document.createElement("pre");
+  pre.textContent = text;         // textContent => no HTML injection
+  wrap.append(h, pre);
+  return wrap;
+}
+
+function buildDetails(m) {
+  const frag = document.createDocumentFragment();
+  const dl = document.createElement("dl");
+  dl.className = "tl-fields";
+  const fields = [["Status", m.status]].concat(m.fields);
+  if (m.duration) fields.push(["Duration", m.duration]);
+  fields.forEach(([label, value]) => {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    dl.append(dt, dd);
+  });
+  frag.appendChild(dl);
+  if (m.input) frag.appendChild(buildBlock("Input", m.input));
+  if (m.output) frag.appendChild(buildBlock("Output", m.output));
+  return frag;
+}
+
+// One collapsed timeline row + its expandable details. Built from DOM nodes
+// (never innerHTML for event data) so a crafted event cannot inject markup.
+function buildRow(m) {
+  const row = document.createElement("div");
+  row.className = "tl-row";
+  row.dataset.category = m.category;
+  row.dataset.status = m.status;
+  row.dataset.id = m.id;
+  row.dataset.text = m.search;
+  row.dataset.cats = m.category + (m.status === "err" ? ",errors" : "");
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.setAttribute("aria-expanded", "false");
+
+  const ind = document.createElement("span");
+  ind.className = "tl-ind";
+  const dot = document.createElement("span");
+  dot.className = "tl-dot " + m.status;
+  ind.appendChild(dot);
+
+  const time = document.createElement("span");
+  time.className = "tl-time";
+  time.textContent = m.time;
+
+  const main = document.createElement("span");
+  main.className = "tl-main";
+  const title = document.createElement("span");
+  title.className = "tl-title";
+  const ico = document.createElement("span");
+  ico.className = "tl-ico";
+  ico.textContent = m.icon;
+  title.append(ico, document.createTextNode(m.title));
+  main.appendChild(title);
+  if (m.subject) {
+    const sub = document.createElement("span");
+    sub.className = "tl-sub";
+    sub.textContent = m.subject;
+    main.appendChild(sub);
   }
-  return null;
+
+  const meta = document.createElement("span");
+  meta.className = "tl-meta";
+  meta.textContent = metaText(m);
+
+  row.append(ind, time, main, meta);
+
+  const detail = document.createElement("div");
+  detail.className = "tl-detail";
+  detail.hidden = true;
+  detail.appendChild(buildDetails(m));
+  row.appendChild(detail);
+
+  const toggle = () => {
+    const open = row.classList.toggle("open");
+    detail.hidden = !open;
+    row.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  row.addEventListener("click", toggle);
+  row.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); }
+  });
+  return row;
 }
 
-// filter-chip categories for one event: gateway | providers | errors | success
-function logCategories(e) {
-  const cats = new Set();
-  const src = logSource(e);
-  if (src === "gateway") cats.add("gateway");
-  if (src === "provider") cats.add("providers");
-  const st = logStatus(e);
-  if (st === "err") cats.add("errors");
-  if (st === "ok") cats.add("success");
-  return cats;
+// Append one event at the bottom, honouring follow/scroll and the DOM cap.
+// `quiet` (history load / pause flush) skips the per-row scroll bookkeeping so
+// a large batch is one layout pass, not hundreds.
+function appendEvent(event, quiet) {
+  if (!event || event.id == null) return;
+  if (!isImportantEvent(event)) return;
+  const key = String(event.id);
+  if (LOGS.rendered.has(key)) return;   // SSE replay / poll overlap dedupe
+  const feed = $("#live-feed");
+  if (!feed) return;
+
+  const m = AstraLog.normalize(event);
+  AstraLog.markRendered(LOGS, event);
+  if (feed.firstElementChild &&
+      feed.firstElementChild.classList.contains("empty")) feed.innerHTML = "";
+
+  const action = quiet ? { scrollToBottom: false, showIndicator: false }
+                       : AstraLog.onAppend(LOGS, feedMetrics(), 1);
+  feed.appendChild(buildRow(m));
+
+  // bounded DOM: drop the oldest rows once over the cap (compensating the
+  // reader's scroll position so their place does not jump).
+  if (feed.children.length > LOGS_MAX_BUFFER) {
+    const before = feed.scrollTop;
+    const removedH = feed.firstElementChild.offsetHeight || 0;
+    feed.removeChild(feed.firstElementChild);
+    if (!LOGS.follow) feed.scrollTop = AstraLog.compensateTrim(before, removedH);
+  }
+
+  AstraLog.count(LOGS, m);
+  renderLogStats();
+
+  if (quiet) return;
+  if (action.scrollToBottom) { feed.scrollTop = feed.scrollHeight; jumpToLatest(); }
+  else showJump(LOGS.unread);
+}
+
+// Live arrival path: skip noise/dupes, render now, or buffer while paused.
+function receiveEvent(event) {
+  const verdict = AstraLog.admit(LOGS, event);
+  if (verdict === "skip") return;
+  if (verdict === "buffer") {
+    AstraLog.buffer(LOGS, event);
+    return;
+  }
+  appendEvent(event);
+}
+
+function flushPending() {
+  const items = LOGS.pending;
+  LOGS.pending = [];
+  if (!items.length) return;
+  items.forEach((e) => appendEvent(e, true));
+  if (LOGS.follow) jumpToLatest(); else showJump(LOGS.unread);
 }
 
 function initLogsToolbar() {
@@ -702,16 +824,23 @@ function initLogsToolbar() {
       LOGS.paused = !LOGS.paused;
       pauseBtn.textContent = LOGS.paused ? "▶ Resume" : "⏸ Pause";
       pauseBtn.classList.toggle("on", LOGS.paused);
+      refreshLiveState();
+      // resuming replays everything buffered while paused, in order.
+      if (!LOGS.paused) flushPending();
     });
   }
   const clearBtn = $("#btn-logs-clear");
   if (clearBtn && !clearBtn.dataset.hooked) {
     clearBtn.dataset.hooked = "1";
     clearBtn.addEventListener("click", async () => {
-      LOGS.buffer = [];
-      LOGS.counts = { total: 0, gateway: 0, provider: 0, errors: 0, success: 0 };
+      AstraLog.reset(LOGS);
+      LOGS.paused = false;
+      const pause = $("#btn-logs-pause");
+      if (pause) { pause.textContent = "⏸ Pause"; pause.classList.remove("on"); }
       renderLogStats();
-      $("#live-feed").innerHTML = `<div class="empty">cleared — listening…</div>`;
+      refreshLiveState();
+      const feed = $("#live-feed");
+      if (feed) feed.innerHTML = `<div class="empty">Cleared — listening…</div>`;
       // Also wipe the persisted history server-side — otherwise a page
       // refresh reloads the same old events right back into the panel.
       try { await del("/api/events"); } catch (_) { /* best-effort */ }
@@ -722,16 +851,45 @@ function initLogsToolbar() {
     copyBtn.dataset.hooked = "1";
     copyBtn.addEventListener("click", () => copyLogsToClipboard(copyBtn));
   }
+  const jumpBtn = $("#logs-jump");
+  if (jumpBtn && !jumpBtn.dataset.hooked) {
+    jumpBtn.dataset.hooked = "1";
+    jumpBtn.addEventListener("click", jumpToLatest);
+  }
+  // Follow the user's scroll position: reaching the bottom resumes
+  // live-follow, scrolling up stops it. Throttled to one rAF per burst.
+  const feed = $("#live-feed");
+  if (feed && !feed.dataset.scrollHooked) {
+    feed.dataset.scrollHooked = "1";
+    let ticking = false;
+    feed.addEventListener("scroll", () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        AstraLog.onScroll(LOGS, feedMetrics());
+        if (LOGS.follow) {
+          const jump = $("#logs-jump");
+          if (jump) jump.hidden = true;
+        }
+      });
+    }, { passive: true });
+  }
   renderLogStats();
+  refreshLiveState();
 }
 
-// Copies the currently-visible (i.e. filter/search-matched) log lines as
-// plain text, newest-first, in the same order they're shown on screen.
+// Copies the currently-visible (i.e. filter/search-matched) rows as plain
+// text, top-to-bottom, in the same chronological order shown on screen.
 async function copyLogsToClipboard(btn) {
   const feed = $("#live-feed");
-  const lines = $$(".term-line", feed)
+  const lines = $$(".tl-row", feed)
     .filter((el) => !el.classList.contains("hidden"))
-    .map((el) => $$(".term-time, .term-src, .term-msg", el).map((s) => s.textContent).join(" "));
+    .map((el) => {
+      const part = (sel) => { const n = $(sel, el); return n ? n.textContent.trim() : ""; };
+      return [part(".tl-time"), part(".tl-title"), part(".tl-sub"), part(".tl-meta")]
+        .filter(Boolean).join("  ");
+    });
   const out = lines.join("\n");
   const flash = (label) => {
     if (!btn) return;
@@ -765,11 +923,9 @@ async function copyLogsToClipboard(btn) {
 function applyLogsFilter() {
   const feed = $("#live-feed");
   if (!feed) return;
-  $$(".log-row", feed).forEach((el) => {
-    const cats = (el.dataset.cats || "").split(",");
-    const matchesFilter = LOGS.filter === "all" || cats.includes(LOGS.filter);
-    const matchesQuery = !LOGS.query || (el.dataset.text || "").includes(LOGS.query);
-    el.classList.toggle("hidden", !(matchesFilter && matchesQuery));
+  $$(".tl-row", feed).forEach((el) => {
+    el.classList.toggle("hidden",
+      !AstraLog.matchesRow(el.dataset.cats, el.dataset.text, LOGS.filter, LOGS.query));
   });
 }
 
@@ -1677,183 +1833,33 @@ loaders.web3 = async function () {
 };
 
 async function eventsPoll() {
-  const r = await api("/api/events?limit=30");
+  // Polling fallback for browsers without EventSource. Id-based dedupe in
+  // receiveEvent() makes a repeated window harmless, so re-offer the tail.
+  const r = await api("/api/events?limit=50");
   if (!r.ok) return;
-  renderEvents((r.data || []).slice(-10));
+  AstraLog.orderHistory(r.data || []).forEach((e) => receiveEvent(e));
 }
+
+// SSE connection state for the header badge (● LIVE / ○ RECONNECTING).
+// Initialized at script load, before the Logs tab is ever opened.
+let SSE_STATE = "reconnecting";
 
 function openSse(afterId) {
   const url = afterId ? `/api/events/stream?after_id=${encodeURIComponent(afterId)}`
                        : "/api/events/stream";
   const es = new EventSource(url);
+  es.onopen = () => { SSE_STATE = "live"; refreshLiveState(); };
   es.onmessage = (ev) => {
     let e = {};
     try { e = JSON.parse(ev.data); } catch (_) { return; }
-    feedLine(e);
+    receiveEvent(e);
   };
-  es.onerror = () => { /* browser auto-reconnects, resuming via Last-Event-ID */ };
-}
-
-// "HH:MM:SS" (24h, as sent by the backend) -> "HH:MM:SS AM/PM" for the
-// terminal-style console readout.
-function fmtTime12(hms) {
-  if (!hms) return "";
-  const bits = hms.split(":");
-  const h = parseInt(bits[0], 10);
-  if (Number.isNaN(h)) return hms;
-  const period = h >= 12 ? "PM" : "AM";
-  const h12 = h % 12 || 12;
-  return `${String(h12).padStart(2, "0")}:${bits[1] || "00"}:${bits[2] || "00"} ${period}`;
-}
-
-const GW_NAMES = { gemini: "Gemini", groq: "Groq", cloudflare: "Cloudflare",
-                   bedrock: "AWS Bedrock" };
-const SRC_LABEL = { gateway: "GATEWAY", provider: "PROVIDER" };
-
-function fmtMs(ms) {
-  const n = Number(ms);
-  if (ms == null || Number.isNaN(n)) return "";
-  return n >= 1000 ? (n / 1000).toFixed(1) + "s" : Math.round(n) + "ms";
-}
-
-// "Groq → llama-3.3-70b" : exactly which AI/provider and which model.
-function logTarget(src, d) {
-  let name = d.provider || "";
-  if (src === "gateway") name = GW_NAMES[name] || name;
-  if (!name && !d.model) return "";
-  return `<b class="term-target">${esc(name || "?")}${d.model ? " → " + esc(d.model) : ""}</b>`;
-}
-
-function logBadge(e, status) {
-  const k = e.kind || "";
-  if (k === "astra_gateway.request") return "🧭";
-  if (k.endsWith(".started")) return "📡";
-  if (k === "provider.health_changed") return "🩺";
-  if (isCorrectionEvent(k) && status === "info") return "🔁";
-  return status === "err" ? "❌" : status === "ok" ? "✅" : "•";
-}
-
-// One human-readable message per event: WHAT happened + WHICH AI/provider
-// and model it happened to (html, already escaped).
-function logMessage(e, src) {
-  const k = e.kind || "";
-  const d = e.data || {};
-  const t = logTarget(src, d);
-  const lat = d.latency_ms != null ? ` · ${fmtMs(d.latency_ms)}` : "";
-  const why = d.error || d.reason;
-  const whyTxt = why ? ` · ${esc(String(why))}` : "";
-  switch (k) {
-    case "astra_gateway.request":
-      return d.category === "explicit_model"
-        ? `Routing request · explicit model ${esc(d.model || "?")}`
-        : `Routing request · ${esc(d.category || "?")} · ${d.candidates != null ? d.candidates : "?"} candidate(s)`;
-    case "astra_gateway.success":
-    case "ai.completed":
-      return `API call OK · ${t}${lat}${d.length != null && d.latency_ms == null ? ` · ${d.length} chars` : ""}`;
-    case "astra_gateway.error":
-      return `API call FAILED · ${t}${whyTxt}`;
-    case "astra_gateway.stream_interrupted":
-      return `Stream interrupted · ${t} · partial reply already sent${whyTxt}`;
-    case "ai.started":
-      return `Calling · ${t}`;
-    case "ai.failed":
-      if (d.aggregate)
-        return `All providers failed · ${d.attempts != null ? d.attempts : "?"} attempt(s)${whyTxt}`;
-      return `API call FAILED · ${t}${d.attempt > 1 ? ` · attempt ${d.attempt}` : ""}${whyTxt}`;
-    case "gateway.task_completion.correction_requested":
-    case "gateway.supervision.correction_requested":
-      return `Reply rejected, asking again · ${logTarget("provider", d)}` +
-             ` · attempt ${d.attempt != null ? d.attempt : "?"}${d.reason ? " · " + esc(String(d.reason)) : ""}` +
-             `${d.got ? ` · got: "${esc(String(d.got))}"` : ""}`;
-    case "gateway.task_completion.correction_succeeded":
-    case "gateway.supervision.correction_succeeded":
-      return `Correction OK · ${logTarget("provider", d)} · attempt ${d.attempt != null ? d.attempt : "?"}`;
-    case "gateway.task_completion.correction_failed":
-    case "gateway.supervision.correction_failed":
-      return `Correction FAILED · ${logTarget("provider", d)}${whyTxt}`;
-    case "gateway.task_completion.correction_exhausted":
-    case "gateway.supervision.correction_exhausted":
-      return `Corrections exhausted · ${logTarget("provider", d)} · ${d.attempts != null ? d.attempts : "?"} attempt(s)${d.reason ? " · " + esc(String(d.reason)) : ""}`;
-    case "provider.health_changed":
-      return `Health changed · ${esc(d.provider || "?")} → ${d.healthy === false ? "DOWN" : "UP"}${whyTxt}`;
-    default:
-      return `${esc(k)} ${feedText(d)}`.trim();
-  }
-}
-
-function feedLine(e) {
-  if (LOGS.paused) return;   // pause just stops new lines from appearing
-  if (!isImportantEvent(e)) return;   // chat/task/tool/etc noise stays out
-  const feed = $("#live-feed");
-  if (!feed) return;
-  if (feed.firstElementChild && feed.firstElementChild.classList.contains("empty"))
-    feed.innerHTML = "";
-
-  // New lines are prepended to the top (newest-first). If the user has
-  // scrolled down into older entries, inserting above them must not yank
-  // their view — so remember where they were and where the top of the
-  // scrollable content is right now.
-  const pinnedToTop = feed.scrollTop <= 4;
-  const prevScrollTop = feed.scrollTop;
-  const prevScrollHeight = feed.scrollHeight;
-
-  const src = logSource(e);
-  const status = logStatus(e);
-  const cats = [...logCategories(e)];
-
-  // Running counters for the stats strip. Gateway / Provider API calls
-  // are counted once per call (terminal event only — see logOutcome), and
-  // Success/Errors are the outcomes of those same calls.
-  LOGS.counts.total++;
-  const outcome = logOutcome(e);
-  if (outcome && LOGS.counts[src] != null) {
-    LOGS.counts[src]++;
-    if (outcome === "ok") LOGS.counts.success++; else LOGS.counts.errors++;
-  }
-  renderLogStats();
-
-  const div = document.createElement("div");
-  div.className = "log-row term-line" + (status === "err" ? " err" : status === "ok" ? " ok" : "");
-  div.dataset.cats = cats.join(",");
-  const when = fmtTime12((e.created_at || "").split(" ")[1] || "");
-  div.innerHTML =
-    `<span class="term-time">[${esc(when)}]</span>` +
-    `<span class="term-src ${src === "gateway" ? "gw" : "pv"}">${SRC_LABEL[src] || "SYSTEM"}</span>` +
-    `<span class="term-badge">${logBadge(e, status)}</span>` +
-    `<span class="term-msg">${logMessage(e, src)}</span>`;
-  const text = `${SRC_LABEL[src] || ""} ${div.textContent}`.toLowerCase();
-  div.dataset.text = text;
-  const matchesFilter = LOGS.filter === "all" || cats.includes(LOGS.filter);
-  const matchesQuery = !LOGS.query || text.includes(LOGS.query);
-  div.classList.toggle("hidden", !(matchesFilter && matchesQuery));
-  feed.prepend(div);
-  while (feed.children.length > LOGS_MAX_BUFFER) feed.removeChild(feed.lastChild);
-
-  // Restore the scroll anchor: stay pinned to the newest line if that's
-  // where the user already was, otherwise hold their reading position
-  // steady by compensating for the height just added above it.
-  if (pinnedToTop) {
-    feed.scrollTop = 0;
-  } else {
-    feed.scrollTop = prevScrollTop + (feed.scrollHeight - prevScrollHeight);
-  }
-}
-function feedText(d) {
-  if (!d) return "";
-  const parts = [];
-  if (d.task) parts.push("task:" + d.task);
-  if (d.provider) parts.push(d.provider);
-  if (d.model) parts.push(d.model);
-  if (d.latency_ms != null) parts.push(d.latency_ms + "ms");
-  if (d.error) parts.push("err:" + d.error);
-  if (d.reason) parts.push(d.reason);
-  if (parts.length) return "· " + esc(parts.join(" "));
-  const pick = ["goal", "tool", "step", "title", "name", "description", "status", "workflow"];
-  for (const k of pick) if (d[k] && typeof d[k] === "string") return "· " + esc(d[k]);
-  try { return "· " + esc(JSON.stringify(d)); } catch (_) { return ""; }
-}
-function renderEvents(rows) {
-  rows.forEach(feedLine);
+  es.onerror = () => {
+    // EventSource auto-reconnects, resuming via Last-Event-ID — reflect that
+    // in the header instead of looking dead.
+    SSE_STATE = "reconnecting";
+    refreshLiveState();
+  };
 }
 
 /* ------------------------------ attachments (multimodal) --------------------- */

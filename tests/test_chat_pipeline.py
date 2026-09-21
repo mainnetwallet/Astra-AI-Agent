@@ -43,14 +43,17 @@ class FakeGateway:
         self.replies = list(replies)
         self.calls = []            # every gateway.chat() messages list
         self.categories = []       # the explicit category of each call
+        self.traces = []           # correlation id forwarded for each call
         self.usable = usable
 
     def is_usable(self):
         return self.usable
 
-    def chat(self, messages, model=None, max_tokens=500, category=None):
+    def chat(self, messages, model=None, max_tokens=500, category=None,
+             trace=""):
         self.calls.append(messages)
         self.categories.append(category)
+        self.traces.append(trace)
         r = self.replies.pop(0)
         if isinstance(r, Exception):
             raise r

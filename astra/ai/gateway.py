@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 
 from astra.ai.credentials import CredentialPool
 from astra.core.exceptions import ProviderError, TimeoutError
+from astra.core.events import new_op_id
 
 
 def _close_http_error(exc) -> None:
@@ -642,7 +643,8 @@ class AstraAIGateway:
         return bool(self.connections)
 
     # -- explicit-model fallback (§17: user-requested model is respected) ----
-    def _try_connections(self, fn, *, model, messages, max_tokens):
+    def _try_connections(self, fn, *, model, messages, max_tokens,
+                         op="", trace=""):
         """Run `fn` over the connections in order; first success wins.
 
         Used only when the caller names a specific model. Tracks which
@@ -654,7 +656,7 @@ class AstraAIGateway:
         last_error = ""
         attempts = 0
         self._emit("astra_gateway.request", category="explicit_model",
-                   model=model or "")
+                   model=model or "", op=op, trace=trace)
         for conn in self.connections:
             attempts += 1
             self.last_attempts = attempts
@@ -676,21 +678,27 @@ class AstraAIGateway:
             except (ProviderError, TimeoutError) as e:
                 last_error = getattr(e, "message", None) or str(e)
                 self._emit("astra_gateway.error", provider=short,
-                           model=used_model, reason=last_error)
+                           model=used_model, reason=last_error, op=op,
+                           trace=trace, terminal=False, attempt=attempts)
                 continue
             except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
                 self._emit("astra_gateway.error", provider=short,
-                           model=used_model, reason=last_error)
+                           model=used_model, reason=last_error, op=op,
+                           trace=trace, terminal=False, attempt=attempts)
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
             self.last_connection = conn.name
             self.last_model = used_model
             self._emit("astra_gateway.success", provider=short,
-                       model=used_model, latency_ms=round(latency_ms, 1))
+                       model=used_model, latency_ms=round(latency_ms, 1),
+                       op=op, trace=trace, terminal=True)
             return result
         self.last_connection = ""
         self.last_model = ""
+        self._emit("astra_gateway.error", provider="", model=model or "",
+                   reason=last_error or "all services failed", op=op,
+                   trace=trace, terminal=True, attempts=attempts)
         raise ProviderError(
             f"Astra AI Gateway: all four services failed —— {last_error}")
 
@@ -758,22 +766,28 @@ class AstraAIGateway:
             except Exception:
                 pass
 
-    def chat(self, messages, model=None, max_tokens=500, category=None) -> str:
+    def chat(self, messages, model=None, max_tokens=500, category=None,
+             trace="") -> str:
         """`category` (optional, one of gateway_routing.REQUEST_CATEGORIES)
         overrides the keyword classification of the user-role text; leave it
         unset for ordinary requests."""
+        op = new_op_id()
         if model:
             return self._try_connections(
                 lambda c, m: c.chat(messages, model=m, max_tokens=max_tokens),
-                model=model, messages=messages, max_tokens=max_tokens)
+                model=model, messages=messages, max_tokens=max_tokens,
+                op=op, trace=trace)
 
         category, ranked = self._select_order(messages, max_tokens, category)
         self._emit("astra_gateway.request", category=category,
-                   candidates=len(ranked))
+                   candidates=len(ranked), op=op, trace=trace)
         if not ranked:
             self.last_connection = ""
             self.last_model = ""
             self.last_attempts = 0
+            self._emit("astra_gateway.error", provider="", model="",
+                       reason="no suitable provider+model available",
+                       op=op, trace=trace, terminal=True)
             raise ProviderError(
                 f"Astra AI Gateway: no suitable provider+model available "
                 f"for this request (category={category})")
@@ -792,14 +806,16 @@ class AstraAIGateway:
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id, reason=last_error)
+                          model=target_model.model_id, reason=last_error,
+                          op=op, trace=trace, terminal=False, attempt=attempts)
                 continue
             except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id, reason=last_error)
+                          model=target_model.model_id, reason=last_error,
+                          op=op, trace=trace, terminal=False, attempt=attempts)
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
             self.routing_state.record_success(target_model.provider,
@@ -807,19 +823,24 @@ class AstraAIGateway:
             self.last_connection = conn.name
             self.last_model = target_model.model_id
             self._emit("astra_gateway.success", provider=target_model.provider,
-                      model=target_model.model_id, latency_ms=round(latency_ms, 1))
+                      model=target_model.model_id, latency_ms=round(latency_ms, 1),
+                      op=op, trace=trace, terminal=True)
             return result
         self.last_connection = ""
         self.last_model = ""
+        self._emit("astra_gateway.error", provider="", model="",
+                   reason=last_error or "all suitable targets failed", op=op,
+                   trace=trace, terminal=True, attempts=attempts)
         raise ProviderError(
             f"Astra AI Gateway: all suitable targets failed —— {last_error}")
 
-    def stream(self, messages, model=None, max_tokens=500):
+    def stream(self, messages, model=None, max_tokens=500, trace=""):
+        op = new_op_id()
         if model:
             # Generator fallback: first connection's stream that starts wins
             # (unchanged explicit-model path — §17).
             self._emit("astra_gateway.request", category="explicit_model",
-                       model=model or "")
+                       model=model or "", op=op, trace=trace)
             for conn in self.connections:
                 call_model = model
                 if call_model and not conn.models:
@@ -838,22 +859,28 @@ class AstraAIGateway:
                 except (ProviderError, TimeoutError) as e:
                     self._emit("astra_gateway.error", provider=short,
                                model=used_model,
-                               reason=getattr(e, "message", None) or str(e))
+                               reason=getattr(e, "message", None) or str(e),
+                               op=op, trace=trace, terminal=False)
                     continue
                 except Exception as e:
                     self._emit("astra_gateway.error", provider=short,
                                model=used_model,
-                               reason=f"{type(e).__name__}: {e}")
+                               reason=f"{type(e).__name__}: {e}",
+                               op=op, trace=trace, terminal=False)
                     continue
                 self._emit("astra_gateway.success", provider=short,
                            model=used_model,
-                           latency_ms=round((time.perf_counter() - start) * 1000.0, 1))
+                           latency_ms=round((time.perf_counter() - start) * 1000.0, 1),
+                           op=op, trace=trace, terminal=True)
                 return
+            self._emit("astra_gateway.error", provider="", model=model or "",
+                       reason="no connection served the requested model",
+                       op=op, trace=trace, terminal=True)
             return
 
         category, ranked = self._select_order(messages, max_tokens)
         self._emit("astra_gateway.request", category=category,
-                   candidates=len(ranked))
+                   candidates=len(ranked), op=op, trace=trace)
         # §23 streaming recovery: once ANY chunk has reached the caller for
         # this call, we must never silently start a second, independent
         # stream on the next connection — that would concatenate an
@@ -874,12 +901,14 @@ class AstraAIGateway:
                                                   target_model.model_id)
                 reason = getattr(e, "message", None) or str(e)
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id, reason=reason)
+                          model=target_model.model_id, reason=reason,
+                          op=op, trace=trace, terminal=False)
                 if emitted_any:
                     self._emit("astra_gateway.stream_interrupted",
                               provider=target_model.provider,
                               model=target_model.model_id, reason=reason,
-                              partial_content_sent=True)
+                              partial_content_sent=True, op=op, trace=trace,
+                              terminal=True)
                     return
                 continue
             except Exception as e:
@@ -887,12 +916,14 @@ class AstraAIGateway:
                                                   target_model.model_id)
                 reason = f"{type(e).__name__}: {e}"
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id, reason=reason)
+                          model=target_model.model_id, reason=reason,
+                          op=op, trace=trace, terminal=False)
                 if emitted_any:
                     self._emit("astra_gateway.stream_interrupted",
                               provider=target_model.provider,
                               model=target_model.model_id, reason=reason,
-                              partial_content_sent=True)
+                              partial_content_sent=True, op=op, trace=trace,
+                              terminal=True)
                     return
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
@@ -901,10 +932,14 @@ class AstraAIGateway:
             self.last_connection = conn.name
             self.last_model = target_model.model_id
             self._emit("astra_gateway.success", provider=target_model.provider,
-                      model=target_model.model_id, latency_ms=round(latency_ms, 1))
+                      model=target_model.model_id, latency_ms=round(latency_ms, 1),
+                      op=op, trace=trace, terminal=True)
             return
         self.last_connection = ""
         self.last_model = ""
+        self._emit("astra_gateway.error", provider="", model="",
+                   reason="no suitable provider+model available",
+                   op=op, trace=trace, terminal=True)
 
     # -- manual health probe ("🔌 AI Providers health" test buttons) ----------
     # Sends one tiny real request to a connection's first model, purely to

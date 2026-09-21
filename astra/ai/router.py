@@ -45,6 +45,7 @@ from astra.ai.gateway_contract import ProviderExecutionPort
 from astra.ai.models import Model, metadata_for
 from astra.ai.routing_policy import RoutingDecisionPolicy
 from astra.core.exceptions import ProviderError, TimeoutError
+from astra.core.events import new_op_id
 from astra.core.timeutil import duration_ms, ms_now
 
 STATS_SCHEMA = """
@@ -117,7 +118,8 @@ class RoutingRequest:
                  no_fallback: bool = False, task_contract=None,
                  evidence: dict | None = None, semantic_verifier=None,
                  required_input_modalities: list | None = None,
-                 required_output_modalities: list | None = None):
+                 required_output_modalities: list | None = None,
+                 trace: str = ""):
         self.task_type = task_type
         self.messages = messages or []
         self.preferred_model = preferred_model
@@ -139,6 +141,10 @@ class RoutingRequest:
         self.semantic_verifier = semantic_verifier
         self.required_input_modalities = list(required_input_modalities or [])
         self.required_output_modalities = list(required_output_modalities or [])
+        # Correlation id of the higher-level operation this request belongs to
+        # (e.g. a chat turn). Propagated onto every emitted lifecycle event so
+        # the Activity Log can resolve a request's children when it ends.
+        self.trace = trace or ""
 
     def __repr__(self):
         return (f"RoutingRequest(task_type={self.task_type!r}, "
@@ -435,9 +441,26 @@ class AstraRouter:
             if hard:
                 req.required_capabilities = list(hard)
 
+    def _route_end(self, req: RoutingRequest, op: str, kind: str, **data) -> None:
+        """Emit the terminal event for one route operation, carrying the same
+        `op` as its `router.request` so the Activity Log resolves the row."""
+        self._emit(kind, task=req.task_type, op=op, trace=req.trace,
+                   terminal=True, **data)
+
+    def _route_failed(self, req: RoutingRequest, op: str, error: str,
+                      **kw) -> RoutingResult:
+        """Terminal failure for a route operation that never dispatched (or
+        whose every candidate failed) — closes the 'Agent Router' row."""
+        kw.pop("ok", None)
+        kw.setdefault("requested_provider", req.preferred_provider or "")
+        kw.setdefault("requested_model", req.preferred_model or "")
+        self._route_end(req, op, "ai.failed", aggregate=True, error=error, **kw)
+        return RoutingResult(ok=False, error=error, **kw)
+
     def route_request(self, req: RoutingRequest) -> RoutingResult:
         self._normalize_requirements(req)
-        self._emit("router.request", task=req.task_type)
+        op = new_op_id()
+        self._emit("router.request", task=req.task_type, op=op, trace=req.trace)
         # Strict mandatory-Gateway enforcement (Gap 1 defense-in-depth):
         # `req.task_contract` is how a caller (the chat pipeline, or any
         # post-execution final-verification pass) declares
@@ -452,7 +475,8 @@ class AstraRouter:
         # A plain request with no contract (task_contract is None) is
         # completely unaffected — that is today's behavior, unchanged.
         if req.task_contract is not None and self.gateway is None:
-            return RoutingResult(
+            return self._route_failed(
+                req, op,
                 ok=False,
                 error="Astra AI Gateway is not attached to this router: a "
                       "task-completion-verified request cannot be routed "
@@ -461,9 +485,10 @@ class AstraRouter:
                 requested_model=req.preferred_model or "")
         candidates = self._candidates(req)
         if not candidates:
-            return RoutingResult(ok=False, error="no eligible provider/model available",
-                                 requested_provider=req.preferred_provider or "",
-                                 requested_model=req.preferred_model or "")
+            return self._route_failed(
+                req, op, ok=False, error="no eligible provider/model available",
+                requested_provider=req.preferred_provider or "",
+                requested_model=req.preferred_model or "")
         ranked = self.policy.rank(candidates, req) if self.policy else \
             [(0.0, c[0], c[1]) for c in candidates]
         # Healthy first: a (provider, model) whose every key recently failed
@@ -479,9 +504,8 @@ class AstraRouter:
                      (not req.preferred_provider or
                       getattr(r[1], "name", "") == req.preferred_provider)]
             if not ranked:
-                return RoutingResult(
-                    ok=False, requested_provider=req.preferred_provider or "",
-                    requested_model=req.preferred_model,
+                return self._route_failed(
+                    req, op, requested_model=req.preferred_model,
                     error=f"requested model {req.preferred_model!r} unavailable "
                           f"and no_fallback=True: failing honestly instead of "
                           f"substituting another model")
@@ -495,7 +519,7 @@ class AstraRouter:
         # skipped; on a fresh failure, the Gateway classifies it and picks
         # the next target, and THAT is what gets attempted here.
         if self.gateway is not None:
-            return self._route_via_gateway(req, ranked, considered)
+            return self._route_via_gateway(req, ranked, considered, op)
 
         results, attempts, fallback = [], 0, False
         last_failure_category = ""
@@ -518,7 +542,8 @@ class AstraRouter:
                 }
                 self._emit("router.decision", task=req.task_type, provider=rr.provider,
                            model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
-                           latency_ms=rr.latency_ms, fallback=fallback)
+                           latency_ms=rr.latency_ms, fallback=fallback,
+                           op=op, trace=req.trace, terminal=True)
                 if fallback:
                     self._emit("router.fallback", task=req.task_type, provider=rr.provider,
                                model=rr.model, candidates_considered=considered,
@@ -548,7 +573,8 @@ class AstraRouter:
                              requested_provider=req.preferred_provider or "",
                              requested_model=req.preferred_model or "",
                              fallback_reason=last_failure_category)
-        self._emit("ai.failed", aggregate=True, error=error, attempts=attempts)
+        self._route_end(req, op, "ai.failed", aggregate=True, error=error,
+                        attempts=attempts)
         return last
 
     # -- Gateway-DRIVEN execution loop (§2-§12, §17-§18) -----------------------
@@ -571,7 +597,7 @@ class AstraRouter:
     # `ranked` order instead of failing the whole request — a Gateway bug
     # must never break otherwise-working routing.
     def _route_via_gateway(self, req: RoutingRequest, ranked: list,
-                           considered: int) -> RoutingResult:
+                           considered: int, op: str = "") -> RoutingResult:
         from astra.ai.gateway_contract import classify_execution_failure
 
         gw_targets = self._execution_targets(ranked)
@@ -652,7 +678,8 @@ class AstraRouter:
                 }
                 self._emit("router.decision", task=req.task_type, provider=rr.provider,
                            model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
-                           latency_ms=rr.latency_ms, fallback=fallback)
+                           latency_ms=rr.latency_ms, fallback=fallback,
+                           op=op, trace=req.trace, terminal=True)
                 if fallback:
                     self._emit("router.fallback", task=req.task_type, provider=rr.provider,
                                model=rr.model, candidates_considered=considered,
@@ -704,7 +731,8 @@ class AstraRouter:
                              requested_model=req.preferred_model or "",
                              fallback_reason=last_failure_category)
         last.completion_status = last_completion_status
-        self._emit("ai.failed", aggregate=True, error=error, attempts=attempts)
+        self._route_end(req, op, "ai.failed", aggregate=True, error=error,
+                        attempts=attempts)
         return last
 
     # -- Gateway execution-recovery reporting (§3-§5; additive, fail-open) ----
@@ -1028,7 +1056,9 @@ class AstraRouter:
 
     def _attempt(self, adapter, model: Model, req: RoutingRequest) -> RoutingResult | None:
         name = getattr(adapter, "name", "")
-        self._emit("ai.started", provider=name, model=model.model_id)
+        op = new_op_id()
+        self._emit("ai.started", provider=name, model=model.model_id,
+                   op=op, trace=req.trace)
         t0 = ms_now()
         last_error = ""
         # per-credential + per-model retries: a failed key rolls to the next
@@ -1036,9 +1066,9 @@ class AstraRouter:
         for attempt in range(1, self.max_retries + 2):
             if attempt > 1:
                 self._emit("credential.rotation", provider=name, model=model.model_id,
-                           attempt=attempt)
+                           attempt=attempt, op=op, trace=req.trace)
                 self._emit("router.retry", provider=name, model=model.model_id,
-                           attempt=attempt)
+                           attempt=attempt, op=op, trace=req.trace)
             try:
                 # Multimodal dispatch: use specialized adapter methods
                 # for non-chat output modalities (image generation, TTS)
@@ -1082,31 +1112,37 @@ class AstraRouter:
                                    _reason=("matched preference" if not attempt else
                                             f"retry #{attempt}"))
                 self._emit("ai.completed", provider=name, model=model.model_id,
-                           latency_ms=ms)
+                           latency_ms=ms, op=op, trace=req.trace, terminal=True)
                 self._record_key_model(adapter, model.model_id, True, ms, "", req)
                 return rr
             except (ProviderError, TimeoutError) as e:
                 last_error = e.message or getattr(e, "category", type(e).__name__)
                 self._errors[name] = self._errors.get(name, 0) + 1
-                self._emit("ai.failed", provider=name, model=model.model_id,
-                           error=last_error, attempt=attempt)
                 self._record_key_model(adapter, model.model_id, False,
                                        duration_ms(t0), last_error, req)
+                # per-key test: one attempt, on that key only -> terminal.
+                retry = (not self._pinned(adapter) and attempt <= self.max_retries
+                         and getattr(e, "retryable", True))
+                self._emit("ai.failed", provider=name, model=model.model_id,
+                           error=last_error, attempt=attempt, op=op,
+                           trace=req.trace, terminal=not retry, retrying=retry)
                 if self._pinned(adapter):
-                    break           # per-key test: one attempt, on that key only
+                    break
                 # the adapter's credential pool has already cooled the bad key;
                 # a fresh key on the same model may succeed, so keep retrying up
                 # to max_retries, respecting backoff only for transient errors.
-                if attempt <= self.max_retries and getattr(e, "retryable", True):
+                if retry:
                     time.sleep(min(self.backoff_s * attempt, 8))
             except Exception as e:           # never let a provider kill routing
                 last_error = f"{type(e).__name__}: {e}"
                 self._errors[name] = self._errors.get(name, 0) + 1
+                retry = (not self._pinned(adapter) and attempt <= self.max_retries)
                 self._emit("ai.failed", provider=name, model=model.model_id,
-                           error=last_error, attempt=attempt)
+                           error=last_error, attempt=attempt, op=op,
+                           trace=req.trace, terminal=not retry, retrying=retry)
                 if self._pinned(adapter):
                     break
-                if attempt <= self.max_retries:
+                if retry:
                     time.sleep(min(self.backoff_s * attempt, 8))
         self._mark_down(name, last_error)
         return RoutingResult(ok=False, error=f"{name}: {last_error}",

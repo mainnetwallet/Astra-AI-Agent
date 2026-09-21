@@ -261,3 +261,242 @@ test("the paused buffer is bounded too", () => {
   // the most recent events survive the cap
   assert.strictEqual(s.pending[s.pending.length - 1].id, 2000);
 });
+
+/* --------------------------------------------------- lifecycle reconciliation
+ * Mirrors the bookkeeping astra.js performs around the DOM: a lifecycle
+ * continuation must update the SAME row, never append a second one. */
+
+function lifeEvent(kind, data, id) {
+  const e = ev(kind, data);
+  e.id = id;
+  return e;
+}
+
+// Simulate the render loop: returns the rows the UI would end up with.
+function simulate(events) {
+  const state = Log.createState();
+  const rows = [];
+  events.forEach((e) => {
+    const m = Log.normalize(e);
+    const plan = Log.planRender(state, e, m);
+    const info = plan.key ? state.active.get(plan.key) : null;
+    let row;
+    if (info && info.el && plan.action === "update") {
+      row = info.el;
+      Log.recount(state, row.model, m);
+      row.model = m;
+    } else {
+      row = { key: plan.key, model: m };
+      rows.push(row);
+      Log.count(state, m);
+    }
+    plan.closeKeys.forEach((k) => {
+      const ci = state.active.get(k);
+      if (ci && ci.el && ci.el.model.status === "running") {
+        // mirrors astra.js resolveRow(): a child still running when its
+        // request/run ended is marked interrupted with a reason.
+        const reason = "interrupted when the request ended";
+        const prev = ci.el.model;
+        ci.el.model = Object.assign({}, prev, {
+          status: "warn", detail: reason, icon: prev.icon,
+          search: (prev.search + " " + reason).toLowerCase(),
+        });
+      }
+    });
+    Log.commit(state, plan, m);
+    const tracked = plan.key ? state.active.get(plan.key) : null;
+    if (tracked) tracked.el = row;
+  });
+  return { state, rows };
+}
+
+test("started -> completed produces ONE resolved row", () => {
+  const { state, rows } = simulate([
+    lifeEvent("tool.started", { op: "T1", tool: "web_search" }, 1),
+    lifeEvent("tool.completed", { op: "T1", tool: "web_search",
+                                  duration_ms: 1240, terminal: true }, 2),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "ok");
+  assert.strictEqual(rows[0].model.detail, "1.24s");
+  assert.strictEqual(state.active.size, 0);
+  assert.strictEqual(state.counts.total, 1);
+});
+
+test("started -> failed produces ONE failed row", () => {
+  const { state, rows } = simulate([
+    lifeEvent("tool.started", { op: "T2", tool: "fetch_url" }, 1),
+    lifeEvent("tool.failed", { op: "T2", tool: "fetch_url", terminal: true,
+                               error: "boom" }, 2),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "err");
+  assert.strictEqual(rows[0].model.detail, "boom");
+  assert.strictEqual(state.active.size, 0);
+  assert.strictEqual(state.counts.errors, 1);
+});
+
+test("started -> timeout resolves correctly", () => {
+  assert.strictEqual(Log.phaseOf("ai.timeout", {}), "terminal");
+  const { state, rows } = simulate([
+    lifeEvent("tool.started", { op: "T3", tool: "slow" }, 1),
+    lifeEvent("tool.failed", { op: "T3", tool: "slow", terminal: true,
+                               error: "tool 'slow' timed out after 5s" }, 2),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "err");
+  assert.match(rows[0].model.detail, /timed out/);
+  assert.strictEqual(state.active.size, 0);
+});
+
+test("two concurrent identical operations stay separate", () => {
+  const { state, rows } = simulate([
+    lifeEvent("ai.started", { op: "A", provider: "groq", model: "m" }, 1),
+    lifeEvent("ai.started", { op: "B", provider: "groq", model: "m" }, 2),
+    lifeEvent("ai.completed", { op: "B", provider: "groq", model: "m",
+                                terminal: true, latency_ms: 100 }, 3),
+    lifeEvent("ai.completed", { op: "A", provider: "groq", model: "m",
+                                terminal: true, latency_ms: 200 }, 4),
+  ]);
+  assert.strictEqual(rows.length, 2);
+  assert.deepStrictEqual(rows.map((r) => r.model.status), ["ok", "ok"]);
+  // B completed first but A's row must not have been overwritten
+  assert.strictEqual(rows.find((r) => r.key === "op:A").model.detail, "200ms");
+  assert.strictEqual(rows.find((r) => r.key === "op:B").model.detail, "100ms");
+  assert.strictEqual(state.active.size, 0);
+});
+
+test("retry updates the running row and the terminal failure resolves it", () => {
+  const { state, rows } = simulate([
+    lifeEvent("ai.started", { op: "R", provider: "x", model: "m" }, 1),
+    lifeEvent("router.retry", { op: "R", provider: "x", model: "m", attempt: 2 }, 2),
+    lifeEvent("ai.failed", { op: "R", provider: "x", model: "m", attempt: 1,
+                             retrying: true, terminal: false, error: "rate" }, 3),
+    lifeEvent("ai.failed", { op: "R", provider: "x", model: "m", attempt: 2,
+                             terminal: true, error: "still failing" }, 4),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "err");
+  assert.strictEqual(state.active.size, 0);
+});
+
+test("retry then success resolves the SAME row to ok", () => {
+  const { rows } = simulate([
+    lifeEvent("ai.started", { op: "S", provider: "x", model: "m" }, 1),
+    lifeEvent("ai.failed", { op: "S", provider: "x", model: "m",
+                             retrying: true, terminal: false, error: "rate" }, 2),
+    lifeEvent("ai.completed", { op: "S", provider: "x", model: "m",
+                                terminal: true, latency_ms: 90 }, 3),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "ok");
+});
+
+test("a terminal event with no prior start is one resolved row", () => {
+  const { rows } = simulate([
+    lifeEvent("tool.completed", { op: "Z", tool: "t", terminal: true }, 1),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "ok");
+});
+
+test("final Response generated leaves no stale running operations", () => {
+  const R = "req-1";
+  const { state, rows } = simulate([
+    lifeEvent("chat.pipeline.started", { op: "chat:" + R, request: R, trace: R }, 1),
+    lifeEvent("astra_gateway.request", { op: "G1", trace: R, category: "general" }, 2),
+    lifeEvent("astra_gateway.success", { op: "G1", trace: R, terminal: true,
+                                         provider: "gemini", model: "g" }, 3),
+    lifeEvent("router.request", { op: "RT", trace: R, task: "coding" }, 4),
+    // this gateway call never reports a terminal event
+    lifeEvent("astra_gateway.request", { op: "G2", trace: R, category: "x" }, 5),
+    lifeEvent("chat.pipeline.finished", { op: "chat:" + R, request: R, trace: R,
+                                          terminal: true, status: "COMPLETE" }, 6),
+  ]);
+  assert.strictEqual(rows.length, 4);
+  assert.strictEqual(state.active.size, 0);
+  const stale = rows.filter((r) => r.model.status === "running");
+  assert.strictEqual(stale.length, 0, "no operation left running");
+  const routerRow = rows.find((r) => r.key === "op:RT");
+  assert.strictEqual(routerRow.model.status, "warn");
+  assert.match(routerRow.model.detail, /interrupted/);
+  const finalRow = rows.find((r) => r.key === "op:chat:" + R);
+  assert.strictEqual(finalRow.model.status, "ok");
+});
+
+test("a failed request resolves its children as well", () => {
+  const R = "req-err";
+  const { state, rows } = simulate([
+    lifeEvent("chat.pipeline.started", { op: "chat:" + R, request: R, trace: R }, 1),
+    lifeEvent("astra_gateway.request", { op: "G9", trace: R }, 2),
+    lifeEvent("chat.pipeline.failed", { op: "chat:" + R, request: R, trace: R,
+                                        terminal: true, error: "boom" }, 3),
+  ]);
+  assert.strictEqual(state.active.size, 0);
+  assert.strictEqual(rows.find((r) => r.key === "op:chat:" + R).model.status, "err");
+  assert.strictEqual(rows.find((r) => r.key === "op:G9").model.status, "warn");
+});
+
+test("web3 stages update one row per tx and only confirmed ends it", () => {
+  const { state, rows } = simulate([
+    lifeEvent("web3.transaction.prepared", { tx: "0xabc" }, 1),
+    lifeEvent("web3.transaction.submitted", { tx: "0xabc" }, 2),
+    lifeEvent("web3.transaction.broadcast", { tx: "0xabc" }, 3),
+    lifeEvent("web3.transaction.confirmed", { tx: "0xabc" }, 4),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "ok");
+  assert.strictEqual(state.active.size, 0);
+});
+
+test("concurrent requests do not close each other's operations", () => {
+  const { state, rows } = simulate([
+    lifeEvent("chat.pipeline.started", { op: "chat:A", request: "A", trace: "A" }, 1),
+    lifeEvent("chat.pipeline.started", { op: "chat:B", request: "B", trace: "B" }, 2),
+    lifeEvent("astra_gateway.request", { op: "GA", trace: "A" }, 3),
+    lifeEvent("astra_gateway.request", { op: "GB", trace: "B" }, 4),
+    lifeEvent("chat.pipeline.finished", { op: "chat:A", request: "A", trace: "A",
+                                          terminal: true, status: "COMPLETE" }, 5),
+  ]);
+  // A's gateway op resolved as interrupted, B's is still genuinely active
+  assert.strictEqual(rows.find((r) => r.key === "op:GA").model.status, "warn");
+  assert.strictEqual(rows.find((r) => r.key === "op:GB").model.status, "running");
+  assert.deepStrictEqual([...state.active.keys()].sort(),
+                         ["op:GB", "op:chat:B"]);
+});
+
+test("generic task lifecycle resolves one row via task_id", () => {
+  const { state, rows } = simulate([
+    lifeEvent("task.running", { task_id: 7, goal: "research" }, 1),
+    lifeEvent("task.done", { task_id: 7, goal: "research", terminal: true }, 2),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "ok");
+  assert.strictEqual(state.active.size, 0);
+});
+
+test("workflow step start and terminal share one op-scoped row", () => {
+  const op = "wf:1:step1";
+  const { state, rows } = simulate([
+    lifeEvent("task.started", { op, run_id: 1, step: "step1" }, 1),
+    lifeEvent("task.completed", { op, run_id: 1, step: "step1",
+                                  terminal: true }, 2),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "ok");
+  assert.strictEqual(state.active.size, 0);
+});
+
+test("an intermediate update keeps the operation active until terminal", () => {
+  const { state, rows } = simulate([
+    lifeEvent("astra_gateway.request", { op: "GX", trace: "T" }, 1),
+    // a non-terminal retry of the same op must NOT drop it from active
+    lifeEvent("astra_gateway.error", { op: "GX", trace: "T",
+                                       terminal: false }, 2),
+    lifeEvent("astra_gateway.success", { op: "GX", trace: "T",
+                                         terminal: true }, 3),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.status, "ok");
+  assert.strictEqual(state.active.size, 0);
+});

@@ -96,6 +96,29 @@ class TestToolLifecycleEvents(unittest.TestCase):
         reg.register(_tool())
         self.assertTrue(reg.execute("echo", {"msg": "ok"})["ok"])
 
+    def test_start_and_terminal_share_one_correlation_id(self):
+        # the Activity Log resolves a start/terminal pair by `op`, never by
+        # title, so both events of one call must carry the same id.
+        bus = _Bus()
+        reg = ToolRegistry(events=bus)
+        reg.register(_tool())
+        reg.execute("echo", {"msg": "hi"})
+        started, done = bus.rows
+        self.assertTrue(started["data"].get("op"))
+        self.assertEqual(started["data"]["op"], done["data"]["op"])
+        self.assertTrue(done["data"]["terminal"])
+        self.assertNotIn("terminal", started["data"])
+
+    def test_concurrent_calls_get_distinct_correlation_ids(self):
+        bus = _Bus()
+        reg = ToolRegistry(events=bus)
+        reg.register(_tool())
+        reg.execute("echo", {"msg": "one"})
+        reg.execute("echo", {"msg": "two"})
+        ops = [r["data"]["op"] for r in bus.rows]
+        self.assertEqual(len(ops), 4)
+        self.assertEqual(len(set(ops)), 2, "each call must have its own op")
+
 
 class _Deny:
     """Policy stub that denies everything (execute() only calls .decision)."""

@@ -53,6 +53,7 @@ from astra.ai.json_extract import loads_lenient
 from astra.ai.multimodal_messages import build_multimodal_content
 from astra.ai.router import RoutingRequest, classify
 from astra.core.exceptions import ProviderError
+from astra.core.events import new_op_id
 
 # Task types that are safe to hand the router for a plain chat turn.
 # Everything else `classify()` can return (image/audio/video generation,
@@ -172,10 +173,11 @@ class _ChatPort(ProviderExecutionPort):
     it got back so the pipeline still has an answer if a later correction
     round fails."""
 
-    def __init__(self, router, task_type: str, vision: bool):
+    def __init__(self, router, task_type: str, vision: bool, trace: str = ""):
         self._router = router
         self._task_type = task_type
         self._vision = vision
+        self._trace = trace
         self.last_text = ""
 
     def execute(self, target, messages: list, max_tokens: int = 500,
@@ -184,7 +186,8 @@ class _ChatPort(ProviderExecutionPort):
             task_type=self._task_type, messages=messages,
             preferred_provider=target.provider_id,
             preferred_model=target.model_id,
-            vision=self._vision, max_tokens=max_tokens, no_fallback=True))
+            vision=self._vision, max_tokens=max_tokens, no_fallback=True,
+            trace=self._trace))
         if rr is None or not rr.ok:
             raise ProviderError(
                 (rr.error if rr is not None else "") or "correction failed")
@@ -216,7 +219,8 @@ class ChatPipeline:
             return False
 
     # -- step 1: Gateway call #1 (understand + assign) ------------------------
-    def _understand(self, message: str, context: str, attachments) -> dict:
+    def _understand(self, message: str, context: str, attachments,
+                    req: str = "") -> dict:
         """Returns {"final_request", "was_incomplete", "provider", "model",
         "criteria", "reason", "ok"}. `ok` False means the call failed and
         the raw message is being used as-is."""
@@ -246,15 +250,17 @@ class ChatPipeline:
             raw = self.gateway.chat(
                 [{"role": "system", "content": UNDERSTAND_SYSTEM_PROMPT},
                  {"role": "user", "content": "\n\n".join(parts)}],
-                max_tokens=UNDERSTAND_MAX_TOKENS, category="general")
+                max_tokens=UNDERSTAND_MAX_TOKENS, category="general",
+                trace=req)
         except Exception as e:
-            self._emit("chat.pipeline.understand_failed", error=str(e))
+            self._emit("chat.pipeline.understand_failed", error=str(e),
+                       request=req, trace=req)
             return fallback
         data = _parse_json_object(raw)
         rewrote = bool((data or {}).get("was_incomplete"))
         if not data or (rewrote and not _clean(data.get("final_request"))):
             self._emit("chat.pipeline.understand_failed",
-                       error="unparsable Gateway reply")
+                       error="unparsable Gateway reply", request=req, trace=req)
             return fallback
 
         provider, model = _clean(data.get("provider")), _clean(data.get("model"))
@@ -273,7 +279,7 @@ class ChatPipeline:
                 "reason": _clean(data.get("reason")), "ok": True}
 
     # -- step 3: Gateway call #2 (verify) -------------------------------------
-    def _make_verifier(self, brief: dict, state: dict):
+    def _make_verifier(self, brief: dict, state: dict, req: str = ""):
         """Semantic verifier for `supervise_task`. It closes over `brief`, so
         verification knows everything call #1 decided."""
         def verifier(contract, result, evidence):
@@ -290,7 +296,8 @@ class ChatPipeline:
                 raw = self.gateway.chat(
                     [{"role": "system", "content": VERIFY_SYSTEM_PROMPT},
                      {"role": "user", "content": prompt}],
-                    max_tokens=VERIFY_MAX_TOKENS, category="reasoning")
+                    max_tokens=VERIFY_MAX_TOKENS, category="reasoning",
+                    trace=req)
             except Exception as e:
                 state["unavailable"] = str(e)
                 return (FAILED, f"verification unavailable: {e}")
@@ -300,7 +307,7 @@ class ChatPipeline:
                 state["unavailable"] = "unparsable verifier reply"
                 return (FAILED, "verification unavailable: unparsable reply")
             self._emit("chat.pipeline.verified", verdict=verdict,
-                       n=state["verifications"])
+                       n=state["verifications"], request=req, trace=req)
             if verdict == "complete":
                 return (COMPLETE, "")
             missing = [_clean(m) for m in (data.get("missing") or [])
@@ -321,12 +328,12 @@ class ChatPipeline:
         t = classify(text)
         return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
-    def _route(self, task_type, messages, provider, model, vision):
+    def _route(self, task_type, messages, provider, model, vision, req=""):
         rr = self.router.route_request(RoutingRequest(
             task_type=task_type, messages=messages,
             preferred_provider=provider or None,
             preferred_model=model or None,
-            vision=vision, max_tokens=self.max_tokens))
+            vision=vision, max_tokens=self.max_tokens, trace=req))
         if (rr is None or not rr.ok) and task_type not in ("simple_chat", "vision") \
                 and "no eligible" in (getattr(rr, "error", "") or ""):
             # A hard capability filter (e.g. "coding") left nothing to run
@@ -334,7 +341,8 @@ class ChatPipeline:
             rr = self.router.route_request(RoutingRequest(
                 task_type="simple_chat", messages=messages,
                 preferred_provider=provider or None,
-                preferred_model=model or None, max_tokens=self.max_tokens))
+                preferred_model=model or None, max_tokens=self.max_tokens,
+                trace=req))
         return rr
 
     @staticmethod
@@ -356,18 +364,24 @@ class ChatPipeline:
     # -- public entry point ---------------------------------------------------------
     def run(self, message: str, *, context: str = "", attachments=None) -> dict:
         raw = _clean(message)
+        # Correlation id for this chat turn: every event, Gateway call and
+        # Router request made below carries it, so the Activity Log can pair
+        # each start with its terminal event and resolve any child operation
+        # still "running" when the turn ends.
+        req = new_op_id()
         if not raw and not attachments:
             return self._reply("Kichu likhun — ami help korte ready.", False,
                                {"stage": "input"})
         raw = raw or "(attachment only)"
         gateway_ok = self._gateway_usable()
         trace = {"gateway": "used" if gateway_ok else "unavailable",
-                 "raw": raw}
-        self._emit("chat.pipeline.started", gateway=trace["gateway"])
+                 "raw": raw, "request": req}
+        self._emit("chat.pipeline.started", gateway=trace["gateway"],
+                   op=f"chat:{req}", request=req, trace=req)
 
         # 1) Gateway understands + assigns
         if gateway_ok:
-            brief = self._understand(raw, context, attachments)
+            brief = self._understand(raw, context, attachments, req=req)
         else:
             brief = {"final_request": raw, "was_incomplete": False,
                      "provider": "", "model": "", "criteria": [],
@@ -379,7 +393,8 @@ class ChatPipeline:
                       "assigned": assigned, "criteria": brief["criteria"],
                       "assign_reason": brief["reason"]})
         self._emit("chat.pipeline.assigned", provider=brief["provider"],
-                   model=brief["model"], was_incomplete=brief["was_incomplete"])
+                   model=brief["model"], was_incomplete=brief["was_incomplete"],
+                   request=req, trace=req)
 
         # 2) Provider executes (output stays internal until verified)
         ctx = _clean(context)
@@ -393,11 +408,12 @@ class ChatPipeline:
                     {"role": "user", "content": content}]
         task_type = self._task_type(brief["final_request"], attachments)
         rr = self._route(task_type, messages, brief["provider"],
-                         brief["model"], vision)
+                         brief["model"], vision, req=req)
         if rr is None or not rr.ok:
             err = (rr.error if rr is not None else "") or "unknown error"
             trace["error"] = err
-            self._emit("chat.pipeline.failed", error=err)
+            self._emit("chat.pipeline.failed", error=err, op=f"chat:{req}",
+                       request=req, trace=req, terminal=True)
             return self._reply(
                 "Provider theke kono uttor pawa jayni. Kichukkhon pore abar "
                 f"try korun. (`{err}`)", False, trace)
@@ -406,6 +422,10 @@ class ChatPipeline:
         # gateway can't verify -> honest pass-through
         if not gateway_ok:
             trace["verification"] = {"status": "skipped"}
+            # terminal event: the request is done even though verification was
+            # skipped, so its started row never stays "running" in the log.
+            self._emit("chat.pipeline.finished", status="skipped",
+                       op=f"chat:{req}", request=req, trace=req, terminal=True)
             return self._reply(rr.text, True, trace,
                                self._artifacts(rr.text, raw))
 
@@ -417,17 +437,18 @@ class ChatPipeline:
         contract = build_task_completion_contract(
             user_request=raw, goal=brief["final_request"],
             completion_criteria=brief["criteria"], require_semantic=True)
-        port = _ChatPort(self.router, task_type, vision)
+        port = _ChatPort(self.router, task_type, vision, trace=req)
         port.last_text = rr.text
         target = ProviderExecutionTarget(rr.provider, rr.model)
         try:
             final, outcome, attempts = self.gateway.supervise_task(
                 port, target, messages,
                 ProviderExecutionResult(ok=True, text=rr.text), contract,
-                semantic_verifier=self._make_verifier(verify_brief, state),
+                semantic_verifier=self._make_verifier(verify_brief, state, req=req),
                 max_tokens=self.max_tokens)
         except Exception as e:      # a Gateway bug must not lose a good answer
-            self._emit("chat.pipeline.verify_error", error=str(e))
+            self._emit("chat.pipeline.verify_error", error=str(e),
+                       op=f"chat:{req}", request=req, trace=req, terminal=True)
             trace["verification"] = {"status": "error", "reason": str(e)}
             return self._reply(
                 rr.text, True, trace, self._artifacts(rr.text, raw),
@@ -441,7 +462,8 @@ class ChatPipeline:
                                  "reason": outcome.reason,
                                  "missing": outcome.missing or state["last_missing"]}
         self._emit("chat.pipeline.finished", status=outcome.status,
-                   attempts=attempts)
+                   attempts=attempts, op=f"chat:{req}", request=req,
+                   trace=req, terminal=True)
         arts = self._artifacts(text, raw)
 
         if outcome.status == COMPLETE:

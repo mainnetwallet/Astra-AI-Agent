@@ -306,8 +306,11 @@ tools) in `astra/agents/` and `astra/tools/`, not dropping a file into
   an audit trail. Each executed call also emits `tool.started` then one
   terminal `tool.completed`/`tool.failed` event (tool name, category,
   duration, and a redacted input/output summary) for the Activity Log.
-  Runs standalone today (see §1) — Web3 flows and
-  `tests/test_web3_toolregistry_auto_integration.py` call it directly.
+  Both events carry the same `op` correlation id and the terminal event
+  is flagged `terminal=True`, so the panel resolves one row instead of
+  leaving a stale "… running" row. Runs standalone today (see §1) —
+  Web3 flows and `tests/test_web3_toolregistry_auto_integration.py`
+  call it directly.
 - **`MemorySystem`** (`memory/memory.py`) — five layers (working,
   short, long, semantic, episodic), all SQLite-backed, no secrets, no
   embeddings (deterministic keyword scoring). `ExperienceStore` learns
@@ -370,6 +373,20 @@ duration) with expandable, redacted details. The pure mapping + scroll
 state machine live in `static/js/log_model.js` (unit-tested under node);
 `static/js/astra.js` only does DOM work.
 
+**Lifecycle reconciliation.** Start and terminal events are paired by a
+reliable correlation id carried on the event payload — `op` (tool, AI,
+router, gateway, chat-pipeline, workflow and workflow-step operations),
+`tx` (Web3 transactions) or `task_id` (the generic task engine) — never
+by title. `AstraLog.planRender()` decides whether an arriving event
+appends a new row or updates the row for its operation in place, so a
+`started → completed/failed/cancelled/timeout` pair (including retry
+updates) resolves to a single row and concurrent operations of the same
+kind each keep their own row. A terminal event also closes the
+still-running children it owns (matched by the request `trace` /
+`run_id`), marking them `warn`/interrupted; every chat turn, workflow
+run and tool call emits such a terminal event, so a finished request
+never leaves an operation stuck on "running".
+
 ---
 
 ## 8. Tests
@@ -390,7 +407,11 @@ server smoke test. Notable files:
   static bytes, SSE frames, lifespan, and the worker pool.
 - `test_tool_events.py` — the `tool.started`/`tool.completed`/
   `tool.failed` lifecycle contract (one terminal event per call,
-  redacted input/output, a broken bus never breaks a tool).
+  shared `op` correlation id, redacted input/output, a broken bus never
+  breaks a tool).
+- `test_lifecycle_terminal_events.py` — every chat-pipeline turn and
+  workflow step/run start is closed by a terminal event carrying the
+  same correlation id (no stale "running" rows).
 - `test_log_model_js.py` + `tests/js/log_model.test.js` — runs the pure
   Activity Log mapping/scroll/pause/filter logic under node (skipped
   when node is absent); `test_activity_log_ui.py` locks the static

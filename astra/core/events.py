@@ -100,6 +100,18 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def new_op_id() -> str:
+    """A short, unique id for one operation (a provider call, a tool call, a
+    chat request...).
+
+    Lifecycle events (e.g. `tool.started` / `tool.completed`) carry this on
+    the event payload so consumers can pair a start with its terminal event
+    exactly — no guessing from titles, and concurrent operations of the same
+    kind never collide."""
+    import uuid
+    return uuid.uuid4().hex[:12]
+
+
 class EventBus:
     def __init__(self, store, limit: int = 2000):
         self.store = store

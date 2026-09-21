@@ -37,10 +37,17 @@ class TestActivityLogUI(unittest.TestCase):
             self.assertIn(f'data-filter="{chip}"', self.html)
 
     def test_logs_are_appended_not_prepended(self):
-        feed_section = self.js[self.js.index("function appendEvent"):]
+        feed_section = self.js[self.js.index("function upsertEvent"):]
         self.assertIn("feed.appendChild(", feed_section)
         # the old newest-first rendering prepended; the timeline must not.
         self.assertNotIn("feed.prepend(", self.js)
+
+    def test_lifecycle_continuations_update_the_same_row(self):
+        # start/running rows must be reconciled in place by their terminal
+        # event via a correlation id, never appended as a second row.
+        for call in ("AstraLog.planRender(", "AstraLog.commit(",
+                     "AstraLog.recount(", "resolveRow("):
+            self.assertIn(call, self.js, f"astra.js does not use {call}")
 
     def test_rendering_uses_the_shared_model(self):
         for call in ("AstraLog.normalize(", "AstraLog.isMeaningful(",

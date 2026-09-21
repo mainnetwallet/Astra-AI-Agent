@@ -23,6 +23,7 @@ import time
 
 from astra.core.exceptions import PermissionError as ToolPermissionError
 from astra.core.exceptions import TimeoutError as ToolTimeoutError
+from astra.core.events import new_op_id
 from astra.core.permissions import Policy
 from astra.tools.schemas import Tool
 
@@ -93,7 +94,7 @@ class ToolRegistry:
             return ""
         return text[:limit] + ("…" if len(text) > limit else "")
 
-    def _emit_tool(self, kind: str, tool: Tool, **data) -> None:
+    def _emit_tool(self, kind: str, tool: Tool, trace: str = "", **data) -> None:
         """Publish one tool-lifecycle event for the Activity Log.
 
         Best-effort: a subscriber/event-bus failure must never break the tool
@@ -102,7 +103,7 @@ class ToolRegistry:
             return
         try:
             self.events.emit(kind, agent="tools", tool=tool.name,
-                             category=tool.category, **data)
+                             category=tool.category, trace=trace, **data)
         except Exception:
             pass
 
@@ -163,7 +164,7 @@ class ToolRegistry:
 
     # -- the one true execution path ------------------------------------------
     def execute(self, name: str, args: dict | None = None, ctx=None,
-                allow_confirmation: bool = True) -> dict:
+                allow_confirmation: bool = True, trace: str = "") -> dict:
         args = dict(args or {})
         tool = self._tools.get(name)
         if tool is None:
@@ -194,18 +195,21 @@ class ToolRegistry:
                 pass
 
         start = time.perf_counter()
-        self._emit_tool("tool.started", tool, input=self._brief(args))
+        op = new_op_id()
+        self._emit_tool("tool.started", tool, trace=trace, op=op,
+                        input=self._brief(args))
         try:
             result = self._invoke_with_retry(tool, args, ctx)
         except Exception as e:
             ms = (time.perf_counter() - start) * 1000.0
             self._note(name, errored=True, ms=ms)
-            self._emit_tool("tool.failed", tool, duration_ms=ms,
+            self._emit_tool("tool.failed", tool, trace=trace, op=op,
+                            terminal=True, duration_ms=ms,
                             error=str(e)[:200], input=self._brief(args))
             raise
         ms = (time.perf_counter() - start) * 1000.0
         self._note(name, errored=False, ms=ms)
-        self._emit_tool("tool.completed", tool, duration_ms=ms,
-                        output=self._brief(result))
+        self._emit_tool("tool.completed", tool, trace=trace, op=op,
+                        terminal=True, duration_ms=ms, output=self._brief(result))
         return {"ok": True, "decision": "allow", "result": result,
                 "duration_ms": ms}

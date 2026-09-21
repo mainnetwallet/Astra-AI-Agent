@@ -569,7 +569,7 @@ async function loadLogsHistory() {
       feed.innerHTML = "";
     // /api/events returns newest-first; the timeline is chronological, so
     // order by id and append. Then snap to the bottom in follow mode.
-    AstraLog.orderHistory(rows).forEach((e) => appendEvent(e, true));
+    AstraLog.orderHistory(rows).forEach((e) => upsertEvent(e, true));
     jumpToLatest();
     return rows[0].id || 0;
   } catch (_) {
@@ -679,17 +679,14 @@ function buildDetails(m) {
 
 // One collapsed timeline row + its expandable details. Built from DOM nodes
 // (never innerHTML for event data) so a crafted event cannot inject markup.
-function buildRow(m) {
-  const row = document.createElement("div");
-  row.className = "tl-row";
+// (Re)build a row's contents from a normalized model. Safe: every dynamic
+// value goes through textContent; only static structure uses innerHTML.
+function fillRow(row, m) {
   row.dataset.category = m.category;
   row.dataset.status = m.status;
-  row.dataset.id = m.id;
   row.dataset.text = m.search;
   row.dataset.cats = m.category + (m.status === "err" ? ",errors" : "");
-  row.setAttribute("role", "button");
-  row.tabIndex = 0;
-  row.setAttribute("aria-expanded", "false");
+  row.innerHTML = "";
 
   const ind = document.createElement("span");
   ind.className = "tl-ind";
@@ -729,22 +726,75 @@ function buildRow(m) {
   detail.appendChild(buildDetails(m));
   row.appendChild(detail);
 
+  row._astraModel = m;
+  row.classList.toggle("hidden",
+    !AstraLog.matchesRow(row.dataset.cats, row.dataset.text,
+                         LOGS.filter, LOGS.query));
+}
+
+function buildRow(m) {
+  const row = document.createElement("div");
+  row.className = "tl-row";
+  row.dataset.id = m.id;
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.setAttribute("aria-expanded", "false");
+
   const toggle = () => {
     const open = row.classList.toggle("open");
-    detail.hidden = !open;
+    const detail = $(".tl-detail", row);
+    if (detail) detail.hidden = !open;
     row.setAttribute("aria-expanded", open ? "true" : "false");
   };
   row.addEventListener("click", toggle);
   row.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); }
   });
+  fillRow(row, m);
   return row;
 }
 
-// Append one event at the bottom, honouring follow/scroll and the DOM cap.
-// `quiet` (history load / pause flush) skips the per-row scroll bookkeeping so
-// a large batch is one layout pass, not hundreds.
-function appendEvent(event, quiet) {
+// Update an existing row in place (start -> completion), preserving whether
+// the user had it expanded.
+function updateRow(row, m) {
+  const wasOpen = row.classList.contains("open");
+  fillRow(row, m);
+  if (wasOpen) {
+    row.classList.add("open");
+    row.setAttribute("aria-expanded", "true");
+    const detail = $(".tl-detail", row);
+    if (detail) detail.hidden = false;
+  }
+}
+
+// A child operation that was still "running" when its request/run ended.
+function resolveRow(row, reason) {
+  const m = row._astraModel;
+  if (!m || m.status !== "running") return;
+  updateRow(row, Object.assign({}, m, {
+    status: "warn", detail: reason, icon: m.icon,
+    search: (m.search + " " + reason).toLowerCase(),
+  }));
+}
+
+function trimBuffer(feed) {
+  while (feed.children.length > LOGS_MAX_BUFFER) {
+    const before = feed.scrollTop;
+    const removed = feed.firstElementChild;
+    const removedH = removed.offsetHeight || 0;
+    const lk = removed.dataset.lifecycleKey;
+    feed.removeChild(removed);
+    if (lk && LOGS.active.get(lk) && LOGS.active.get(lk).el === removed)
+      LOGS.active.delete(lk);
+    if (!LOGS.follow) feed.scrollTop = AstraLog.compensateTrim(before, removedH);
+  }
+}
+
+// Render one arriving event: resolve the row for its operation if it is a
+// lifecycle continuation, otherwise append a new row. `quiet` (history load /
+// pause flush) skips the per-row scroll bookkeeping so a large batch is one
+// layout pass, not hundreds.
+function upsertEvent(event, quiet) {
   if (!event || event.id == null) return;
   if (!isImportantEvent(event)) return;
   const key = String(event.id);
@@ -754,28 +804,44 @@ function appendEvent(event, quiet) {
 
   const m = AstraLog.normalize(event);
   AstraLog.markRendered(LOGS, event);
+  const plan = AstraLog.planRender(LOGS, event, m);
   if (feed.firstElementChild &&
       feed.firstElementChild.classList.contains("empty")) feed.innerHTML = "";
 
-  const action = quiet ? { scrollToBottom: false, showIndicator: false }
-                       : AstraLog.onAppend(LOGS, feedMetrics(), 1);
-  feed.appendChild(buildRow(m));
+  const info = plan.key ? LOGS.active.get(plan.key) : null;
+  let rowEl = info && info.el ? info.el : null;
 
-  // bounded DOM: drop the oldest rows once over the cap (compensating the
-  // reader's scroll position so their place does not jump).
-  if (feed.children.length > LOGS_MAX_BUFFER) {
-    const before = feed.scrollTop;
-    const removedH = feed.firstElementChild.offsetHeight || 0;
-    feed.removeChild(feed.firstElementChild);
-    if (!LOGS.follow) feed.scrollTop = AstraLog.compensateTrim(before, removedH);
+  if (rowEl && plan.action === "update") {
+    // resolve the SAME operation: update in place, never a second row
+    const oldModel = rowEl._astraModel;
+    updateRow(rowEl, m);
+    AstraLog.recount(LOGS, oldModel, m);
+    renderLogStats();
+  } else {
+    const action = quiet ? { scrollToBottom: false, showIndicator: false }
+                         : AstraLog.onAppend(LOGS, feedMetrics(), 1);
+    rowEl = buildRow(m);
+    if (plan.key) rowEl.dataset.lifecycleKey = plan.key;
+    feed.appendChild(rowEl);
+    trimBuffer(feed);
+    AstraLog.count(LOGS, m);
+    renderLogStats();
+
+    if (!quiet) {
+      if (action.scrollToBottom) { feed.scrollTop = feed.scrollHeight; jumpToLatest(); }
+      else showJump(LOGS.unread);
+    }
   }
 
-  AstraLog.count(LOGS, m);
-  renderLogStats();
+  // A request/run that just ended resolves any child it left "running".
+  plan.closeKeys.forEach((k) => {
+    const ci = LOGS.active.get(k);
+    if (ci && ci.el) resolveRow(ci.el, "interrupted when the request ended");
+  });
 
-  if (quiet) return;
-  if (action.scrollToBottom) { feed.scrollTop = feed.scrollHeight; jumpToLatest(); }
-  else showJump(LOGS.unread);
+  AstraLog.commit(LOGS, plan, m);
+  const tracked = plan.key ? LOGS.active.get(plan.key) : null;
+  if (tracked) tracked.el = rowEl;
 }
 
 // Live arrival path: skip noise/dupes, render now, or buffer while paused.
@@ -786,14 +852,14 @@ function receiveEvent(event) {
     AstraLog.buffer(LOGS, event);
     return;
   }
-  appendEvent(event);
+  upsertEvent(event);
 }
 
 function flushPending() {
   const items = LOGS.pending;
   LOGS.pending = [];
   if (!items.length) return;
-  items.forEach((e) => appendEvent(e, true));
+  items.forEach((e) => upsertEvent(e, true));
   if (LOGS.follow) jumpToLatest(); else showJump(LOGS.unread);
 }
 

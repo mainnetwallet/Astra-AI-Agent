@@ -107,7 +107,8 @@ class WorkflowEngine:
         run = self.get_run(rid)
         if self.events:
             self.events.emit("workflow.started", agent="workflows",
-                             workflow=run["name"], run_id=run["id"])
+                             workflow=run["name"], run_id=run["id"],
+                             op=f"wf:{run['id']}")
         return run
 
     def get_run(self, run_id: int) -> dict | None:
@@ -186,21 +187,40 @@ class WorkflowEngine:
                 continue
             self.store.exec("UPDATE workflow_runs SET current_step = ? WHERE id = ?",
                             (sid, run["id"]))
+            step_op = f"wf:{run['id']}:{sid}"
+            step_ok, step_error = True, ""
             if self.events:
                 self.events.emit("task.started", agent="workflows",
-                                 workflow=run.get("name"), step=sid)
+                                 workflow=run.get("name"), step=sid,
+                                 run_id=run["id"], op=step_op)
             try:
                 out = self.registry.execute(step["tool"], call_params,
                                             ctx=self.context,
-                                            allow_confirmation=False)
+                                            allow_confirmation=False,
+                                            trace=f"wf:{run['id']}")
                 if out.get("decision") == "ask":
                     results[sid] = {"blocked": True, "reason": out.get("reason")}
+                    step_ok = False
+                    step_error = str(out.get("reason") or "blocked")
                 else:
                     results[sid] = {"ok": out.get("ok", False),
                                     "output": out.get("result")}
+                    step_ok = bool(out.get("ok", False))
+                    if not step_ok:
+                        step_error = str(out.get("reason") or "step did not complete")
             except Exception as e:
                 results[sid] = {"ok": False,
                                 "error": f"{type(e).__name__}: {e}"}
+                step_ok = False
+                step_error = f"{type(e).__name__}: {e}"
+            if self.events:
+                # terminal counterpart of task.started (same op) so the step
+                # row resolves instead of staying "running" forever.
+                self.events.emit(
+                    "task.completed" if step_ok else "task.failed",
+                    agent="workflows", workflow=run.get("name"), step=sid,
+                    run_id=run["id"], op=step_op, terminal=True,
+                    error=step_error)
             done.add(sid)
         status = "paused" if (self.get_run(run["id"]) or {}).get("status") == "paused" else "completed"
         self.store.exec(
@@ -211,7 +231,8 @@ class WorkflowEngine:
         if self.events and status == "completed":
             self.events.emit("workflow.completed", agent="workflows",
                              workflow=run.get("name") or run.get("name") or "",
-                             run_id=run["id"])
+                             run_id=run["id"], op=f"wf:{run['id']}",
+                             terminal=True)
         return self.get_run(run["id"])
 
     # -- step helpers --------------------------------------------------------

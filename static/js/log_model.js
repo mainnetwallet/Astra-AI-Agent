@@ -65,6 +65,14 @@
   function statusOf(kind, data) {
     var k = String(kind == null ? "" : kind);
     var d = data || {};
+    // Explicit lifecycle hints win: a non-terminal failure is a warning (the
+    // operation is still going / about to retry), not a terminal error.
+    if (d.retrying === true || d.terminal === false) return "warn";
+    // Web3 stages: prepared/submitted/broadcast are in-flight; only
+    // confirmed/rejected/failed end the transaction.
+    if (k === "web3.transaction.confirmed") return "ok";
+    if (k === "web3.transaction.rejected") return "warn";
+    if (/^web3\.transaction\.(prepared|submitted|broadcast)$/.test(k)) return "running";
     if (/correction_(failed|exhausted)$/.test(k)) return "err";
     if (/(^|\.)(error|failed)$/.test(k) || /\.failed$/.test(k)) return "err";
     if (k === "astra_gateway.stream_interrupted") return "err";
@@ -342,6 +350,107 @@
   var RENDERED_MAX = 1000;
   var PENDING_MAX = 500;
 
+  /* ------------------------------------------------------------- lifecycle
+   * A lifecycle event carries an operation id (`op`) — or, for web3, a tx id —
+   * so a start and its terminal event resolve the SAME row instead of leaving
+   * a stale "running" row behind. `trace` links a child operation to the
+   * higher-level request/run that owns it, so a request that ends can resolve
+   * any child it left running. */
+  var START_SUFFIX = /\.(started|request)$/;
+  var TERMINAL_SUFFIX = /\.(completed|succeeded|failed|error|timeout|cancelled|rejected|confirmed|done|finished|exhausted)$/;
+  var WEB3_TERMINAL = /^web3\.transaction\.(confirmed|failed|rejected)$/;
+  var UPDATE_KINDS = /^(router\.(retry|fallback)|credential\.rotation|gateway\.target_cooldown)$/;
+
+  function phaseOf(kind, d) {
+    var k = String(kind == null ? "" : kind);
+    var data = d || {};
+    if (data.terminal === true) return "terminal";
+    if (data.terminal === false || data.retrying === true) return "update";
+    if (WEB3_TERMINAL.test(k)) return "terminal";
+    if (START_SUFFIX.test(k)) return "start";
+    if (TERMINAL_SUFFIX.test(k)) return "terminal";
+    if (UPDATE_KINDS.test(k) || /correction_requested$/.test(k)) return "update";
+    return "event";
+  }
+
+  // The reconciliation key for an event, or "" when it is a standalone row.
+  function lifecycleOf(event, model) {
+    var e = event || {};
+    var d = (e.data && typeof e.data === "object") ? e.data : {};
+    var kind = String(e.kind || "");
+    var key = "";
+    if (d.op) key = "op:" + d.op;
+    else if (kind.indexOf("web3.") === 0 && d.tx && d.tx !== "*") key = "tx:" + d.tx;
+    else if (kind.indexOf("task.") === 0 && d.task_id != null && d.task_id !== "")
+      key = "task:" + d.task_id;
+    else if (kind.indexOf("workflow.") === 0 && d.run_id != null && d.run_id !== "")
+      key = "wf:" + d.run_id;
+    var phase = phaseOf(kind, d);
+    // An operation stays tracked (so its later terminal event resolves this
+    // SAME row) while it is starting, mid-flight, or retrying. A non-terminal
+    // failure (retrying=true) is an update, not the end of the operation.
+    var status = model ? model.status : "";
+    var running = phase !== "terminal" &&
+      (phase === "start" || phase === "update" || status === "running");
+    return { key: key, phase: phase, running: running,
+             trace: d.trace ? String(d.trace) : "",
+             request: d.request ? String(d.request) : "",
+             run_id: (d.run_id == null ? "" : String(d.run_id)) };
+  }
+
+  // Decide how an arriving event affects the rendered timeline. Pure: the
+  // caller applies DOM changes, then calls commit().
+  function planRender(state, event, model) {
+    var lc = lifecycleOf(event, model);
+    var existing = lc.key && state.active.has(lc.key)
+      ? state.active.get(lc.key) : null;
+    var closeKeys = [];
+    if (lc.phase === "terminal") {
+      var req = lc.request || (lc.key.indexOf("req:") === 0 ? lc.key.slice(4) : "");
+      var run = lc.run_id;
+      state.active.forEach(function (info, k) {
+        if (k === lc.key) return;
+        var sameReq = req && (info.request === req || info.trace === req);
+        var sameRun = run && (info.run_id === run || info.trace === "wf:" + run);
+        if (sameReq || sameRun) closeKeys.push(k);
+      });
+    }
+    return { action: existing ? "update" : "append", key: lc.key,
+             phase: lc.phase, running: lc.running, closeKeys: closeKeys,
+             trace: lc.trace, request: lc.request, run_id: lc.run_id };
+  }
+
+  // Apply a plan to the state's bookkeeping (the DOM element is stored on the
+  // same info object by the caller and preserved here).
+  function commit(state, plan, model) {
+    if (!plan.key) return state;
+    if (plan.phase === "terminal") {
+      state.active.delete(plan.key);
+    } else if (plan.running) {
+      var info = state.active.get(plan.key) || {};
+      info.request = plan.request;
+      info.trace = plan.trace;
+      info.run_id = plan.run_id;
+      info.category = model ? model.category : "";
+      state.active.set(plan.key, info);
+    } else {
+      state.active.delete(plan.key);
+    }
+    plan.closeKeys.forEach(function (k) { state.active.delete(k); });
+    return state;
+  }
+
+  // Adjust category/error counters when a row changes status (running -> ok/err).
+  function recount(state, oldModel, newModel) {
+    if (oldModel) {
+      if (state.counts[oldModel.category] != null) state.counts[oldModel.category]--;
+      if (oldModel.status === "err") state.counts.errors--;
+    }
+    if (state.counts[newModel.category] != null) state.counts[newModel.category]++;
+    if (newModel.status === "err") state.counts.errors++;
+    return state.counts;
+  }
+
   function createState() {
     return {
       filter: "all", query: "", paused: false,
@@ -349,6 +458,7 @@
       follow: true, unread: 0,
       rendered: new Set(),   // event ids already shown (dedupe)
       pending: [],           // events buffered while paused
+      active: new Map(),     // lifecycle key -> {el, request, trace, run_id}
     };
   }
 
@@ -386,6 +496,7 @@
     state.counts = EMPTY_COUNTS();
     state.rendered = new Set();
     state.pending = [];
+    state.active = new Map();
     state.unread = 0;
     state.follow = true;
     return state;
@@ -415,8 +526,13 @@
     markRendered: markRendered,
     buffer: buffer,
     count: count,
+    recount: recount,
     reset: reset,
     matchesRow: matchesRow,
+    phaseOf: phaseOf,
+    lifecycleOf: lifecycleOf,
+    planRender: planRender,
+    commit: commit,
     RENDERED_MAX: RENDERED_MAX,
     PENDING_MAX: PENDING_MAX,
     distanceFromBottom: distanceFromBottom,

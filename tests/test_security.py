@@ -60,6 +60,16 @@ class TestSsrfGuard(unittest.TestCase):
     def test_allows_public_https(self):
         self.assertFalse(risky_url("https://example.com/page", resolve_dns=False))
 
+    def test_userinfo_does_not_hide_the_real_host(self):
+        # A `user@host` authority must be judged by the host after the `@`,
+        # otherwise a loopback/link-local target slips past the guard.
+        for bad in ("http://evil@127.0.0.1/x",
+                    "http://user:pass@169.254.169.254/latest",
+                    "http://evil@[::1]/"):
+            self.assertTrue(risky_url(bad, resolve_dns=False), bad)
+        self.assertFalse(
+            risky_url("http://user:pass@example.com/x", resolve_dns=False))
+
     def test_override_allows_private(self):
         self.assertTrue(allow_url("http://127.0.0.1/x", allow_private=True))
 

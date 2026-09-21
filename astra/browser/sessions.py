@@ -90,6 +90,17 @@ class BrowserSession:
         if self._user_lock:
             return self._paused("cannot open a new page while waiting on "
                                 "CAPTCHA/MFA — resolve and resume first")
+        # Same SSRF guard as URL research: a browser page is untrusted input
+        # to the model, so refuse file://, javascript:, loopback and private
+        # targets unless the operator explicitly opts in. Without this the
+        # browser tool was an unguarded SSRF/local-file path.
+        from astra.security import allow_url
+        allow_private = os.environ.get("ASTRA_ALLOW_PRIVATE_URLS") == "1"
+        if not allow_url(url, allow_private=allow_private):
+            return {"status": "error", "url": url,
+                    "error": "refused URL (non-http(s) or private/blocked "
+                             "network) — set ASTRA_ALLOW_PRIVATE_URLS=1 to "
+                             "allow internal targets"}
         self._start()
         if not self._page:
             self._context = self._browser.new_context(

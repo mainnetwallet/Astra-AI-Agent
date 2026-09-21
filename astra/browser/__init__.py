@@ -27,7 +27,6 @@ def register_browser_tools(reg, manager=None) -> int:
     availability — each call fails honestly with the install hint when the
     engine is missing, so callers keep seeing the verbs they can invoke.
     """
-    from astra.tools.registry import ToolRegistry  # noqa: F401
     from astra.tools.schemas import Tool, Level
 
     manager = manager or BrowserManager()

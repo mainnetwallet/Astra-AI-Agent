@@ -381,7 +381,9 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         keys = {
             "GEMINI_API_KEYS": "k", "GROQ_API_KEYS": "k", "MISTRAL_API_KEYS": "k",
             "OPENROUTER_API_KEYS": "k", "CEREBRAS_API_KEYS": "k",
-            "CLOUDFLARE_API_KEYS": "k", "SAMBA_API_KEYS": "k",
+            # cloudflare also needs an account id to build a request URL
+            "CLOUDFLARE_API_KEYS": "k", "CLOUDFLARE_ACCOUNT_IDS": "acct",
+            "SAMBA_API_KEYS": "k",
             "COHERE_API_KEYS": "k", "ZAI_API_KEYS": "k", "BEDROCK_CREDENTIALS": "k",
         }
         cfg = self._config(**keys)
@@ -580,6 +582,20 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         adapter = reg.get("bedrock")
         self.assertIsNotNone(adapter)
         self.assertEqual(adapter.auth_mode, "bearer")
+
+    def test_cloudflare_requires_account_ids_as_well_as_keys(self):
+        # A Workers AI token alone cannot build a request URL, so the
+        # registry must not report cloudflare as a routable provider.
+        from astra.ai.registry import has_credentials
+        self.assertFalse(
+            has_credentials(self._config(CLOUDFLARE_API_KEYS="tok"), "cloudflare"))
+        self.assertFalse(
+            has_credentials(self._config(CLOUDFLARE_ACCOUNT_IDS="acct"),
+                            "cloudflare"))
+        self.assertTrue(
+            has_credentials(self._config(CLOUDFLARE_API_KEYS="tok",
+                                         CLOUDFLARE_ACCOUNT_IDS="acct"),
+                            "cloudflare"))
 
     # 15. deterministic tie-breaking
     def test_equal_score_candidates_rank_deterministically(self):

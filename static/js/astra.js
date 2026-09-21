@@ -2044,9 +2044,10 @@ async function boot() {
   });
   await Promise.all(scriptLoads);
 
-  loaders.dashboard();
   // Reopen whichever tab was active before the last refresh, if it still
-  // exists; otherwise fall back to Dashboard.
+  // exists; otherwise fall back to Dashboard. showTab runs the tab's loader,
+  // so calling loaders.dashboard() here as well fired two identical
+  // /api/dashboard requests on every load.
   let initialTab = "dashboard";
   try {
     const saved = localStorage.getItem("astra:active-tab");

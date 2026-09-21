@@ -41,6 +41,14 @@ def has_credentials(config, provider: str) -> bool:
         getlist = getattr(config, "getlist", lambda _k, d=[]: d)
         return bool(getlist("BEDROCK_API_KEYS", default=[])) or \
             bool(getlist("BEDROCK_CREDENTIALS", default=[]))
+    if provider == "cloudflare":
+        # A Workers AI token is useless without at least one account id: the
+        # adapter builds every request URL as /accounts/<id>/ai/v1 and raises
+        # otherwise. Requiring both here keeps a token-only config from being
+        # reported as a routable provider whose every call fails.
+        getlist = getattr(config, "getlist", lambda _k, d=[]: d)
+        return bool(getlist("CLOUDFLARE_API_KEYS", default=[])) and \
+            bool(getlist("CLOUDFLARE_ACCOUNT_IDS", default=[]))
     env = KEYS_ENV.get(provider)
     if not env:
         return False

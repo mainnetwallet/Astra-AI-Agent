@@ -160,11 +160,15 @@ configured.
 | `ASTRA_ALLOW_PRIVATE_URLS` | 0 | SSRF guard override for URL research |
 | `AI_PROVIDER` | *(auto)* | Force/opt-in a provider order (`AI_PROVIDER=gemini groq`) |
 | `AI_ROUTING_PREFERENCE` | balanced | AstraRouter scoring preference |
+| `AI_MAX_RETRIES` | 2 | Retries per provider before failing over to the next |
+| `AI_BACKOFF` | 1.0 | Base seconds for exponential retry backoff |
 | `CHAT_MAX_TOKENS` | 1500 | Provider completion budget per chat turn |
 | `ASTRA_STARTUP_DISCOVERY` | 0 | Run model discovery once at boot |
 | `GRANTED_PERMISSIONS` | `read low_risk_write browser_action` | Tool permission levels granted to the agent |
-| `DATA_DIR` | ./data | SQLite data directory |
+| `DATA_DIR` | ./data | Runtime data directory (SQLite DB + `uploads/`) |
 | `DATABASE` | `<DATA_DIR>/astra.db` | Explicit SQLite file path |
+| `ASTRA_WORKSPACE` | `./workspace` | Root the file tools may read/write (path escapes rejected) |
+| `BROWSER_SCREENSHOTS` | `data/screenshots` | Directory browser-tool screenshots are written to |
 | `ASTRA_MASTER_SECRET` | *(key file)* | Web3 keystore master secret |
 | `WEB3_TRANSACTION_MODE` | CONFIRM | `CONFIRM` (manual) or `AUTO` (policy-only) |
 | `WEB3_MAX_TX_VALUE_WEI` / `WEB3_MAX_DAILY_TX_VALUE_WEI` / `WEB3_MAX_GAS_LIMIT` | 0 (unlimited) | Deterministic policy limits |
@@ -308,8 +312,10 @@ an async generator, so an idle Activity Log tab costs no worker thread.
   `Cross-Origin-Opener-Policy`, Content-Security-Policy.
 * **Redaction** — a global generator redacts api keys/tokens/seeds/passwords/
   private keys from every outbound API response and SSE frame.
-* **SSRF guard** — URL research refuses loopback/private/link-local targets
-  unless `ASTRA_ALLOW_PRIVATE_URLS=1`.
+* **SSRF guard** — URL research **and browser-tool navigation** refuse
+  loopback/private/link-local (and non-`http(s)`) targets unless
+  `ASTRA_ALLOW_PRIVATE_URLS=1`. URL userinfo (`http://user@host/`) and
+  bracketed IPv6 literals are parsed so they cannot disguise the real host.
 * **Path traversal** — static file serving resolves inside `static/` only.
 
 ## Specialist agents & the plugin system

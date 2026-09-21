@@ -71,6 +71,39 @@ class WebCoreTests(unittest.TestCase):
         self.assertFalse(data["ok"])
         self.assertEqual(data["error_code"], "bad_request")
 
+    def test_non_integer_query_params_are_400_not_500(self):
+        # `int()` on raw query input used to raise ValueError and surface as
+        # an opaque 500. A malformed client parameter is a 400.
+        for path in ("/api/chat/history?after_id=abc",
+                     "/api/chat/history?limit=xyz",
+                     "/api/chat/history?conversation_id=nope",
+                     "/api/events?limit=abc",
+                     "/api/events?after_id=x",
+                     "/api/memory?limit=x",
+                     "/api/memory/search?k=x"):
+            resp = self._call("GET", path)
+            self.assertEqual(resp.status, 400, path)
+            self.assertEqual(self._payload(resp)["error_code"], "bad_request", path)
+
+    def test_non_integer_path_and_body_params_are_400(self):
+        for method, path in (("POST", "/api/workflows/abc/run"),
+                             ("DELETE", "/api/schedules/abc")):
+            resp = self._call(method, path, body={})
+            self.assertEqual(resp.status, 400, path)
+        resp = self._call("POST", "/api/tasks",
+                          body={"goal": "g", "priority": "high"})
+        self.assertEqual(resp.status, 400)
+
+    def test_uploads_dir_follows_data_dir(self):
+        from astra.web import uploads_dir
+
+        class _Cfg:
+            def get(self, key, default=None):
+                return "/srv/astra" if key == "DATA_DIR" else default
+
+        self.assertEqual(uploads_dir(_Cfg()), os.path.join("/srv/astra",
+                                                           "uploads"))
+
     def test_path_traversal_blocked(self):
         resp = self._call("GET", "/static/../run.py")
         self.assertEqual(resp.status, 400)

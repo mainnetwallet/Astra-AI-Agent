@@ -108,6 +108,23 @@ from .security import (ApiError, RateLimiter, make_request_id, redact)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 
+
+def uploads_dir(cfg=None) -> str:
+    """Absolute uploads directory, under the same DATA_DIR as the database.
+
+    Uploads used to be hardcoded to `<repo>/data/uploads`, so a deployment
+    that relocated DATA_DIR (a container volume, /sdcard on Termux) kept its
+    database there but wrote uploaded files into the install directory.
+    Honouring DATA_DIR keeps them together (and survives a read-only app
+    dir)."""
+    data_dir = ""
+    if cfg is not None:
+        data_dir = cfg.get("DATA_DIR", "") or ""
+    data_dir = data_dir or os.environ.get("DATA_DIR") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    return os.path.join(data_dir, "uploads")
+
+
 AGENT_NAME = "Astra AI Agent"
 
 CONTENT_TYPES = {
@@ -247,6 +264,21 @@ def error_response(message, status=400, error_code="bad_request", rid=""):
     return json_response({"ok": False, "error": message,
                           "error_code": error_code, "request_id": rid},
                          status, rid)
+
+
+def int_arg(value, default=None, *, name="value"):
+    """Parse a client-supplied integer.
+
+    Raises ApiError(400) on garbage instead of letting `int()` raise a
+    ValueError that the generic handler turns into an opaque 500 — a bad
+    query string is a client error, not a server fault. `None`/`""` yields
+    `default` (so an omitted parameter keeps its documented fallback)."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ApiError("bad_request", f"{name} must be an integer")
 
 
 def api_error_response(exc, rid=""):
@@ -446,10 +478,6 @@ class AstraSite:
         self.rate_limiter = RateLimiter(rl, 60.0)
         self._allowed_origins = set(
             (cfg.getlist("ASTRA_CORS_ORIGINS") if cfg else None) or [])
-        try:
-            self.bind_host = addr[0]
-        except Exception:
-            self.bind_host = "0.0.0.0"
         # -- observability: tiny in-memory request counters --------------------
         self._req_lock = threading.Lock()
         self._req = {"count": 0, "errors": 0,
@@ -689,9 +717,7 @@ class WebApp:
         return Response(200, body, content_type_for(path), cache=cache)
 
     def _serve_upload(self, filename: str, req: Request) -> Response:
-        upload_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data", "uploads")
+        upload_dir = uploads_dir(self.site.cfg())
         path = os.path.abspath(os.path.join(upload_dir, filename))
         root = os.path.abspath(upload_dir)
         if not path.startswith(root + os.sep):
@@ -735,9 +761,7 @@ class WebApp:
         """Process uploaded files into attachment dicts for the agent."""
         if not files:
             return []
-        upload_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data", "uploads")
+        upload_dir = uploads_dir(self.site.cfg())
         os.makedirs(upload_dir, exist_ok=True)
         attachments = []
         for f in files[:10]:
@@ -826,10 +850,11 @@ class WebApp:
             return json_response({"ok": True, "data": reply}, rid=req.rid)
         if path == ["api", "chat", "history"] and method == "GET":
             cid_param = q.get("conversation_id")
+            cid = int_arg(cid_param, name="conversation_id") if cid_param else None
             return json_response({"ok": True, "data": site.chat_log.history(
-                after_id=int(q.get("after_id") or 0),
-                limit=min(int(q.get("limit") or 200), 500),
-                conversation_id=int(cid_param) if cid_param else None)}, rid=req.rid)
+                after_id=int_arg(q.get("after_id"), 0, name="after_id"),
+                limit=min(int_arg(q.get("limit"), 200, name="limit"), 500),
+                conversation_id=cid)}, rid=req.rid)
         if path == ["api", "chat", "history"] and method == "DELETE":
             return json_response({"ok": True,
                                   "removed": site.chat_log.clear()}, rid=req.rid)
@@ -897,8 +922,9 @@ class WebApp:
         # live events
         if path == ["api", "events"] and method == "GET":
             return json_response({"ok": True, "data": site.events().history(
-                limit=int(q.get("limit", 100)),
-                after_id=int(q.get("after_id") or 0))}, rid=req.rid)
+                limit=int_arg(q.get("limit"), 100, name="limit"),
+                after_id=int_arg(q.get("after_id"), 0, name="after_id"))},
+                rid=req.rid)
         if path == ["api", "events"] and method == "DELETE":
             removed = site.events().clear()
             return json_response({"ok": True, "removed": removed}, rid=req.rid)
@@ -926,7 +952,8 @@ class WebApp:
                 return error_response("goal required", 400, "bad_request",
                                       req.rid)
             t = site.tasks().create(goal=goal, type=body.get("type", "manual"),
-                                    priority=int(body.get("priority", 0)),
+                                    priority=int_arg(body.get("priority"), 0,
+                                                     name="priority"),
                                     description=body.get("description", ""))
             return json_response({"ok": True, "data": t}, 201, req.rid)
         if len(path) == 3 and path[0] == "api" and path[1] == "tasks" and method == "GET":
@@ -939,7 +966,7 @@ class WebApp:
             return json_response({"ok": True, "data": t}, rid=req.rid)
         if path == ["api", "memory"] and method == "GET":
             return json_response({"ok": True, "data": site.memory().all(
-                limit=int(q.get("limit", 100)),
+                limit=int_arg(q.get("limit"), 100, name="limit"),
                 category=q.get("category") or None)}, rid=req.rid)
         if path == ["api", "memory"] and method == "POST":
             content = (body.get("content") or "").strip()
@@ -962,7 +989,7 @@ class WebApp:
             except (TypeError, ValueError):
                 _min_imp = None
             return json_response({"ok": True, "data": site.memory().search(
-                qq, k=int(q.get("k", 5)),
+                qq, k=int_arg(q.get("k"), 5, name="k"),
                 layer=q.get("layer") or None,
                 min_importance=_min_imp)}, rid=req.rid)
         if len(path) == 3 and path[0] == "api" and path[1] == "memory" and method == "DELETE":
@@ -986,7 +1013,8 @@ class WebApp:
                                          body.get("description", ""), steps)
             return json_response({"ok": True, "data": wf}, 201, req.rid)
         if len(path) == 4 and path[:2] == ["api", "workflows"] and path[3] == "run" and method == "POST":
-            run = site.workflows().run(workflow_id=int(path[2]),
+            run = site.workflows().run(workflow_id=int_arg(
+                                           path[2], name="workflow_id"),
                                        params=body.get("params") or {})
             return json_response({"ok": True, "data": run}, rid=req.rid)
         if path == ["api", "workflows", "runs"] and method == "GET":
@@ -1001,7 +1029,8 @@ class WebApp:
             s = site.scheduler().add(body.get("name", "sched"),
                                      body.get("kind", "daily"),
                                      body.get("value", ""),
-                                     int(body.get("workflow_id", 0)),
+                                     int_arg(body.get("workflow_id"), 0,
+                                             name="workflow_id"),
                                      body.get("params") or {})
             return json_response({"ok": True, "data": s}, 201, req.rid)
         if len(path) == 3 and path[:2] == ["api", "schedules"] and method in ("PATCH", "DELETE"):
@@ -1010,14 +1039,15 @@ class WebApp:
                 return error_response("scheduler disabled", 400, "bad_request",
                                       req.rid)
             if method == "DELETE":
-                sc.delete(int(path[2]))
+                sc.delete(int_arg(path[2], name="schedule id"))
                 return json_response({"ok": True}, rid=req.rid)
             # PATCH: enable/disable only (schedule fields are fixed)
             enabled = body.get("enabled")
             if enabled is None:
                 return error_response("enabled required", 400, "bad_request",
                                       req.rid)
-            row = sc.set_enabled(int(path[2]), bool(enabled))
+            row = sc.set_enabled(int_arg(path[2], name="schedule id"),
+                                 bool(enabled))
             if row:
                 return json_response({"ok": True, "data": row}, rid=req.rid)
             return error_response("schedule not found", 404, "bad_request",

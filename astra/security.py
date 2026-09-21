@@ -185,11 +185,24 @@ def risky_url(url: str, resolve_dns: bool = True, allow_loopback: bool = False) 
 
 
 def _split_url(url: str):
-    """Minimal URL split: returns (scheme, host, port) or None."""
-    m = re.match(r"^(https?)://([^/:?#]+)(?::(\d+))?", url)
+    """Minimal URL split: returns (scheme, host, port) or None.
+
+    The authority is parsed explicitly so a URL carrying userinfo
+    (`http://user:pass@127.0.0.1/`) is judged by its *real* host, not the
+    whole `user@host` string — otherwise the DNS check runs on a bogus name
+    and the guard fails open. Bracketed IPv6 literals are unwrapped too."""
+    m = re.match(r"^(https?)://([^/?#]+)", url)
     if not m:
         return None
-    return m.group(1), m.group(2).lower(), m.group(3)
+    scheme, authority = m.group(1), m.group(2)
+    # userinfo (user[:pass]@) is not part of the host we must judge
+    if "@" in authority:
+        authority = authority.rsplit("@", 1)[1]
+    host, _, port = authority.partition(":")
+    host = host.strip("[]").lower()
+    if not host:
+        return None
+    return scheme, host, port or None
 
 
 def allow_url(url: str, allow_private: bool = False) -> bool:

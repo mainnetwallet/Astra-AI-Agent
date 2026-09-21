@@ -312,6 +312,19 @@ class TestConfig(unittest.TestCase):
         self.assertIn("port", snap)
         self.assertIn("plugins", snap)
 
+    def test_all_host_mirrors_bind(self):
+        """`host` reports the real bind address, not a stale constant."""
+        from astra.core.config import Config
+        saved = os.environ.pop("BIND", None)
+        try:
+            self.assertEqual(Config().all()["host"], "127.0.0.1")
+            os.environ["BIND"] = "0.0.0.0"
+            self.assertEqual(Config().all()["host"], "0.0.0.0")
+        finally:
+            os.environ.pop("BIND", None)
+            if saved is not None:
+                os.environ["BIND"] = saved
+
 
 # ── State / Timeutil ─────────────────────────────────────────────────────────
 class TestStateTimeutil(unittest.TestCase):

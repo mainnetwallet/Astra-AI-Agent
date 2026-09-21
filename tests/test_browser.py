@@ -139,7 +139,8 @@ class TestBrowserMockedLive(unittest.TestCase):
         _fresh_session_state()
         from astra.browser.manager import BrowserManager
         mgr = BrowserManager()
-        r = mgr.browser_open({"url": "https://x/challenge", "session": "c"})
+        r = mgr.browser_open({"url": "https://example.com/challenge",
+                              "session": "c"})
         self.assertIn("status", r)
         # The manager must *pause*, not solve: pending_user_action stays true.
         from astra.browser.sessions import BrowserSession
@@ -162,6 +163,16 @@ class TestBrowserMockedLive(unittest.TestCase):
         mgr.close_session("nl")
         fp.uninstall_fake()
         _fresh_session_state()
+
+    def test_open_refuses_private_and_non_http_urls(self):
+        from astra.browser.manager import BrowserManager
+        mgr = BrowserManager()
+        for bad in ("http://127.0.0.1/admin", "file:///etc/passwd",
+                    "javascript:alert(1)", "http://169.254.169.254/latest"):
+            r = mgr.browser_open({"url": bad, "session": "ssrf"})
+            self.assertEqual(r["status"], "error", bad)
+            self.assertEqual(r["url"], bad)
+        mgr.close_session("ssrf")
 
 
 if __name__ == "__main__":

@@ -44,9 +44,16 @@ from astra.workflows.scheduler import SchedulerManager
 from astra.agent import Agent
 from astra.store import Store
 
-def default_db_path() -> str:
-    data_dir = os.environ.get("DATA_DIR", os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))
+def default_db_path(config=None) -> str:
+    # DATA_DIR is a documented storage-location knob; it must be honoured
+    # whether it arrives via the environment, `.env` or `config.json` (the
+    # latter two are only visible through Config). Reading os.environ alone
+    # silently ignored `DATA_DIR=...` in `.env`.
+    data_dir = ""
+    if config is not None:
+        data_dir = config.get("DATA_DIR", "") or ""
+    data_dir = data_dir or os.environ.get("DATA_DIR") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
     return os.path.join(data_dir, "astra.db")
 
 
@@ -59,7 +66,7 @@ def build(store: Store | None = None, config=None,
     """
     config = config or Config()
     if store is None:
-        store = Store(config.get("DATABASE", default_db_path()))
+        store = Store(config.get("DATABASE") or default_db_path(config))
     store.migrate()
 
     # core subsystems

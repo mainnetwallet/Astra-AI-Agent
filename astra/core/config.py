@@ -118,12 +118,15 @@ class Config:
         (The old default here was the literal string "anthropic", a
         leftover from when Anthropic was the one and only provider.)
         """
-        sup = {"port": 8787, "host": "0.0.0.0", "log_level": "info",
+        sup = {"port": 8787, "log_level": "info",
                "browser_mode": "off", "ai_provider": "",
                "ai_model": "", "data_dir": ""}
         out = {}
         for k in sup:
             out[k] = self.get(k, sup[k])
+        # `host` mirrors the actual bind address (`BIND`), not a stale
+        # constant; the launcher binds to BIND (default loopback).
+        out["host"] = self.get("BIND", "127.0.0.1")
         # Legacy, no-op key: the plugin loader was removed from the codebase,
         # so ACTIVE_PLUGINS has no effect. The count is reported only so the
         # public config snapshot keeps its historical "plugins" field.

@@ -89,11 +89,6 @@ PROVIDER_VAR = {
     "bedrock": "BEDROCK_MODELS",
 }
 
-
-def _tokens_from_context(context_window: int) -> int:
-    return int(context_window)
-
-
 class Model:
     """One AI model resource. Immutable-ish metadata, mutable status."""
     __slots__ = ("provider", "model_id", "display_name", "capabilities", "context_window",

@@ -22,7 +22,7 @@ import urllib.request
 
 from astra.ai.credentials import CredentialPool
 from astra.ai.provider import AIProvider, _read_sse
-from astra.core.exceptions import AstraError, ProviderError, TimeoutError
+from astra.core.exceptions import ProviderError, TimeoutError
 
 DEFAULT_TIMEOUT = 60
 STREAM_TIMEOUT = 120
@@ -221,7 +221,6 @@ class CompatibleAdapter(AIProvider):
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1) -> str:
         """Generate an image via /v1/images/generations (OpenAI-compatible)."""
-        import base64 as b64mod
         cred = self._pick()
         if cred is None:
             raise ProviderError(f"{self.name}: no healthy credential configured")

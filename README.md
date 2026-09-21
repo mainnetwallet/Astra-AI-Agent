@@ -316,10 +316,11 @@ an async generator, so an idle Activity Log tab costs no worker thread.
 
 **There is no plugin loader.** The `astra.core.Plugin`/`Registry` system was
 removed from the codebase; `plugins/` is an empty placeholder folder for future
-third-party plugins (see `plugins/README.md`). `ACTIVE_PLUGINS` is still read
-for a public-config count, but nothing is discovered, loaded or wired from
-`plugins/` today. The SPA keeps dormant plugin hooks, but the manifest reports
-zero plugin tabs.
+third-party plugins (see `plugins/README.md`). `ACTIVE_PLUGINS` is a no-op
+legacy key — read only for the public-config `plugins` count (0 by default) —
+because nothing is discovered, loaded or wired from `plugins/` today. The SPA
+keeps dormant plugin hooks, but the manifest reports zero plugin tabs and no
+plugin script files ship.
 
 Domain-specific work instead ships as a built-in **specialist agent**
 (`astra/agents/`) — `general`, `research`, `browser`, `coding`, `files`,

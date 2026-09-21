@@ -124,5 +124,8 @@ class Config:
         out = {}
         for k in sup:
             out[k] = self.get(k, sup[k])
-        out["plugins"] = len(self.getlist("ACTIVE_PLUGINS", default=["airdrop"]))
+        # Legacy, no-op key: the plugin loader was removed from the codebase,
+        # so ACTIVE_PLUGINS has no effect. The count is reported only so the
+        # public config snapshot keeps its historical "plugins" field.
+        out["plugins"] = len(self.getlist("ACTIVE_PLUGINS", default=[]))
         return out

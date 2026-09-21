@@ -18,12 +18,11 @@ from __future__ import annotations
 import threading
 from datetime import datetime
 
-from .signer import sign
+from .signer import sign, keccak_256
 from .keystore import SecureKeyStore
 from . import raw_tx
 from . import chains
-from astra.core.exceptions import AstraError
-from .policy import (TransactionPolicyEngine, PolicyConfig, TxRequest,
+from .policy import (TransactionPolicyEngine, TxRequest,
                      TransactionPolicyError, TransactionRejectedError,
                      TransactionFailedError)
 
@@ -232,12 +231,11 @@ class TransactionManager:
             return {"tx_id": tx_id, "status": rec["status"]}
         chain = self._chain_by_id(rec["chain_id"])
         deadline = time.time() + timeout_s
-        last = None
         while True:
             try:
                 rcpt = raw_tx.receipt(chain.get("rpcs", []), h)
-            except Exception as exc:
-                rcpt, last = None, str(exc)[:120]
+            except Exception:
+                rcpt = None
             if rcpt and rcpt.get("status") == "0x1":
                 self._mark(rec["id"], "CONFIRMED")
                 return {"tx_id": tx_id, "status": "CONFIRMED", "tx_hash": h}
@@ -258,7 +256,7 @@ class TransactionManager:
                 "WHERE status IN ('SIGNED', 'BROADCAST', 'AUTHORIZED')"):
             tx_id = row["tx_id"]
             try:
-                res = self.sign_and_broadcast_checked(tx_id)
+                self.sign_and_broadcast_checked(tx_id)
                 out.append(tx_id)
             except Exception as exc:
                 out.append(tx_id)   # surfaced below via status/error

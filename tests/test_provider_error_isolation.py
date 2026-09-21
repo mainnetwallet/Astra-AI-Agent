@@ -54,7 +54,7 @@ class CloudflareConcurrencyTests(unittest.TestCase):
         self.assertEqual(ad.base_url, "https://api.cloudflare.com/client/v4")
 
     def test_gateway_connection_urls_stay_well_formed(self):
-        from astra.ai.gateway import AstraGatewayCloudflare, _GatewayCompatibleConnection
+        from astra.ai.gateway import AstraGatewayCloudflare
         ad = AstraGatewayCloudflare(config=_cfg(GW_CLOUDFLARE_API_KEYS="k",
                                                 GW_CLOUDFLARE_ACCOUNT_IDS="acctA"))
         seen = self._hammer(ad, "astra.ai.gateway._GatewayCompatibleConnection._post")

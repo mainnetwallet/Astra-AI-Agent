@@ -24,7 +24,6 @@ import json
 import urllib.request
 
 from astra.core.exceptions import ProviderError
-from astra.core.timeutil import duration_ms, ms_now
 
 
 class AIProvider:
@@ -72,16 +71,13 @@ def _read_sse(resp) -> list[dict]:
     (data: {...} / data: [DONE]). Lines without 'data:' prefix are ignored.
     Empty data lines and [DONE] sentinel terminate the stream gracefully.
     """
-    import io
     results = []
-    buf = ""
     raw = resp.read()
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", errors="replace")
     for line in raw.split("\n"):
         line = line.strip()
         if not line:
-            buf = ""
             continue
         if line.startswith("data:"):
             payload = line[len("data:"):].strip()

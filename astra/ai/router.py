@@ -41,7 +41,6 @@ import threading
 import time
 from datetime import datetime
 
-from astra.ai.credentials import CredentialPool
 from astra.ai.gateway_contract import ProviderExecutionPort
 from astra.ai.models import Model, metadata_for
 from astra.ai.routing_policy import RoutingDecisionPolicy
@@ -1048,11 +1047,9 @@ class AstraRouter:
                 if "image" in out_mods and hasattr(adapter, "generate_image"):
                     prompt = self._extract_prompt(req.messages)
                     text = adapter.generate_image(prompt, model=model.model_id)
-                    streamed = False
                 elif "audio" in out_mods and hasattr(adapter, "text_to_speech"):
                     prompt = self._extract_prompt(req.messages)
                     text = adapter.text_to_speech(prompt, model=model.model_id)
-                    streamed = False
                 elif req.required_tools or req.structured_output or req.task_contract is not None:
                     # §JSON mode: ask the provider API to enforce JSON, not
                     # just the prompt text — a chatty/"reasoning" free model
@@ -1066,11 +1063,9 @@ class AstraRouter:
                     text = adapter.chat(req.messages, model=model.model_id,
                                         max_tokens=structured_tokens,
                                         response_format="json_object")
-                    streamed = False
                 else:
                     text = adapter.chat(req.messages, model=model.model_id,
                                         max_tokens=req.max_tokens)
-                    streamed = False
                 ms = duration_ms(t0)
                 cost = self._estimate_cost_adapter(adapter, text)
                 self._latency[name].append(ms)

@@ -44,7 +44,7 @@ class ModelDiscovery:
                     "error": "no discovery adapter"}
         try:
             ids = adapter.list_models()
-        except Exception as e:
+        except Exception:
             ids = []
         with self._lock:
             self._cache[provider] = {"at": time.monotonic(), "models": ids}

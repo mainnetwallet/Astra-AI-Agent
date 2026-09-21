@@ -20,7 +20,6 @@ All of them are routable peers; the modern adapters are the recommended path.
 from __future__ import annotations
 
 from astra.ai.adapters import ADAPTERS
-from astra.ai.credentials import CredentialPool
 
 # api-keys env var per provider (the spec's normalized naming).
 # The Astra AI Gateway is deliberately absent — it is not a provider (see
@@ -103,7 +102,6 @@ def build_providers(config=None, events=None) -> ProviderRegistry:
     # legacy Anthropic + generic OpenAI-compatible still participate when
     # configured (backward compatibility).
     from .provider import ClaudeProvider, OpenAICompatibleProvider
-    from .models import PROVIDER_VAR
     forced = config.getlist("AI_PROVIDER", default=[])
     for name, cls in ADAPTERS.items():
         if not has_credentials(config, name) and name not in forced:

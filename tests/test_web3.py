@@ -271,7 +271,6 @@ class TestPolicyBlockPersist(unittest.TestCase):
         from astra.web3.policy import (PolicyConfig, TransactionPolicyEngine,
                                        TxRequest, TransactionPolicyError)
         from astra.web3.transactions import TransactionManager
-        from astra.web3.keystore import SecureKeyStore
         store = make_store()
         eng = TransactionPolicyEngine(PolicyConfig(
             mode="AUTO", max_tx_value_wei=10 ** 15))

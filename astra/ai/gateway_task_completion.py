@@ -53,8 +53,7 @@ from dataclasses import dataclass, field
 from astra.ai.gateway_contract import (ProviderExecutionPort,
                                        ProviderExecutionResult,
                                        ProviderExecutionTarget)
-from astra.ai.gateway_supervision import (build_correction_messages,
-                                          validate_execution_result)
+from astra.ai.gateway_supervision import validate_execution_result
 from astra.core.correction import MAX_CORRECTION_ATTEMPTS
 
 # ── §8 completion taxonomy ───────────────────────────────────────────────────

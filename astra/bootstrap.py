@@ -30,9 +30,8 @@ from astra.core.tasks import TaskEngine
 # goes through them (see astra/ai/chat_pipeline.py). ToolRegistry.execute()
 # itself works standalone — see
 # tests/test_web3_toolregistry_auto_integration.py.
-from astra.ai.provider import ClaudeProvider, OpenAICompatibleProvider
 from astra.ai.router import AstraRouter
-from astra.ai.registry import build_providers, ProviderRegistry
+from astra.ai.registry import build_providers
 from astra.ai.models import ModelRegistry
 from astra.ai.discovery import ModelDiscovery
 from astra.agents import SPECIALISTS, AgentManager
@@ -83,9 +82,9 @@ def build(store: Store | None = None, config=None,
     # tool surface. Master secret comes from ASTRA_MASTER_SECRET (or the
     # operator's key file), never from model prompts.
     from astra.web3.transactions import (TransactionManager,
-                                         TransactionPolicyEngine,
-                                         PolicyConfig)
-    from astra.web3.policy import normalize_mode, normalize_address
+                                         TransactionPolicyEngine)
+    from astra.web3.policy import (normalize_mode, normalize_address,
+                                   PolicyConfig)
     from astra.web3.keystore import SecureKeyStore
     from astra.web3.tools import register_web3_tools
     # Environment → PolicyConfig: every WEB3_* limit/allowlist documented in
@@ -211,10 +210,3 @@ def build(store: Store | None = None, config=None,
         "web3_policy": policy_engine,
         "gateway_intelligence": gateway_intelligence,
     }
-
-
-def _first_environ(key: str) -> str:
-    for name in (key, "ASTRA_" + key, key.upper(), "ASTRA_" + key.upper()):
-        if os.environ.get(name):
-            return os.environ[name]
-    return ""

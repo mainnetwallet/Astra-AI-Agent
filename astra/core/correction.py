@@ -2,14 +2,15 @@
 
 Correction is distinct from provider/model failover (spec §20): it applies
 when the SAME target is still healthy but the result it returned was
-deterministically invalid/partial (astra.core.result_validation). The
-instruction below tells the target what already happened and what's still
-missing, so it continues rather than redoing completed work.
+deterministically invalid/partial (see astra.ai.gateway_supervision and
+astra.ai.gateway_task_completion). The instruction below tells the target
+what already happened and what's still missing, so it continues rather than
+redoing completed work.
 
 Correction is bounded (`MAX_CORRECTION_ATTEMPTS`) and only ever offered to
 idempotent tools (astra.tools.schemas.Tool.idempotent) — a non-idempotent
 step (a wallet tx, a browser mutation, ...) is never blindly re-invoked just
-because its result looked incomplete; see astra.core.executor.Executor.
+because its result looked incomplete.
 """
 from __future__ import annotations
 

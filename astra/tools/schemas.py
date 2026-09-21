@@ -5,17 +5,8 @@ confirmation flag. `ToolRegistry` turns these into safe, audited calls.
 """
 from __future__ import annotations
 
-import inspect
-
 from astra.core.exceptions import ValidationError
 from astra.core.permissions import Level
-
-
-def _type_of(spec) -> str:
-    if isinstance(spec, str):
-        return spec
-    t = getattr(spec, "type", None) or "any"
-    return t
 
 
 class Tool:

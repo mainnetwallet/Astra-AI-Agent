@@ -51,9 +51,6 @@ def sign_v4(access_key: str, secret_key: str, region: str, service: str,
     canonical_uri = quote(parts.path, safe="/-_.~") or "/"
     canonical_querystring = parts.query or ""
 
-    def _quote(s: str) -> str:
-        return quote(s, safe="-_.~")
-
     signed_headers = "content-type;host;x-amz-date"
     canonical_headers = (
         f"content-type:{headers['content-type']}\n"
@@ -84,9 +81,6 @@ class BedrockCredentialPool(CredentialPool):
 
     @classmethod
     def from_env(cls, config, env_name: str, provider: str | None = None) -> "BedrockCredentialPool":
-        import re
-        raw = getattr(config, "get", lambda _k, d="": d)(env_name, "") or ""
-        raw = getattr(config, "get", lambda _k, d="": d)("AWS_ACCESS_KEY_ID", "") or ""
         pairs: list[str] = []
         text = getattr(config, "get", lambda _k, d="": d)(env_name, "") or ""
         for line in text.replace(",", "\n").splitlines():

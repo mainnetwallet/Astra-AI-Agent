@@ -103,7 +103,6 @@ astra/
 │   ├── gateway_routing.py    Gateway-side provider short-name mapping
 │   ├── gateway_supervision.py Supervises a task end-to-end through the loop
 │   ├── chat_pipeline.py    The single path every chat message takes (§1)
-│   ├── health.py            Per-provider/per-key health tracking
 │   ├── capabilities.py      Capability tags (chat/streaming/tools/vision/...)
 │   ├── multimodal_messages.py  Builds multimodal message payloads
 │   ├── artifact_extraction.py  Detects + extracts code/doc artifacts from replies
@@ -120,11 +119,9 @@ astra/
 │   ├── config.py          Env/`.env` config reader (get/getlist/getint)
 │   ├── events.py           EventBus — persisted events + SSE feed
 │   ├── permissions.py       Tool risk levels (READ ... SYSTEM_ACTION) + policy
-│   ├── policies.py          Confirmation-delegate policy plumbing
 │   ├── tasks.py             Generic DAG task engine (used by workflows)
 │   ├── state.py             Shared state-machine constants
 │   ├── correction.py         Bounded fix/redo attempt counting for the Gateway
-│   ├── result_validation.py  Result-shape validation helpers
 │   ├── classification.py     Task-type classification helpers
 │   ├── context.py            Request-scoped context plumbing
 │   ├── artifacts.py          Artifact (generated file) bookkeeping
@@ -253,10 +250,11 @@ They are **not** AI providers and **not** a plugin system.
 
 **There is no separate plugin loader.** `astra.core.Plugin`/`Registry`
 was removed from the codebase; `plugins/` is an empty folder
-(`plugins/README.md` says so explicitly) and `ACTIVE_PLUGINS` only
-affects the public-config count today. Adding a new capability currently
-means adding a specialist agent (+ its tools) in `astra/agents/` and
-`astra/tools/`, not dropping a file into `plugins/`.
+(`plugins/README.md` says so explicitly) and `ACTIVE_PLUGINS` is a no-op
+legacy key read only for the public-config `plugins` count (0 by default).
+Adding a new capability currently means adding a specialist agent (+ its
+tools) in `astra/agents/` and `astra/tools/`, not dropping a file into
+`plugins/`.
 
 ---
 

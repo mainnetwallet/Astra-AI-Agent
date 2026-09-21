@@ -446,7 +446,6 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
     # 12b. the four-connection automatic fallback order
     def test_gateway_automatic_fallback_over_four_connections(self):
         from astra.ai.gateway import AstraAIGateway, GATEWAY_CONNECTIONS
-        from astra.ai.router import RoutingRequest
         # canonical fallback order is Gemini → Groq → Cloudflare → Bedrock
         names = [c.name for c in GATEWAY_CONNECTIONS]
         self.assertEqual(names, ["astra-gw-gemini", "astra-gw-groq",
@@ -584,7 +583,6 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
 
     # 15. deterministic tie-breaking
     def test_equal_score_candidates_rank_deterministically(self):
-        from astra.ai.routing_policy import RoutingDecisionPolicy
         from astra.ai.router import RoutingRequest
         a = FakeAIProvider(name="a", models=["m0"])
         b = FakeAIProvider(name="b", models=["m0"])
@@ -878,7 +876,7 @@ class TestProviderModelRoutingFix(unittest.TestCase):
 
     def test_max_latency_ms_end_to_end_prefers_faster_candidate(self):
         from astra.ai.router import RoutingRequest
-        from astra.ai.models import Model, ModelRegistry
+        from astra.ai.models import ModelRegistry
         reg = ModelRegistry()
         reg.add("multi", "fast-1", speed_class="fast")
         reg.add("multi", "slow-1", speed_class="slow")

@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
-import secrets
 
 from astra.core.exceptions import AstraError
 
@@ -153,7 +152,6 @@ class SecureKeyStore:
     def rotate_master(self, new_secret: str) -> int:
         """Re-wrap every record under a new master secret."""
         new_master = _derive_master(new_secret)
-        old = self._master
         self._master = new_master
         re_wrapped = 0
         rows = self.store.fetch("SELECT * FROM web3_keys")

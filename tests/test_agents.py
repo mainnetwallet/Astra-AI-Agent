@@ -6,8 +6,6 @@ Gateway/ChatPipeline (agents are not providers and do not plan chat).
 """
 from __future__ import annotations
 
-import os
-import tempfile
 import unittest
 
 from astra.agents import SPECIALISTS, AgentManager

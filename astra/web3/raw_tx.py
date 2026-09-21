@@ -49,10 +49,6 @@ def rlp_encode(item) -> bytes:
     return _rlp_item(item)
 
 
-def _int_hex(v: int) -> bytes:
-    return b"" if v == 0 else v.to_bytes((v.bit_length() + 7) // 8, "big")
-
-
 # ── transaction build ─────────────────────────────────────────────────────────
 def build_unsigned_eip1559(*, chain_id, nonce, max_priority_fee, max_fee,
                            gas_limit, to, value_wei, data_hex="") -> list:

@@ -7,7 +7,6 @@ screenshot work; CAPTCHA walls pause to WAITING_USER; observation is bounded.
 """
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 import tempfile

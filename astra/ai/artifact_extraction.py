@@ -11,9 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
-import tempfile
 
 from astra.core.artifacts import store_artifact, validate_artifact
 

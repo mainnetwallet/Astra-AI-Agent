@@ -10,13 +10,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astra.core.attachments import (
-    Attachment, FILE_FAMILIES, SUPPORTED_EXTENSIONS, DANGEROUS_EXTENSIONS,
+    FILE_FAMILIES, SUPPORTED_EXTENSIONS, DANGEROUS_EXTENSIONS,
     detect_mime, validate_file, process_upload, validate_archive,
     normalize_attachments, MAX_FILE_SIZE,
 )
 from astra.core.artifacts import (
-    Artifact, store_artifact, validate_artifact, make_artifact_dir,
-    ARTIFACT_TYPES,
+    store_artifact, validate_artifact,
 )
 from astra.ai.capabilities import (
     ALL_INPUT_CAPS, ALL_OUTPUT_CAPS,
@@ -28,7 +27,7 @@ from astra.ai.capabilities import (
     filter_candidates_by_capabilities,
 )
 from astra.ai.models import Model, metadata_for
-from astra.ai.router import RoutingRequest, RoutingResult, classify
+from astra.ai.router import RoutingRequest, classify
 
 
 class TestAttachments(unittest.TestCase):

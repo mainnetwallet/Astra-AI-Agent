@@ -58,8 +58,8 @@ EVENT_KINDS = (
     "astra_gateway.request", "astra_gateway.success", "astra_gateway.error",
     "astra_gateway.stream_interrupted", "astra_gateway.test",
     # Gateway-spec supervision (§9-12, §19): deterministic result
-    # validation + bounded correction, layered on top of the executor's
-    # existing retry/verify pipeline — see astra.core.executor.
+    # validation + bounded correction, layered on top of the existing
+    # retry/verify pipeline — see astra.core.classification + correction.
     "supervision.correction_requested", "supervision.correction_succeeded",
     "supervision.correction_exhausted", "supervision.validation_failed",
     # Gateway execution recovery (§2-5, §7-12, §18 of the FINAL FIX PROMPT):
@@ -71,7 +71,7 @@ EVENT_KINDS = (
     "gateway.execution_failed", "gateway.target_cooldown",
     "gateway.recovery_target_selected",
     # Gateway-OWNED result supervision (§6-12): distinct from
-    # "supervision.*" above (that's the Executor's tool-output validation)
+    # "supervision.*" above (that's the tool-output validation path)
     # — these fire when the Gateway itself validates a Provider's raw
     # response and drives a correction back through ProviderExecutionPort
     # to the SAME target (see astra/ai/gateway_supervision.py).
@@ -145,7 +145,6 @@ class EventBus:
             pass
 
     def history(self, limit: int = 50, after_id: int = 0) -> list[dict]:
-        from json import loads
         rows = self.store.fetch(
             "SELECT * FROM events WHERE id > ? ORDER BY id DESC LIMIT ?",
             (after_id, limit))
@@ -153,7 +152,6 @@ class EventBus:
 
     def since(self, after_id: int) -> list[dict]:
         """Chronological events emitted after an id (for SSE tailing)."""
-        from json import loads
         rows = self.store.fetch(
             "SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT 200",
             (after_id,))

@@ -19,11 +19,6 @@ def make_agent():
     return store, plugins, agent
 
 
-def make_plugin():
-    """No plugins are registered yet (see plugins/README.md)."""
-    return None
-
-
 def make_stack(**kw):
     """Full stack (tools, memory, workflows, scheduler, router, …) on a fresh
     in-memory store — the same wiring run.py uses."""

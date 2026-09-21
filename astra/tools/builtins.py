@@ -6,7 +6,6 @@ offline-first, no secrets stored, confirmation-gated where needed.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import urllib.parse

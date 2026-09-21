@@ -18,11 +18,10 @@ from astra.ai.gateway_contract import (ProviderExecutionPort,
 from astra.ai.gateway_task_completion import (COMPLETE, FAILED, INCOMPLETE,
                                               UNCERTAIN,
                                               GatewayTaskCompletionSupervisor,
-                                              TaskVerificationOutcome,
                                               build_task_completion_contract,
                                               build_task_correction_instruction,
                                               verify_task_completion)
-from astra.ai.router import AstraRouter, RoutingRequest, _RouterExecutionPort
+from astra.ai.router import AstraRouter, RoutingRequest
 from astra.core.correction import MAX_CORRECTION_ATTEMPTS
 from astra.core.exceptions import ProviderError
 from astra.store import Store
@@ -222,7 +221,6 @@ class TestGatewayTaskCompletionSupervisorUnit(unittest.TestCase):
         on the FIRST correction, Gateway re-validates, and the corrected
         result is what the caller gets back — only after re-validation."""
         sup = GatewayTaskCompletionSupervisor()
-        first_reply_ignored = "not json"
         fixed_reply = json.dumps({"fix": "patched auth.py", "tests": "passed"})
         port = _RecordingPort([fixed_reply])
         contract = build_task_completion_contract(

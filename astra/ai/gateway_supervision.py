@@ -4,10 +4,9 @@ This is the piece that was missing from the otherwise-complete Gateway
 execution-recovery wiring (astra/ai/gateway_recovery.py): everything in
 that module decides WHO to execute against (target selection / cooldown /
 failover between providers or models). Nothing in it ever looked at WHAT
-came back. `astra.core.result_validation` / `astra.core.correction` do
-validate-and-correct — but that loop is owned by `astra.core.executor.
-Executor`, over TOOL step outputs (file-exists, non-empty text fields), and
-never touches an AI provider's chat response or `ProviderExecutionPort`.
+came back. `astra.core.correction` owns the deterministic validate-and-correct
+loop for the Gateway's TOOL step outputs (file-exists, non-empty text fields),
+and never touches an AI provider's chat response or `ProviderExecutionPort`.
 
 `GatewayResultSupervision` is the Gateway-owned equivalent for the Existing
 Provider system's raw AI response text:
@@ -59,7 +58,8 @@ def validate_execution_result(result: ProviderExecutionResult, *,
                                required_fields: tuple = ()) -> ExecutionValidationOutcome:
     """Deterministic checks only (§7/§9) — never a semantic ("does this text
     actually answer the question") judgement, mirroring the same
-    intentional scope limit as `astra.core.result_validation`.
+    intentional scope limit as the Gateway's task-completion validation
+    (`astra.ai.gateway_task_completion`).
 
     With nothing declared to check (`require_json=False`,
     `required_fields=()`), only the non-empty check applies — every

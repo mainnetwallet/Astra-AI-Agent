@@ -19,14 +19,11 @@ Transaction Manager's own internal, deterministic state transitions.
 """
 from __future__ import annotations
 
-from .chains import list_chains
 from . import rpc as rpcmod
 from astra.tools.schemas import Tool, Level
 
 
 def _resolve_manager(ctx):
-    from astra.web3.transactions import (TransactionPolicyEngine, PolicyConfig,
-                                         TxRequest)
     mgr = getattr(ctx, "web3_manager", None) or getattr(ctx, "tx_manager", None)
     return mgr
 
@@ -106,8 +103,6 @@ def tool_tx_prepare(args: dict, ctx) -> dict:
     mgr = _resolve_manager(ctx)
     if mgr is None:
         # no manager → offer static read-only guidance, never signing
-        from astra.web3.transactions import TransactionPolicyEngine
-        from astra.web3.transactions import TransactionPolicyError
         pol = getattr(ctx, "policy", None)
         if not pol:
             return {"ok": False, "error": "transaction manager not configured"}

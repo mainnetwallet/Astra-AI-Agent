@@ -1,14 +1,19 @@
 # Astra AI Agent 🚀
 
-A **plugin-based local Personal AI OS** — a core that plans, routes, remembers
-and executes goals, plus the **Airdrop Manager** as its first plugin. Python
-3.9+; the only runtime dependencies are FastAPI and uvicorn, which serve the
-web API and the SPA.
+A **local Personal AI OS** — a core that routes chat through a
+verification gateway, remembers, and runs task-specialist agents,
+including a built-in **Airdrop** specialist. Python 3.9+; the only
+runtime dependencies are FastAPI and uvicorn, which serve the web API
+and the SPA.
 
-Astra is a **Personal AI OS**: a generic core (orchestrator, planner, tool
-registry, memory, workflows, scheduler) with domain-specific features living
-in **plugins**. Want token tracking, a calendar, trading alerts, notes? Write
-one plugin, drop it in `plugins/`, restart. The core never changes.
+Astra's chat path is: every message goes through the **Astra AI
+Gateway** (understands + assigns the best provider/model, then verifies
+the answer before it reaches you) before hitting a real AI provider.
+Domain-specific work (airdrop tracking, web3, browsing, coding, files,
+research) is handled by **specialist agents** the `AgentManager` picks
+between — these ship built into the core today. A standalone plugin
+system (`plugins/`) exists as an empty placeholder for future
+third-party extensions; nothing is loaded from it yet.
 
 ---
 
@@ -18,17 +23,25 @@ one plugin, drop it in `plugins/`, restart. The core never changes.
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  Astra AI Agent — Personal AI OS                                        │
 │                                                                          │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │ Orchestrator │  │  Planner    │  │   Memory     │  │  Workflows    │  │
-│  │ (exec loop)  │  │ (NL→steps)  │  │ (layered)    │  │  (DAG engine) │  │
-│  └─────────────┘  └─────────────┘  └──────────────┘  └───────────────┘  │
-│                                                                          │
+│  User message                                                          │
+│     │                                                                  │
+│     ▼                                                                  │
 │  ┌──────────────────────┐   ┌─────────────────────────────────────────┐ │
-│  │   AstraRouter        │   │  Provider Adapters (10)                 │ │
-│  │   CENTRAL routing    │   │  gemini groq mistral openrouter         │ │
-│  │   core — it is NOT   │──▶│  cerebras cloudflare sambanova cohere   │ │
-│  │   a provider         │   │  zai bedrock (+claude / openai-compat)  │ │
+│  │ Astra AI Gateway     │   │  AstraRouter                            │ │
+│  │ UNDERSTAND+ASSIGN,   │──▶│  scores task type, ranks provider/model │ │
+│  │ then VERIFY the      │◀──│  candidates, rotates credentials,       │ │
+│  │ provider's answer    │   │  routes to a Provider Adapter (10)      │ │
 │  └──────────────────────┘   └─────────────────────────────────────────┘ │
+│                                             │                          │
+│                                             ▼                          │
+│              gemini groq mistral openrouter cerebras cloudflare        │
+│              sambanova cohere zai bedrock (+claude / openai-compat)    │
+│                                                                          │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  ┌─────────────┐ │
+│  │ AgentManager │  │   Memory     │  │  Workflows    │  │  ToolRegistry│ │
+│  │ (specialist  │  │ (layered)    │  │  (DAG engine) │  │  (builtin +  │ │
+│  │  selection)  │  │              │  │               │  │   web3+browser)│ │
+│  └─────────────┘  └──────────────┘  └───────────────┘  └─────────────┘ │
 │                                                                          │
 │  ┌──────────────────────┐   ┌─────────────────────────────────────────┐ │
 │  │ Web3 Transaction     │   │ Security layer                          │ │
@@ -40,16 +53,25 @@ one plugin, drop it in `plugins/`, restart. The core never changes.
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+Note: an earlier Orchestrator/Planner execution loop (UNDERSTAND → PLAN →
+SELECT TOOL → EXECUTE → OBSERVE → VERIFY → LEARN → CONTINUE) has been
+**removed** from the codebase. Every chat message now goes through the
+Gateway/ChatPipeline flow above instead; there is no multi-step planning
+loop and no resumable `WAITING_USER` chat run — `resume()` reports
+honestly that this no longer applies. `ToolRegistry` still exists and
+still executes tools (used directly by Web3 flows and tests), it's just
+no longer driven by a deleted Orchestrator.
+
 ### Key subsystems
 
 | Subsystem | What it does |
 |-----------|-------------|
-| **AstraRouter** | **The central AI routing core.** Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes, and records routing stats. It consumes the 10 adapters + model registry — it is **never** registered as a provider itself. It optionally holds one gateway of its own: the **Astra AI Gateway** (`GW_*` config in `astra/ai/gateway.py`), four independent AI connections with automatic fallback (Gemini → Groq → Cloudflare → Bedrock), used only as a last-resort fallback after every real provider has failed, and reported separately from the provider table. |
+| **Astra AI Gateway + ChatPipeline** | The path every chat message takes: Gateway call #1 understands the request and assigns it to the best provider/model; the provider executes; Gateway call #2 verifies the output and triggers a bounded fix/redo loop if it's incomplete. Fails open — if the Gateway is unusable, the message still reaches a provider via the router, just unverified. |
+| **AstraRouter** | Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes, and records routing stats. Consumes the 10 adapters + model registry. Never registered as a provider itself, and the Gateway is never used as a fallback provider when every real provider fails (source-level regression test enforces this). |
 | **Provider adapters (10)** | Gemini, Groq, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova, Cohere, Z.ai, Bedrock — one shared OpenAI-compatible adapter class + a real AWS SigV4 Bedrock adapter. Unlimited credentials per provider via key pools. |
 | **Model registry** | Capabilities, context window, streaming/tools/vision support, cost/speed/quality classes, preferred/disabled status. |
-| `Orchestrator` | UNDERSTAND → PLAN → SELECT TOOL → EXECUTE → OBSERVE → VERIFY → LEARN → CONTINUE. Recoverable across restarts (WAITING_USER runs are reconstituted, never blanket-failed). |
-| `Planner` | NL goal → ordered, dependency-aware tool steps. |
-| `ToolRegistry` | Builtin + plugin tools with schema validation, permission policy, timeout/retry/rate-limit, audit trail. |
+| `AgentManager` + specialist agents | Declarative task specialists (`general`, `research`, `browser`, `coding`, `files`, `web3`, `airdrop`) the manager scores and picks between for a goal. Not providers, not plugins — they describe what kind of work this is and which tools fit. |
+| `ToolRegistry` | Builtin + web3 + browser tools with schema validation, permission policy, timeout/retry/rate-limit, audit trail. Runs standalone (no Orchestrator drives it any more). |
 | `MemorySystem` | Layered memory (working/short/long/semantic/episodic) with importance scoring + search. |
 | `ExperienceStore` | Learns from past successes/failures. |
 | `WorkflowEngine` + `SchedulerManager` | Multi-step workflows, run on demand or cron-like schedules. |
@@ -129,7 +151,7 @@ logs, UI, or API responses. Router preference order: `AI_PROVIDER=gemini groq �
 | `ACTIVE_PLUGINS` | airdrop | Comma-separated plugin whitelist |
 | `ASTRA_SCHEDULER` | 0 | Start the scheduler daemon |
 | `ASTRA_FASTAPI_DOCS` | 0 | Expose `/docs` + `/openapi.json` |
-| `ASTRA_ASGI_THREADS` | 40 | Worker-thread pool used for blocking route work |
+| `ASTRA_ASGI_THREADS` | 0 (uses Starlette's own default of 40) | Worker-thread pool used for blocking route work |
 
 ## Web3 transaction safety
 
@@ -154,13 +176,13 @@ logs, UI, or API responses. Router preference order: `AI_PROVIDER=gemini groq �
 
 | Tab | What it shows |
 |-----|-------------|
-| **Dashboard** | Overview cards — plug to your plugin data |
+| **Dashboard** | Overview cards — empty placeholder until a plugin/specialist wires data in (no plugin system is loaded today) |
 | **Assistant** | Chat interface — natural language commands |
 | **Live** | Real-time SSE event stream, health, tools, executions |
 | **Providers** | AI provider health, latency, calls/errors, model refresh |
 | **Router** | Model registry + task routing stats (the AstraRouter's view) |
 | **Wallet** | Web3 transaction policy (mode, limits, allowlists) + recent txs |
-| **Backup** | Export/import all data as one JSON file |
+| **Backup** | Export/import as one JSON file — currently a placeholder (`_exports: {}`) since no plugin/specialist registers exportable data yet |
 
 ## API (versioned)
 
@@ -264,33 +286,32 @@ events live in SQLite, so every worker streams the same activity.
 
 ## Plugin system
 
-One plugin ships: **Airdrop Manager** (`plugins/airdrop/`).
+**Not implemented yet.** The `astra.core.Plugin`/`Registry` system has
+been removed from the codebase; `plugins/` is an empty placeholder
+folder for future third-party plugins (see `plugins/README.md`).
+`ACTIVE_PLUGINS` is read but currently only affects a health-check
+count — nothing is discovered, loaded, or wired from `plugins/` today.
+
+Domain-specific work instead ships as a built-in **specialist agent**
+(`astra/agents/`) that `AgentManager` selects between — Airdrop tracking
+is one of these (`astra/agents/airdrop.py`), alongside `general`,
+`research`, `browser`, `coding`, `files`, and `web3`. Adding a new
+capability today means adding a specialist agent + its tools in core,
+not dropping a file into `plugins/`.
 
 ### Built-in tools
 
-`search_web` · `remember` · `recall` · `get_health` · `create_task` ·
-`list_tasks` · `read_file` · `write_file` · `search_files` ·
-`wallet_balances` · `fetch_url` · `answer` · `wallet_validate` · `browse` …
+**Core** (`astra/tools/builtins.py`): `remember` · `recall` ·
+`search_memory` · `create_task` · `list_tasks` · `search_web` ·
+`fetch_url` · `wallet_balances` · `list_files` · `read_file` ·
+`write_file` · `search_files` · `get_health` · `generate_document`
 
-### Adding a new plugin
+**Web3** (`astra/web3/tools.py`): `token_balance` · `chain_status` ·
+`rpc_status` · `tx_prepare` · `tx_status`
 
-Create `plugins/myplugin/__init__.py` with a class inheriting `Plugin`:
-
-```python
-from astra.core.plugins import Plugin
-
-class MyPlugin(Plugin):
-    slug = "myplugin"
-    title = "My Plugin"
-    version = "0.1.0"
-
-    def startup(self): ...
-    def shutdown(self): ...
-    def tools(self):
-        return [{"name": "my_tool", "fn": self.my_tool}]
-```
-
-Drop it in `plugins/`, add `"myplugin"` to `ACTIVE_PLUGINS`, restart.
+**Browser** (`astra/browser/`, registered when a browser is available):
+`browser_open` · `browser_observe` · `browser_action` ·
+`browser_extract` · `browser_screenshot` · `browser_close`
 
 ## Development
 

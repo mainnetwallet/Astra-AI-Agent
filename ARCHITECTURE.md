@@ -87,7 +87,8 @@ astra/
 ├── security.py          Secret redaction, SSRF guard, rate limiter, request_id
 │
 ├── ai/                  Everything AI: providers, router, Gateway, pipeline
-│   ├── provider.py       Base provider classes (Claude, generic OpenAI-compat)
+│   ├── provider.py       AIProvider base + backward-compatible Claude /
+│   │                     generic OpenAI-compatible providers
 │   ├── adapters/          10 concrete provider adapters (see §3)
 │   ├── registry.py        Builds the provider list from env config
 │   ├── models.py          Model registry (capabilities, context, cost class)
@@ -173,9 +174,15 @@ tests/                    unittest + pytest suite (see §7)
 
 ## 3. AI providers
 
-Ten provider adapters share one `CompatibleAdapter` base
-(`astra/ai/adapters/base.py`) that speaks OpenAI-style
-`/chat/completions`, plus one real AWS-SigV4 Bedrock adapter:
+There are two provider families. Both are assembled by
+`astra/ai/registry.py::build_providers()` and both are routable peers of the
+AstraRouter.
+
+**Modern adapters (recommended).** Ten modules under `astra/ai/adapters/`:
+nine share one `CompatibleAdapter` base (`astra/ai/adapters/base.py`) that
+speaks OpenAI-style `/chat/completions`, and `bedrock.py` is a real AWS-SigV4 /
+Converse adapter. Each takes an unlimited credential pool and is seeded into
+the model registry from its `<PROVIDER>_MODELS` env var:
 
 | Provider | Adapter file | Env (keys) | Env (models) |
 |---|---|---|---|
@@ -188,7 +195,7 @@ Ten provider adapters share one `CompatibleAdapter` base
 | SambaNova | `adapters/sambanova.py` | `SAMBA_API_KEYS` | `SAMBA_MODELS` |
 | Cohere | `adapters/cohere.py` | `COHERE_API_KEYS` | `COHERE_MODELS` |
 | Z.ai | `adapters/zai.py` | `ZAI_API_KEYS` | `ZAI_MODELS` |
-| Bedrock | `adapters/bedrock.py` | `BEDROCK_CREDENTIALS` (`access_key:secret_key:region`) | `BEDROCK_MODELS` |
+| Bedrock | `adapters/bedrock.py` | `BEDROCK_API_KEYS` (bearer) or `BEDROCK_CREDENTIALS` (`access_key:secret_key`) | `BEDROCK_MODELS` |
 
 Each provider gets an unlimited **credential pool**
 (`astra/ai/credentials.py`): round-robin/least-recently-used selection
@@ -196,6 +203,20 @@ across healthy keys, per-key cooldown on failure, and an auth failure
 marks only that one key unhealthy so sibling keys keep working. Secrets
 never leave the `Credential` object — only non-secret metadata (id,
 healthy, calls, errors) is exposed to dashboards/events.
+
+**Backward-compatible providers (legacy).** `astra/ai/provider.py` also
+defines the two original single-provider paths. They are registered only when
+configured, and still route through the same router, but they are not part of
+the modern adapter set:
+
+| Provider | Class | Env | Notes |
+|---|---|---|---|
+| Anthropic | `ClaudeProvider` (name `anthropic`) | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | one key, no credential pool |
+| OpenAI-compatible | `OpenAICompatibleProvider` (name `openai` by default; `AI_PROVIDER_LABEL` renames it) | `AI_BASE_URL`, `AI_MODEL`, `AI_API_KEY` | OpenAI, Ollama, LM Studio, DeepSeek… |
+
+They have no credential pool and are not seeded from the `<PROVIDER>_MODELS`
+registry env vars (the router still builds model metadata for them on the fly,
+and discovery can list their models). New setups should use the adapters above.
 
 `AstraRouter` (`astra/ai/router.py`) sits on top: it classifies the
 task type, scores candidate provider/model pairs by health + past

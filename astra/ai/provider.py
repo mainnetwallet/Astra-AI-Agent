@@ -1,9 +1,22 @@
-"""AIProvider abstraction.
+"""AIProvider abstraction + the two backward-compatible single-provider paths.
 
-A provider exposes a `chat(messages)`, optional streaming, a model list and a
-cheap health check. The router selects between them under one interface, so
-swapping Anthropic for OpenAI/Ollama/anything later is a config change, not a
-code change. Credentials come from config/env — never hardcoded, never logged.
+Every provider exposes `chat(messages)`, optional streaming, a model list and
+a cheap health check, so the AstraRouter can select between them under one
+interface. Credentials come from config/env — never hardcoded, never logged.
+
+Provider families
+-----------------
+* **Modern adapters (the default, recommended path)** — the ten modules under
+  `astra/ai/adapters/`: gemini, groq, mistral, openrouter, cerebras,
+  cloudflare, sambanova, cohere and zai (all built on `CompatibleAdapter`),
+  plus bedrock (AWS SigV4 / Converse). They are credential-pool based, seeded
+  into the model registry from `<PROVIDER>_API_KEYS` / `<PROVIDER>_MODELS`,
+  and are what `astra/ai/registry.py` builds by default.
+* **Backward-compatible providers (this module)** — `ClaudeProvider` (one
+  Anthropic key via `ANTHROPIC_API_KEY`) and `OpenAICompatibleProvider` (one
+  generic OpenAI-style endpoint via `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY`).
+  Both still join routing when configured — they are the legacy single-provider
+  path, not part of the modern adapter set.
 """
 from __future__ import annotations
 
@@ -82,6 +95,12 @@ def _read_sse(resp) -> list[dict]:
 
 
 class ClaudeProvider(AIProvider):
+    """Backward-compatible single-key Anthropic (Claude) provider.
+
+    Instantiated only when `ANTHROPIC_API_KEY` is set (model via
+    `ANTHROPIC_MODEL`). It is not one of the ten modern adapters in
+    `astra/ai/adapters/` and is not seeded from the model-registry env vars.
+    """
     name = "anthropic"
     base_url = "https://api.anthropic.com/v1/messages"
 
@@ -164,8 +183,12 @@ class ClaudeProvider(AIProvider):
 
 
 class OpenAICompatibleProvider(AIProvider):
-    """Works with OpenAI, OpenRouter, Ollama, LM Studio, DeepSeek, or any
-    OpenAI-compatible endpoint. Uses AI_BASE_URL / AI_MODEL / AI_API_KEY.
+    """Backward-compatible generic OpenAI-compatible provider.
+
+    Works with OpenAI, Ollama, LM Studio, DeepSeek, or any OpenAI-style
+    endpoint. Uses AI_BASE_URL / AI_MODEL / AI_API_KEY (label via
+    AI_PROVIDER_LABEL). It is the legacy single-endpoint path, separate from
+    the ten modern adapters in `astra/ai/adapters/`.
 
     Zero external dependencies — pure stdlib urllib with SSE parsing.
     """

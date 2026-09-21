@@ -4,8 +4,8 @@
       python3 run.py                  # port 8787, browser auto-opens
       PORT=9000 python3 run.py        # custom port
       DATA_DIR=/sdcard/astra python3 run.py   # storage location
-      ANTHROPIC_API_KEY=sk-... python3 run.py # enable AI Q&A chat
-      AI_PROVIDER=anthropic python3 run.py    # (default provider)
+      GEMINI_API_KEYS=... python3 run.py      # enable AI chat (any adapter key)
+      AI_PROVIDER=gemini groq python3 run.py  # optional router preference order
       NO_BROWSER=1 python3 run.py     # don't auto-open the browser
       BIND=127.0.0.1 python3 run.py   # default: loopback only (private)
       BIND=0.0.0.0  python3 run.py    # LAN access (set ASTRA_TOKEN first!)

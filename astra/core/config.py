@@ -105,9 +105,21 @@ class Config:
         return [x.strip() for x in str(v).replace(",", " ").split() if x.strip()]
 
     def all(self) -> dict:
-        """Public (non-secret) config snapshot for GET /api/config."""
+        """Public (non-secret) config snapshot for GET /api/config.
+
+        `ai_provider` mirrors the optional `AI_PROVIDER` router preference /
+        opt-in list (space- or comma-separated provider names) and defaults
+        to "" = AstraRouter auto-selects. It is NOT a single "default
+        provider": there is no such thing any more. Every configured
+        provider is a candidate — the ten modern adapters in
+        `astra/ai/adapters/` plus the backward-compatible Claude
+        (`ANTHROPIC_API_KEY`) and generic OpenAI-compatible
+        (`AI_BASE_URL`/`AI_API_KEY`) providers in `astra/ai/provider.py`.
+        (The old default here was the literal string "anthropic", a
+        leftover from when Anthropic was the one and only provider.)
+        """
         sup = {"port": 8787, "host": "0.0.0.0", "log_level": "info",
-               "browser_mode": "off", "ai_provider": "anthropic",
+               "browser_mode": "off", "ai_provider": "",
                "ai_model": "", "data_dir": ""}
         out = {}
         for k in sup:

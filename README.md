@@ -63,6 +63,7 @@ Orchestrator/Planner loop was removed, and `ToolRegistry` now runs standalone
 | **Astra AI Gateway + ChatPipeline** | The path every chat message takes: Gateway call #1 understands the request and assigns the best provider/model; the provider executes; Gateway call #2 verifies the output and drives a bounded fix/redo loop if it is incomplete. Fails open. |
 | **AstraRouter** (`astra/ai/router.py`) | Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes and records routing stats. Never registered as a provider itself, and the Gateway is never a fallback provider when every real provider fails. |
 | **Provider adapters (10)** (`astra/ai/adapters/`) | Gemini, Groq, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova, Cohere, Z.ai, Bedrock. Nine share an OpenAI-compatible adapter base; Bedrock is a real AWS SigV4 / Converse adapter. Unlimited credentials per provider via key pools. |
+| **Backward-compatible providers** (`astra/ai/provider.py`) | The two original single-provider paths: `ClaudeProvider` (`ANTHROPIC_API_KEY`) and `OpenAICompatibleProvider` (`AI_BASE_URL`/`AI_API_KEY`). Routed when configured; legacy, no key pool. |
 | **Model registry** (`astra/ai/models.py`) | Capabilities, context window, streaming/tools/vision support, cost/speed/quality classes, preferred/disabled status. |
 | **AgentManager + specialists** (`astra/agents/`) | Declarative task specialists (`general`, `research`, `browser`, `coding`, `files`, `web3`, `airdrop`) the manager scores; not providers and not plugins. Chat does not plan through them today. |
 | **ToolRegistry** (`astra/tools/registry.py`) | Builtin + web3 + browser tools with schema validation, permission policy, timeout/retry, audit trail. Runs standalone. |
@@ -102,29 +103,48 @@ Linux / macOS / Termux: the same `setup.sh` + `start.sh` flow.
 
 ## Setting up AI providers
 
-Copy `.env.example` to `.env` and fill in at least one provider key list. Each
-value is a space/comma-separated list — unlimited credentials, rotated per
-request by the router:
+Copy `.env.example` to `.env` and fill in at least one provider. Astra ships
+two provider families; everything configured joins the same router as a peer.
 
-| Provider | Env (keys) | Env (models, optional) |
-|----------|-----------|------------------------|
-| Gemini | `GEMINI_API_KEYS` | `GEMINI_MODELS` |
-| Groq | `GROQ_API_KEYS` | `GROQ_MODELS` |
-| Mistral | `MISTRAL_API_KEYS` | `MISTRAL_MODELS` |
-| OpenRouter | `OPENROUTER_API_KEYS` | `OPENROUTER_MODELS` |
-| Cerebras | `CEREBRAS_API_KEYS` | `CEREBRAS_MODELS` |
-| Cloudflare | `CLOUDFLARE_API_KEYS` (+`CLOUDFLARE_ACCOUNT_IDS`) | `CLOUDFLARE_MODELS` |
-| SambaNova | `SAMBA_API_KEYS` | `SAMBA_MODELS` |
-| Cohere | `COHERE_API_KEYS` | `COHERE_MODELS` |
-| Z.ai | `ZAI_API_KEYS` | `ZAI_MODELS` |
-| Bedrock | `BEDROCK_API_KEYS` (bearer token) **or** `BEDROCK_CREDENTIALS` (`access_key:secret_key` IAM pairs) | `BEDROCK_MODELS` |
+### Modern adapters (recommended)
+
+Ten adapter modules live in `astra/ai/adapters/`. Nine share one
+OpenAI-compatible base; `bedrock.py` is a real AWS SigV4 / Converse adapter.
+Each reads a space/comma-separated **key pool** — unlimited credentials,
+rotated per request — plus an optional model list:
+
+| Provider | Adapter module | Env (keys) | Env (models, optional) |
+|----------|----------------|-----------|------------------------|
+| Gemini | `astra/ai/adapters/gemini.py` | `GEMINI_API_KEYS` | `GEMINI_MODELS` |
+| Groq | `astra/ai/adapters/groq.py` | `GROQ_API_KEYS` | `GROQ_MODELS` |
+| Mistral | `astra/ai/adapters/mistral.py` | `MISTRAL_API_KEYS` | `MISTRAL_MODELS` |
+| OpenRouter | `astra/ai/adapters/openrouter.py` | `OPENROUTER_API_KEYS` | `OPENROUTER_MODELS` |
+| Cerebras | `astra/ai/adapters/cerebras.py` | `CEREBRAS_API_KEYS` | `CEREBRAS_MODELS` |
+| Cloudflare | `astra/ai/adapters/cloudflare.py` | `CLOUDFLARE_API_KEYS` (+`CLOUDFLARE_ACCOUNT_IDS`) | `CLOUDFLARE_MODELS` |
+| SambaNova | `astra/ai/adapters/sambanova.py` | `SAMBA_API_KEYS` | `SAMBA_MODELS` |
+| Cohere | `astra/ai/adapters/cohere.py` | `COHERE_API_KEYS` | `COHERE_MODELS` |
+| Z.ai | `astra/ai/adapters/zai.py` | `ZAI_API_KEYS` | `ZAI_MODELS` |
+| Bedrock | `astra/ai/adapters/bedrock.py` | `BEDROCK_API_KEYS` (bearer token) **or** `BEDROCK_CREDENTIALS` (`access_key:secret_key` IAM pairs) | `BEDROCK_MODELS` |
 
 Bedrock's region comes from `BEDROCK_BASE_URL` / `AWS_REGION` (default
-`us-east-1`). Single-provider chat also works via `ANTHROPIC_API_KEY` (Claude)
-or `AI_BASE_URL`/`AI_MODEL`/`AI_API_KEY` (any OpenAI-compatible endpoint —
-OpenAI, Ollama, LM Studio…). All keys stay in env/`.env` — never in the DB,
-logs, UI or API responses. Force a router preference order with
-`AI_PROVIDER=gemini groq …`.
+`us-east-1`).
+
+### Backward-compatible providers (legacy)
+
+`astra/ai/provider.py` also defines the two original single-provider paths.
+They are still routed when configured, but they are the legacy path — no key
+pool and no model-registry seeding:
+
+| Provider | Class | Env | Notes |
+|----------|-------|-----|-------|
+| Claude / Anthropic | `ClaudeProvider` | `ANTHROPIC_API_KEY` (+`ANTHROPIC_MODEL`) | one Anthropic key |
+| Any OpenAI-compatible endpoint | `OpenAICompatibleProvider` | `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY` (+`AI_PROVIDER_LABEL`) | OpenAI, Ollama, LM Studio, DeepSeek… |
+
+All keys stay in env/`.env` — never in the DB, logs, UI or API responses.
+`AI_PROVIDER` is an optional **preference / opt-in list** (`AI_PROVIDER=gemini
+groq …`); it does not pick a single default provider, and there is no such
+default any more — with none set, the router auto-selects among everything
+configured.
 
 ## Environment Variables
 

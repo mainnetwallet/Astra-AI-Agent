@@ -8,6 +8,10 @@ The Astra AI Gateway (astra/ai/gateway.py) is NOT among these either: it is
 a completely separate, isolated system with its own four AI connections
 (GW_* config) and its own execution path — never a provider adapter, never
 in this table, and never invoked as a fallback for these providers.
+
+The two backward-compatible single-provider paths — ClaudeProvider
+(`ANTHROPIC_API_KEY`) and OpenAICompatibleProvider (`AI_BASE_URL`/`AI_API_KEY`)
+— live in the sibling module `astra/ai/provider.py`, not here.
 """
 from __future__ import annotations
 

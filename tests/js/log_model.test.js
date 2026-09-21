@@ -276,6 +276,11 @@ function lifeEvent(kind, data, id) {
 function simulate(events) {
   const state = Log.createState();
   const rows = [];
+  const place = (row) => {
+    let i = rows.length;
+    while (i > 0 && Log.compareChron(rows[i - 1].model, row.model) > 0) i--;
+    rows.splice(i, 0, row);
+  };
   events.forEach((e) => {
     const m = Log.normalize(e);
     const plan = Log.planRender(state, e, m);
@@ -284,10 +289,11 @@ function simulate(events) {
     if (info && info.el && plan.action === "update") {
       row = info.el;
       Log.recount(state, row.model, m);
-      row.model = m;
+      // mirrors astra.js updateRow(): the row keeps its START identity.
+      row.model = Log.mergeLifecycle(row.model, m);
     } else {
       row = { key: plan.key, model: m };
-      rows.push(row);
+      place(row);   // mirrors astra.js placeRow(): chronological insert
       Log.count(state, m);
     }
     plan.closeKeys.forEach((k) => {
@@ -499,4 +505,88 @@ test("an intermediate update keeps the operation active until terminal", () => {
   assert.strictEqual(rows.length, 1);
   assert.strictEqual(rows[0].model.status, "ok");
   assert.strictEqual(state.active.size, 0);
+});
+
+/* -------------------------------------------------- chronological ordering
+ * An operation's timeline position is fixed by its START timestamp; a
+ * completion refines the row in place and never moves it. Events that arrive
+ * out of order (SSE replay/buffering) are inserted at their real position. */
+
+function at(id, kind, created, data, agent) {
+  return { id, kind, agent: agent || "", data: data || {},
+           created_at: created };
+}
+
+test("a completed lifecycle row keeps its start position and time", () => {
+  const { rows } = simulate([
+    at(1, "astra_gateway.request", "2026-09-21 22:49:37",
+       { op: "G1", trace: "R" }, "gateway"),
+    at(2, "router.request", "2026-09-21 22:49:38", { op: "RT", trace: "R" }),
+    at(3, "astra_gateway.success", "2026-09-21 22:50:45",
+       { op: "G1", trace: "R", terminal: true, latency_ms: 68000 }, "gateway"),
+  ]);
+  assert.deepStrictEqual(rows.map((r) => r.key), ["op:G1", "op:RT"]);
+  assert.strictEqual(rows[0].model.status, "ok");
+  // the displayed time is the START time, not the completion time
+  assert.strictEqual(rows[0].model.time, "22:49:37");
+});
+
+test("completion order does not reorder the timeline", () => {
+  const { rows } = simulate([
+    at(1, "ai.started", "2026-09-21 10:00:00", { op: "A", provider: "p", model: "m" }),
+    at(2, "ai.started", "2026-09-21 10:01:00", { op: "B", provider: "p", model: "m" }),
+    at(3, "ai.completed", "2026-09-21 10:02:00",
+       { op: "B", terminal: true, latency_ms: 100 }),
+    at(4, "ai.completed", "2026-09-21 10:03:00",
+       { op: "A", terminal: true, latency_ms: 200 }),
+  ]);
+  assert.deepStrictEqual(rows.map((r) => r.key), ["op:A", "op:B"]);
+  assert.deepStrictEqual(rows.map((r) => r.model.time), ["10:00:00", "10:01:00"]);
+  assert.deepStrictEqual(rows.map((r) => r.model.status), ["ok", "ok"]);
+});
+
+test("out-of-order events are inserted at their chronological position", () => {
+  const { rows } = simulate([
+    at(1, "tool.started", "2026-09-21 10:00:00", { op: "X", tool: "t" }),
+    at(3, "tool.started", "2026-09-21 10:02:00", { op: "Z", tool: "t" }),
+    at(2, "tool.started", "2026-09-21 10:01:00", { op: "Y", tool: "t" }),
+  ]);
+  assert.deepStrictEqual(rows.map((r) => r.model.time),
+                         ["10:00:00", "10:01:00", "10:02:00"]);
+  assert.deepStrictEqual(rows.map((r) => r.key), ["op:X", "op:Y", "op:Z"]);
+});
+
+test("a late-arriving completion lands in its start's slot, not the bottom", () => {
+  const { rows } = simulate([
+    at(1, "tool.started", "2026-09-21 10:00:00", { op: "X", tool: "t" }),
+    at(2, "tool.started", "2026-09-21 10:01:00", { op: "Y", tool: "t" }),
+    at(3, "tool.completed", "2026-09-21 10:02:00",
+       { op: "X", terminal: true, duration_ms: 120000 }),
+  ]);
+  assert.deepStrictEqual(rows.map((r) => r.key), ["op:X", "op:Y"]);
+  assert.strictEqual(rows[0].model.time, "10:00:00");
+});
+
+test("history is sorted by the same canonical key as live events", () => {
+  const history = [
+    at(3, "tool.completed", "2026-09-21 10:02:00", { op: "T", terminal: true }),
+    at(1, "tool.started", "2026-09-21 10:00:00", { op: "T" }),
+    at(2, "tool.started", "2026-09-21 10:01:00", { op: "U" }),
+  ];
+  assert.deepStrictEqual(Log.orderHistory(history).map((e) => e.id), [1, 2, 3]);
+});
+
+test("history + SSE share one dedupe keyed on event id", () => {
+  const s = Log.createState();
+  const e = at(5, "tool.started", "2026-09-21 10:00:00", { op: "T", tool: "t" });
+  assert.strictEqual(Log.admit(s, e), "render");   // from history
+  Log.markRendered(s, e);
+  assert.strictEqual(Log.admit(s, e), "skip");     // replayed by SSE
+});
+
+test("gateway.recovery_target_selected is not an empty standalone row", () => {
+  assert.strictEqual(Log.isMeaningful({
+    id: 9, kind: "gateway.recovery_target_selected",
+    agent: "gateway.execution_recovery", data: { fallback_to: "p/m" },
+  }), false);
 });

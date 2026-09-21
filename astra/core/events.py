@@ -131,13 +131,17 @@ class EventBus:
             import warnings
             warnings.warn(f"unknown event kind: {kind!r}", UserWarning, stacklevel=2)
         from json import dumps
+        # One timestamp for both the persisted row and the SSE broadcast, so
+        # history and the live feed order an event identically (two _now()
+        # calls could straddle a second boundary and disagree by 1s).
+        created_at = _now()
         with self._lock:
             rid = self.store.insert(
                 "events", kind=kind, agent=agent,
-                data=dumps(data, ensure_ascii=False), created_at=_now())
+                data=dumps(data, ensure_ascii=False), created_at=created_at)
             self._prune()
         record = {"id": rid, "kind": kind, "agent": agent, "data": data,
-                  "created_at": _now()}
+                  "created_at": created_at}
         for fn in list(self._subscribers):
             try:
                 fn(record)

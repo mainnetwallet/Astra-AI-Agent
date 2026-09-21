@@ -755,10 +755,11 @@ function buildRow(m) {
 }
 
 // Update an existing row in place (start -> completion), preserving whether
-// the user had it expanded.
+// the user had it expanded. The row keeps its original timeline identity
+// (start time/position) — only its lifecycle state changes.
 function updateRow(row, m) {
   const wasOpen = row.classList.contains("open");
-  fillRow(row, m);
+  fillRow(row, AstraLog.mergeLifecycle(row._astraModel, m));
   if (wasOpen) {
     row.classList.add("open");
     row.setAttribute("aria-expanded", "true");
@@ -788,6 +789,25 @@ function trimBuffer(feed) {
       LOGS.active.delete(lk);
     if (!LOGS.follow) feed.scrollTop = AstraLog.compensateTrim(before, removedH);
   }
+}
+
+// Insert a new row at its chronological position. Normally that is the bottom
+// (events arrive in order), but an out-of-order event — SSE replay, buffering,
+// a reconnect, or a slow async operation — must land where its backend
+// timestamp puts it, not where it happened to arrive. Returns true when the
+// row went in above the viewport so the caller can keep the reader's place.
+function placeRow(feed, rowEl) {
+  const m = rowEl._astraModel;
+  let ref = null;
+  for (let n = feed.lastElementChild; n; n = n.previousElementSibling) {
+    const nm = n._astraModel;
+    if (!nm) continue;                          // placeholder / non-row node
+    if (AstraLog.compareChron(nm, m) <= 0) break;
+    ref = n;
+  }
+  if (ref) feed.insertBefore(rowEl, ref); else feed.appendChild(rowEl);
+  if (!ref) return false;
+  return rowEl.getBoundingClientRect().top < feed.getBoundingClientRect().top;
 }
 
 // Render one arriving event: resolve the row for its operation if it is a
@@ -822,14 +842,19 @@ function upsertEvent(event, quiet) {
                          : AstraLog.onAppend(LOGS, feedMetrics(), 1);
     rowEl = buildRow(m);
     if (plan.key) rowEl.dataset.lifecycleKey = plan.key;
-    feed.appendChild(rowEl);
+    const insertedAbove = placeRow(feed, rowEl);
     trimBuffer(feed);
     AstraLog.count(LOGS, m);
     renderLogStats();
 
     if (!quiet) {
       if (action.scrollToBottom) { feed.scrollTop = feed.scrollHeight; jumpToLatest(); }
-      else showJump(LOGS.unread);
+      else {
+        // an out-of-order row inserted above the viewport must not shift what
+        // the reader is looking at.
+        if (insertedAbove) feed.scrollTop += rowEl.offsetHeight || 0;
+        showJump(LOGS.unread);
+      }
     }
   }
 

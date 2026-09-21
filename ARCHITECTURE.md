@@ -360,9 +360,12 @@ server in-process on an ephemeral port.
 
 The panel is a *view* over the existing `/api/events` history and
 `/api/events/stream` SSE feed — there is no second logging system. Rows
-render oldest → newest with live events appended at the bottom, and the
-scroll position drives follow mode: near the bottom it auto-scrolls and
-keeps the newest row visible, scrolling up stops auto-follow and shows a
+render oldest → newest, ordered by the backend event timestamp
+(`created_at`, id as the same-second tiebreak) rather than arrival order;
+an out-of-order event is inserted at its real position, and history and
+the live feed use the same comparator. Live events normally append at the
+bottom, and the scroll position drives follow mode: near the bottom it
+auto-scrolls and keeps the newest row visible, scrolling up stops auto-follow and shows a
 "↓ New logs" pill that jumps back and resumes. The DOM is capped at 300
 rows and the in-memory dedupe/pause buffers are bounded, so a long-lived
 panel cannot grow without limit. `AstraLog.isMeaningful()` drops
@@ -381,9 +384,11 @@ by title. `AstraLog.planRender()` decides whether an arriving event
 appends a new row or updates the row for its operation in place, so a
 `started → completed/failed/cancelled/timeout` pair (including retry
 updates) resolves to a single row and concurrent operations of the same
-kind each keep their own row. A terminal event also closes the
-still-running children it owns (matched by the request `trace` /
-`run_id`), marking them `warn`/interrupted; every chat turn, workflow
+kind each keep their own row. An update refines the row in place: its
+displayed time and timeline position stay pinned to the original start
+event, so completion order never changes the visual order. A terminal
+event also closes the still-running children it owns (matched by the
+request `trace` / `run_id`), marking them `warn`/interrupted; every chat turn, workflow
 run and tool call emits such a terminal event, so a finished request
 never leaves an operation stuck on "running".
 

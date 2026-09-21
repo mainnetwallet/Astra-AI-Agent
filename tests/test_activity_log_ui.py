@@ -37,10 +37,19 @@ class TestActivityLogUI(unittest.TestCase):
             self.assertIn(f'data-filter="{chip}"', self.html)
 
     def test_logs_are_appended_not_prepended(self):
-        feed_section = self.js[self.js.index("function upsertEvent"):]
+        # placeRow() appends in chronological order and only inserts before an
+        # existing row for an out-of-order event; it never prepends.
+        feed_section = self.js[self.js.index("function placeRow"):]
         self.assertIn("feed.appendChild(", feed_section)
+        self.assertIn("feed.insertBefore(", feed_section)
         # the old newest-first rendering prepended; the timeline must not.
         self.assertNotIn("feed.prepend(", self.js)
+
+    def test_lifecycle_updates_keep_the_start_position(self):
+        # a start -> completion update refines the row in place (pinned to the
+        # start's timestamp); ordering uses the canonical (created_at, id) key.
+        self.assertIn("AstraLog.mergeLifecycle(", self.js)
+        self.assertIn("AstraLog.compareChron(", self.js)
 
     def test_lifecycle_continuations_update_the_same_row(self):
         # start/running rows must be reconciled in place by their terminal

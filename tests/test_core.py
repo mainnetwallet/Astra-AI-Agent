@@ -41,6 +41,14 @@ class TestEventBus(unittest.TestCase):
         self.assertEqual(rec["kind"], "custom.game_event")
         self.assertEqual(rec["data"]["score"], 99)
 
+    def test_broadcast_timestamp_matches_the_persisted_row(self):
+        """History and the SSE feed must agree on an event's canonical time,
+        so the returned/broadcast record reuses the stored created_at."""
+        rec = self.ev.emit("tool.started", agent="tools", op="X")
+        stored = self.ev.store.fetchone("SELECT * FROM events WHERE id = ?",
+                                        (rec["id"],))
+        self.assertEqual(rec["created_at"], stored["created_at"])
+
 
 # ── TaskEngine ────────────────────────────────────────────────────────────────
 class TestTaskEngine(unittest.TestCase):

@@ -205,7 +205,7 @@ configured.
 | **Router** | Model registry + task routing stats (the AstraRouter's view) |
 | **Wallet** | Web3 transaction policy (mode, limits, allowlists) + recent txs |
 | **Backup** | Export/import as one JSON file — currently a placeholder (`_exports: {}`) |
-| **Activity Log** | Live execution timeline (SSE): chronological, newest at the bottom, auto-follow with "↓ New logs", category filters (Agents/AI/Tools/Browser/Web3/Errors), search, pause/resume, copy, clear, expandable details. Start/terminal events are reconciled by a correlation id, so a running row is updated in place (or resolved) instead of leaving a stale entry |
+| **Activity Log** | Live execution timeline (SSE): chronological by backend event time, newest at the bottom (out-of-order events land in place), auto-follow with "↓ New logs", category filters (Agents/AI/Tools/Browser/Web3/Errors), search, pause/resume, copy, clear, expandable details. Start/terminal events are reconciled by a correlation id, so a running row is updated in place — keeping its original timestamp/position — instead of leaving a stale entry |
 
 ## API
 

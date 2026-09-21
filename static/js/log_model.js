@@ -46,7 +46,11 @@
 
   // Kinds that are pure heartbeats / duplicate another event and would only
   // add noise. Dropped before rendering (they stay in the persisted log).
-  var NOISE_KINDS = { "ai.token": 1, "scheduler.tick": 1 };
+  // `gateway.recovery_target_selected` is metadata for the *next* recovery
+  // attempt (the attempt itself is reported by its own ai.*/astra_gateway.*
+  // lifecycle), so on its own it renders as an empty "Recovery target" row.
+  var NOISE_KINDS = { "ai.token": 1, "scheduler.tick": 1,
+                      "gateway.recovery_target_selected": 1 };
 
   function isMeaningful(event) {
     var e = event || {};
@@ -247,6 +251,29 @@
     return m ? m[1] : "";
   }
 
+  // The canonical event timestamp comes from the backend (`created_at`), never
+  // from when the DOM happened to receive the event. Ordering compares this
+  // first and the event id second (same-second events keep emission order).
+  function stampOf(created) {
+    return String(created == null ? "" : created).trim();
+  }
+
+  // Accepts either a raw event (created_at/id) or a normalized model
+  // (sortTs/sortId) so history, live events and rendered rows all order with
+  // the exact same rule.
+  function chronKey(obj) {
+    var o = obj || {};
+    var ts = o.sortTs != null ? o.sortTs : stampOf(o.created_at);
+    var id = o.sortId != null ? o.sortId : (Number(o.id) || 0);
+    return { ts: ts, id: id };
+  }
+
+  function compareChron(a, b) {
+    var ka = chronKey(a), kb = chronKey(b);
+    if (ka.ts && kb.ts && ka.ts !== kb.ts) return ka.ts < kb.ts ? -1 : 1;
+    return ka.id - kb.id;
+  }
+
   function normalize(event) {
     var e = event || {};
     var kind = String(e.kind == null ? "" : e.kind);
@@ -269,6 +296,8 @@
       kind: kind,
       agent: e.agent || "",
       time: timeOf(e.created_at),
+      sortTs: stampOf(e.created_at),
+      sortId: Number(e.id) || 0,
       category: categoryOf(kind),
       status: status,
       icon: t[0],
@@ -332,11 +361,11 @@
 
   /* --------------------------------------------------------------- ordering */
   // History comes back newest-first from /api/events; the timeline always
-  // renders oldest -> newest with live events appended at the bottom. Sort by
-  // id so the order is correct no matter what the endpoint returned.
+  // renders oldest -> newest. Sort by the SAME canonical (created_at, id) key
+  // the live feed uses, so history and live events can never disagree.
   function orderHistory(rows) {
     return (rows || []).slice().sort(function (a, b) {
-      return ((a && a.id) || 0) - ((b && b.id) || 0);
+      return compareChron(a, b);
     });
   }
 
@@ -451,6 +480,21 @@
     return state.counts;
   }
 
+  // A lifecycle continuation (started -> completed/failed/retrying) refines the
+  // SAME operation row. Its timeline identity — id, displayed time and the
+  // (timestamp, id) sort key — must stay pinned to the ORIGINAL start event, so
+  // a completion never makes the row jump or look like it happened later.
+  function mergeLifecycle(oldModel, newModel) {
+    var merged = Object.assign({}, newModel);
+    if (oldModel) {
+      merged.id = oldModel.id;
+      merged.time = oldModel.time;
+      merged.sortTs = oldModel.sortTs;
+      merged.sortId = oldModel.sortId;
+    }
+    return merged;
+  }
+
   function createState() {
     return {
       filter: "all", query: "", paused: false,
@@ -527,8 +571,11 @@
     buffer: buffer,
     count: count,
     recount: recount,
+    mergeLifecycle: mergeLifecycle,
     reset: reset,
     matchesRow: matchesRow,
+    compareChron: compareChron,
+    chronKey: chronKey,
     phaseOf: phaseOf,
     lifecycleOf: lifecycleOf,
     planRender: planRender,

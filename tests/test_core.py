@@ -185,6 +185,56 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIn("test_tool", all_st)
 
 
+class TestWorkspacePathContainment(unittest.TestCase):
+    """Regression: `_safe()` guarded with `path.startswith(root)`, which
+    accepted a SIBLING directory whose name merely began with the workspace
+    root (root=/w/ws, path=/w/ws-evil), and never resolved symlinks. Either
+    let a file tool read or write outside the workspace."""
+
+    def test_sibling_prefix_escape_is_rejected(self):
+        import tempfile
+        from unittest import mock
+        from astra.tools import builtins as b
+        from astra.core.exceptions import ValidationError
+        base = tempfile.mkdtemp()
+        root = os.path.join(base, "workspace")
+        sibling = os.path.join(base, "workspace-evil")
+        os.makedirs(root)
+        os.makedirs(sibling)
+        with open(os.path.join(sibling, "secret.txt"), "w") as fh:
+            fh.write("top secret")
+        with mock.patch.object(b, "WORKSPACE", root):
+            with self.assertRaises(ValidationError):
+                b._safe("../workspace-evil/secret.txt")
+            with self.assertRaises(ValidationError):
+                b._safe("/etc/passwd")
+            # a legitimate in-workspace path still resolves
+            ok = b._safe("sub/notes.txt")
+            self.assertTrue(ok == os.path.realpath(root) or
+                            ok.startswith(os.path.join(root, "sub")))
+
+    def test_symlink_escape_is_rejected(self):
+        import tempfile
+        from unittest import mock
+        from astra.tools import builtins as b
+        from astra.core.exceptions import ValidationError
+        base = tempfile.mkdtemp()
+        root = os.path.join(base, "workspace")
+        outside = os.path.join(base, "outside")
+        os.makedirs(root)
+        os.makedirs(outside)
+        with open(os.path.join(outside, "secret.txt"), "w") as fh:
+            fh.write("top secret")
+        link = os.path.join(root, "link")
+        try:
+            os.symlink(outside, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported on this platform")
+        with mock.patch.object(b, "WORKSPACE", root):
+            with self.assertRaises(ValidationError):
+                b._safe("link/secret.txt")
+
+
 # ── Memory + Experience ───────────────────────────────────────────────────────
 class TestMemory(unittest.TestCase):
     def setUp(self):

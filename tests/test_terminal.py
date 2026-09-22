@@ -7,6 +7,7 @@ process control, timeout, history and session isolation.
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -264,3 +265,168 @@ class ShellDetectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Recorder:
+    """Minimal event sink for terminal lifecycle assertions."""
+
+    def __init__(self):
+        self.rows = []
+
+    def emit(self, kind, agent="", **data):
+        self.rows.append({"kind": kind, "agent": agent, "data": data})
+        return self.rows[-1]
+
+    def kinds(self, kind=None):
+        return [r["kind"] for r in self.rows
+                if kind is None or r["kind"] == kind]
+
+
+class ProbeIsolationTests(unittest.TestCase):
+    """Regression: cwd/env/exit-code probes were a single set of files per
+    session, written by EVERY command's shell wrapper — so a background
+    command finishing (or starting) could overwrite or delete the probes a
+    concurrently-running foreground command was about to read, corrupting
+    its cwd/exit code. Each command must own its probe files."""
+
+    def test_probe_files_are_per_command_and_not_shared(self):
+        s = _session()
+        p1 = s._probe_paths_for("s1-1")
+        p2 = s._probe_paths_for("s1-2")
+        self.assertTrue(set(p1.values()).isdisjoint(set(p2.values())))
+        base1 = tempfile.mkdtemp()
+        base2 = tempfile.mkdtemp()
+        # simulate command #2's wrapper finishing mid-way through command #1
+        for probes, base in ((p2, base2), (p1, base1)):
+            with open(probes["pwd"], "w") as fh:
+                fh.write(base + "\n")
+            with open(probes["rc"], "w") as fh:
+                fh.write("0\n")
+        rc = s._apply_probes(p1)
+        self.assertEqual(rc, 0)
+        self.assertEqual(os.path.realpath(s.cwd), os.path.realpath(base1))
+        # applying a command's probes consumes them (no stale files)
+        self.assertFalse(os.path.exists(p1["pwd"]))
+        s.close()
+
+
+class CloseDoesNotBlockTests(unittest.TestCase):
+    """Regression: a session lock used to be held for the whole duration of a
+    foreground command, so close() (and therefore server shutdown) blocked
+    until the command finished, and process-control calls contended behind
+    it. close() must return promptly and kill the in-flight command."""
+
+    def test_close_returns_immediately_and_kills_inflight_command(self):
+        s = _session()
+        done = {}
+
+        def run_slow():
+            r = s.exec("sleep 20", timeout=30)
+            done["status"] = r["status"]
+
+        th = threading.Thread(target=run_slow)
+        th.start()
+        time.sleep(0.4)
+        start = time.monotonic()
+        s.close()
+        close_s = time.monotonic() - start
+        th.join(timeout=10)
+        self.assertFalse(th.is_alive(), "in-flight command was not unblocked")
+        self.assertLess(close_s, 3.0,
+                        "close() blocked on the in-flight command")
+        self.assertTrue(s.closed)
+        self.assertIn(done.get("status"), ("failed", "timeout", "completed"))
+
+    def test_stop_does_not_block_behind_a_foreground_command(self):
+        s = _session()
+        bg = s.exec("sleep 30", wait=False)
+        th = threading.Thread(target=lambda: s.exec("sleep 20", timeout=30))
+        th.start()
+        time.sleep(0.4)
+        start = time.monotonic()
+        stopped = s.stop(bg["process_id"])
+        elapsed = time.monotonic() - start
+        self.assertEqual(stopped["status"], STOPPED)
+        self.assertLess(elapsed, 3.0, "stop() blocked behind the foreground run")
+        s.close()
+        th.join(timeout=10)
+
+
+class DuplicateCompletionEventTests(unittest.TestCase):
+    """Regression: concurrent status()/refresh calls could each emit a
+    terminal.completed event for the same background process."""
+
+    def test_completion_event_emitted_exactly_once_under_concurrency(self):
+        rec = _Recorder()
+        s = TerminalSession("dup", cwd=tempfile.mkdtemp(), events=rec)
+        started = s.exec("echo done", wait=False)
+        pid = started["process_id"]
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if s.status(pid)["status"] != RUNNING:
+                break
+            time.sleep(0.02)
+        # hammer the same process from many threads
+        threads = [threading.Thread(target=lambda: s.status(pid))
+                   for _ in range(24)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        completions = rec.kinds("terminal.completed")
+        self.assertEqual(len(completions), 1)
+        # exactly one terminal event of any kind for that process
+        terminals = [r for r in rec.rows if r["data"].get("terminal") is True]
+        self.assertEqual(len(terminals), 1)
+        s.close()
+
+
+class ManagerBoundsTests(unittest.TestCase):
+    """A long-lived server must not accumulate sessions/processes forever."""
+
+    def test_lru_idle_session_is_evicted_at_the_cap(self):
+        m = TerminalManager(max_sessions=2)
+        a = m.get("a")
+        time.sleep(0.01)
+        m.get("b")
+        time.sleep(0.01)
+        m.get("c")   # evicts the LRU idle session ("a")
+        self.assertTrue(a.closed)
+        self.assertEqual(set(m.session_ids()), {"b", "c"})
+        m.close_all()
+
+    def test_session_with_live_process_is_not_evicted_or_idle_reaped(self):
+        m = TerminalManager(max_sessions=2, idle_seconds=0.0001)
+        busy = m.get("busy")
+        busy.exec("sleep 30", wait=False)
+        m.get("x")
+        m.get("y")   # must evict x, never the busy session
+        self.assertIsNotNone(m.get("busy", create=False))
+        self.assertFalse(busy.closed)
+        # close_idle must also skip a session that owns a live process
+        time.sleep(0.01)
+        self.assertNotIn("busy", m.close_idle())
+        self.assertFalse(busy.closed)
+        m.close_all()
+
+    def test_close_idle_emits_completion_for_finished_background_process(self):
+        """Regression: a background process that finished on its own never
+        got a terminal Activity-Log event unless someone polled status(), so
+        its "… running" row lingered forever. The idle sweep must refresh
+        (and therefore close out) the finished process before reaping."""
+        rec = _Recorder()
+        m = TerminalManager(events=rec, idle_seconds=0.0001)
+        session = m.get("bg")
+        started = session.exec("echo done", wait=False)
+        pid = started["process_id"]
+        # Let the process finish on its own WITHOUT polling it (a status()
+        # call would emit the completion itself and hide the bug).
+        time.sleep(0.5)
+        self.assertNotIn("terminal.completed", rec.kinds())
+        closed = m.close_idle()
+        self.assertIn("bg", closed)
+        completions = [r for r in rec.rows
+                       if r["kind"] == "terminal.completed"
+                       and r["data"].get("process_id") == pid]
+        self.assertEqual(len(completions), 1)
+        m.close_all()

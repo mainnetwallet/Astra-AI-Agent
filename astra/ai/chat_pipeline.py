@@ -198,24 +198,36 @@ def _cid_from_history(history):
     return getattr(history, "conversation_id", None)
 
 
-def _with_tool_summary(messages: list, steps: list) -> list:
+def _with_tool_summary(messages: list, steps: list,
+                       extra_context: str = "") -> list:
     """Clone provider messages and append a compact, bounded summary of the
-    tool actions already taken — with NO tool protocol — for the Gateway's
-    correction phase."""
+    tool actions already taken — with NO tool protocol — plus the live
+    terminal/execution context, for the Gateway's correction phase. The
+    correcting model must see the same current state the loop saw."""
     clone = [dict(m) for m in (messages or [])]
-    if not steps or not clone or clone[-1].get("role") != "user":
+    if not clone or clone[-1].get("role") != "user":
         return clone
-    lines = []
-    for s in steps:
-        line = f"- {s.tool}: status={s.status or 'ok'}"
-        code = s.result.get("exit_code") if isinstance(s.result, dict) else None
-        if code is not None:
-            line += f", exit_code={code}"
-        if not s.ok and s.error:
-            line += f", error={s.error[:120]}"
-        lines.append(line)
-    block = ("\n\nTool actions ALREADY performed for this task (do not repeat "
-             "them; use their results):\n" + "\n".join(lines))
+    parts = []
+    if steps:
+        lines = []
+        for s in steps:
+            line = f"- {s.tool}: status={s.status or 'ok'}"
+            code = (s.result.get("exit_code")
+                    if isinstance(s.result, dict) else None)
+            if code is not None:
+                line += f", exit_code={code}"
+            if not s.ok and s.error:
+                line += f", error={s.error[:120]}"
+            lines.append(line)
+        parts.append("Tool actions ALREADY performed for this task (do not "
+                     "repeat them; use their results):\n" + "\n".join(lines))
+    extra = (extra_context or "").strip()
+    if extra:
+        parts.append("Current execution context (live terminal session + "
+                     "actions already taken):\n" + extra)
+    if not parts:
+        return clone
+    block = "\n\n" + "\n\n".join(parts)
     content = clone[-1].get("content")
     if isinstance(content, str):
         clone[-1]["content"] = content + block
@@ -462,7 +474,7 @@ class ChatPipeline:
 
     def _run_tool_loop(self, brief, hist_turns, ctx_text, task_type, vision,
                        scope, session_id, terminal_context, exec_context,
-                       req, trace, base_messages=None):
+                       req, trace, base_messages=None, task_content=None):
         """Run the shared `AgentToolLoop` with the Provider system as the
         brain. Returns a `RoutingResult` (so the verify stage is unchanged)
         or None on failure. The loop's final message list is attached so
@@ -489,8 +501,10 @@ class ChatPipeline:
             blocks.append("Live terminal session state:\n" + terminal_context)
         if exec_context:
             blocks.append(exec_context)
+        task = (task_content if task_content is not None
+                else brief["final_request"])
         try:
-            result = loop.run(brief["final_request"], caller,
+            result = loop.run(task, caller,
                               system_prompt=PROVIDER_SYSTEM_PROMPT,
                               history=hist_turns, context_blocks=blocks,
                               session_id=session_id, scope=scope,
@@ -521,8 +535,12 @@ class ChatPipeline:
         # could otherwise reply with a tool call instead of a fixed answer).
         # They get the original prompt plus a compact summary of what the
         # tools already did, so it can fix a missing/incomplete answer.
+        correction_ctx = "\n\n".join(
+            b for b in (self._terminal_context(session_id),
+                        self.execution_history.context_text(scope)) if b)
         rr._loop_messages = _with_tool_summary(base_messages or [],
-                                               result.steps)
+                                               result.steps,
+                                               extra_context=correction_ctx)
         return rr
 
     # -- helpers -----------------------------------------------------------------
@@ -582,7 +600,8 @@ class ChatPipeline:
 
     # -- public entry point ---------------------------------------------------------
     def run(self, message: str, *, context: str = "", history=None,
-            attachments=None, conversation_id=None) -> dict:
+            attachments=None, conversation_id=None,
+            session_id=None) -> dict:
         """`history`, when given, is the canonical provider-independent
         conversation history for this turn (a list of {"role", "content"}
         dicts, oldest first — see `astra.ai.conversation_context`, or a
@@ -622,7 +641,8 @@ class ChatPipeline:
         # the correlation ids, it never filters running rows away).
         try:
             return self._run_turn(raw, context, hist_turns, attachments, req,
-                                  gateway_ok, trace, conversation_id)
+                                  gateway_ok, trace, conversation_id,
+                                  session_id)
         except Exception as e:
             self._emit("chat.pipeline.failed",
                        error=f"{type(e).__name__}: {e}",
@@ -631,7 +651,8 @@ class ChatPipeline:
             raise
 
     def _run_turn(self, raw, context, hist_turns, attachments, req,
-                  gateway_ok, trace, conversation_id=None) -> dict:
+                  gateway_ok, trace, conversation_id=None,
+                  session_id_override=None) -> dict:
         """The rest of one chat turn, split out of `run()` so it can
         guarantee a terminal event even when a step raises unexpectedly."""
 
@@ -645,7 +666,12 @@ class ChatPipeline:
         # is built ONCE and shown to BOTH the Gateway and the Provider.
         scope = (str(conversation_id) if conversation_id not in (None, "", 0)
                  else req)
-        session_id = default_session_id_for(conversation_id)
+        # An explicit session_id lets an embedder isolate callers that have
+        # no conversation id (the web layer always has one). Without either,
+        # there is a single implicit conversation, so one stable default
+        # session — never a silent mix of unrelated explicit ids.
+        session_id = (str(session_id_override) if session_id_override
+                      else default_session_id_for(conversation_id))
         terminal_context = self._terminal_context(session_id)
         exec_context = self.execution_history.context_text(scope)
         extra_context = "\n\n".join(
@@ -700,7 +726,7 @@ class ChatPipeline:
             rr = self._run_tool_loop(
                 brief, hist_turns, ctx_text, task_type, vision, scope,
                 session_id, terminal_context, exec_context, req, trace,
-                messages)
+                messages, content)
         else:
             rr = self._route(task_type, messages, brief["provider"],
                              brief["model"], vision, req=req)

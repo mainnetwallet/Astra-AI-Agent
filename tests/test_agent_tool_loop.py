@@ -184,6 +184,17 @@ class LoopContextTests(unittest.TestCase):
         text = hist.context_text("s", max_entries=5, max_chars=300)
         self.assertLessEqual(len(text), 301)
 
+    def test_execution_history_bounds_the_number_of_scopes(self):
+        """A long-lived server serving many conversations must not grow the
+        scope table without bound."""
+        hist = AgentExecutionHistory(max_entries=2, max_scopes=3)
+        for scope in ("a", "b", "c", "d"):
+            hist.record(scope, "terminal_exec", ok=True, status="completed",
+                        result={"stdout": scope})
+        self.assertEqual(hist.entries("a"), [])      # LRU scope evicted
+        self.assertTrue(hist.entries("d"))
+        self.assertTrue(hist.entries("c"))
+
     def test_context_blocks_reach_the_model(self):
         reg, manager = _stack()
         brain = ScriptedBrain([_final("ok")])
@@ -195,6 +206,25 @@ class LoopContextTests(unittest.TestCase):
 
 
 class EventsTests(unittest.TestCase):
+    def test_tool_args_in_events_are_redacted(self):
+        """Regression: a model may run `export API_KEY=<secret>` or a curl
+        with an Authorization header; the Activity Log's `agent.tool_call`
+        args must be redacted, exactly like ToolRegistry's own tool events."""
+        bus = Bus()
+        reg, manager = _stack()
+        manager.events = bus
+        loop = AgentToolLoop(reg, terminal=manager, events=bus)
+        secret = "ghp_" + "A" * 30
+        brain = ScriptedBrain([
+            _tool(f"export API_KEY={secret}"),
+            _final("ok")])
+        loop.run("x", brain, system_prompt="", session_id="s", scope="s")
+        call_events = [r for r in bus.rows if r["kind"] == "agent.tool_call"]
+        self.assertTrue(call_events)
+        for r in call_events:
+            self.assertNotIn(secret, json.dumps(r["data"]))
+        manager.close_all()
+
     def test_lifecycle_events_emitted(self):
         bus = Bus()
         reg, manager = _stack()

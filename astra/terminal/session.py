@@ -183,12 +183,16 @@ class ProcessRecord:
 
     def __init__(self, process_id: str, command: str, popen, cwd: str,
                  started_at: float, max_output_chars: int,
-                 on_output=None, op: str = ""):
+                 on_output=None, op: str = "", probes: dict | None = None):
         self.process_id = process_id
         self.command = command
         self.popen = popen
         self.cwd = cwd
         self.started_at = started_at
+        # This command's own probe files, removed once it has ended (a
+        # session that starts many background jobs must not accumulate
+        # them until the session itself closes).
+        self.probes = probes or {}
         # Correlation id shared by this process's start/terminal events, so
         # the Activity Log resolves one row instead of leaving it running.
         self.op = op or f"term:{process_id}"
@@ -214,6 +218,23 @@ class ProcessRecord:
                 return
             self.exit_code = code
             self.status = COMPLETED if code == 0 else FAILED
+
+    def claim_exit(self) -> bool:
+        """Return True exactly ONCE, when the process has ended and its
+        terminal Activity-Log event has not been emitted yet. The poll +
+        flag flip happen under the record lock, so two threads refreshing
+        concurrently can never both emit a completion event."""
+        with self._lock:
+            if self.status == RUNNING:
+                code = self.popen.poll()
+                if code is None:
+                    return False
+                self.exit_code = code
+                self.status = COMPLETED if code == 0 else FAILED
+            if self.exit_emitted:
+                return False
+            self.exit_emitted = True
+            return True
 
     def duration_ms(self) -> float:
         return round((time.monotonic() - self.started_at) * 1000.0, 2)
@@ -261,13 +282,30 @@ class TerminalSession:
         self._processes: dict[str, ProcessRecord] = {}
         self._counter = 0
         self._closed = False
+        # `_lock` guards session STATE (cwd/env/history/process table/closed)
+        # and is only ever held for short mutations. `_exec_lock` serializes
+        # foreground commands so a session runs one at a time, but it is NOT
+        # held by close()/status()/stop() — an in-flight command must never
+        # block shutdown or process control (that used to hang close() for
+        # the full command duration).
         self._lock = threading.RLock()
+        self._exec_lock = threading.Lock()
+        self._active = None            # currently-running foreground Popen
         self._probe_dir = tempfile.mkdtemp(prefix="astra-term-")
-        self._probe_paths = {
-            "rc": os.path.join(self._probe_dir, "rc"),
-            "pwd": os.path.join(self._probe_dir, "pwd"),
-            "env": os.path.join(self._probe_dir, "env"),
-        }
+
+    def _probe_paths_for(self, tag: str) -> dict:
+        """Probe files for ONE command.
+
+        A single shared set per session was silently overwritten by a
+        concurrently-running background command (its wrapper writes the same
+        files), so a foreground command could read *another* command's cwd /
+        exit code — or have its probes deleted by a background `start` while
+        it ran. Unique files per command remove the race entirely.
+        """
+        safe = "".join(c for c in str(tag) if c.isalnum() or c in "-_")
+        base = os.path.join(self._probe_dir, safe or "cmd")
+        return {"rc": base + ".rc", "pwd": base + ".pwd",
+                "env": base + ".env"}
 
     # -- identity / state ----------------------------------------------------
     def snapshot(self) -> dict:
@@ -320,10 +358,35 @@ class TerminalSession:
             if self._closed:
                 return
             self._closed = True
+            active = self._active
             records = list(self._processes.values())
+        # Terminate outside the lock: close() must never block on a slow
+        # command or on process-control calls contending for the lock.
+        if active is not None:
+            self._terminate(active)
         for record in records:
+            record.exit_emitted = True
             self._terminate(record.popen)
         shutil.rmtree(self._probe_dir, ignore_errors=True)
+
+    def is_idle(self) -> bool:
+        """True when no foreground command is running and no background
+        process is still alive — safe for the manager to reap."""
+        self._refresh_all()
+        return self.can_reap()
+
+    def can_reap(self) -> bool:
+        """Like `is_idle` but with no events/refresh side effects, so the
+        manager can call it while holding its own lock."""
+        with self._lock:
+            if self._closed:
+                return True
+            if self._active is not None:
+                return False
+            for proc in self._processes.values():
+                if proc.status == RUNNING and proc.popen.poll() is None:
+                    return False
+            return True
 
     @property
     def closed(self) -> bool:
@@ -340,8 +403,6 @@ class TerminalSession:
         command = str(command or "").strip()
         if not command:
             raise ValidationError("command required")
-        if self._closed:
-            raise ValidationError(f"terminal session {self.session_id} is closed")
         if cwd:
             self.set_cwd(cwd)
         if timeout is not None:
@@ -349,28 +410,37 @@ class TerminalSession:
             if timeout <= 0:
                 timeout = None
         with self._lock:
+            if self._closed:
+                raise ValidationError(
+                    f"terminal session {self.session_id} is closed")
             self.last_used = time.time()
-            if wait:
+        if wait:
+            with self._exec_lock:
+                with self._lock:
+                    if self._closed:
+                        raise ValidationError(
+                            f"terminal session {self.session_id} is closed")
                 return self._run_foreground(command, timeout, env)
-            return self._run_background(command, env)
+        return self._run_background(command, env)
 
     def _new_process_id(self) -> str:
         with self._lock:
             self._counter += 1
             return f"{self.session_id}-{self._counter}"
 
-    def _base_env(self, extra: dict | None) -> dict:
+    def _base_env(self, extra: dict | None, probes: dict) -> dict:
         env = dict(self.env)
-        env["ASTRA_TERMINAL_RC"] = self._probe_paths["rc"]
-        env["ASTRA_TERMINAL_PWD"] = self._probe_paths["pwd"]
-        env["ASTRA_TERMINAL_ENV"] = self._probe_paths["env"]
+        env["ASTRA_TERMINAL_RC"] = probes["rc"]
+        env["ASTRA_TERMINAL_PWD"] = probes["pwd"]
+        env["ASTRA_TERMINAL_ENV"] = probes["env"]
         env["ASTRA_TERMINAL_SESSION"] = self.session_id
         if extra:
             env.update({str(k): str(v) for k, v in extra.items()})
         return env
 
-    def _reset_probes(self) -> None:
-        for path in self._probe_paths.values():
+    @staticmethod
+    def _discard_probes(probes: dict) -> None:
+        for path in probes.values():
             try:
                 os.remove(path)
             except OSError:
@@ -407,7 +477,7 @@ class TerminalSession:
             return [path, "-NoProfile", "-NonInteractive", "-Command", script]
         return [path, "-c", script]
 
-    def _popen(self, argv, env):
+    def _popen(self, argv, env, cwd):
         kwargs = {}
         if os.name == "posix":
             kwargs["start_new_session"] = True
@@ -415,16 +485,21 @@ class TerminalSession:
             kwargs["creationflags"] = getattr(subprocess,
                                               "CREATE_NEW_PROCESS_GROUP", 0)
         return subprocess.Popen(
-            argv, cwd=self.cwd, env=env, stdin=subprocess.DEVNULL,
+            argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
 
     def _run_foreground(self, command, timeout, env) -> dict:
-        self._reset_probes()
         process_id = self._new_process_id()
+        probes = self._probe_paths_for(process_id)
         op = f"term:{process_id}"
         started = time.monotonic()
+        with self._lock:
+            cwd = self.cwd
+            base_env = self._base_env(env, probes)
         argv = self._shell_argv(self._wrap(command))
-        popen = self._popen(argv, self._base_env(env))
+        popen = self._popen(argv, base_env, cwd)
+        with self._lock:
+            self._active = popen
         # Live streaming: forward chunks to the caller's callback AND publish
         # at most MAX_STREAM_EVENTS capped `terminal.output` events per
         # command, so a chatty process can never flood the Activity Log.
@@ -461,12 +536,17 @@ class TerminalSession:
                    shell=self.shell.get("name"), status=RUNNING)
         timed_out = False
         try:
-            popen.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            self._terminate(popen)
-        out_thread.join(timeout=5)
-        err_thread.join(timeout=5)
+            try:
+                popen.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                self._terminate(popen)
+        finally:
+            with self._lock:
+                if self._active is popen:
+                    self._active = None
+            out_thread.join(timeout=5)
+            err_thread.join(timeout=5)
         rc = None if timed_out else popen.returncode
         if timed_out:
             status = TIMEOUT
@@ -476,16 +556,19 @@ class TerminalSession:
             status = FAILED
         duration = round((time.monotonic() - started) * 1000.0, 2)
         if not timed_out:
-            probe_rc = self._apply_probes()
+            probe_rc = self._apply_probes(probes)
             # cmd/PowerShell return the wrapper's own status, so their real
             # command exit code comes from the probe file; POSIX shells
             # already `exit $?`, so popen.returncode is authoritative.
             if self.shell.get("kind") != "posix" and probe_rc is not None:
                 rc = probe_rc
                 status = COMPLETED if rc == 0 else FAILED
+        self._discard_probes(probes)
+        with self._lock:
+            current_cwd = self.cwd
         result = {
             "command": command,
-            "cwd": self.cwd,
+            "cwd": current_cwd,
             "session_id": self.session_id,
             "process_id": process_id,
             "shell": self.shell.get("name", ""),
@@ -508,19 +591,22 @@ class TerminalSession:
         return result
 
     def _run_background(self, command, env) -> dict:
-        self._reset_probes()
         process_id = self._new_process_id()
+        probes = self._probe_paths_for(process_id)
         started = time.monotonic()
 
         def on_chunk(text):
             if self.on_output is not None:
                 self.on_output(text)
 
+        with self._lock:
+            cwd = self.cwd
+            base_env = self._base_env(env, probes)
         argv = self._shell_argv(self._wrap(command))
-        popen = self._popen(argv, self._base_env(env))
-        record = ProcessRecord(process_id, command, popen, self.cwd, started,
+        popen = self._popen(argv, base_env, cwd)
+        record = ProcessRecord(process_id, command, popen, cwd, started,
                                self.max_output_chars, on_output=on_chunk,
-                               op=f"term:{process_id}")
+                               op=f"term:{process_id}", probes=probes)
         out_thread = threading.Thread(target=_read_stream,
                                       args=(popen.stdout, record.stdout),
                                       daemon=True)
@@ -530,14 +616,15 @@ class TerminalSession:
         out_thread.start()
         err_thread.start()
         record.attach(out_thread, err_thread)
-        self._processes[process_id] = record
+        with self._lock:
+            self._processes[process_id] = record
         self._emit("terminal.started", op=record.op, process_id=process_id,
-                   command=command, cwd=self.cwd,
+                   command=command, cwd=cwd,
                    shell=self.shell.get("name"), status=RUNNING,
                    background=True)
         result = {
             "command": command,
-            "cwd": self.cwd,
+            "cwd": cwd,
             "session_id": self.session_id,
             "process_id": process_id,
             "shell": self.shell.get("name", ""),
@@ -575,7 +662,10 @@ class TerminalSession:
                     record.exit_code = record.popen.wait(timeout=5)
                 except Exception:
                     record.exit_code = None
-        record.exit_emitted = True
+            # Marked under the record lock so a concurrent _refresh_all can
+            # never also emit a completion event for the same process.
+            record.exit_emitted = True
+        self._discard_probes(record.probes)
         result = record.to_dict()
         result["session_id"] = self.session_id
         self._emit("terminal.stopped", op=record.op, process_id=process_id,
@@ -598,25 +688,31 @@ class TerminalSession:
         with self._lock:
             records = list(self._processes.values())
         for record in records:
-            record.refresh()
-            if record.status != RUNNING and not record.exit_emitted:
-                record.exit_emitted = True
-                kind = ("terminal.completed" if record.status == COMPLETED
-                        else "terminal.failed")
-                self._emit(kind, op=record.op,
-                           process_id=record.process_id,
-                           command=record.command, cwd=record.cwd,
-                           exit_code=record.exit_code,
-                           duration=record.duration_ms(),
-                           status=record.status, terminal=True)
+            # claim_exit() is atomic: exactly one refresh emits the terminal
+            # event, so concurrent polls cannot duplicate it.
+            if not record.claim_exit():
+                continue
+            self._discard_probes(record.probes)
+            kind = ("terminal.completed" if record.status == COMPLETED
+                    else "terminal.failed")
+            self._emit(kind, op=record.op,
+                       process_id=record.process_id,
+                       command=record.command, cwd=record.cwd,
+                       exit_code=record.exit_code,
+                       duration=record.duration_ms(),
+                       status=record.status, terminal=True)
 
     # -- results / probes ----------------------------------------------------
-    def _apply_probes(self) -> int | None:
+    def _apply_probes(self, probes: dict) -> int | None:
         """Apply the cwd/env side effects and return the probed exit code
         (None when the shell does not need/emit one)."""
-        pwd_path = self._probe_paths["pwd"]
-        rc_path = self._probe_paths["rc"]
-        env_path = self._probe_paths["env"]
+        with self._lock:
+            return self._apply_probes_locked(probes)
+
+    def _apply_probes_locked(self, probes: dict) -> int | None:
+        pwd_path = probes["pwd"]
+        rc_path = probes["rc"]
+        env_path = probes["env"]
         try:
             with open(pwd_path, "r", encoding="utf-8", errors="replace") as fh:
                 new_cwd = fh.read().strip()
@@ -639,6 +735,7 @@ class TerminalSession:
                 self.env = parsed
         except OSError:
             pass
+        self._discard_probes(probes)
         return probe_rc
 
     def _record(self, result: dict) -> None:

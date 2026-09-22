@@ -23,17 +23,23 @@ from astra.terminal.session import TerminalSession
 
 DEFAULT_SESSION_ID = "default"
 DEFAULT_IDLE_SECONDS = 30 * 60
+# Upper bound on live sessions, so a long-running server cannot accumulate
+# sessions (and their child processes) forever. The least-recently-used
+# FULLY-IDLE session is evicted when a new one would exceed this.
+DEFAULT_MAX_SESSIONS = 64
 
 
 class TerminalManager:
     def __init__(self, *, events=None, config=None, default_cwd=None,
                  max_output_chars=None, history_limit=None,
-                 idle_seconds: float = DEFAULT_IDLE_SECONDS, on_output=None):
+                 idle_seconds: float = DEFAULT_IDLE_SECONDS, on_output=None,
+                 max_sessions: int = DEFAULT_MAX_SESSIONS):
         self.events = events
         self.config = config
         self.default_cwd = default_cwd
         self.idle_seconds = float(idle_seconds or 0)
         self.on_output = on_output
+        self.max_sessions = max(1, int(max_sessions or DEFAULT_MAX_SESSIONS))
         self._max_output_chars = max_output_chars
         self._history_limit = history_limit
         self._sessions: dict[str, TerminalSession] = {}
@@ -52,6 +58,7 @@ class TerminalManager:
                 return existing
             if not create:
                 return None
+            evicted = self._evict_lru_locked(reserve=1)
             session = TerminalSession(
                 key, cwd=cwd or self.default_cwd or None, shell=shell,
                 env=env, events=self.events,
@@ -66,7 +73,25 @@ class TerminalManager:
             self._emit("terminal.session_created", session_id=key,
                        cwd=session.cwd, shell=session.shell.get("name"),
                        platform=session.platform)
-            return session
+        for old_session in evicted:
+            old_session.close()
+        return session
+
+    def _evict_lru_locked(self, *, reserve: int = 0) -> list:
+        """Close the least-recently-used fully-idle sessions until there is
+        room for `reserve` new one(s). Never evicts a session that is
+        executing or owns a live process. Returns the sessions to close
+        OUTSIDE the manager lock."""
+        evicted = []
+        while len(self._sessions) + reserve > self.max_sessions:
+            candidates = [(s.session_id, s.last_used, s)
+                          for s in self._sessions.values() if s.can_reap()]
+            if not candidates:
+                break
+            sid, _, session = min(candidates, key=lambda c: c[1])
+            self._sessions.pop(sid, None)
+            evicted.append(session)
+        return evicted
 
     def _default(self, key: str, fallback):
         if self.config is not None:
@@ -105,13 +130,34 @@ class TerminalManager:
         limit = self.idle_seconds if max_idle_seconds is None else max_idle_seconds
         if not limit:
             return []
-        closed = []
         with self._lock:
-            for sid, session in list(self._sessions.items()):
-                if session.idle_seconds() >= limit:
-                    self._sessions.pop(sid, None)
-                    session.close()
-                    closed.append(sid)
+            candidates = [session for session in self._sessions.values()
+                          if session.idle_seconds() >= limit]
+        closed = []
+        for session in candidates:
+            # `is_idle()` first refreshes the session's processes OUTSIDE the
+            # manager lock, so a background process that finished on its own
+            # gets its single `terminal.completed`/`terminal.failed` event —
+            # otherwise its "… running" row lingered in the Activity Log
+            # until the next server restart. It is also what makes the
+            # decision to reap safe: a session mid-command or owning a live
+            # process reports False and is left alone (never kill a dev
+            # server just because no command ran recently).
+            if not session.is_idle():
+                continue
+            with self._lock:
+                if self._sessions.get(session.session_id) is not session:
+                    continue
+                # Re-check usage right before eviction: a command may have
+                # arrived while we were refreshing outside the lock, and a
+                # freshly-used session must not be reaped.
+                if session.idle_seconds() < limit:
+                    continue
+                self._sessions.pop(session.session_id, None)
+            # close() can wait up to a few seconds on child termination, so
+            # it is deliberately called with NO manager lock held.
+            session.close()
+            closed.append(session.session_id)
         for sid in closed:
             self._emit("terminal.session_closed", session_id=sid, reason="idle")
         return closed

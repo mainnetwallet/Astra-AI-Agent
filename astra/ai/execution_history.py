@@ -22,9 +22,10 @@ each other's execution history.
 from __future__ import annotations
 
 import threading
-from collections import deque
+from collections import OrderedDict, deque
 
 DEFAULT_MAX_ENTRIES = 40
+DEFAULT_MAX_SCOPES = 200
 DEFAULT_CONTEXT_ENTRIES = 12
 DEFAULT_CONTEXT_CHARS = 2500
 
@@ -63,9 +64,13 @@ class ExecutionEntry:
 class AgentExecutionHistory:
     """Bounded, thread-safe, per-scope log of tool executions."""
 
-    def __init__(self, max_entries: int = DEFAULT_MAX_ENTRIES):
+    def __init__(self, max_entries: int = DEFAULT_MAX_ENTRIES,
+                 max_scopes: int = DEFAULT_MAX_SCOPES):
         self.max_entries = max(1, int(max_entries))
-        self._scopes: dict[str, deque] = {}
+        # Ordered so the least-recently-used scope can be evicted, bounding
+        # memory on a long-lived server that serves many conversations.
+        self.max_scopes = max(1, int(max_scopes))
+        self._scopes: OrderedDict[str, deque] = OrderedDict()
         self._lock = threading.RLock()
 
     def record(self, scope: str, tool: str, *, ok: bool, status: str = "",
@@ -76,8 +81,11 @@ class AgentExecutionHistory:
         with self._lock:
             bucket = self._scopes.get(key)
             if bucket is None:
+                while len(self._scopes) >= self.max_scopes:
+                    self._scopes.popitem(last=False)
                 bucket = deque(maxlen=self.max_entries)
                 self._scopes[key] = bucket
+            self._scopes.move_to_end(key)
             bucket.append(entry)
 
     def entries(self, scope: str, limit: int = DEFAULT_CONTEXT_ENTRIES) -> list[dict]:

@@ -108,6 +108,18 @@ class WebCoreTests(unittest.TestCase):
         resp = self._call("GET", "/static/../run.py")
         self.assertEqual(resp.status, 400)
 
+    def test_encoded_traversal_out_of_uploads_is_refused(self):
+        """Regression guard for the stored-file routes: a percent-decoded
+        segment can be a single "../.." (split_path decodes AFTER splitting
+        on "/"), so the resolved path must be containment-checked against the
+        uploads root, never merely `startswith`-ed against a prefix."""
+        for path in ("/api/uploads/..%2f..%2frun.py",
+                     "/api/uploads/%2e%2e%2f%2e%2e%2frun.py",
+                     "/api/artifacts/x/..%2f..%2frun.py"):
+            resp = self._call("GET", path)
+            self.assertIn(resp.status, (403, 404), path)
+            self.assertNotIn(b"import", resp.body or b"", path)
+
     def test_auth_gate_rejects_without_token(self):
         self.site.operator_token = "sekrit"
         resp = self._call("GET", "/api/health")

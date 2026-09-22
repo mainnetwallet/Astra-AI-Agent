@@ -259,16 +259,26 @@ class AgentToolLoop:
         system = (system + "\n\n" + protocol) if system else protocol
 
         blocks = [b for b in (context_blocks or []) if b]
-        user_text = task if isinstance(task, str) else str(task)
-        if blocks:
-            user_text = user_text + "\n\n" + "\n\n".join(blocks)
+        block_text = "\n\n".join(blocks)
+        # `task` may be a multimodal content list (text + image/audio/
+        # document parts). It must be preserved as parts — stringifying it
+        # would silently drop every attachment — with the context blocks
+        # appended as an extra text part.
+        if isinstance(task, list):
+            user_content = list(task)
+            if block_text:
+                user_content.append({"type": "text", "text": block_text})
+        else:
+            user_text = task if isinstance(task, str) else str(task)
+            user_content = (user_text + "\n\n" + block_text
+                            if block_text else user_text)
 
         messages: list[dict] = [{"role": "system", "content": system}]
         for turn in history or []:
             if isinstance(turn, dict) and turn.get("content"):
                 messages.append({"role": turn.get("role") or "user",
                                  "content": turn["content"]})
-        messages.append({"role": "user", "content": user_text})
+        messages.append({"role": "user", "content": user_content})
 
         ctx = ToolContext(registry=self.registry, events=self.events,
                           terminal=self.terminal,
@@ -388,8 +398,17 @@ def _brief_result(result, limit: int = 400) -> dict:
 
 
 def _safe_args(args: dict, limit: int = 300) -> str:
+    """Compact, redacted JSON view of a tool's args for the Activity Log.
+    A model may legitimately run `export API_KEY=...` or a `curl -H
+    Authorization:...`; the raw secret must never be persisted into the event
+    log (the tool registry redacts its own events — this path must too)."""
     try:
         text = json.dumps(args, ensure_ascii=False, default=str)
     except Exception:
         text = str(args)
+    try:
+        from astra.security import redact_text
+        text = redact_text(text)
+    except Exception:
+        pass
     return text[:limit] + ("…" if len(text) > limit else "")

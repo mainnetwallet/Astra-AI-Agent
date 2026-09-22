@@ -176,6 +176,85 @@ class SessionIsolationTests(unittest.TestCase):
         self.assertNotIn("conv-1", manager.context_text("conv-2"))
         manager.close_all()
 
+    def test_explicit_session_id_isolates_cid_less_callers(self):
+        """With no conversation_id an embedder can still isolate runs by
+        passing session_id; two ids must never share cwd/history."""
+        reg, manager = _stack()
+        base_a = tempfile.mkdtemp()
+
+        def tool(command):
+            return json.dumps({"action": "tool", "tool": "terminal_exec",
+                               "args": {"command": command}})
+
+        def final(answer):
+            return json.dumps({"action": "final", "answer": answer})
+
+        gw = FakeGateway([understand(final_request="cd"),
+                          verdict("complete")])
+        rt = FakeRouter([tool(f"cd {base_a}"), final("a done")])
+        pipe = ChatPipeline(gw, rt, registry=reg, terminal=manager)
+        pipe.run("go to a", session_id="run-A")
+
+        gw.replies = [understand(final_request="pwd"), verdict("complete")]
+        rt.outputs = [tool("pwd"), final("here")]
+        pipe.run("where am i", session_id="run-B")
+
+        self.assertEqual(os.path.realpath(manager.get("run-A").cwd),
+                         os.path.realpath(base_a))
+        self.assertNotEqual(os.path.realpath(manager.get("run-B").cwd),
+                            os.path.realpath(base_a))
+        manager.close_all()
+
+    def test_concurrent_conversations_keep_terminal_state_isolated(self):
+        """Two chats served at the same time, through ONE shared pipeline
+        stack (registry + terminal + execution history), must each keep
+        their own cwd and must not corrupt each other's state."""
+        import threading
+        from astra.ai.execution_history import AgentExecutionHistory
+
+        reg, manager = _stack()
+        shared_history = AgentExecutionHistory()
+        base_a = tempfile.mkdtemp()
+        base_b = tempfile.mkdtemp()
+        results = {}
+        errors = []
+
+        def worker(cid, base):
+            try:
+                def tool(command):
+                    return json.dumps({"action": "tool",
+                                       "tool": "terminal_exec",
+                                       "args": {"command": command}})
+
+                def final(answer):
+                    return json.dumps({"action": "final", "answer": answer})
+
+                gw = FakeGateway([understand(final_request="work"),
+                                  verdict("complete")])
+                rt = FakeRouter([tool(f"cd {base}"), tool("pwd"),
+                                 final("done")])
+                pipe = ChatPipeline(gw, rt, registry=reg, terminal=manager,
+                                    execution_history=shared_history)
+                hist = ConversationContext(messages=[], conversation_id=cid)
+                results[cid] = pipe.run("work", history=hist)
+            except Exception as e:          # surfaced by the assertions below
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(1, base_a)),
+                   threading.Thread(target=worker, args=(2, base_b))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        self.assertEqual(errors, [])
+        self.assertTrue(results.get(1, {}).get("ok"), results)
+        self.assertTrue(results.get(2, {}).get("ok"), results)
+        self.assertEqual(os.path.realpath(manager.get("conv-1").cwd),
+                         os.path.realpath(base_a))
+        self.assertEqual(os.path.realpath(manager.get("conv-2").cwd),
+                         os.path.realpath(base_b))
+        manager.close_all()
+
 
 class GatewayBrainTests(unittest.TestCase):
     def test_gateway_brain_drives_the_same_loop_and_terminal(self):
@@ -219,6 +298,8 @@ class GatewayBrainTests(unittest.TestCase):
 class CorrectionPhaseTests(unittest.TestCase):
     def test_correction_messages_exclude_tool_protocol(self):
         reg, manager = _stack()
+        workdir = tempfile.mkdtemp()
+        manager.get("conv-13").exec(f"cd {workdir}")
         gw = FakeGateway([understand(final_request="do it"),
                           verdict("incomplete"), verdict("complete")])
         rt = FakeRouter([json.dumps({"action": "tool", "tool": "terminal_exec",
@@ -236,6 +317,40 @@ class CorrectionPhaseTests(unittest.TestCase):
         self.assertNotIn('"action": "tool"', joined)
         # ...but the tools already run are summarised for the correcting model
         self.assertIn("ALREADY performed", joined)
+        # ...and it sees the live terminal state too (regression: the
+        # correction call used to get only the tool summary, not terminal).
+        self.assertIn(workdir, joined)
+        self.assertIn("Current execution context", joined)
+        manager.close_all()
+
+
+class MultimodalToolLoopTests(unittest.TestCase):
+    """Regression: the agent tool loop stringified multimodal content, so an
+    attached image was silently dropped on the production (terminal-wired)
+    path."""
+
+    def test_image_attachment_reaches_the_provider_as_a_content_part(self):
+        import base64
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+            "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        workdir = tempfile.mkdtemp()
+        path = os.path.join(workdir, "x.png")
+        with open(path, "wb") as fh:
+            fh.write(png)
+        reg, manager = _stack()
+        gw = FakeGateway([understand(final_request="describe"),
+                          verdict("complete")])
+        rt = FakeRouter(["a picture"])
+        pipe = ChatPipeline(gw, rt, registry=reg, terminal=manager)
+        out = pipe.run("what is in this image?", attachments=[
+            {"family": "image", "storage_path": path,
+             "detected_type": "image/png", "original_filename": "x.png"}])
+        self.assertTrue(out["ok"])
+        content = rt.requests[0].messages[-1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertTrue(any(isinstance(p, dict) and p.get("type") == "image_url"
+                            for p in content))
         manager.close_all()
 
 

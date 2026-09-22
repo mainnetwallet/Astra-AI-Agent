@@ -189,11 +189,21 @@ WORKSPACE = os.environ.get("ASTRA_WORKSPACE",
                            os.path.join(os.getcwd(), "workspace"))
 
 def _safe(rel: str) -> str:
-    """Resolve a relative path inside WORKSPACE; reject escapes."""
+    """Resolve a relative path inside WORKSPACE; reject escapes.
+
+    Two checks, because either alone is escapable:
+      * a plain `path.startswith(root)` prefix test accepts a SIBLING whose
+        name merely starts with the root (root=/w/ws, path=/w/ws-evil);
+      * resolving symlinks stops an in-workspace symlink from pointing out.
+    """
     root = os.path.abspath(WORKSPACE)
     os.makedirs(root, exist_ok=True)
     path = os.path.abspath(os.path.join(root, rel))
-    if not path.startswith(root):
+    if path != root and not path.startswith(root + os.sep):
+        raise ValidationError("path escapes workspace root")
+    real_root = os.path.realpath(root)
+    real_path = os.path.realpath(path)
+    if real_path != real_root and not real_path.startswith(real_root + os.sep):
         raise ValidationError("path escapes workspace root")
     return path
 

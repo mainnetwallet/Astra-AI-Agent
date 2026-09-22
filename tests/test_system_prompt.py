@@ -362,5 +362,93 @@ class ToolLoopSystemPromptTests(unittest.TestCase):
         manager.close_all()
 
 
+# ── 8) Capability-question behavior ("Tumi ki ki korte paro?") ─────────────
+# Regression coverage for the fix: Astra used to give a generic/hallucinated
+# capability list with awkward Bengali wording. The Core prompt now carries
+# explicit CAPABILITY QUESTIONS guidance (concise, grounded only in actual
+# runtime capabilities, no invented tool/browser/terminal/API access).
+_OLD_AWKWARD_PHRASES = (
+    "স্বাদিষ্ট প্রশ্নের উত্তর দিতে",
+    "কোনো তথ্য না জানলে সেটা তুমি জানতে বলবো না",
+)
+
+
+class CapabilityQuestionCorePromptTests(unittest.TestCase):
+    def test_core_prompt_has_capability_question_guidance(self):
+        self.assertIn("CAPABILITY QUESTIONS", CORE)
+        self.assertIn("what can you do", CORE.lower())
+
+    def test_core_prompt_grounds_capabilities_in_runtime_context_only(self):
+        self.assertIn(
+            "do not claim tool, browser, terminal, file-system, API, "
+            "website, or live-data access", CORE)
+
+    def test_core_prompt_forbids_invented_capabilities(self):
+        self.assertIn("Never invent, assume, or pad out capabilities", CORE)
+
+    def test_core_prompt_bans_generic_marketing_style_lists(self):
+        self.assertIn("not a generic marketing-style feature list", CORE)
+
+    def test_core_prompt_identifies_as_astra_ai_agent(self):
+        self.assertIn("You are Astra, an autonomous AI agent", CORE)
+        self.assertIn("task-solving assistant", CORE)
+
+    def test_core_prompt_requires_natural_non_awkward_wording(self):
+        self.assertIn("never awkward, garbled, mistranslated, or "
+                      "nonsensical phrasing", CORE)
+
+    def test_old_awkward_phrases_are_not_present_anywhere_in_the_prompt(self):
+        for phrase in _OLD_AWKWARD_PHRASES:
+            self.assertNotIn(phrase, CORE)
+            self.assertNotIn(phrase, PROVIDER_SYSTEM_PROMPT)
+            self.assertNotIn(phrase, UNDERSTAND_SYSTEM_PROMPT)
+            self.assertNotIn(phrase, VERIFY_SYSTEM_PROMPT)
+            self.assertNotIn(phrase, GATEWAY_UNDERSTANDING_SYSTEM_PROMPT)
+            self.assertNotIn(phrase, GATEWAY_CLASSIFY_SYSTEM_PROMPT)
+
+    def test_core_still_present_exactly_once_after_the_update(self):
+        # the update must not have accidentally split Core into two copies
+        for const in (PROVIDER_SYSTEM_PROMPT, UNDERSTAND_SYSTEM_PROMPT,
+                     VERIFY_SYSTEM_PROMPT, GATEWAY_UNDERSTANDING_SYSTEM_PROMPT,
+                     GATEWAY_CLASSIFY_SYSTEM_PROMPT):
+            self.assertEqual(const.count(CORE), 1)
+
+
+class CapabilityQuestionPipelineTests(unittest.TestCase):
+    """End-to-end-ish: a real 'Tumi ki ki korte paro?' turn through the
+    ChatPipeline, checking the outgoing provider prompt carries the
+    grounding rules exactly once and the user-facing reply never leaks
+    internal prompt content."""
+
+    def test_provider_prompt_carries_capability_grounding_rules_once(self):
+        pipe, gw, rt = make_pipeline(
+            [understand(final_request="Tumi ki ki korte paro?",
+                       was_incomplete=False),
+             verdict("complete")],
+            ["Ami Astra, tomar proshner uttor dite o lekha/code likhte "
+             "shahajjo korte pari."])
+        pipe.run("Tumi ki ki korte paro?")
+        sys_msg = system_of(rt.requests[0].messages)
+        self.assertEqual(sys_msg.count(CORE), 1)
+        self.assertIn("CAPABILITY QUESTIONS", sys_msg)
+        self.assertEqual(system_count(rt.requests[0].messages), 1)
+
+    def test_final_capability_reply_has_no_fabricated_unavailable_tools_leak(self):
+        reply = ("Ami Astra, tomar proshner uttor dite o lekha/code likhte "
+                "shahajjo korte pari.")
+        pipe, gw, rt = make_pipeline(
+            [understand(final_request="Tumi ki ki korte paro?",
+                       was_incomplete=False),
+             verdict("complete")],
+            [reply])
+        out = pipe.run("Tumi ki ki korte paro?")
+        self.assertEqual(out["reply"], reply)
+        # no internal prompt/section headers or old awkward phrases leaked
+        for marker in ("CAPABILITY QUESTIONS", "ASTRA CORE", CORE):
+            self.assertNotIn(marker, out["reply"])
+        for phrase in _OLD_AWKWARD_PHRASES:
+            self.assertNotIn(phrase, out["reply"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -160,8 +160,11 @@ class FakeRouter:
 
 def make_pipeline(gateway_replies, outputs, **kw):
     gw = FakeGateway(gateway_replies, usable=kw.pop("usable", True))
-    rt = FakeRouter(outputs)
-    return ChatPipeline(gw, rt, max_tokens=800), gw, rt
+    rt = FakeRouter(outputs, targets=kw.pop("targets", None))
+    registry = kw.pop("registry", None)
+    terminal = kw.pop("terminal", None)
+    return (ChatPipeline(gw, rt, max_tokens=800, registry=registry,
+                         terminal=terminal, **kw), gw, rt)
 
 
 def system_of(messages):
@@ -448,6 +451,117 @@ class CapabilityQuestionPipelineTests(unittest.TestCase):
             self.assertNotIn(marker, out["reply"])
         for phrase in _OLD_AWKWARD_PHRASES:
             self.assertNotIn(phrase, out["reply"])
+
+
+# ── 9) Capability question through the real Agent Tool Loop path ───────────
+# In production, terminal tools are always registered (astra.bootstrap), so
+# `_tool_loop_usable()` is True and EVERY chat turn — including a capability
+# question — goes through the Agent Tool Loop, not the plain provider route.
+# This is the actual root cause the fix brief describes: the loop's
+# TOOL_PROTOCOL used to flatly forbid mentioning "tools" in the final
+# answer, overriding the Core prompt's capability-question guidance. These
+# tests cover the fix end to end through `ChatPipeline`, for both the
+# tool-loop path (tools registered) and the plain path (none registered).
+class CapabilityQuestionToolLoopPipelineTests(unittest.TestCase):
+    def test_tool_loop_system_prompt_carries_capability_catalog_and_core_once(self):
+        reg, manager = _stack()
+        try:
+            pipe, gw, rt = make_pipeline(
+                [understand(final_request="Tomar ki ki tools available?",
+                           was_incomplete=False),
+                 verdict("complete")],
+                [_final("Amar terminal ar file access ache.")],
+                registry=reg, terminal=manager)
+            pipe.run("Tomar ki ki tools available?")
+            sys_msg = system_of(rt.requests[0].messages)
+            self.assertEqual(sys_msg.count(CORE), 1)
+            self.assertIn("Runtime capability catalog", sys_msg)
+            self.assertIn("terminal", sys_msg.lower())
+            self.assertIn("file access", sys_msg)
+            self.assertEqual(system_count(rt.requests[0].messages), 1)
+        finally:
+            manager.close_all()
+
+    def test_disabled_unregistered_tool_is_not_claimed_in_tool_loop_prompt(self):
+        # Only builtins (no terminal, no browser) registered on this run —
+        # the prompt must never claim terminal/browser/web3 access.
+        policy = Policy(granted=["read", "low_risk_write"])
+        reg = ToolRegistry(policy=policy)
+        register_builtins(reg)
+        manager = TerminalManager()  # unused: no terminal tools registered
+        try:
+            pipe, gw, rt = make_pipeline(
+                [understand(final_request="Tomar ki ki tools available?",
+                           was_incomplete=False),
+                 verdict("complete")],
+                ["Amar file access ache, kintu terminal ba browser nei."],
+                registry=reg, terminal=manager)
+            pipe.run("Tomar ki ki tools available?")
+            sys_msg = system_of(rt.requests[0].messages)
+            self.assertIn("file access", sys_msg)
+            self.assertNotIn("terminal/shell access", sys_msg)
+            self.assertNotIn("web browsing", sys_msg)
+        finally:
+            manager.close_all()
+
+    def test_empty_registry_says_no_external_tools_available(self):
+        # No registry at all -> tool loop stays unusable, plain provider
+        # route is used, and the prompt still grounds the answer honestly
+        # instead of leaving the model to guess.
+        pipe, gw, rt = make_pipeline(
+            [understand(final_request="Tomar ki ki tools available?",
+                       was_incomplete=False),
+             verdict("complete")],
+            ["Ekhon amar kono external tool nei."])
+        pipe.run("Tomar ki ki tools available?")
+        sys_msg = system_of(rt.requests[0].messages)
+        self.assertIn("no external tools are currently available", sys_msg)
+        self.assertEqual(sys_msg.count(CORE), 1)
+
+    def test_no_tool_protocol_or_internal_names_leak_in_final_reply(self):
+        reg, manager = _stack()
+        try:
+            pipe, gw, rt = make_pipeline(
+                [understand(final_request="Tomar ki ki tools available?",
+                           was_incomplete=False),
+                 verdict("complete")],
+                [_final("Amar terminal ar file access ache.")],
+                registry=reg, terminal=manager)
+            out = pipe.run("Tomar ki ki tools available?")
+            for leaked in ('"action": "tool"', "TOOL_PROTOCOL",
+                          "terminal_exec", "read_file", "{catalog}"):
+                self.assertNotIn(leaked, out["reply"])
+        finally:
+            manager.close_all()
+
+    def test_core_system_prompt_present_exactly_once_through_tool_loop(self):
+        reg, manager = _stack()
+        try:
+            pipe, gw, rt = make_pipeline(
+                [understand(was_incomplete=False), verdict("complete")],
+                [_final("done")], registry=reg, terminal=manager)
+            pipe.run("Tomar ki ki tools available?")
+            self.assertEqual(system_count(rt.requests[0].messages), 1)
+            self.assertEqual(system_of(rt.requests[0].messages).count(CORE), 1)
+        finally:
+            manager.close_all()
+
+    def test_conversation_history_remains_intact_through_tool_loop(self):
+        reg, manager = _stack()
+        try:
+            pipe, gw, rt = make_pipeline(
+                [understand(was_incomplete=False), verdict("complete")],
+                [_final("follow-up answer")], registry=reg, terminal=manager)
+            history = [{"role": "user", "content": "earlier question"},
+                      {"role": "assistant", "content": "earlier answer"}]
+            pipe.run("follow up on that", history=history)
+            call_messages = rt.requests[0].messages
+            contents = [m["content"] for m in call_messages]
+            self.assertIn("earlier question", contents)
+            self.assertIn("earlier answer", contents)
+            self.assertEqual(system_count(call_messages), 1)
+        finally:
+            manager.close_all()
 
 
 if __name__ == "__main__":

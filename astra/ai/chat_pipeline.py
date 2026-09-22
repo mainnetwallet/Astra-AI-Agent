@@ -44,6 +44,7 @@ import os
 import tempfile
 
 from astra.ai.artifact_extraction import detect_output_type, extract_artifacts
+from astra.ai.capability_context import build_capability_context
 from astra.ai.gateway_contract import (ProviderExecutionPort,
                                        ProviderExecutionResult,
                                        ProviderExecutionTarget)
@@ -514,9 +515,23 @@ class ChatPipeline:
             blocks.append(exec_context)
         task = (task_content if task_content is not None
                 else brief["final_request"])
+        # Reuse the SAME per-turn system prompt `_run_turn` just built
+        # (Core + specialized + live capability runtime context) rather
+        # than the bare static PROVIDER_SYSTEM_PROMPT, so a capability
+        # question is grounded identically whether or not it happens to
+        # go through the tool loop. `AgentToolLoop.run` appends
+        # TOOL_PROTOCOL's own (internal, machine-facing) catalog after
+        # this — see that module. Falls back to the static constant only
+        # for a caller that invokes this method directly with no
+        # base_messages (none in this codebase today; defensive only).
+        system_prompt = PROVIDER_SYSTEM_PROMPT
+        if base_messages:
+            first = base_messages[0]
+            if isinstance(first, dict) and first.get("role") == "system":
+                system_prompt = first.get("content") or system_prompt
         try:
             result = loop.run(task, caller,
-                              system_prompt=PROVIDER_SYSTEM_PROMPT,
+                              system_prompt=system_prompt,
                               history=hist_turns, context_blocks=blocks,
                               session_id=session_id, scope=scope,
                               max_tokens=self.max_tokens, trace=req)
@@ -735,7 +750,18 @@ class ChatPipeline:
         # 2) Provider executes (output stays internal until verified)
         vision = _has_image(attachments)
         content = build_multimodal_content(brief["final_request"], attachments)
-        messages = [{"role": "system", "content": PROVIDER_SYSTEM_PROMPT}]
+        # The tool/capability picture is derived LIVE from the ToolRegistry
+        # on every turn (never hardcoded, never baked into the static Core
+        # prompt) and supplied as this call's runtime context — the same
+        # Core+specialized+runtime-context composition `build_system_prompt`
+        # already defines, just actually used here. See
+        # astra.ai.capability_context for what is/isn't included, and
+        # tests/test_system_prompt.py's CapabilityQuestion* tests for the
+        # regression coverage this closes.
+        capability_ctx = build_capability_context(self.registry)
+        provider_system_prompt = build_system_prompt(
+            _PROVIDER_SPECIALIZED_PROMPT, runtime_context=capability_ctx)
+        messages = [{"role": "system", "content": provider_system_prompt}]
         if hist_turns:
             # The SAME canonical history the Gateway just saw, as real
             # conversation turns (not squashed into the current message) —

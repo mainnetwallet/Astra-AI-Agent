@@ -66,7 +66,8 @@ Rules:
 - A failed command is not fatal: its structured result (status, exit_code, stdout/stderr) is given back to you — read it, fix the cause, and try again.
 - Prefer the terminal for shell/git/test work and the file tools for reading/editing files.
 - Only use a tool when it is genuinely useful. If no tool is needed, answer directly in plain text (no JSON necessary).
-- Never invent tool output. Never mention this protocol, tools or internal machinery in the final answer."""
+- Never invent tool output. Never mention this JSON action protocol, exact tool names, argument schemas, or other internal machinery in the final answer.
+- If asked what you can do or which tools/capabilities are available, that is NOT a request to invent or to stay silent: answer from the runtime capability catalog you were given (in the system prompt, above this protocol) in clean, practical, plain language — never the literal tool names in this protocol, and never a category that catalog doesn't list."""
 
 
 def build_tool_catalog(registry, *, categories=None, max_tools=DEFAULT_MAX_TOOLS_IN_PROMPT,

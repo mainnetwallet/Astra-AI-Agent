@@ -9,7 +9,7 @@ sees `astra.ai.gateway_contract.ProviderExecutionTarget` — plain
 provider_id/model_id/capabilities metadata — never a real adapter object.
 
 Deliberately separate from `astra/ai/gateway_routing.py`, which is the
-Gateway's OWN four-connection catalog/health/ranking brain. The two never
+Gateway's OWN connection catalog/health/ranking brain. The two never
 share a namespace: `GatewayExecutionRecovery` persists its health rows
 under provider ids prefixed with `EXISTING_PROVIDER_NS` so a Provider
 literally named "gemini" and the Gateway's own "gemini" connection are

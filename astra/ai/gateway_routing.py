@@ -5,7 +5,7 @@ This module is the Gateway's OWN routing brain — deliberately separate from
 (RoutingDecisionPolicy), which belong exclusively to the existing Provider
 system. Nothing here touches ProviderRegistry, Provider adapters, Provider
 credentials or Provider model configuration; it only ever reasons about the
-Gateway's own four connections (`astra/ai/gateway.py`) and their own
+Gateway's own connections (`astra/ai/gateway.py`) and their own
 GW_-prefixed model lists.
 
 Pieces:
@@ -46,6 +46,12 @@ GATEWAY_PROVIDER_SHORT = {
     "astra-gw-groq": "groq",
     "astra-gw-cloudflare": "cloudflare",
     "astra-gw-bedrock": "bedrock",
+    "astra-gw-openrouter": "openrouter",
+    "astra-gw-mistral": "mistral",
+    "astra-gw-cerebras": "cerebras",
+    "astra-gw-sambanova": "sambanova",
+    "astra-gw-cohere": "cohere",
+    "astra-gw-zai": "zai",
 }
 
 REQUEST_CATEGORIES = (

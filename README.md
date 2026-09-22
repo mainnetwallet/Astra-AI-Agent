@@ -64,13 +64,40 @@ how the user could do it. See ARCHITECTURE.md §1.3.
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-The Gateway is a **separate, isolated system** with its own four AI
-connections (`GW_*` config). It is *not* a provider and is never in the
-provider registry; if it is unusable the pipeline **fails open** — the message
-still reaches a provider via the router and the reply is returned with an
+The Gateway is a **separate, isolated system** with its own ten AI
+connections (`GW_*` config: Gemini, Groq, Cloudflare, Bedrock, OpenRouter,
+Mistral, Cerebras, SambaNova, Cohere, Z.AI). It is *not* a provider and is
+never in the provider registry; if it is unusable the pipeline **fails open**
+— the message still reaches a provider via the router and the reply is
+returned with an
 honest "unverified" note. There is exactly one AI execution path; an earlier
 Orchestrator/Planner loop was removed, and `ToolRegistry` now runs standalone
 (workflow steps, web3 flows and tests call it directly).
+
+Gateway connections (each independently optional — configure only the ones
+you have keys for; unconfigured ones are simply absent):
+
+| Connection | `GW_*` env prefix | Official endpoint | Default models |
+|---|---|---|---|
+| Gemini | `GW_GEMINI_` | `generativelanguage.googleapis.com/v1beta/openai` | `gemini-3.5-flash`, `gemini-3.1-flash-lite` |
+| Groq | `GW_GROQ_` | `api.groq.com/openai/v1` | `openai/gpt-oss-120b` |
+| Cloudflare | `GW_CLOUDFLARE_` (+ `_ACCOUNT_IDS`) | `api.cloudflare.com/client/v4` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` |
+| Bedrock | `GW_BEDROCK_` (+ `_CREDENTIALS`, `_REGION`) | `bedrock-runtime.<region>.amazonaws.com` | `amazon.nova-lite-v1:0` |
+| OpenRouter | `GW_OPENROUTER_` | `openrouter.ai/api/v1` | `nvidia/nemotron-3-*:free` |
+| Mistral | `GW_MISTRAL_` | `api.mistral.ai/v1` | `mistral-small-2603` |
+| Cerebras | `GW_CEREBRAS_` | `api.cerebras.ai/v1` | `gpt-oss-120b` |
+| SambaNova | `GW_SAMBANOVA_` (or `GW_SAMBA_`) | `api.sambanova.ai/v1` | `Meta-Llama-3.3-70B-Instruct` |
+| Cohere | `GW_COHERE_` | `api.cohere.ai/compatibility/v1` | `command-a-03-2025` |
+| Z.AI (GLM) | `GW_ZAI_` | `api.z.ai/api/paas/v4` | `glm-4.7-flash` |
+
+Each connection takes a comma-separated key pool and a model list
+(`GW_<NAME>_API_KEYS` / `GW_<NAME>_MODELS`), and each model id can be
+overridden per install. All ten share one contract: Bearer auth from the
+connection's own pool, per-key health/cooldown, 60s (120s streaming)
+timeouts, bounded transient retries (`GW_MAX_RETRIES`), HTTP
+error/rate-limit classification, failover to the next healthy target, and
+normalized OpenAI-style responses with usage metadata when the provider
+reports it.
 
 ### Key subsystems
 
@@ -256,7 +283,7 @@ for SSE, where headers cannot be sent.
 | GET/POST | `/api/workflows` (+`/{id}/run`, `/runs`) | Workflow definitions + runs |
 | GET/POST/PATCH/DELETE | `/api/schedules` | Scheduler CRUD |
 | GET | `/api/providers` | Routable provider health |
-| GET | `/api/gateway/health` | Astra AI Gateway status (4 connections + fallback) |
+| GET | `/api/gateway/health` | Astra AI Gateway status (10 connections + fallback) |
 | GET | `/api/metrics` | Server + subsystem metrics |
 | GET | `/api/v1/models` | Model registry + per-provider health |
 | POST | `/api/v1/models/refresh` | Re-run model discovery |

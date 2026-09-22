@@ -339,7 +339,7 @@ astra/
 │   ├── credentials.py      Per-provider credential pools (health, cooldown)
 │   ├── router.py           AstraRouter — scores + routes + rotates creds
 │   ├── routing_policy.py    Task-type → provider/model scoring rules
-│   ├── gateway.py           Astra AI Gateway — 4 independent GW_* connections
+│   ├── gateway.py           Astra AI Gateway — 10 independent GW_* connections
 │   ├── gateway_contract.py  Execution port/result types shared with router
 │   ├── gateway_task_completion.py  Bounded verify → correct → re-verify loop
 │   ├── gateway_recovery.py   Recovery semantics for interrupted gateway tasks
@@ -483,13 +483,22 @@ task type, scores candidate provider/model pairs by health + past
 outcomes, rotates credentials, and records routing stats
 (`/api/v1/router/status`, `/api/v1/router/stats`).
 
-The separate **Astra AI Gateway** (`astra/ai/gateway.py`) is four
-independent connections (`GW_GEMINI_*`, `GW_GROQ_*`,
-`GW_CLOUDFLARE_*`, `GW_BEDROCK_*`) with its own fallback chain (Gemini
-→ Groq → Cloudflare → Bedrock). It does not import or wrap the Provider
-adapter classes — it's a fully separate implementation used only for
-the Gateway's own UNDERSTAND/VERIFY calls in the chat pipeline (§1),
-never as a fifth "provider" in the router's candidate list.
+The separate **Astra AI Gateway** (`astra/ai/gateway.py`) is ten
+independent connections — `GW_GEMINI_*`, `GW_GROQ_*`,
+`GW_CLOUDFLARE_*`, `GW_BEDROCK_*`, `GW_OPENROUTER_*`, `GW_MISTRAL_*`,
+`GW_CEREBRAS_*`, `GW_SAMBANOVA_*` (also `GW_SAMBA_*`),
+`GW_COHERE_*`, `GW_ZAI_*` — with its own fallback chain (Gemini → Groq →
+Cloudflare → Bedrock → OpenRouter → Mistral → Cerebras → SambaNova →
+Cohere → Z.AI). Only configured connections are built; an unconfigured
+provider is absent, never an error. Every OpenAI-compatible connection
+shares one execution contract: Bearer auth from its own per-connection
+credential pool, 60s / 120s (stream) timeouts, bounded transient retries
+(`GW_MAX_RETRIES`), HTTP error/rate-limit classification with per-key
+cooldown, usage capture where the provider reports it, and normalized
+`choices[].message.content` responses. It does not import or wrap the
+Provider adapter classes — it's a fully separate implementation used only
+for the Gateway's own UNDERSTAND/VERIFY calls in the chat pipeline (§1),
+never as an extra "provider" in the router's candidate list.
 
 **System prompt architecture.** Every AI/model call in this section (and
 in §1's tool loop) is composed the same way:

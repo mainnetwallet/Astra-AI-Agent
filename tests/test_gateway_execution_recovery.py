@@ -187,7 +187,7 @@ class TestGatewayExecutionRecovery(unittest.TestCase):
         reloaded = GatewayExecutionRecovery(store=self.store)
         self.assertFalse(reloaded.is_eligible(target))
 
-    # namespace isolation: the Gateway's OWN four-connection catalog health
+    # namespace isolation: the Gateway's OWN connection catalog health
     # must never be touched by execution-recovery bookkeeping for the
     # Existing Provider system, even when both happen to use the literal
     # provider name "gemini".

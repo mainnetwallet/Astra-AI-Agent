@@ -5,7 +5,7 @@ list_models/supports) and keeps provider-specific HTTP inside its own file.
 The AstraRouter never touches provider HTTP — it scores the adapters here.
 
 The Astra AI Gateway (astra/ai/gateway.py) is NOT among these either: it is
-a completely separate, isolated system with its own four AI connections
+a completely separate, isolated system with its own ten AI connections
 (GW_* config) and its own execution path — never a provider adapter, never
 in this table, and never invoked as a fallback for these providers.
 

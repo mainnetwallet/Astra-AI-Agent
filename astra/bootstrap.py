@@ -178,7 +178,7 @@ def build(store: Store | None = None, config=None,
     model_registry = ModelRegistry(config)
     # Optional Astra AI Gateway (GW_* config). This is a COMPLETELY SEPARATE
     # system, NOT a provider, and is never added to provider_registry/
-    # providers — see astra/ai/gateway.py. It has its own four AI connections
+    # providers — see astra/ai/gateway.py. It has its own AI connections
     # (Gemini, Groq, Cloudflare, Bedrock) with independent credentials/
     # models/endpoints. It is handed to AstraRouter only as a reference for
     # separate status reporting ("Astra AI Gateway" in health/dashboard

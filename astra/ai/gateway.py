@@ -1,13 +1,19 @@
 """Astra AI Gateway — a separate multi-service AI gateway with automatic fallback.
 
-Replaces the old third-party AI gateway service with a set of four
+Replaces the old third-party AI gateway service with a set of ten
 independent AI connections:
 
     Astra AI Gateway
     ├── Gemini      ← GW_GEMINI_* config
     ├── Groq        ← GW_GROQ_* config
     ├── Cloudflare  ← GW_CLOUDFLARE_* config
-    └── Bedrock     ← GW_BEDROCK_* config
+    ├── Bedrock     ← GW_BEDROCK_* config
+    ├── OpenRouter  ← GW_OPENROUTER_* config
+    ├── Mistral     ← GW_MISTRAL_* config
+    ├── Cerebras    ← GW_CEREBRAS_* config
+    ├── SambaNova   ← GW_SAMBANOVA_* config (GW_SAMBA_* also accepted)
+    ├── Cohere      ← GW_COHERE_* config
+    └── Z.AI (GLM)  ← GW_ZAI_* config
 
 Each connection has completely independent credentials, models and
 endpoints/base URLs — separate from the existing Provider system:
@@ -16,25 +22,28 @@ it is never added to ProviderRegistry and is reported separately in
 health/dashboard output, never inside the provider table.
 
 Architecture note: this module is fully self-contained. It does NOT import,
-subclass, or instantiate the existing Provider adapter classes
-(GeminiAdapter, GroqAdapter, CloudflareAdapter, BedrockAdapter in
-astra/ai/adapters/*) — those remain exclusively the Provider system's. Each
-Gateway connection below (AstraGatewayGemini, AstraGatewayGroq,
-AstraGatewayCloudflare, AstraGatewayBedrock) implements its own request/
-response/auth plumbing against its own GW_-prefixed configuration. Nothing
-here reads GEMINI_*/GROQ_*/CLOUDFLARE_*/BEDROCK_* or touches a Provider
-adapter instance, client, or config object.
+subclass, or instantiate the existing Provider adapter classes (the ten
+modules in astra/ai/adapters/*) — those remain exclusively the Provider
+system's. Each Gateway connection below implements its own request/response/
+auth plumbing against its own GW_-prefixed configuration. Nothing here reads
+GEMINI_*/GROQ_*/… or touches a Provider adapter instance, client, or config
+object.
 
-Fallback: if Gemini fails → Groq → Cloudflare → Bedrock. The same task,
-messages, context and system instructions carry over unchanged between
-services (the full request is re-sent with the next connection until one
-succeeds) — no restart, no task duplication.
+Fallback: connections are attempted in `GATEWAY_CONNECTIONS` order — the
+original Gemini → Groq → Cloudflare → Bedrock chain first, then the six
+additional connections — with per-model health/cooldown and capability
+scoring applied on top (see astra/ai/gateway_routing.py). A failure at any
+connection (or model) automatically moves to the next healthy target. The
+same task, messages, context and system instructions carry over unchanged
+between services (the full request is re-sent with the next connection until
+one succeeds) — no restart, no task duplication.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
 import json
+import socket
 import threading
 import time
 import urllib.error
@@ -67,6 +76,19 @@ def _short_provider(conn) -> str:
 
 GW_DEFAULT_TIMEOUT = 60
 GW_STREAM_TIMEOUT = 120
+# Bounded transient-failure retry for ONE connection attempt (a network
+# blip / 5xx / 429 is worth one more try against the pool; auth and
+# request-level errors are not retried at all). This never replaces the
+# Gateway's own per-target fallback: when retries are exhausted the error
+# propagates and the attempt loop moves on to the next healthy target.
+GW_MAX_RETRIES = 1
+GW_RETRY_BACKOFF = 0.5
+GW_RETRY_MAX_BACKOFF = 8.0
+
+
+def _is_timeout(exc) -> bool:
+    """True for both a socket timeout and an Astra TimeoutError."""
+    return isinstance(exc, socket.timeout) or "timed out" in str(exc).lower()
 
 
 # ── shared OpenAI-compatible plumbing (Gateway-only; not the Provider base) ──
@@ -82,17 +104,63 @@ class _GatewayCompatibleConnection:
     base_url_env: str = ""
     base_url: str = ""
     capabilities: list[str] = ["chat", "stream"]
+    # Static per-request headers a provider's API expects/accepts (e.g.
+    # OpenRouter's optional attribution headers). Secret-free by construction —
+    # credentials are always added by `_headers()` from the pool.
+    extra_headers: dict = {}
+    # Optional alternate env names, consulted ONLY when the primary env var is
+    # empty (e.g. SambaNova's short `GW_SAMBA_*` prefix next to the canonical
+    # `GW_SAMBANOVA_*`). Opt-in per connection; unset for the rest.
+    env_aliases: dict = {}
 
     def __init__(self, config=None, events=None, pool: CredentialPool | None = None):
         self.config = config
         self.events = events
-        self.pool = pool or CredentialPool.from_env(config, self.api_keys_env, self.name)
-        self.models = (config.getlist(self.models_env, default=[])
-                       if config and self.models_env else list(self.models
-                       if hasattr(self, "models") else []))
-        raw = (config.get(self.base_url_env, None) if config and self.base_url_env else None)
+        keys_env = self._first_env(self.api_keys_env)
+        self.pool = pool or CredentialPool.from_env(config, keys_env, self.name)
+        self.models = (self._env_list(self.models_env) if config and self.models_env
+                       else list(self.models if hasattr(self, "models") else []))
+        raw = self._env_str(self.base_url_env)
         self.base_url = (raw or self.base_url or "").rstrip("/")
         self._last_usage: dict = {}
+        self._last_usage_stream: dict = {}
+        self.max_retries = max(0, int(
+            config.getint("GW_MAX_RETRIES", GW_MAX_RETRIES)
+            if config is not None and hasattr(config, "getint") else GW_MAX_RETRIES))
+        try:
+            self.retry_backoff = float(
+                config.get("GW_RETRY_BACKOFF", GW_RETRY_BACKOFF)
+                if config is not None else GW_RETRY_BACKOFF)
+        except (TypeError, ValueError):
+            self.retry_backoff = GW_RETRY_BACKOFF
+
+    # -- env resolution (primary name, then any documented alias) ------------
+    def _env_names(self, name: str) -> tuple[str, ...]:
+        if not name:
+            return ()
+        return (name,) + tuple(self.env_aliases.get(name, ()))
+
+    def _first_env(self, name: str) -> str:
+        """First alias name that actually has a value configured, else the
+        primary name. Only used to label the credential pool."""
+        for n in self._env_names(name):
+            if self.config is not None and self._env_list(n):
+                return n
+        return name
+
+    def _env_list(self, name: str) -> list:
+        for n in self._env_names(name):
+            vals = (self.config.getlist(n, default=[]) if self.config else []) or []
+            if vals:
+                return vals
+        return []
+
+    def _env_str(self, name: str):
+        for n in self._env_names(name):
+            v = (self.config.get(n, None) if self.config else None)
+            if v:
+                return v
+        return None
 
     # -- credentials ------------------------------------------------------
     def _pick(self):
@@ -109,7 +177,7 @@ class _GatewayCompatibleConnection:
             self.pool.report_success(cred)
 
     def _headers(self, cred) -> dict:
-        h = {"content-type": "application/json"}
+        h = {"content-type": "application/json", **dict(self.extra_headers)}
         secret = self.pool.get_secret_for(cred) if cred else ""
         if secret:
             h["Authorization"] = f"Bearer {secret}"
@@ -126,13 +194,59 @@ class _GatewayCompatibleConnection:
             _close_http_error(e)
             self._classify_http(e, cred)
             raise
-        except urllib.error.URLError as e:
+        except OSError as e:
             self._done(cred, True, reason=f"network: {getattr(e, 'reason', e)}")
-            raise ProviderError(f"{self.name} network error: {getattr(e, 'reason', e)}") from e
+            if _is_timeout(e):
+                err = TimeoutError(f"{self.name} timed out")
+                err.retryable = True
+                raise err from e
+            err = ProviderError(
+                f"{self.name} network error: {getattr(e, 'reason', e)}")
+            err.retryable = True
+            raise err from e
         try:
             return json.loads(raw.decode("utf-8", errors="replace"))
         except ValueError as e:
-            raise ProviderError(f"{self.name} bad json response") from e
+            err = ProviderError(f"{self.name} bad json response")
+            err.retryable = False
+            raise err from e
+
+    # -- bounded transient retry (per connection attempt) -------------------
+    def _attempt_count(self) -> int:
+        return max(0, int(getattr(self, "max_retries", GW_MAX_RETRIES))) + 1
+
+    def _run(self, fn):
+        """Run `fn(cred)` with a bounded number of attempts.
+
+        A fresh credential is picked for every attempt, so a 429/auth
+        failure rotates across the pool exactly as the non-retrying path
+        always did. Only errors explicitly marked `retryable` (network blip,
+        timeout, 429, 5xx) are retried; auth and request-level errors (400/
+        404/409/422) propagate immediately so the Gateway's own fallback
+        moves to the next connection without pointless extra latency. When
+        the retry cannot even get a credential (all keys cooled down) the
+        original, informative error is re-raised rather than a generic
+        "no healthy credential" — failover reporting stays truthful."""
+        attempts = self._attempt_count()
+        last = None
+        for attempt in range(attempts):
+            cred = self._pick()
+            if cred is None:
+                if last is not None:
+                    raise last
+                err = ProviderError(
+                    f"{self.name}: no healthy credential configured")
+                err.retryable = False
+                raise err
+            try:
+                return fn(cred)
+            except (ProviderError, TimeoutError) as e:
+                last = e
+                if attempt + 1 >= attempts or not getattr(e, "retryable", False):
+                    raise
+                time.sleep(min(self.retry_backoff * (attempt + 1),
+                               GW_RETRY_MAX_BACKOFF))
+        raise last
 
     def _api_base(self) -> str:
         """Base URL for ONE request (see CompatibleAdapter._api_base): connections
@@ -149,13 +263,25 @@ class _GatewayCompatibleConnection:
         self._done(cred, True, reason=f"http {code}", rate_limited=rate_limited,
                    auth_failure=auth,
                    cooldown_s=(0.0 if request_level else 45 if rate_limited else 30))
+        # Only transient upstream conditions are worth a second attempt from
+        # the same connection; everything else fails over immediately.
+        retryable = code in (408, 429, 500, 502, 503, 504)
         if code == 408:
-            raise TimeoutError(f"{self.name} timed out")
+            err = TimeoutError(f"{self.name} timed out")
+            err.retryable = True
+            raise err
         if code == 429:
-            raise ProviderError(f"{self.name} rate limit reached")
+            err = ProviderError(f"{self.name} rate limit reached")
+            err.retryable = True
+            err.rate_limited = True
+            raise err
         if code in (401, 403):
-            raise ProviderError(f"{self.name} authentication failed")
-        raise ProviderError(f"{self.name} http {code}")
+            err = ProviderError(f"{self.name} authentication failed")
+            err.retryable = False
+            raise err
+        err = ProviderError(f"{self.name} http {code}")
+        err.retryable = retryable
+        raise err
 
     def _read_sse(self, resp) -> list[dict]:
         results = []
@@ -177,17 +303,19 @@ class _GatewayCompatibleConnection:
 
     # -- interface ------------------------------------------------------------
     def chat(self, messages, model=None, max_tokens=None) -> str:
-        cred = self._pick()
-        if cred is None:
-            raise ProviderError(f"{self.name}: no healthy credential configured")
         body = {"model": model or (self.models[0] if self.models else ""),
                 "messages": messages}
         # Output limit is optional for these APIs: an unset budget is omitted
         # so the model uses its own maximum (astra.ai.token_limits).
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
-        data = self._post(f"{self._api_base()}/chat/completions", body, cred)
-        self._done(cred)
+
+        def once(cred):
+            data = self._post(f"{self._api_base()}/chat/completions", body, cred)
+            self._done(cred)
+            return data
+
+        data = self._run(once)
         try:
             text = data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError):
@@ -196,36 +324,59 @@ class _GatewayCompatibleConnection:
         return text.strip() or "(no reply)"
 
     def stream(self, messages, model=None, max_tokens=None):
-        cred = self._pick()
-        if cred is None:
-            raise ProviderError(f"{self.name}: no healthy credential configured")
+        model_id = model or (self.models[0] if self.models else "")
         if self.events:
             self.events.emit("ai.started", agent="gateway", provider=self.name,
-                             model=model or (self.models[0] if self.models else ""))
-        body = {"model": model or (self.models[0] if self.models else ""),
-                "messages": messages, "stream": True}
+                             model=model_id)
+        body = {"model": model_id, "messages": messages, "stream": True}
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
-        data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(f"{self._api_base()}/chat/completions",
-                                     data=data, headers=self._headers(cred))
+        payload = json.dumps(body).encode("utf-8")
+
+        def connect(cred):
+            """Open the SSE response. `urlopen` returns only after the status
+            line + headers, so auth/rate-limit/5xx still raise HERE and are
+            retried/failed over before any token has been yielded."""
+            req = urllib.request.Request(
+                f"{self._api_base()}/chat/completions",
+                data=payload, headers=self._headers(cred))
+            try:
+                return cred, urllib.request.urlopen(req, timeout=GW_STREAM_TIMEOUT)
+            except urllib.error.HTTPError as e:
+                _close_http_error(e)
+                self._classify_http(e, cred)
+                raise
+            except OSError as e:
+                self._done(cred, True, reason="stream network error")
+                err = ProviderError(f"{self.name} stream network error")
+                err.retryable = True
+                raise err from e
+
+        # Only the CONNECT phase is retried: once the first chunk is yielded a
+        # retry would duplicate output, so a mid-stream failure propagates and
+        # the caller/Gateway decides what to do next.
+        cred, resp = self._run(connect)
         full = ""
         try:
-            with urllib.request.urlopen(req, timeout=GW_STREAM_TIMEOUT) as resp:
+            with resp:
                 for chunk in self._read_sse(resp):
+                    usage = chunk.get("usage")
+                    if usage:
+                        # OpenAI-compatible streams include usage in the final
+                        # frame only when the upstream sends it — preserve it
+                        # when present, never invent it.
+                        self._last_usage_stream = usage
                     choices = chunk.get("choices", [])
                     delta = choices[0].get("delta", {}) if choices else {}
                     text = delta.get("content", "")
                     if text:
                         full += text
                         yield text
-        except urllib.error.HTTPError as e:
-            _close_http_error(e)
-            self._classify_http(e, cred)
-            raise
-        except urllib.error.URLError as e:
-            self._done(cred, True, reason="stream network error")
-            raise ProviderError(f"{self.name} stream network error") from e
+        except OSError as e:
+            self._done(cred, True, reason="stream interrupted")
+            err = ProviderError(f"{self.name} stream interrupted")
+            err.retryable = False
+            raise err from e
         self._done(cred)
         if self.events:
             self.events.emit("ai.completed", agent="gateway", provider=self.name,
@@ -233,6 +384,13 @@ class _GatewayCompatibleConnection:
 
     def health_check(self) -> bool:
         return bool(self.pool)
+
+    def last_usage(self) -> dict:
+        """Non-secret token/usage metadata of the most recent call, when the
+        provider reported any ({} otherwise). Streaming usage is reported by
+        OpenAI-compatible APIs only in the final SSE frame, and only when the
+        upstream includes it — never invented here."""
+        return dict(self._last_usage_stream or self._last_usage or {})
 
     def credential_summary(self) -> dict:
         return self.pool.summary()
@@ -296,6 +454,89 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
             acc = self._accounts[self._aidx % len(self._accounts)]
             self._aidx += 1
         return f"{self.base_url}/accounts/{acc}/ai/v1"
+
+
+# ── additional OpenAI-compatible Gateway connections ────────────────────────
+# OpenRouter, Mistral, Cerebras, SambaNova, Cohere and Z.AI all expose the
+# OpenAI `{model, messages, max_tokens}` → `choices[].message.content` dialect
+# over HTTPS with `Authorization: Bearer <key>` (Cohere through its official
+# OpenAI-compatibility endpoint, Z.AI through its v4 endpoint), so each is a
+# thin declaration over the shared base above: official base URL + its own
+# GW_* env names + the capabilities that provider actually supports. Auth,
+# timeouts, bounded retries, error/rate-limit classification, credential
+# rotation, health and usage capture are all inherited unchanged.
+class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
+    """Astra AI Gateway / OpenRouter connection (independent of
+    OpenRouterAdapter)."""
+    name = "astra-gw-openrouter"
+    base_url = "https://openrouter.ai/api/v1"
+    models_env = "GW_OPENROUTER_MODELS"
+    api_keys_env = "GW_OPENROUTER_API_KEYS"
+    base_url_env = "GW_OPENROUTER_BASE_URL"
+    # Optional attribution headers OpenRouter documents for API clients.
+    extra_headers = {
+        "HTTP-Referer": "https://github.com/mainnetwallet/Astra-AI-Agent",
+        "X-Title": "Astra AI Agent",
+    }
+    capabilities = ["chat", "stream", "tools", "json", "vision"]
+
+
+class AstraGatewayMistral(_GatewayCompatibleConnection):
+    """Astra AI Gateway / Mistral connection (independent of MistralAdapter)."""
+    name = "astra-gw-mistral"
+    base_url = "https://api.mistral.ai/v1"
+    models_env = "GW_MISTRAL_MODELS"
+    api_keys_env = "GW_MISTRAL_API_KEYS"
+    base_url_env = "GW_MISTRAL_BASE_URL"
+    capabilities = ["chat", "stream", "tools", "json", "coding"]
+
+
+class AstraGatewayCerebras(_GatewayCompatibleConnection):
+    """Astra AI Gateway / Cerebras connection (independent of CerebrasAdapter)."""
+    name = "astra-gw-cerebras"
+    base_url = "https://api.cerebras.ai/v1"
+    models_env = "GW_CEREBRAS_MODELS"
+    api_keys_env = "GW_CEREBRAS_API_KEYS"
+    base_url_env = "GW_CEREBRAS_BASE_URL"
+    capabilities = ["chat", "stream", "tools", "json"]
+
+
+class AstraGatewaySambaNova(_GatewayCompatibleConnection):
+    """Astra AI Gateway / SambaNova connection (independent of
+    SambaNovaAdapter). Accepts both the canonical `GW_SAMBANOVA_*` names and
+    the provider's shorter `GW_SAMBA_*` prefix."""
+    name = "astra-gw-sambanova"
+    base_url = "https://api.sambanova.ai/v1"
+    models_env = "GW_SAMBANOVA_MODELS"
+    api_keys_env = "GW_SAMBANOVA_API_KEYS"
+    base_url_env = "GW_SAMBANOVA_BASE_URL"
+    env_aliases = {
+        "GW_SAMBANOVA_API_KEYS": ("GW_SAMBA_API_KEYS",),
+        "GW_SAMBANOVA_MODELS": ("GW_SAMBA_MODELS",),
+        "GW_SAMBANOVA_BASE_URL": ("GW_SAMBA_BASE_URL",),
+    }
+    capabilities = ["chat", "stream", "tools", "json"]
+
+
+class AstraGatewayCohere(_GatewayCompatibleConnection):
+    """Astra AI Gateway / Cohere connection (independent of CohereAdapter),
+    using Cohere's official OpenAI-compatibility endpoint."""
+    name = "astra-gw-cohere"
+    base_url = "https://api.cohere.ai/compatibility/v1"
+    models_env = "GW_COHERE_MODELS"
+    api_keys_env = "GW_COHERE_API_KEYS"
+    base_url_env = "GW_COHERE_BASE_URL"
+    capabilities = ["chat", "stream", "tools", "json", "vision", "translation"]
+
+
+class AstraGatewayZAI(_GatewayCompatibleConnection):
+    """Astra AI Gateway / Z.AI (GLM) connection (independent of ZAIAdapter)."""
+    name = "astra-gw-zai"
+    base_url = "https://api.z.ai/api/paas/v4"
+    models_env = "GW_ZAI_MODELS"
+    api_keys_env = "GW_ZAI_API_KEYS"
+    base_url_env = "GW_ZAI_BASE_URL"
+    capabilities = ["chat", "stream", "tools", "json", "vision"]
 
 
 # ── Gateway Bedrock connection (independent of BedrockAdapter) ──────────────
@@ -405,6 +646,12 @@ class AstraGatewayBedrock:
             or f"https://bedrock-runtime.{self.region}.amazonaws.com"
         self.base_url = raw.rstrip("/")
         self.models = config.getlist(self.models_env, default=[]) if config else []
+        # Converse reports {inputTokens, outputTokens, totalTokens}; preserved
+        # verbatim (secret-free) for callers that want usage metadata.
+        self._last_usage: dict = {}
+
+    def last_usage(self) -> dict:
+        return dict(self._last_usage or {})
 
     # -- signing --------------------------------------------------------------
     def _sign(self, cred, url: str, payload: bytes) -> dict:
@@ -472,6 +719,7 @@ class AstraGatewayBedrock:
             raise ProviderError(f"{self.name}: no healthy credential configured")
         body = self._converse_body(messages, model, max_tokens)
         data = self._post(f"{self.base_url}/model/{model}/converse", body, cred)
+        self._last_usage = data.get("usage", {}) or {}
         blocks = data.get("output", {}).get("message", {}).get("content", [])
         return "".join(b.get("text", "") for b in blocks).strip() or "(no reply)"
 
@@ -524,12 +772,21 @@ class AstraGatewayBedrock:
         return capability in self.capabilities
 
 
-# Canonical fallback order: Gemini → Groq → Cloudflare → Bedrock
+# Canonical fallback order. The original four connections keep their exact
+# relative order (Gemini → Groq → Cloudflare → Bedrock) so existing routing/
+# scoring behaviour is unchanged; the six additional connections follow in a
+# fixed order and are simply skipped when unconfigured.
 GATEWAY_CONNECTIONS = (
     AstraGatewayGemini,
     AstraGatewayGroq,
     AstraGatewayCloudflare,
     AstraGatewayBedrock,
+    AstraGatewayOpenRouter,
+    AstraGatewayMistral,
+    AstraGatewayCerebras,
+    AstraGatewaySambaNova,
+    AstraGatewayCohere,
+    AstraGatewayZAI,
 )
 
 
@@ -543,10 +800,17 @@ def _build_connection(cls, config=None):
     if config is None:
         return None
     # gateway connections are independent of provider config; only GW_* counts
-    keys = config.getlist(cls.api_keys_env, default=[])
-    creds = getattr(cls, "credentials_env", None)
-    if not keys and creds:
-        keys = config.getlist(creds, default=[])
+    aliases = getattr(cls, "env_aliases", {}) or {}
+
+    def _vals(env_name):
+        if not env_name:
+            return []
+        return [k for name in (env_name,) + tuple(aliases.get(env_name, ()))
+                for k in config.getlist(name, default=[])]
+
+    keys = _vals(cls.api_keys_env)
+    if not keys:
+        keys = _vals(getattr(cls, "credentials_env", None))
     if not keys:
         return None
     try:
@@ -558,9 +822,10 @@ def _build_connection(cls, config=None):
 class AstraAIGateway:
     """Multi-provider, multi-model intelligent-routing gateway.
 
-    Astra AI Gateway has exactly four connections (Gemini, Groq, Cloudflare,
-    Bedrock), each of which may expose multiple models (§1). For every
-    request the Gateway:
+    Astra AI Gateway has ten connections (Gemini, Groq, Cloudflare, Bedrock,
+    OpenRouter, Mistral, Cerebras, SambaNova, Cohere, Z.AI), each of which may
+    expose multiple models (§1) and each of which is optional — an
+    unconfigured connection is simply absent. For every request the Gateway:
 
         1. classifies the request (simple/general/reasoning/coding/
            long_context/structured_output/tool_use/vision) — locally,
@@ -610,7 +875,7 @@ class AstraAIGateway:
         # §2-§5, §18: task-level execution recovery for the EXISTING
         # Provider system's own catalog — a completely separate namespace
         # from `self.routing_state` above (which only ever tracks this
-        # Gateway's own four GW_* connections). See gateway_recovery.py.
+        # Gateway's own GW_* connections). See gateway_recovery.py.
         from astra.ai.gateway_recovery import GatewayExecutionRecovery
         self.execution_recovery = GatewayExecutionRecovery(store=store,
                                                             events=events)
@@ -708,7 +973,7 @@ class AstraAIGateway:
                    reason=last_error or "all services failed", op=op,
                    trace=trace, terminal=True, attempts=attempts)
         raise ProviderError(
-            f"Astra AI Gateway: all four services failed —— {last_error}")
+            f"Astra AI Gateway: all configured services failed —— {last_error}")
 
     # -- intelligent multi-provider/multi-model selection (§2/§15) -----------
     def _classification_inputs(self, messages) -> tuple[str, int, bool]:
@@ -1292,7 +1557,7 @@ def build_astra_ai_gateway(config=None, store=None,
 #
 # The Gateway's only job here is to turn a raw, possibly short/incomplete/
 # poorly-structured/mixed-language user message into a clearer, better
-# structured instruction — using its OWN four connections (GW_* config,
+# structured instruction — using its OWN connections (GW_* config,
 # AstraAIGateway.chat() above) — and hand that improved text back to the
 # caller. It never calls a Provider adapter, never touches ProviderRegistry
 # or AstraRouter, and never performs the user's actual task itself: the

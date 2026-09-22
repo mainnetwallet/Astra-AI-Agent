@@ -17,7 +17,8 @@ and credential-free: the Gateway only ever receives/returns sanitized
 `ProviderExecutionTarget` provider_id/model_id metadata (astra/ai/
 gateway_contract.py) and never an adapter, a credential or ProviderRegistry
 itself. The Gateway is a completely independent system with its
-own four AI connections — Gemini, Groq, Cloudflare, Bedrock — each with
+own AI connections (Gemini, Groq, Cloudflare, Bedrock, OpenRouter,
+Mistral, Cerebras, SambaNova, Cohere, Z.AI) — each with
 independent credentials/models/endpoints (GW_* config). It is never added to
 `self.providers`, never appears in ProviderRegistry, provider health, or the
 provider dashboard table, and — just as important — AstraRouter NEVER
@@ -26,7 +27,7 @@ this file only ever moves between the real provider adapters in
 `self.providers`; when every one of them fails, routing fails honestly
 instead of dropping down into the Gateway. The Gateway has its own separate
 execution path (`AstraAIGateway.chat()` in gateway.py) with its own internal
-fallback across its four connections — that is the only fallback chain the
+fallback across its own connections — that is the only fallback chain the
 Gateway ever participates in. The two systems share no code path: Provider →
 Gateway and Gateway → ProviderRegistry are both absent by design.
 
@@ -887,7 +888,7 @@ class AstraRouter:
 
     def gateway_health(self) -> dict:
         """Astra AI Gateway status, reported separately from provider health
-        (never as a provider). Includes the per-connection health of its four
+        (never as a provider). Includes the per-connection health of its
         AI connections (Gemini, Groq, Cloudflare, Bedrock)."""
         gw = self.gateway
         if gw is None:

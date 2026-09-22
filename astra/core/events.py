@@ -51,7 +51,7 @@ EVENT_KINDS = (
     # AstraRouter (internal routing brain) — routing decision visibility
     "router.request", "router.decision", "router.fallback", "router.retry",
     "credential.rotation",
-    # Astra AI Gateway (separate system: own four AI connections with
+    # Astra AI Gateway (separate system: own AI connections with
     # automatic fallback) — kept distinct from the internal router's own
     # "router.*"/"ai.*" events so the dashboard Logs panel can filter for
     # the Gateway specifically.

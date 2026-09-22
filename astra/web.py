@@ -62,7 +62,7 @@ System endpoints:
   GET/POST /api/workflows   workflow definitions; runs via POST {id}/run
   GET/POST /api/schedules   scheduler CRUD
   GET  /api/providers       AI provider health/latency/cost
-  GET  /api/gateway/health  Astra AI Gateway status (4 connections + fallback)
+  GET  /api/gateway/health  Astra AI Gateway status (connections + fallback)
   GET  /api/agents          legacy execution routes — the orchestrator was
                              removed, so these return an empty list / 410
   GET  /api/executions      alias for /api/agents (same legacy behaviour)
@@ -1371,7 +1371,7 @@ class WebApp:
             rid=req.rid)
 
     def _gateway_test(self, req: Request) -> Response:
-        """Test only the Astra AI Gateway's four connections."""
+        """Test only the Astra AI Gateway's own connections."""
         router = self.site.router()
         gw = getattr(router, "gateway", None) if router else None
         if gw is None:

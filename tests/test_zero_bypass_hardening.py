@@ -34,8 +34,11 @@ import inspect
 import unittest
 
 from astra.ai.gateway import (AstraAIGateway, AstraGatewayBedrock,
-                              AstraGatewayCloudflare, AstraGatewayGemini,
-                              AstraGatewayGroq)
+                              AstraGatewayCerebras, AstraGatewayCloudflare,
+                              AstraGatewayCohere, AstraGatewayGemini,
+                              AstraGatewayGroq, AstraGatewayMistral,
+                              AstraGatewayOpenRouter, AstraGatewaySambaNova,
+                              AstraGatewayZAI)
 from astra.ai.registry import KEYS_ENV
 from astra.ai.router import AstraRouter, RoutingRequest
 from astra.core.exceptions import ProviderError
@@ -109,23 +112,30 @@ class _FailingProvider:
 # 5: Gateway/Existing-Provider credential isolation
 # ═══════════════════════════════════════════════════════════════════════
 class TestCredentialIsolation(unittest.TestCase):
+    # Every Gateway connection: the four original services plus the six
+    # OpenAI-compatible ones added later.
+    GATEWAY_CLASSES = (
+        AstraGatewayGemini, AstraGatewayGroq, AstraGatewayCloudflare,
+        AstraGatewayBedrock, AstraGatewayOpenRouter, AstraGatewayMistral,
+        AstraGatewayCerebras, AstraGatewaySambaNova, AstraGatewayCohere,
+        AstraGatewayZAI,
+    )
+
     def test_gateway_connections_use_gw_prefixed_env_only(self):
-        gw_envs = {
-            AstraGatewayGemini.api_keys_env,
-            AstraGatewayGroq.api_keys_env,
-            AstraGatewayCloudflare.api_keys_env,
-            AstraGatewayBedrock.api_keys_env,
-        }
+        gw_envs = {cls.api_keys_env for cls in self.GATEWAY_CLASSES}
+        self.assertEqual(len(self.GATEWAY_CLASSES), 10)
+        self.assertEqual(len(gw_envs), 10)
         for env in gw_envs:
             self.assertTrue(env.startswith("GW_"), env)
 
     def test_gateway_env_names_disjoint_from_existing_provider_env_names(self):
-        gw_envs = {
-            AstraGatewayGemini.api_keys_env, AstraGatewayGroq.api_keys_env,
-            AstraGatewayCloudflare.api_keys_env, AstraGatewayBedrock.api_keys_env,
-        }
+        gw_envs = {cls.api_keys_env for cls in self.GATEWAY_CLASSES}
         provider_envs = set(KEYS_ENV.values())
         self.assertEqual(gw_envs & provider_envs, set())
+        # every Gateway env name is a GW_ shadow of a distinct provider var
+        aliases = {cls.api_keys_env: getattr(cls, "env_aliases", {})
+                   for cls in self.GATEWAY_CLASSES}
+        self.assertTrue(aliases)
 
     def test_existing_provider_env_names_are_unprefixed(self):
         for provider, env in KEYS_ENV.items():

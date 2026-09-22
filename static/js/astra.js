@@ -1672,6 +1672,12 @@ const GATEWAY_LABELS = {
   "astra-gw-groq": "Groq",
   "astra-gw-cloudflare": "Cloudflare",
   "astra-gw-bedrock": "Bedrock",
+  "astra-gw-openrouter": "OpenRouter",
+  "astra-gw-mistral": "Mistral",
+  "astra-gw-cerebras": "Cerebras",
+  "astra-gw-sambanova": "SambaNova",
+  "astra-gw-cohere": "Cohere",
+  "astra-gw-zai": "Z.AI",
 };
 // Model-level Gateway test results, kept client-side for the same reason
 // as PROVIDER_MODEL_RESULTS above.

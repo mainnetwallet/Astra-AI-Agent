@@ -445,13 +445,19 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         self.assertNotIn("astra_ai_gateway", r.health())
         self.assertEqual(r.gateway_health()["state"], "healthy")
 
-    # 12b. the four-connection automatic fallback order
+    # 12b. the ten-connection automatic fallback order
     def test_gateway_automatic_fallback_over_four_connections(self):
         from astra.ai.gateway import AstraAIGateway, GATEWAY_CONNECTIONS
-        # canonical fallback order is Gemini → Groq → Cloudflare → Bedrock
+        # canonical fallback order: the original Gemini → Groq → Cloudflare →
+        # Bedrock chain keeps its exact relative order, then the six added
+        # OpenAI-compatible connections.
         names = [c.name for c in GATEWAY_CONNECTIONS]
-        self.assertEqual(names, ["astra-gw-gemini", "astra-gw-groq",
-                                 "astra-gw-cloudflare", "astra-gw-bedrock"])
+        self.assertEqual(names, [
+            "astra-gw-gemini", "astra-gw-groq", "astra-gw-cloudflare",
+            "astra-gw-bedrock",
+            "astra-gw-openrouter", "astra-gw-mistral", "astra-gw-cerebras",
+            "astra-gw-sambanova", "astra-gw-cohere", "astra-gw-zai"])
+        self.assertEqual(len(names), 10)
         # first three connections fail; the fourth serves the request
         conns = [_FakeGatewayConn(name="astra-gw-gemini", models=["m"], fail_times=1),
                  _FakeGatewayConn(name="astra-gw-groq", models=["m"], fail_times=1),
@@ -1041,7 +1047,7 @@ class TestGatewayRequestIntelligence(unittest.TestCase):
         self.assertFalse(result["enriched"])
         self.assertEqual(conn._calls, 0)
 
-    # -- fallback across the Gateway's own four connections -------------------
+    # -- fallback across the Gateway's own connections -------------------------
     def test_enrichment_falls_back_across_gateway_connections(self):
         from astra.ai.gateway import GatewayRequestIntelligence
         bad = _FakeGatewayConn(name="astra-gw-gemini", fail_times=999)

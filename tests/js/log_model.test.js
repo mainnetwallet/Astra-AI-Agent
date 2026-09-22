@@ -623,6 +623,100 @@ test("duration is derived from backend timestamps when the event has none", () =
   assert.strictEqual(rows[0].model.status, "ok");
 });
 
+/* Regression: the Activity Log showed
+ *   10:36:23 → 10:38:11   🧠 Agent Tool Loop Finished   COMPLETE · 3ms
+ * because an intermediate `agent.tool_result` (which shares the loop's `op`)
+ * carried its own per-tool `duration_ms`, and mergeLifecycle kept that stale
+ * duration when the loop's terminal event arrived. A row's duration must be
+ * its OWN start -> terminal span. */
+test("a per-tool duration never becomes the tool loop's duration", () => {
+  const { rows } = simulate([
+    at(1, "agent.tool_loop.started", "2026-09-22 10:36:23",
+       { op: "L", trace: "R", request: "R" }, "agent.tool_loop"),
+    at(2, "agent.tool_result", "2026-09-22 10:36:24",
+       { op: "L", trace: "R", step: 0, tool: "terminal_exec",
+         status: "completed", duration_ms: 3 }, "agent.tool_loop"),
+    at(3, "agent.tool_loop.finished", "2026-09-22 10:38:11",
+       { op: "L", trace: "R", request: "R", steps: 3, tool_calls: 3,
+         stopped_reason: "final", terminal: true }, "agent.tool_loop"),
+  ]);
+  assert.strictEqual(rows.length, 1, "one operation = one row");
+  const m = rows[0].model;
+  assert.strictEqual(m.title, "Agent Tool Loop Finished");
+  assert.strictEqual(m.time, "10:36:23");       // start never overwritten
+  assert.strictEqual(m.endTime, "10:38:11");    // terminal end kept
+  assert.notStrictEqual(m.duration, "3ms");
+  const secs = parseFloat(String(m.duration));
+  assert.ok(Math.abs(secs - 107.8) < 1,
+            "expected ~107.8s (10:36:23 -> 10:38:11), got " + m.duration);
+});
+
+test("the tool loop uses its own backend duration when the terminal has one", () => {
+  const { rows } = simulate([
+    at(1, "agent.tool_loop.started", "2026-09-22 10:36:23",
+       { op: "L", trace: "R", request: "R" }, "agent.tool_loop"),
+    at(2, "agent.tool_result", "2026-09-22 10:36:24",
+       { op: "L", trace: "R", step: 0, tool: "terminal_exec",
+         duration_ms: 3 }, "agent.tool_loop"),
+    at(3, "agent.tool_loop.finished", "2026-09-22 10:38:11",
+       { op: "L", trace: "R", request: "R", terminal: true,
+         duration_ms: 107800 }, "agent.tool_loop"),
+  ]);
+  assert.strictEqual(rows[0].model.time, "10:36:23");
+  assert.strictEqual(rows[0].model.endTime, "10:38:11");
+  assert.strictEqual(rows[0].model.duration, "107.8s");
+});
+
+test("a short operation keeps millisecond precision", () => {
+  const { rows } = simulate([
+    at(1, "agent.tool_loop.started", "2026-09-22 10:36:23",
+       { op: "S", trace: "R", request: "R" }, "agent.tool_loop"),
+    at(2, "agent.tool_loop.finished", "2026-09-22 10:36:23",
+       { op: "S", trace: "R", request: "R", terminal: true,
+         duration_ms: 3 }, "agent.tool_loop"),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.duration, "3ms");
+});
+
+test("a progress event never invents a duration for a running operation", () => {
+  const { rows } = simulate([
+    at(1, "agent.tool_loop.started", "2026-09-22 10:36:23",
+       { op: "L", trace: "R", request: "R" }, "agent.tool_loop"),
+    at(2, "agent.tool_result", "2026-09-22 10:36:24",
+       { op: "L", trace: "R", step: 0, tool: "terminal_exec",
+         duration_ms: 3 }, "agent.tool_loop"),
+  ]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.startTs, "2026-09-22 10:36:23");
+  assert.strictEqual(rows[0].model.endTs, "");
+  assert.strictEqual(rows[0].model.duration, "");
+});
+
+test("multi-step loop keeps its start and derives the whole duration", () => {
+  const events = [
+    at(1, "agent.tool_loop.started", "2026-09-22 10:00:00",
+       { op: "L", trace: "R", request: "R" }, "agent.tool_loop"),
+  ];
+  let id = 2;
+  for (let step = 0; step < 3; step++) {
+    events.push(at(id++, "agent.tool_call", "2026-09-22 10:00:0" + step,
+                   { op: "L", trace: "R", step: step, tool: "terminal_exec" },
+                   "agent.tool_loop"));
+    events.push(at(id++, "agent.tool_result", "2026-09-22 10:00:0" + step,
+                   { op: "L", trace: "R", step: step, tool: "terminal_exec",
+                     tool_duration_ms: 5 }, "agent.tool_loop"));
+  }
+  events.push(at(id, "agent.tool_loop.finished", "2026-09-22 10:01:48",
+                 { op: "L", trace: "R", request: "R", terminal: true,
+                   duration_ms: 108000 }, "agent.tool_loop"));
+  const { rows } = simulate(events);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].model.time, "10:00:00");
+  assert.strictEqual(rows[0].model.endTime, "10:01:48");
+  assert.strictEqual(rows[0].model.duration, "108s");
+});
+
 test("running operation shows only its start time", () => {
   const { rows } = simulate([
     at(1, "ai.started", "2026-09-21 23:21:19",

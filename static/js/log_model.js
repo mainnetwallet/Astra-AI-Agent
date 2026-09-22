@@ -545,6 +545,14 @@
   // completion never makes the row jump. The terminal event contributes the END
   // timestamp (+ duration), so the row can show "start → end" without losing
   // its chronological position.
+  //
+  // Duration belongs to the OPERATION, not to whichever event borrowed its
+  // lifecycle key: a terminal event's duration is its own start -> terminal
+  // span (an explicit `duration_ms` on that terminal still wins), and an
+  // intermediate/progress event (e.g. a per-tool `duration_ms` on the tool
+  // loop's key) never sets — or keeps — a duration for a running operation.
+  // Without this, a 3ms tool result leaked into a tool-loop row that actually
+  // spanned ~108s, so the finished row read "COMPLETE · 3ms".
   function mergeLifecycle(oldModel, newModel) {
     var merged = Object.assign({}, newModel);
     if (oldModel) {
@@ -554,13 +562,21 @@
       merged.sortTs = oldModel.sortTs;
       merged.sortId = oldModel.sortId;
       if (newModel.endTs) {
+        // Terminal: the operation ended here. Keep the END timestamp; the
+        // duration is the whole span, so a duration recorded by an earlier
+        // progress event must be dropped unless this very event carries one.
+        merged.endTs = newModel.endTs;
         merged.endTime = newModel.endTime || "";
+        if (!newModel.duration) merged.duration = "";
       } else {
         // intermediate/retry refinement: keep any end already recorded
         merged.endTs = oldModel.endTs || "";
         merged.endTime = oldModel.endTime || "";
+        // A refinement of a still-running operation never gives it a
+        // duration — only a terminal event can.
+        if (!merged.endTs) merged.duration = "";
+        else if (!newModel.duration) merged.duration = oldModel.duration || "";
       }
-      if (!newModel.duration) merged.duration = oldModel.duration || "";
     }
     return withDuration(merged);
   }

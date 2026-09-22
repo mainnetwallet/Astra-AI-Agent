@@ -263,6 +263,32 @@ class EventsTests(unittest.TestCase):
             self.assertIn(r["data"].get("op"), starts)
         manager.close_all()
 
+    def test_tool_loop_terminal_reports_its_own_duration(self):
+        """Regression: the loop row used to inherit a per-tool `duration_ms`
+        from an intermediate agent.tool_result, so a ~108s loop rendered as
+        "COMPLETE · 3ms". The loop's terminal event must carry the loop's own
+        start->terminal duration, and the progress event must not masquerade
+        as one."""
+        bus = Bus()
+        reg, manager = _stack()
+        manager.events = bus
+        loop = AgentToolLoop(reg, terminal=manager, events=bus)
+        brain = ScriptedBrain([_tool("echo a"), _final("ok")])
+        loop.run("x", brain, system_prompt="", session_id="s", scope="s")
+        finished = [r for r in bus.rows
+                    if r["kind"] == "agent.tool_loop.finished"][0]
+        self.assertTrue(finished["data"]["terminal"])
+        self.assertIn("duration_ms", finished["data"])
+        self.assertGreaterEqual(finished["data"]["duration_ms"], 0)
+        # the per-step event carries its own tool timing under a distinct key
+        # so the frontend can never read it as the loop's duration
+        results = [r for r in bus.rows if r["kind"] == "agent.tool_result"]
+        self.assertTrue(results)
+        for r in results:
+            self.assertNotIn("duration_ms", r["data"])
+            self.assertIn("tool_duration_ms", r["data"])
+        manager.close_all()
+
     def test_background_process_lifecycle_events_close_their_op(self):
         bus = Bus()
         reg, manager = _stack()

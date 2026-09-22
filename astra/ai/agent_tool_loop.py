@@ -36,6 +36,7 @@ working unchanged.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 
 from astra.ai.execution_history import AgentExecutionHistory
@@ -284,6 +285,11 @@ class AgentToolLoop:
                           terminal=self.terminal,
                           terminal_session_id=session_id)
         op = new_op_id()
+        # The loop's own start, so its terminal event can report a real
+        # duration (sub-second accurate) instead of the row inheriting a
+        # per-tool `duration_ms` from a progress event — which is how a
+        # ~108s tool loop once rendered as "COMPLETE · 3ms".
+        started = time.monotonic()
         self._emit("agent.tool_loop.started", op=op, trace=trace,
                    scope=scope or "", session_id=session_id or "",
                    max_steps=self.max_steps, tools=len(
@@ -297,7 +303,9 @@ class AgentToolLoop:
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
                 self._emit("agent.tool_loop.failed", op=op, trace=trace,
-                           error=err, terminal=True)
+                           error=err, terminal=True,
+                           duration_ms=round(
+                               (time.monotonic() - started) * 1000.0, 2))
                 return ToolLoopResult(text=last_text, ok=False, steps=steps,
                                       tool_calls=tool_calls,
                                       stopped_reason="error", error=err,
@@ -312,7 +320,9 @@ class AgentToolLoop:
                 self._emit("agent.tool_loop.finished", op=op, trace=trace,
                            scope=scope or "", steps=len(steps),
                            tool_calls=tool_calls, stopped_reason="final",
-                           terminal=True)
+                           terminal=True,
+                           duration_ms=round(
+                               (time.monotonic() - started) * 1000.0, 2))
                 return ToolLoopResult(text=text, ok=True, steps=steps,
                                       tool_calls=tool_calls,
                                       stopped_reason="final", messages=messages)
@@ -338,7 +348,7 @@ class AgentToolLoop:
                     result=outcome, args=args, step=index)
             self._emit("agent.tool_result", op=op, trace=trace, step=index,
                        tool=tool, ok=step.ok, status=step.status,
-                       duration_ms=outcome.get("duration_ms"))
+                       tool_duration_ms=outcome.get("duration_ms"))
 
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content":
@@ -351,7 +361,9 @@ class AgentToolLoop:
 
         self._emit("agent.tool_loop.finished", op=op, trace=trace,
                    scope=scope or "", steps=len(steps), tool_calls=tool_calls,
-                   stopped_reason="max_steps", terminal=True)
+                   stopped_reason="max_steps", terminal=True,
+                   duration_ms=round(
+                       (time.monotonic() - started) * 1000.0, 2))
         return ToolLoopResult(text=last_text, ok=True, steps=steps,
                               tool_calls=tool_calls,
                               stopped_reason="max_steps", messages=messages)

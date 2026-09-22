@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import socket
 import unittest
 import urllib.error
@@ -862,6 +863,173 @@ class GatewayIntegrationTests(unittest.TestCase):
                                         GW_MISTRAL_MODELS="mistral-small-2603"))
         r = AstraRouter(providers=[], config=_cfg(), gateway=gw)
         self.assertNotIn("astra_ai_gateway", r.providers)
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Bedrock model parity — every Provider BEDROCK_MODELS entry is routable here
+# ═══════════════════════════════════════════════════════════════════════════
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _env_file_list(key: str) -> list:
+    """Read a comma-separated list var straight out of `.env.example`."""
+    path = os.path.join(_REPO_ROOT, ".env.example")
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line.startswith(key + "="):
+                return [m.strip() for m in line.split("=", 1)[1].split(",")
+                        if m.strip()]
+    return []
+
+
+def _converse_body(text="ok", usage=None):
+    """A minimal Bedrock Converse response body."""
+    payload = {"output": {"message": {"content": [{"text": text}]}}}
+    if usage is not None:
+        payload["usage"] = usage
+    return json.dumps(payload).encode()
+
+
+def _converse_sse(*texts):
+    """ConverseStream-style `data:` frames for one text delta each."""
+    return "".join(
+        "data: " + json.dumps(
+            {"contentBlockDelta": {"delta": {"text": t}}}) + "\n\n"
+        for t in texts).encode()
+
+
+class GatewayBedrockModelParityTests(unittest.TestCase):
+    """GW_BEDROCK_MODELS must cover every Bedrock model the Provider's
+    BEDROCK_MODELS configures — while remaining a separate list."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.provider_models = _env_file_list("BEDROCK_MODELS")
+        cls.gateway_models = _env_file_list("GW_BEDROCK_MODELS")
+
+    def test_provider_and_gateway_lists_are_non_empty(self):
+        self.assertTrue(self.provider_models)
+        self.assertTrue(self.gateway_models)
+
+    def test_gateway_covers_every_provider_bedrock_model(self):
+        missing = [m for m in self.provider_models
+                   if m not in self.gateway_models]
+        self.assertEqual(missing, [], f"missing from GW_BEDROCK_MODELS: {missing}")
+
+    def test_existing_gateway_models_are_preserved_in_order(self):
+        # the two entries the Gateway shipped with stay, order intact
+        self.assertEqual(self.gateway_models[:2],
+                         ["us.amazon.nova-lite-v1:0", "amazon.nova-lite-v1:0"])
+
+    def test_no_duplicate_gateway_models(self):
+        self.assertEqual(len(self.gateway_models), len(set(self.gateway_models)))
+
+    def test_gateway_and_provider_model_configs_stay_separate(self):
+        from astra.ai.adapters.bedrock import BedrockAdapter
+        self.assertEqual(BedrockAdapter.models_env, "BEDROCK_MODELS")
+        self.assertEqual(AstraGatewayBedrock.models_env, "GW_BEDROCK_MODELS")
+        self.assertNotEqual(BedrockAdapter.models_env, AstraGatewayBedrock.models_env)
+        # separate values, not the same list object/value
+        self.assertNotEqual(self.gateway_models, self.provider_models)
+
+
+class GatewayBedrockModelRoutingTests(unittest.TestCase):
+    """The Gateway can actually build, select and request every added model."""
+
+    def _bedrock_conn(self):
+        cfg = _cfg(GW_BEDROCK_API_KEYS="k",
+                   GW_BEDROCK_MODELS=",".join(_env_file_list("GW_BEDROCK_MODELS")))
+        return AstraGatewayBedrock(config=cfg)
+
+    def test_every_model_builds_a_catalog_entry_with_metadata(self):
+        conn = self._bedrock_conn()
+        catalog = build_gateway_catalog([conn])
+        self.assertEqual([m.model_id for _c, m in catalog], conn.models)
+        for _c, model in catalog:
+            self.assertEqual(model.provider, "bedrock")
+            self.assertIn("chat", model.capabilities)
+            self.assertGreater(model.context_window, 0)
+
+    def test_every_model_is_eligible_for_general_requests(self):
+        from astra.ai.gateway_routing import GatewayRoutingState
+        conn = self._bedrock_conn()
+        catalog = build_gateway_catalog([conn])
+        state = GatewayRoutingState(None)
+        eligible = {m.model_id for _c, m, _h in eligible_targets(
+            catalog, state, category="general", context_tokens=0)}
+        for mid in conn.models:
+            self.assertIn(mid, eligible)
+
+    def test_every_model_is_requested_with_its_own_converse_url(self):
+        conn = self._bedrock_conn()
+        side, seen = _capture([_resp(_converse_body("ok", {"totalTokens": 3}))
+                               for _ in conn.models])
+        with mock.patch("astra.ai.gateway.urllib.request.urlopen", side):
+            for mid in conn.models:
+                out = conn.chat([{"role": "user", "content": "hi"}], model=mid)
+                self.assertEqual(out, "ok")
+                self.assertEqual(conn.last_usage().get("totalTokens"), 3)
+        self.assertEqual(len(seen), len(conn.models))
+        for mid, call in zip(conn.models, seen):
+            self.assertIn(f"/model/{mid}/converse", call["url"])
+
+    def test_every_model_serves_explicit_model_selection_through_gateway(self):
+        conn = self._bedrock_conn()
+        gw = AstraAIGateway(connections=[conn])
+        for mid in conn.models:
+            side, _seen = _capture([_resp(_converse_body("hi"))])
+            with mock.patch("astra.ai.gateway.urllib.request.urlopen", side):
+                out = gw.chat([{"role": "user", "content": "x"}], model=mid)
+            self.assertEqual(out, "hi")
+            self.assertEqual(gw.last_connection, "astra-gw-bedrock")
+            self.assertEqual(gw.last_model, mid)
+            self.assertEqual(gw.last_attempts, 1)
+
+    def test_every_model_streams_through_converse_stream(self):
+        conn = self._bedrock_conn()
+        for mid in conn.models:
+            with mock.patch("astra.ai.gateway.urllib.request.urlopen",
+                            lambda req, timeout=None: io.BytesIO(
+                                _converse_sse("he", "llo"))):
+                out = "".join(conn.stream(
+                    [{"role": "user", "content": "hi"}], model=mid))
+            self.assertEqual(out, "hello", mid)
+
+    def test_added_models_keep_expected_capability_metadata(self):
+        conn = self._bedrock_conn()
+        meta = {m.model_id: m for _c, m in build_gateway_catalog([conn])}
+        # Anthropic (Claude) — tools + vision
+        self.assertIn("tools", meta["us.anthropic.claude-opus-4-5"].capabilities)
+        self.assertIn("vision", meta["us.anthropic.claude-opus-4-5"].capabilities)
+        # DeepSeek — reasoning + coding
+        self.assertIn("reasoning", meta["deepseek.v3.1"].capabilities)
+        self.assertIn("coding", meta["deepseek.v3.2"].capabilities)
+        # Pixtral — vision
+        self.assertIn("vision", meta["mistral.pixtral-large-2502-v1:0"].capabilities)
+        # Qwen coder — tools
+        self.assertIn("tools", meta["qwen.qwen3-coder-480b-a35b-v1:0"].capabilities)
+        # Kimi — tools, exposed as supports_tools
+        self.assertTrue(meta["moonshotai.kimi-k2.5"].supports_tools)
+        # Nova family — tools
+        self.assertIn("tools", meta["us.amazon.nova-pro-v1:0"].capabilities)
+
+    def test_tool_capable_added_models_survive_the_tool_use_filter(self):
+        from astra.ai.gateway_routing import GatewayRoutingState
+        conn = self._bedrock_conn()
+        catalog = build_gateway_catalog([conn])
+        state = GatewayRoutingState(None)
+        eligible = [m for _c, m, _h in eligible_targets(
+            catalog, state, category="tool_use", context_tokens=0)]
+        ids = {m.model_id for m in eligible}
+        self.assertIn("us.anthropic.claude-sonnet-4-5", ids)
+        self.assertIn("deepseek.v3.1", ids)
+        self.assertIn("moonshotai.kimi-k2.5", ids)
+        self.assertIn("qwen.qwen3-coder-480b-a35b-v1:0", ids)
+        # every eligible target genuinely declares the hard capability
+        for m in eligible:
+            self.assertIn("tools", m.capabilities)
 
 
 if __name__ == "__main__":

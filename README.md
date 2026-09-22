@@ -82,7 +82,7 @@ you have keys for; unconfigured ones are simply absent):
 | Gemini | `GW_GEMINI_` | `generativelanguage.googleapis.com/v1beta/openai` | `gemini-3.5-flash`, `gemini-3.1-flash-lite` |
 | Groq | `GW_GROQ_` | `api.groq.com/openai/v1` | `openai/gpt-oss-120b` |
 | Cloudflare | `GW_CLOUDFLARE_` (+ `_ACCOUNT_IDS`) | `api.cloudflare.com/client/v4` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` |
-| Bedrock | `GW_BEDROCK_` (+ `_CREDENTIALS`, `_REGION`) | `bedrock-runtime.<region>.amazonaws.com` | `amazon.nova-lite-v1:0` |
+| Bedrock | `GW_BEDROCK_` (+ `_CREDENTIALS`, `_REGION`) | `bedrock-runtime.<region>.amazonaws.com` | full Bedrock catalog (`us.amazon.nova-lite-v1:0` default) |
 | OpenRouter | `GW_OPENROUTER_` | `openrouter.ai/api/v1` | `nvidia/nemotron-3-*:free` |
 | Mistral | `GW_MISTRAL_` | `api.mistral.ai/v1` | `mistral-small-2603` |
 | Cerebras | `GW_CEREBRAS_` | `api.cerebras.ai/v1` | `gpt-oss-120b` |

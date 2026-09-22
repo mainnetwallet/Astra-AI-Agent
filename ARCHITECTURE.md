@@ -191,6 +191,90 @@ per-command prompt so an autonomous loop is possible; the real gate is the
 operator's `GRANTED_PERMISSIONS` list (`system_action` is granted by default
 in `bootstrap.py` — remove it and every terminal tool fails closed).
 
+---
+
+### 1.3 Gateway capability context + structured execution handoff
+
+The Gateway is the **request-understanding / planning / orchestration brain**;
+the Provider is the **execution AI**; the `ToolRegistry` is the **single
+source of truth** for what the runtime can actually do; `AgentToolLoop` is the
+**actual tool-execution loop**; Gateway verification is the **completion
+gate**. One chat turn therefore looks like:
+
+```
+User
+ -> Gateway UNDERSTAND
+      - inspects the LIVE runtime capability catalog (derived from the
+        actual ToolRegistry on this turn, never hardcoded)
+      - preserves the user's exact intent (final_request)
+      - decides whether real tool execution is required, and which
+        capability category performs it
+      - emits a structured execution handoff:
+        {"execution": {"required": true, "capability": "terminal",
+                       "intent": "..."}}
+ -> Provider / AgentToolLoop
+      - receives the SAME live ToolRegistry, the Gateway's execution
+        decision, the exact tool catalog + argument schemas, the
+        conversation history, and the live terminal/execution state
+      - actually executes (ToolRegistry.execute -> terminal_exec -> ...)
+      - the structured tool result returns into the SAME conversation
+ -> Gateway VERIFY
+      - an execution-required task is COMPLETE only when real execution
+        evidence exists (tool call, tool result, exit code, terminal state,
+        execution history) — a nicely worded "here's how you could do it"
+        answer is INCOMPLETE
+      - if incomplete, the correction is re-dispatched through the SAME
+        AgentToolLoop for execution-required tasks, so a correction can
+        actually run the required tool instead of producing more prose
+ -> final natural-language response (internal protocol/metadata never leak)
+```
+
+**One capability representation, two consumers.**
+`astra.ai.capability_context.collect_runtime_capabilities(registry)` builds a
+single `RuntimeCapabilities` value from the live `ToolRegistry` on every
+turn. It exposes:
+
+- `human_context` — the clean, human-facing capability block (categories
+  only, no tool names, no protocol). Handed to the Gateway's UNDERSTAND
+  prompt *and* to the Provider's runtime context.
+- `catalog_text()` — the exact machine-facing capability IDs
+  (`terminal`, `files`, `browser`, ...) the Gateway may use for
+  `execution.capability`.
+
+`astra.ai.agent_tool_loop.build_tool_catalog(registry)` remains the separate,
+machine-facing **exact tool catalog** the model uses to actually invoke a
+tool (exact names + argument schemas), appended by the tool loop as
+`TOOL_PROTOCOL`. The two artifacts are deliberately distinct: a capability
+question is answered from `human_context`, tool execution is driven by
+`build_tool_catalog`. There is no second registry and no hand-maintained
+Gateway-side capability list — both read the same live `ToolRegistry`.
+
+**Structured handoff.** The Gateway's UNDERSTAND reply may carry an
+`execution` object; `astra.ai.gateway_contract.ProviderExecutionDecision`
+parses it, and `normalized(live_categories)` guarantees the Gateway can never
+demand a capability the runtime does not have (an unknown category is
+dropped; no tool capability at all forces `required=false`). The decision
+travels to the Provider in the system-prompt runtime context *and* as the
+first context block of the tool loop, so it survives provider failover — a
+fallback model sees the identical requirement, tools and tool protocol.
+
+**Verification uses execution evidence.** For an execution-required task,
+`ChatPipeline` builds the completion contract with
+`evidence_required=("tool_execution",)`, backed by a live callable that reads
+`AgentExecutionHistory` (what the agent actually did). The deterministic gate
+runs before the semantic verifier, so an answer produced without the required
+tool action can never be verified COMPLETE. `ProviderExecutionDecision` is
+also shown to the verifier, which is explicitly told an execution task is not
+complete from a description/promise. Corrections for such tasks go through
+`_ToolLoopPort`, which re-enters the same `AgentToolLoop` — the same
+`ToolRegistry`, the same shared Terminal, the same `CHAT_AGENT_BRAIN`.
+
+**Secrets.** Tool results are redacted (`astra.security.redact_text`) before
+they re-enter the model conversation or the execution history, the terminal
+context block is redacted before it is injected into any prompt, and
+`sanitize_final_response` remains the last gate before the reply reaches the
+user.
+
 ## 2. Directory map
 
 ```
@@ -219,6 +303,10 @@ astra/
 │   ├── gateway_contract.py  Execution port/result types shared with router
 │   ├── gateway_task_completion.py  Bounded verify → correct → re-verify loop
 │   ├── gateway_recovery.py   Recovery semantics for interrupted gateway tasks
+│   ├── capability_context.py ONE live RuntimeCapabilities read (human
+│   │                        capability block + exact capability IDs)
+│   ├── gateway_contract.py   ProviderExecutionTarget/Result/Decision — the
+│   │                        Gateway <-> Provider handoff contract
 │   ├── gateway_routing.py    Gateway-side provider short-name mapping
 │   ├── gateway_supervision.py Supervises a task end-to-end through the loop
 │   ├── chat_pipeline.py    The single path every chat message takes (§1)
@@ -382,7 +470,9 @@ relevant runtime context          (history, terminal/execution state,
 `astra.ai.system_prompt.build_system_prompt()` is the single place the
 Core prompt (identity, operating principles, tool-use/hallucination/
 recovery/internal-output rules shared by every call) gets attached to a
-specialized prompt. Each `*_SYSTEM_PROMPT` constant in `chat_pipeline.py`
+specialized prompt. The per-turn runtime context for both the Gateway's
+UNDERSTAND call and the Provider includes the LIVE capability block (and, for
+an execution-required task, the structured execution decision) — see §1.3. Each `*_SYSTEM_PROMPT` constant in `chat_pipeline.py`
 and `gateway.py` is built through it once at import time; provider
 adapters (`astra/ai/adapters/*`) never inject it themselves and stay
 provider-agnostic. `AgentToolLoop.run()` (§1) guarantees the Core layer is

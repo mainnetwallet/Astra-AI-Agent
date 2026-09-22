@@ -784,6 +784,14 @@ class TerminalSession:
         text = "\n".join(lines)
         if max_chars and len(text) > max_chars:
             text = text[:max_chars] + "…"
+        # This text is injected into model prompts (Gateway + Provider), so
+        # a credential-shaped value that appeared in a command or a stderr
+        # snippet must never leave the session unredacted.
+        try:
+            from astra.security import redact_text
+            text = redact_text(text)
+        except Exception:
+            pass
         return text
 
     # -- internals -----------------------------------------------------------

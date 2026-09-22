@@ -155,8 +155,23 @@ class TaskVerificationOutcome:
         return self.status in (INCOMPLETE, UNCERTAIN)
 
 
-def _missing_evidence(contract: TaskCompletionContract, evidence: dict | None) -> list:
-    ev = evidence or {}
+def _resolve_evidence(evidence) -> dict:
+    """`evidence` may be a plain dict (the original contract) OR a zero-arg
+    callable that returns one. The callable form lets a caller whose evidence
+    only exists AFTER a correction round (e.g. "a tool actually ran") have it
+    re-read on every verification pass instead of freezing the pre-correction
+    snapshot — see `ChatPipeline._execution_evidence`. A callable that raises
+    yields `{}` (no evidence), which fails safe toward "not complete"."""
+    if callable(evidence):
+        try:
+            evidence = evidence()
+        except Exception:
+            return {}
+    return evidence if isinstance(evidence, dict) else {}
+
+
+def _missing_evidence(contract: TaskCompletionContract, evidence) -> list:
+    ev = _resolve_evidence(evidence)
     return [key for key in contract.evidence_required if not ev.get(key)]
 
 
@@ -219,7 +234,7 @@ def verify_task_completion(
     if contract.require_semantic and semantic_verifier is not None:
         try:
             status, reason, sem_missing, sem_action, sem_instr = _unpack_semantic(
-                semantic_verifier(contract, result, evidence or {}))
+                semantic_verifier(contract, result, _resolve_evidence(evidence)))
         except Exception as e:
             # fail open toward caution, never toward false completion:
             # an exception in the (external) verifier is UNCERTAIN, not

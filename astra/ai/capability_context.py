@@ -8,6 +8,12 @@ Prompt. Feed the result to `astra.ai.system_prompt.build_system_prompt`'s
 of the Core + specialized layers (see that module's docstring for the
 full architecture this preserves).
 
+`collect_runtime_capabilities(registry)` returns the ONE authoritative
+`RuntimeCapabilities` value for a turn: the live category set, the
+human-facing block, and the machine-facing capability-ID list the Gateway
+uses for its structured execution decision. `build_capability_context()` is
+the thin backward-compatible wrapper for the human-facing block alone.
+
 This is intentionally a DIFFERENT artifact from
 `astra.ai.agent_tool_loop.build_tool_catalog`:
 
@@ -28,6 +34,8 @@ external tools" statement rather than silence, so the model is never
 left to guess (and never left free to invent access it doesn't have).
 """
 from __future__ import annotations
+
+from dataclasses import dataclass, field
 
 # category (as used by astra.tools.builtins / astra.terminal / astra.browser
 # / astra.web3) -> (clean user-facing label, short practical description).
@@ -71,6 +79,100 @@ def _label_for(category: str) -> tuple[str, str]:
     return clean, ""
 
 
+@dataclass(frozen=True)
+class RuntimeCapabilities:
+    """ONE authoritative runtime capability representation, derived live from
+    the actual `ToolRegistry` (see `astra.tools.registry`).
+
+    This is the single object the Gateway (request understanding/planning)
+    and the Provider (execution) both read, so the two can never disagree
+    about what the runtime can actually do:
+
+      - `categories`      live tool categories (``terminal``, ``browser``,
+                          ``files``, ``web3``, ``memory``, ``tasks``,
+                          ``research``, ``wallet``, ``system``, ...), exactly
+                          the ones with at least one registered tool.
+      - `human_context`   the clean, human-facing capability block
+                          (`build_capability_context`) — safe to hand to any
+                          model, never names a tool or the JSON protocol.
+      - `catalog_text()`  the machine-facing *capability ID* list the
+                          Gateway uses to fill `execution.capability` — the
+                          exact category tokens, so a structured execution
+                          decision can never name a capability that does not
+                          exist. It is deliberately NOT the exact tool
+                          catalog (`astra.ai.agent_tool_loop.build_tool_catalog`
+                          owns that machine-facing tool surface).
+
+    Everything is derived on construction; nothing is hardcoded and nothing
+    is cached — a registry change is visible on the very next request.
+    """
+    categories: tuple[str, ...] = ()
+    _human: str = field(default="", repr=False)
+
+    @property
+    def available(self) -> bool:
+        return bool(self.categories)
+
+    def has(self, category: str) -> bool:
+        return (category or "").strip().lower() in self.categories
+
+    @property
+    def human_context(self) -> str:
+        return self._human or NO_TOOLS_MESSAGE
+
+    def catalog_text(self) -> str:
+        """Machine-facing capability-ID block for the Gateway's UNDERSTAND
+        step. Only categories that actually exist right now appear."""
+        if not self.categories:
+            return _NO_CAPABILITY_IDS
+        return _CAPABILITY_IDS_HEADER + ", ".join(self.categories)
+
+    def to_dict(self) -> dict:
+        return {"categories": list(self.categories)}
+
+
+_NO_CAPABILITY_IDS = (
+    "Runtime capability IDs available right now: (none — no tool capability "
+    "exists in this runtime)")
+
+_CAPABILITY_IDS_HEADER = (
+    "Runtime capability IDs available right now (the ONLY valid values for "
+    "execution.capability): ")
+
+
+def collect_runtime_capabilities(registry) -> RuntimeCapabilities:
+    """Derive the live `RuntimeCapabilities` from `registry` right now.
+
+    Never hardcoded, never cached: a category appears only when the live
+    `ToolRegistry` actually has a tool in it. Returns an empty (unavailable)
+    representation for a missing/raising/empty registry so callers fail
+    safe — they then honestly state that no tool capability exists.
+    """
+    if registry is None:
+        return RuntimeCapabilities((), NO_TOOLS_MESSAGE)
+    try:
+        tools = registry.list()
+    except Exception:
+        return RuntimeCapabilities((), NO_TOOLS_MESSAGE)
+    if not tools:
+        return RuntimeCapabilities((), NO_TOOLS_MESSAGE)
+
+    counts: dict[str, int] = {}
+    for t in tools:
+        cat = (t.get("category") if isinstance(t, dict) else "") or "other"
+        cat = str(cat).strip().lower() or "other"
+        counts[cat] = counts.get(cat, 0) + 1
+    if not counts:
+        return RuntimeCapabilities((), NO_TOOLS_MESSAGE)
+
+    lines = [_HEADER]
+    for cat in sorted(counts):
+        label, desc = _label_for(cat)
+        suffix = f" — {desc}" if desc else ""
+        lines.append(f"- {label}{suffix}")
+    return RuntimeCapabilities(tuple(sorted(counts)), "\n".join(lines))
+
+
 def build_capability_context(registry) -> str:
     """A short, deterministic, human-facing block naming the tool
     CATEGORIES actually registered on `registry` right now.
@@ -81,27 +183,9 @@ def build_capability_context(registry) -> str:
     `NO_TOOLS_MESSAGE` when `registry` is None, unusable, or empty, so a
     capability question always gets an honest, grounded answer instead
     of silence the model could fill in with a guess.
+
+    Thin wrapper over `collect_runtime_capabilities` so the human block and
+    the machine-facing capability-ID list are ALWAYS derived from the same
+    live registry read (one source of truth, never two).
     """
-    if registry is None:
-        return NO_TOOLS_MESSAGE
-    try:
-        tools = registry.list()
-    except Exception:
-        return NO_TOOLS_MESSAGE
-    if not tools:
-        return NO_TOOLS_MESSAGE
-
-    counts: dict[str, int] = {}
-    for t in tools:
-        cat = (t.get("category") if isinstance(t, dict) else "") or "other"
-        cat = cat.strip().lower() or "other"
-        counts[cat] = counts.get(cat, 0) + 1
-    if not counts:
-        return NO_TOOLS_MESSAGE
-
-    lines = [_HEADER]
-    for cat in sorted(counts):
-        label, desc = _label_for(cat)
-        suffix = f" — {desc}" if desc else ""
-        lines.append(f"- {label}{suffix}")
-    return "\n".join(lines)
+    return collect_runtime_capabilities(registry).human_context

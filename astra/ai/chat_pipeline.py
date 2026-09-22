@@ -6,7 +6,20 @@
            - message complete?    -> passed through unchanged (no "improving")
            - Gateway sees every usable provider/model and picks the best one
              for this job, and writes down what a 100%-complete answer needs
+           - Gateway is handed the LIVE runtime capability catalog (derived
+             from the actual ToolRegistry on this turn — the SAME object the
+             Provider is given) and decides, per request, whether real tool
+             execution is required and which capability category performs it.
+             It emits that as a structured `execution` handoff
+             (astra.ai.gateway_contract.ProviderExecutionDecision), never as
+             instructions for the user.
       -> Provider executes the work (its output is NOT shown to the user yet)
+           - the structured execution decision travels in the Provider's
+             runtime context (and the tool-loop context block), so the
+             Provider/AgentToolLoop executes the required capability with the
+             SAME live ToolRegistry instead of describing how the user could
+             do it themselves — and a fallback provider sees the identical
+             requirement and tools.
       -> Gateway call #2  VERIFY
            - the Gateway is handed everything call #1 decided (the request it
              assigned, the completion criteria, which provider/model got it)
@@ -44,8 +57,10 @@ import os
 import tempfile
 
 from astra.ai.artifact_extraction import detect_output_type, extract_artifacts
-from astra.ai.capability_context import build_capability_context
-from astra.ai.gateway_contract import (ProviderExecutionPort,
+from astra.ai.capability_context import (RuntimeCapabilities,
+                                         collect_runtime_capabilities)
+from astra.ai.gateway_contract import (ProviderExecutionDecision,
+                                       ProviderExecutionPort,
                                        ProviderExecutionResult,
                                        ProviderExecutionTarget)
 from astra.ai.gateway_task_completion import (COMPLETE, FAILED, INCOMPLETE,
@@ -85,16 +100,37 @@ VERIFY_MAX_TOKENS = 600
 # the Core prompt already covers, and nothing else in this module (or any
 # other caller) should inject the Core prompt a second time.
 _PROVIDER_SPECIALIZED_PROMPT = (
-    "Do the user's request fully and directly."
+    "Do the user's request fully and directly. When the runtime context "
+    "contains a Gateway execution decision saying this request requires a "
+    "capability, actually perform it with the available tool and report the "
+    "real result — never answer with instructions for the user to do it "
+    "themselves, and never promise work you have not actually done."
 )
 
 PROVIDER_SYSTEM_PROMPT = build_system_prompt(_PROVIDER_SPECIALIZED_PROMPT)
 
 _UNDERSTAND_SPECIALIZED_PROMPT = (
-    "You are the Astra AI Gateway. A user message arrives (it may be short, "
-    "incomplete, or written in Bengali/Banglish/English). You do NOT answer "
-    "it and you do NOT do the task — a Provider AI does that after you. You "
-    "do three things and reply with ONE JSON object and nothing else.\n\n"
+    "You are the Astra AI Gateway. You are the request-understanding, "
+    "planning and orchestration brain. You do NOT execute the task yourself "
+    "and you do NOT answer the user — a Provider AI (with the live tools of "
+    "this runtime) executes after you. A user message arrives (it may be "
+    "short, incomplete, or written in Bengali/Banglish/English). You do four "
+    "things and reply with ONE JSON object and nothing else.\n\n"
+
+    "0) INSPECT THE LIVE RUNTIME CAPABILITIES. You are given the runtime's "
+    "LIVE capability catalog, derived from the actual tool registry of this "
+    "running process right now. Treat it as authoritative:\n"
+    "   - It lists exactly which capabilities exist in this runtime "
+    "(terminal/shell, browser, file access, web3/wallet, memory/tasks, "
+    "research, system, ...).\n"
+    "   - Never plan around, promise, or claim a capability that is not "
+    "listed there, and never say a tool is unavailable when the catalog "
+    "lists it.\n"
+    "   - 'A capability exists' and 'this request requires that capability' "
+    "are different things: only mark execution as required when the user's "
+    "request genuinely needs to act through a tool, not merely mentions a "
+    "capability or asks about it.\n\n"
+
     "1) UNDERSTAND. Decide whether the message is complete.\n"
     "   - If it is incomplete (missing subject, vague reference like "
     "\"eita\"/\"that one\", cut-off sentence), rewrite it as a complete "
@@ -105,18 +141,48 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "the criteria.\n"
     "   - If it is already complete, copy it EXACTLY into final_request. "
     "Do not improve, translate, restructure or expand a complete message.\n"
-    "   - final_request is written in the user's voice, never as a reply.\n\n"
-    "2) ASSIGN. From the provider/model list you are given, pick the single "
+    "   - final_request is written in the user's voice — it preserves the "
+    "user's exact intent. It is never a reply to the user, never a set of "
+    "instructions telling the user how to do the task themselves, and never "
+    "a description of what you decided.\n\n"
+
+    "2) DECIDE EXECUTION. Decide whether the request requires real tool "
+    "execution, and if so which capability category, and put it in the "
+    "`execution` object:\n"
+    "   - Ordinary reasoning, chat, knowledge, explanation, writing or code "
+    "generation -> \"execution\": {\"required\": false, \"capability\": "
+    "\"\", \"intent\": \"\"}.\n"
+    "   - A request to actually DO something in this environment (run a "
+    "shell command, clone/install/build something, run tests, read or write "
+    "files, browse a page, prepare a transaction, ...) -> "
+    "\"execution\": {\"required\": true, \"capability\": \"<category "
+    "id>\", \"intent\": \"<one short line of what must be done>\"}.\n"
+    "   - `capability` MUST be one of the exact category IDs the live "
+    "catalog lists (e.g. \"terminal\", \"files\", \"browser\"). If the "
+    "task needs a capability the catalog does NOT list, set required false, "
+    "leave capability empty, and say honestly in `reason` that this runtime "
+    "cannot perform it — never demand a capability this runtime does not "
+    "have.\n"
+    "   - When execution is required, the Provider/AgentToolLoop is told to "
+    "perform it; you must not turn the task into instructions for the user, "
+    "and you must not ask the Provider merely to explain how.\n\n"
+
+    "3) ASSIGN. From the provider/model list you are given, pick the single "
     "best provider+model for this job (coding -> a coding-capable model, "
     "hard reasoning -> a high-quality model, simple chat -> a fast one, "
     "images -> a vision model). Copy provider and model EXACTLY from the "
     "list. If nothing in the list is a clear fit, use \"\" for both.\n\n"
-    "3) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
-    "answer must satisfy.\n\n"
+
+    "4) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
+    "answer must satisfy (for an execution task, the criteria must require "
+    "the real action to have been performed and its result reported).\n\n"
+
     "Reply with exactly this JSON shape:\n"
     "{\"final_request\": \"...\", \"was_incomplete\": true|false, "
     "\"provider\": \"...\", \"model\": \"...\", "
-    "\"criteria\": [\"...\"], \"reason\": \"<one short line>\"}"
+    "\"criteria\": [\"...\"], \"reason\": \"<one short line>\", "
+    "\"execution\": {\"required\": true|false, \"capability\": \"\", "
+    "\"intent\": \"\"}}"
 )
 
 UNDERSTAND_SYSTEM_PROMPT = build_system_prompt(_UNDERSTAND_SPECIALIZED_PROMPT)
@@ -139,6 +205,14 @@ _VERIFY_SPECIALIZED_PROMPT = (
     "from scratch.\n"
     "Then write `instructions`: clear, specific, imperative text addressed "
     "to the provider saying exactly what to fix or why to redo it.\n\n"
+    "EXECUTION TASKS: when you are told this request requires real tool "
+    "execution, it is complete ONLY if the execution context (tool actions, "
+    "tool results, exit codes, terminal state) shows the required tool "
+    "action actually ran and its result is available. An answer that only "
+    "describes how the work could be done, tells the user to do it "
+    "themselves, or promises to do it later is INCOMPLETE even if the "
+    "wording is otherwise good. Never turn an execution task into a \"tell "
+    "the user how to do it\" task.\n\n"
     "Reply with ONE JSON object and nothing else:\n"
     "{\"verdict\": \"complete\"|\"incomplete\", \"missing\": [\"...\"], "
     "\"action\": \"fix\"|\"redo\", \"instructions\": \"...\"}"
@@ -249,6 +323,27 @@ def _with_tool_summary(messages: list, steps: list,
     return clone
 
 
+def _last_user_text(messages) -> str:
+    """The most recent user-role text in a message list (string or multimodal
+    parts), used to recover a correction instruction for the tool-loop port.
+    Returns "" when there is none."""
+    for m in reversed(messages or []):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            text = " ".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and isinstance(p.get("text"), str)).strip()
+        else:
+            text = ""
+        if text:
+            return text
+    return ""
+
+
 def _has_image(attachments) -> bool:
     for a in attachments or []:
         fam = a.get("family") if isinstance(a, dict) else getattr(a, "family", "")
@@ -306,6 +401,76 @@ class _GatewayPort(ProviderExecutionPort):
         return text
 
 
+class _ToolLoopPort(ProviderExecutionPort):
+    """Correction port for an EXECUTION-REQUIRED task: re-enters the same
+    `AgentToolLoop` instead of just re-prompting a model for text.
+
+    Why this exists (`verification must not block a required tool`):
+    `_ChatPort`/`_GatewayPort` carry a correction as plain text to a model —
+    they have no tool protocol and never touch the ToolRegistry, so a
+    correction for a task whose required tool never ran can only ever
+    produce *more prose*. That is precisely how an execution task used to
+    degenerate into "here is how you can run `git clone` yourself", and why
+    the verifier kept rejecting it with no way to fix it.
+
+    This port dispatches the correction through the identical
+    `AgentToolLoop`: same live `ToolRegistry`, same shared `Terminal`, same
+    `CHAT_AGENT_BRAIN` selection, with the Gateway's execution decision
+    still present in the context. A fallback provider reached while
+    executing a correction therefore sees the same requirement and the same
+    tools as the first one (the execution intent survives failover).
+    """
+
+    def __init__(self, pipeline, execution, *, hist_turns, task_type, vision,
+                 scope, session_id, req="", system_prompt="",
+                 terminal_context="", exec_context=""):
+        self._pipeline = pipeline
+        self.execution = execution
+        self.hist_turns = hist_turns or []
+        self.task_type = task_type
+        self.vision = vision
+        self.scope = scope
+        self.session_id = session_id
+        self.req = req
+        self.system_prompt = system_prompt
+        self.terminal_context = terminal_context or ""
+        self.exec_context = exec_context or ""
+        self.last_text = ""
+
+    def execute(self, target, messages: list, max_tokens: int = 500,
+                **kwargs) -> str:
+        from astra.ai.agent_tool_loop import AgentToolLoop
+        # The correction instruction the supervisor appended as the last
+        # user turn (see gateway_task_completion.build_task_completion_messages).
+        task = (_last_user_text(messages) or self.execution.intent
+                or "complete the required task")
+        caller = self._pipeline._make_tool_caller(
+            self.task_type, self.vision,
+            provider=target.provider_id or None,
+            model=target.model_id or None, req=self.req)
+        loop = AgentToolLoop(self._pipeline.registry,
+                             terminal=self._pipeline.terminal,
+                             events=self._pipeline.events,
+                             max_steps=self._pipeline.max_tool_steps,
+                             execution_history=self._pipeline.execution_history)
+        blocks = []
+        decision_block = self.execution.context_block()
+        if decision_block:
+            blocks.append(decision_block)
+        if self.terminal_context:
+            blocks.append("Live terminal session state:\n" + self.terminal_context)
+        if self.exec_context:
+            blocks.append(self.exec_context)
+        result = loop.run(task, caller, system_prompt=self.system_prompt,
+                          history=self.hist_turns, context_blocks=blocks,
+                          session_id=self.session_id, scope=self.scope,
+                          max_tokens=max_tokens, trace=self.req)
+        if not result.ok:
+            raise ProviderError(result.error or "tool loop correction failed")
+        self.last_text = result.text
+        return result.text
+
+
 # ── the pipeline ────────────────────────────────────────────────────────────
 class ChatPipeline:
     def __init__(self, gateway, router, events=None, *,
@@ -354,15 +519,83 @@ class ChatPipeline:
         except Exception:
             return False
 
+    def _tools_available(self) -> bool:
+        """True when the live ToolRegistry actually exposes at least one tool
+        (any category). Distinct from `_tool_loop_usable()` (which is about
+        the terminal specifically) — the agent tool loop can execute any
+        registered tool, so an execution-required task with, say, only file
+        tools should still get the real loop."""
+        if self.registry is None:
+            return False
+        try:
+            return bool(self.registry.list())
+        except Exception:
+            return False
+
+    def _make_tool_caller(self, task_type, vision, *, provider=None,
+                          model=None, req=""):
+        """Build the brain that drives the shared `AgentToolLoop` for this
+        pipeline's configured mode. `CHAT_AGENT_BRAIN` selects WHICH AI
+        decides the next tool call — never which tools exist: both callers
+        reach the same `ToolRegistry` and therefore the same tools and
+        Terminal (requirement 9)."""
+        from astra.ai.agent_tool_loop import (GatewayToolCaller,
+                                              ProviderToolCaller)
+        if self.agent_brain == "gateway" and self._gateway_usable():
+            return GatewayToolCaller(self.gateway, category="tool_use")
+        return ProviderToolCaller(self.router, task_type=task_type,
+                                  vision=vision, provider=provider,
+                                  model=model, trace=req)
+
+    def _execution_evidence(self, scope) -> dict:
+        """LIVE execution evidence for the Gateway's completion gate: exactly
+        the tool actions the agent actually performed this turn, read from
+        the SAME `AgentExecutionHistory` the tool loop records into. Never a
+        claim or a summary of prose — only observed tool executions.
+
+        Returns `{}` when no tool ran, which makes the deterministic evidence
+        gate fail a "requires tool execution" task instead of rubber-stamping
+        it from a nicely worded answer.
+        """
+        try:
+            rows = self.execution_history.entries(scope) if scope else []
+        except Exception:
+            rows = []
+        if not rows:
+            return {}
+        tools = []
+        for row in rows:
+            name = row.get("tool") or ""
+            if name and name not in tools:
+                tools.append(name)
+        return {"tool_execution": {"count": len(rows), "tools": tools,
+                                   "last_status": rows[-1].get("status", "")}}
+
     # -- step 1: Gateway call #1 (understand + assign) ------------------------
     def _understand(self, message: str, context: str, attachments,
-                    req: str = "", extra_context: str = "") -> dict:
+                    req: str = "", extra_context: str = "",
+                    capabilities: "RuntimeCapabilities | None" = None) -> dict:
         """Returns {"final_request", "was_incomplete", "provider", "model",
-        "criteria", "reason", "ok"}. `ok` False means the call failed and
-        the raw message is being used as-is."""
+        "criteria", "reason", "execution", "ok"}. `ok` False means the call
+        failed and the raw message is being used as-is.
+
+        `capabilities` is the LIVE `RuntimeCapabilities` derived from the
+        ToolRegistry on this turn (see `astra.ai.capability_context`). It is
+        what makes the Gateway's understanding authoritative: the Gateway is
+        given both the human-facing capability block AND the machine-facing
+        exact category IDs, so its `execution` decision can only name a
+        capability the runtime actually has. The same object is handed to the
+        Provider, so Gateway and Provider can never disagree about what
+        exists. When `capabilities` is None a fresh read of `self.registry`
+        is taken, so a direct caller cannot accidentally give the Gateway
+        stale/absent capability context.
+        """
+        caps = (capabilities if capabilities is not None
+                else collect_runtime_capabilities(self.registry))
         fallback = {"final_request": message, "was_incomplete": False,
                     "provider": "", "model": "", "criteria": [],
-                    "reason": "", "ok": False}
+                    "reason": "", "execution": ProviderExecutionDecision(),
+                    "ok": False}
         targets = []
         try:
             targets = self.router.available_targets()
@@ -374,6 +607,13 @@ class ChatPipeline:
             f"quality={t.get('quality') or '?'} ctx={t.get('context_window') or '?'}"
             for t in targets[:MAX_TARGETS_IN_PROMPT]) or "(none listed)"
         parts = ["Available providers/models:\n" + catalogue]
+        # LIVE runtime capability context — the same authoritative
+        # representation the Provider is given, so the Gateway plans against
+        # what actually exists instead of guessing. Human-facing block first
+        # (clean, no tool names / no protocol), then the exact category IDs
+        # the Gateway must use for `execution.capability`.
+        parts.append(caps.human_context)
+        parts.append(caps.catalog_text())
         ctx = _clean(context)
         if ctx:
             parts.append("Prior conversation (only to resolve references in the "
@@ -415,11 +655,18 @@ class ChatPipeline:
             model = ""
         criteria = [_clean(c) for c in (data.get("criteria") or [])
                     if _clean(c)][:5]
+        # The Gateway's structured execution decision. `normalized()` drops
+        # any capability the live runtime does not actually have, so a model
+        # hallucinating "browser" on a terminal-only runtime can never make
+        # the Provider look for a tool that is not there.
+        execution = ProviderExecutionDecision.from_dict(
+            data.get("execution")).normalized(caps.categories)
         return {"final_request": _clean(data["final_request"]) if rewrote
                 else message,
                 "was_incomplete": rewrote,
                 "provider": provider, "model": model, "criteria": criteria,
-                "reason": _clean(data.get("reason")), "ok": True}
+                "reason": _clean(data.get("reason")), "execution": execution,
+                "ok": True}
 
     # -- step 3: Gateway call #2 (verify) -------------------------------------
     def _make_verifier(self, brief: dict, state: dict, req: str = "",
@@ -436,15 +683,35 @@ class ChatPipeline:
                 if scope else ""
             term_ctx = self._terminal_context(session_id) if session_id else ""
             extra = "\n\n".join(b for b in (term_ctx, exec_ctx) if b)
+            execution = brief.get("execution") or ProviderExecutionDecision()
+            exec_rule = ""
+            if execution.required:
+                cap = execution.capability or "the required tool"
+                exec_rule = (
+                    "\n\nThis request REQUIRES real tool execution "
+                    f"(capability: {cap}). It is complete ONLY if the "
+                    "execution context below shows the required tool action "
+                    "actually ran and its result is available (a tool call, "
+                    "its result, an exit code, terminal state or execution "
+                    "history). An answer that only describes, instructs the "
+                    "user how to do it, or promises to do it later is "
+                    "INCOMPLETE — no matter how good the wording is.")
             prompt = (
                 f"Original user message:\n{brief['raw']}\n\n"
                 f"Request you assigned (call #1):\n{brief['final_request']}\n\n"
                 f"Completion criteria you defined:\n{crit}\n\n"
                 f"Assigned to: {brief['assigned'] or 'automatic routing'}\n\n"
+                f"Gateway execution decision: "
+                f"{'required' if execution.required else 'not required'}"
+                + (f" (capability: {execution.capability or 'unspecified'})"
+                   if execution.required else "")
+                + "\n\n"
                 f"Provider output to verify:\n{output}")
+            if exec_rule:
+                prompt += exec_rule
             if extra:
                 prompt += ("\n\nExecution context (live terminal session + "
-                           "tool actions already taken; use it only to judge "
+                           "tool actions already taken; use it to judge "
                            "whether the work is really done):\n" + extra)
             try:
                 raw = self.gateway.chat(
@@ -492,22 +759,23 @@ class ChatPipeline:
         brain. Returns a `RoutingResult` (so the verify stage is unchanged)
         or None on failure. The loop's final message list is attached so
         Gateway corrections carry the tool exchanges too."""
-        from astra.ai.agent_tool_loop import (AgentToolLoop,
-                                              GatewayToolCaller,
-                                              ProviderToolCaller)
+        from astra.ai.agent_tool_loop import AgentToolLoop
         use_gateway = (self.agent_brain == "gateway" and self._gateway_usable())
-        if use_gateway:
-            caller = GatewayToolCaller(self.gateway, category="tool_use")
-        else:
-            caller = ProviderToolCaller(
-                self.router, task_type=task_type, vision=vision,
-                provider=brief["provider"] or None,
-                model=brief["model"] or None, trace=req)
+        caller = self._make_tool_caller(
+            task_type, vision, provider=brief["provider"] or None,
+            model=brief["model"] or None, req=req)
         loop = AgentToolLoop(self.registry, terminal=self.terminal,
                              events=self.events,
                              max_steps=self.max_tool_steps,
                              execution_history=self.execution_history)
         blocks = []
+        # The Gateway's execution decision comes FIRST so the model reads it
+        # before the tool protocol/it answers: this is the structured
+        # handoff telling it whether it must actually run a tool.
+        decision_block = (brief.get("execution") or
+                          ProviderExecutionDecision()).context_block()
+        if decision_block:
+            blocks.append(decision_block)
         if ctx_text and not hist_turns:
             blocks.append("Recent conversation (for reference):\n" + ctx_text)
         if terminal_context:
@@ -740,21 +1008,33 @@ class ChatPipeline:
         trace["scope"] = scope
 
         # 1) Gateway understands + assigns
+        # ONE live capability read per turn, from the actual ToolRegistry.
+        # This same object grounds the Gateway's understanding AND the
+        # Provider's runtime context, so the two can never disagree about
+        # what this runtime can actually do (requirement: identical source).
+        caps = collect_runtime_capabilities(self.registry)
         if gateway_ok:
             brief = self._understand(raw, ctx_text, attachments, req=req,
-                                     extra_context=extra_context)
+                                     extra_context=extra_context,
+                                     capabilities=caps)
         else:
             brief = {"final_request": raw, "was_incomplete": False,
                      "provider": "", "model": "", "criteria": [],
-                     "reason": "", "ok": False}
+                     "reason": "", "ok": False,
+                     "execution": ProviderExecutionDecision()}
         assigned = (f"{brief['provider']}/{brief['model']}" if brief["model"]
                     else brief["provider"])
+        execution = (brief.get("execution") or ProviderExecutionDecision())
         trace.update({"understood": brief["final_request"],
                       "was_incomplete": brief["was_incomplete"],
                       "assigned": assigned, "criteria": brief["criteria"],
-                      "assign_reason": brief["reason"]})
+                      "assign_reason": brief["reason"],
+                      "execution": execution.to_dict(),
+                      "runtime_capabilities": caps.to_dict()})
         self._emit("chat.pipeline.assigned", provider=brief["provider"],
                    model=brief["model"], was_incomplete=brief["was_incomplete"],
+                   execution_required=execution.required,
+                   execution_capability=execution.capability,
                    request=req, trace=req)
 
         # 2) Provider executes (output stays internal until verified)
@@ -768,9 +1048,17 @@ class ChatPipeline:
         # astra.ai.capability_context for what is/isn't included, and
         # tests/test_system_prompt.py's CapabilityQuestion* tests for the
         # regression coverage this closes.
-        capability_ctx = build_capability_context(self.registry)
+        # Capability block + (when the Gateway decided execution is
+        # required) the structured execution decision. Both come from the
+        # ONE live capability read above, and both live in the system prompt
+        # so they survive provider failover: every retry/replacement model
+        # sees the same requirement, not just the first one that was tried.
+        runtime_ctx = caps.human_context
+        decision_block = execution.context_block()
+        if decision_block:
+            runtime_ctx = runtime_ctx + "\n\n" + decision_block
         provider_system_prompt = build_system_prompt(
-            _PROVIDER_SPECIALIZED_PROMPT, runtime_context=capability_ctx)
+            _PROVIDER_SPECIALIZED_PROMPT, runtime_context=runtime_ctx)
         messages = [{"role": "system", "content": provider_system_prompt}]
         if hist_turns:
             # The SAME canonical history the Gateway just saw, as real
@@ -793,7 +1081,10 @@ class ChatPipeline:
         # tool loop (inspect -> run -> read failure -> edit -> retest) whose
         # results return to the SAME execution. Without it, the original
         # single provider call is used unchanged.
-        if self._tool_loop_usable():
+        tools_available = self._tools_available()
+        use_loop = self._tool_loop_usable() or (execution.required and
+                                                tools_available)
+        if use_loop:
             rr = self._run_tool_loop(
                 brief, hist_turns, ctx_text, task_type, vision, scope,
                 session_id, terminal_context, exec_context, req, trace,
@@ -829,11 +1120,32 @@ class ChatPipeline:
         state = {"verifications": 0, "unavailable": "", "last_missing": []}
         verify_brief = {"raw": raw, "final_request": brief["final_request"],
                         "criteria": brief["criteria"],
-                        "assigned": f"{rr.provider}/{rr.model}"}
+                        "assigned": f"{rr.provider}/{rr.model}",
+                        "execution": execution}
+        # For an execution-required task the Gateway's completion gate is
+        # grounded in REAL execution evidence, not prose: no observed tool
+        # action => no COMPLETE, deterministically, before the semantic
+        # verifier is even consulted. The evidence is re-read (callable)
+        # after every correction round, so a correction that actually
+        # executed the tool flips the gate.
         contract = build_task_completion_contract(
             user_request=raw, goal=brief["final_request"],
-            completion_criteria=brief["criteria"], require_semantic=True)
-        if getattr(rr, "_port_kind", "") == "gateway":
+            completion_criteria=brief["criteria"], require_semantic=True,
+            evidence_required=(("tool_execution",)
+                               if execution.required else ()))
+        evidence = ((lambda: self._execution_evidence(scope))
+                    if execution.required else None)
+        if execution.required and tools_available:
+            # A correction to an execution task must be able to actually
+            # execute — see _ToolLoopPort. Without this the correction can
+            # only produce more prose, which is exactly how an execution
+            # task degenerates into "here's how you can do it yourself".
+            port = _ToolLoopPort(
+                self, execution, hist_turns=hist_turns, task_type=task_type,
+                vision=vision, scope=scope, session_id=session_id, req=req,
+                system_prompt=provider_system_prompt,
+                terminal_context=terminal_context, exec_context=exec_context)
+        elif getattr(rr, "_port_kind", "") == "gateway":
             port = _GatewayPort(self.gateway, trace=req)
         else:
             port = _ChatPort(self.router, task_type, vision, trace=req)
@@ -843,6 +1155,7 @@ class ChatPipeline:
             final, outcome, attempts = self.gateway.supervise_task(
                 port, target, supervised_messages,
                 ProviderExecutionResult(ok=True, text=rr.text), contract,
+                evidence=evidence,
                 semantic_verifier=self._make_verifier(
                     verify_brief, state, req=req, session_id=session_id,
                     scope=scope),

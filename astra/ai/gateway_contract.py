@@ -159,6 +159,110 @@ class ProviderExecutionPort:
 
 
 @dataclass
+class ProviderExecutionDecision:
+    """The Gateway's structured execution decision for ONE user request.
+
+    This is the machine-readable half of the Gateway -> Provider handoff
+    (the human-readable half is the runtime capability block the Provider is
+    also given). The Gateway's UNDERSTAND step decides, from the LIVE runtime
+    capability catalog, whether this request needs real tool execution, and
+    if so which capability category — and states it here instead of leaving
+    the Provider to re-guess:
+
+        {"required": true, "capability": "terminal",
+         "intent": "clone the requested repository"}
+
+    Rules enforced by `normalized()` (never trust an unverified model claim):
+
+      - `capability` is kept ONLY if the live runtime actually has that
+        category. A capability the runtime does not have is dropped, never
+        invented — see `astra.ai.capability_context`.
+      - If the runtime has no tool capability at all, `required` is forced
+        False: the Gateway may not demand execution that cannot happen.
+
+    Backward compatible by design: an older/simpler Gateway reply with no
+    `execution` object yields the default (`required=False`), which is
+    exactly today's behavior (the Provider decides for itself).
+    """
+    required: bool = False
+    capability: str = ""
+    intent: str = ""
+    reason: str = ""
+
+    def normalized(self, available_categories=()) -> "ProviderExecutionDecision":
+        """Return a copy with `capability`/`required` constrained to what the
+        live runtime can actually do. `available_categories` is an iterable
+        of live category ids (e.g. `RuntimeCapabilities.categories`)."""
+        live = {str(c).strip().lower() for c in (available_categories or ()) if str(c).strip()}
+        cap = (self.capability or "").strip().lower()
+        required = bool(self.required)
+        reason = (self.reason or "").strip()
+        if cap and cap not in live:
+            # Never claim (or demand) a capability the runtime does not have.
+            cap = ""
+        if required and not live:
+            required = False
+            reason = (reason + " " if reason else "") + (
+                "No tool capability exists in this runtime, so the Gateway "
+                "must not demand tool execution.")
+        return ProviderExecutionDecision(required=required, capability=cap,
+                                        intent=(self.intent or "").strip(),
+                                        reason=reason.strip())
+
+    @classmethod
+    def from_dict(cls, data) -> "ProviderExecutionDecision":
+        """Parse the Gateway's `execution` object, tolerating any shape.
+
+        A missing/None/non-dict value, or individual fields of the wrong
+        type, degrade to the default decision (required=False) rather than
+        raising — an old or malformed Gateway reply must never break a turn.
+        """
+        if not isinstance(data, dict):
+            return cls()
+        required = data.get("required", False)
+        if isinstance(required, str):
+            required = required.strip().lower() in ("true", "yes", "1")
+        cap = data.get("capability", "")
+        if isinstance(cap, (list, tuple)):
+            cap = next((str(c) for c in cap if str(c).strip()), "")
+        intent = data.get("intent", "")
+        reason = data.get("reason", "")
+        return cls(required=bool(required), capability=str(cap or ""),
+                   intent=str(intent or ""), reason=str(reason or ""))
+
+    def to_dict(self) -> dict:
+        return {"required": self.required, "capability": self.capability,
+                "intent": self.intent, "reason": self.reason}
+
+    def context_block(self, available_categories=()) -> str:
+        """The authoritative handoff text the Provider/AgentToolLoop is given
+        for this request. Empty when no execution is required (nothing to
+        say), so ordinary chat turns are unchanged."""
+        if not self.required:
+            return ""
+        lines = [
+            "Gateway execution decision (authoritative — this request "
+            "REQUIRES real tool execution before you answer):",
+        ]
+        if self.capability:
+            lines.append(
+                f"- Required capability: {self.capability} (available in "
+                "this runtime).")
+        else:
+            lines.append(
+                "- Required capability: use the most appropriate tool "
+                "available in this runtime.")
+        if self.intent:
+            lines.append(f"- What the user asked for: {self.intent}")
+        lines.append(
+            "- Actually perform the action with the tool(s) available to "
+            "you, then report the real result. Do NOT reply with "
+            "instructions for the user to do it themselves, and do NOT "
+            "promise to do it later — the tool must actually run first.")
+        return "\n".join(lines)
+
+
+@dataclass
 class ProviderExecutionResult:
     """Sanitized outcome of one `ProviderExecutionPort.execute()` call (§6).
 

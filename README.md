@@ -14,6 +14,22 @@ browsing, coding, files, research) ships as built-in **specialist agents**
 (`astra/agents/`), but chat no longer *plans* through them: like the plugin
 system, they are registered for introspection and routing hints only.
 
+**Gateway = understanding/planning/orchestration · Provider = execution AI ·
+`ToolRegistry` = the one source of truth for real capabilities/tools ·
+`AgentToolLoop` = the actual tool-execution loop · Gateway verification =
+completion verification.** The Gateway is handed the LIVE runtime capability
+catalog (derived from the actual `ToolRegistry` on every turn — never
+hardcoded, never a second list) and emits a structured execution handoff
+(`{"execution": {"required": true, "capability": "terminal", "intent": ...}}`)
+when a request needs a real tool. The Provider/AgentToolLoop receives that
+decision plus the exact machine-facing tool catalog (names + argument
+schemas), the conversation history and the live terminal/execution state, and
+runs the tool through the SAME registry. An execution task is only verified
+COMPLETE when real execution evidence exists (tool call, tool result, exit
+code, terminal state), and a correction to such a task re-enters the tool
+loop so the required tool actually executes instead of the model describing
+how the user could do it. See ARCHITECTURE.md §1.3.
+
 ---
 
 ## Architecture
@@ -60,7 +76,7 @@ Orchestrator/Planner loop was removed, and `ToolRegistry` now runs standalone
 
 | Subsystem | What it does |
 |-----------|-------------|
-| **Astra AI Gateway + ChatPipeline** | The path every chat message takes: Gateway call #1 understands the request and assigns the best provider/model; the provider executes through the **agent tool loop** (inspect → terminal → read/edit → test → retry) using the shared ToolRegistry; Gateway call #2 verifies the output and drives a bounded fix/redo loop if it is incomplete. Fails open. |
+| **Astra AI Gateway + ChatPipeline** | The path every chat message takes: Gateway call #1 understands the request, reads the LIVE runtime capability catalog, decides whether real tool execution is required (structured `execution` handoff) and assigns the best provider/model; the provider executes through the **agent tool loop** (inspect → terminal → read/edit → test → retry) using the shared ToolRegistry; Gateway call #2 verifies the output against real execution evidence and drives a bounded fix/redo loop if it is incomplete — re-entering the tool loop for execution tasks so a correction can actually run the required tool. Fails open. |
 | **AstraRouter** (`astra/ai/router.py`) | Scores task types, ranks provider/model candidates by health+score, rotates credentials, learns from outcomes and records routing stats. Never registered as a provider itself, and the Gateway is never a fallback provider when every real provider fails. |
 | **Provider adapters (10)** (`astra/ai/adapters/`) | Gemini, Groq, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova, Cohere, Z.ai, Bedrock. Nine share an OpenAI-compatible adapter base; Bedrock is a real AWS SigV4 / Converse adapter. Unlimited credentials per provider via key pools. |
 | **Backward-compatible providers** (`astra/ai/provider.py`) | The two original single-provider paths: `ClaudeProvider` (`ANTHROPIC_API_KEY`) and `OpenAICompatibleProvider` (`AI_BASE_URL`/`AI_API_KEY`). Routed when configured; legacy, no key pool. |
@@ -375,6 +391,8 @@ astra/
 ├── store.py             Generic SQLite storage (plain dicts, no ORM)
 ├── security.py          Redaction, SSRF guard, rate limiter, request_id
 ├── ai/                  Providers, adapters, router, Gateway, pipeline
+│                        (+ capability_context.py: the ONE live capability read,
+│                         gateway_contract.py: Gateway <-> Provider handoff)
 ├── agents/              Specialist agents + AgentManager
 ├── core/                Config, events, permissions, tasks, state, …
 ├── tools/               ToolRegistry + built-in tools

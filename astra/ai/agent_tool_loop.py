@@ -67,6 +67,7 @@ Rules:
 - Prefer the terminal for shell/git/test work and the file tools for reading/editing files.
 - Only use a tool when it is genuinely useful. If no tool is needed, answer directly in plain text (no JSON necessary).
 - Never invent tool output. Never mention this JSON action protocol, exact tool names, argument schemas, or other internal machinery in the final answer.
+- If the Gateway's execution decision (in the system prompt or the task context) says this request requires a capability, you MUST actually invoke the tool that performs it and use its real result before answering. Never reply with instructions describing how the user could do it themselves instead of doing it.
 - If asked what you can do or which tools/capabilities are available, that is NOT a request to invent or to stay silent: answer from the runtime capability catalog you were given (in the system prompt, above this protocol) in clean, practical, plain language — never the literal tool names in this protocol, and never a category that catalog doesn't list."""
 
 
@@ -86,10 +87,48 @@ def build_tool_catalog(registry, *, categories=None, max_tools=DEFAULT_MAX_TOOLS
         desc = " ".join(str(t.get("description") or "").split())
         if len(desc) > max_desc:
             desc = desc[:max_desc] + "…"
-        lines.append(f"- {t['name']} ({t.get('category', '')}): {desc}")
+        line = f"- {t['name']} ({t.get('category', '')}): {desc}"
+        args = _format_args_schema(t.get("input_schema"))
+        if args:
+            line += f" args: {args}"
+        lines.append(line)
         if len(lines) >= max_tools:
             break
     return "\n".join(lines) or "(no tools available)"
+
+
+def _format_args_schema(schema, *, max_args: int = 8) -> str:
+    """Compact, deterministic rendering of one tool's live input schema —
+    the exact argument names/types the model must use, taken straight from
+    `Tool.describe()["input_schema"]` (never a hand-maintained second copy).
+
+    This is the one place the model learns a tool's real arguments without
+    native tool-calling; without it the model has only the tool's name and
+    description and has to guess `{"command": ...}` vs `{"cmd": ...}`.
+    """
+    if not isinstance(schema, dict) or not schema:
+        return ""
+    # Two shapes exist on the live registry: a flat {"arg": {"type": ...,
+    # "required": bool}} map (builtins/terminal/web3) and a full JSON-Schema
+    # object {"type": "object", "properties": {...}, "required": [...]}
+    # (browser tools). Normalise both before rendering.
+    required = set()
+    if isinstance(schema.get("properties"), dict):
+        props = schema["properties"]
+        if isinstance(schema.get("required"), (list, tuple)):
+            required = {str(r) for r in schema["required"]}
+    else:
+        props = schema
+        required = {str(k) for k, v in schema.items()
+                    if isinstance(v, dict) and v.get("required")}
+    parts = []
+    for name in sorted(props):
+        spec = props.get(name) if isinstance(props.get(name), dict) else {}
+        typ = str(spec.get("type") or "any")
+        parts.append(f"{name}:{typ}" + ("" if name in required else "?"))
+        if len(parts) >= max_args:
+            break
+    return "{" + ", ".join(parts) + "}"
 
 
 def _parse_action(text: str):
@@ -135,6 +174,16 @@ def _parse_action(text: str):
     if action == "final":
         return data
     return None
+
+
+def _redact_text(text: str) -> str:
+    """Best-effort secret redaction (`astra.security.redact_text`), never
+    fatal: a redaction failure must not break a tool result."""
+    try:
+        from astra.security import redact_text
+        return redact_text(text)
+    except Exception:
+        return text
 
 
 def _cap(text: str, limit: int) -> str:
@@ -375,20 +424,26 @@ class AgentToolLoop:
             step.status = outcome.get("status", "")
             step.error = outcome.get("error", "")
             step.result = outcome
-            if self.execution_history is not None and scope is not None:
-                self.execution_history.record(
-                    scope, tool, ok=step.ok, status=step.status,
-                    result=outcome, args=args, step=index)
             self._emit("agent.tool_result", op=op, trace=trace, step=index,
                        tool=tool, ok=step.ok, status=step.status,
                        tool_duration_ms=outcome.get("duration_ms"))
 
+            # Redact credential-shaped values from the tool result BEFORE it
+            # is fed back into the model conversation and the execution
+            # history: a command or error message can echo a token
+            # (`git clone https://user:TOKEN@...`), and that must never
+            # reach a model prompt, the persisted execution history or a
+            # later final answer.
+            result_json = _redact_text(json.dumps(outcome, ensure_ascii=False,
+                                                  default=str))
+            if self.execution_history is not None and scope is not None:
+                self.execution_history.record(
+                    scope, tool, ok=step.ok, status=step.status,
+                    result=result_json, args=args, step=index)
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content":
                              "Tool result:\n" + _cap(
-                                 json.dumps(outcome, ensure_ascii=False,
-                                            default=str),
-                                 self.max_tool_result_chars)})
+                                 result_json, self.max_tool_result_chars)})
             self._emit("agent.tool_loop.step", op=op, trace=trace, step=index,
                        tool=tool, ok=step.ok, terminal=False)
 

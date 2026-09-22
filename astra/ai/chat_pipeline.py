@@ -53,6 +53,7 @@ from astra.ai.json_extract import loads_lenient
 from astra.ai.multimodal_messages import build_multimodal_content
 from astra.ai.execution_history import AgentExecutionHistory
 from astra.ai.router import RoutingRequest, RoutingResult, classify
+from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError
 from astra.core.events import new_op_id
 from astra.terminal.manager import default_session_id_for
@@ -73,15 +74,21 @@ MAX_OUTPUT_CHARS_IN_VERIFY = 12000
 UNDERSTAND_MAX_TOKENS = 700
 VERIFY_MAX_TOKENS = 600
 
-PROVIDER_SYSTEM_PROMPT = (
-    "You are Astra, a helpful AI assistant. Do the user's request fully and "
-    "directly. Reply in the same language the user wrote in (Bengali, "
-    "Banglish or English). Give the actual answer/output, not a description "
-    "of what you would do. Never mention internal routing, gateways or "
-    "verification."
+# NOTE: each *_SYSTEM_PROMPT below is the specialized layer for its role
+# only. The Astra Core System Prompt (identity, operating principles,
+# tool-use/hallucination/recovery/internal-output rules shared by every AI
+# call) lives in `astra.ai.system_prompt.ASTRA_CORE_SYSTEM_PROMPT` and is
+# composed on top of each specialized layer, once, via `build_system_prompt`
+# below — specialized prompts must never re-state identity/behavior rules
+# the Core prompt already covers, and nothing else in this module (or any
+# other caller) should inject the Core prompt a second time.
+_PROVIDER_SPECIALIZED_PROMPT = (
+    "Do the user's request fully and directly."
 )
 
-UNDERSTAND_SYSTEM_PROMPT = (
+PROVIDER_SYSTEM_PROMPT = build_system_prompt(_PROVIDER_SPECIALIZED_PROMPT)
+
+_UNDERSTAND_SPECIALIZED_PROMPT = (
     "You are the Astra AI Gateway. A user message arrives (it may be short, "
     "incomplete, or written in Bengali/Banglish/English). You do NOT answer "
     "it and you do NOT do the task — a Provider AI does that after you. You "
@@ -110,7 +117,9 @@ UNDERSTAND_SYSTEM_PROMPT = (
     "\"criteria\": [\"...\"], \"reason\": \"<one short line>\"}"
 )
 
-VERIFY_SYSTEM_PROMPT = (
+UNDERSTAND_SYSTEM_PROMPT = build_system_prompt(_UNDERSTAND_SPECIALIZED_PROMPT)
+
+_VERIFY_SPECIALIZED_PROMPT = (
     "You are the Astra AI Gateway's verifier. Earlier you understood a user "
     "request, assigned it to a Provider AI and defined what a complete "
     "answer needs. The Provider has now produced an output that the user "
@@ -132,6 +141,8 @@ VERIFY_SYSTEM_PROMPT = (
     "{\"verdict\": \"complete\"|\"incomplete\", \"missing\": [\"...\"], "
     "\"action\": \"fix\"|\"redo\", \"instructions\": \"...\"}"
 )
+
+VERIFY_SYSTEM_PROMPT = build_system_prompt(_VERIFY_SPECIALIZED_PROMPT)
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────

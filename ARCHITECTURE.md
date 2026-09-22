@@ -363,6 +363,36 @@ adapter classes — it's a fully separate implementation used only for
 the Gateway's own UNDERSTAND/VERIFY calls in the chat pipeline (§1),
 never as a fifth "provider" in the router's candidate list.
 
+**System prompt architecture.** Every AI/model call in this section (and
+in §1's tool loop) is composed the same way:
+
+```
+ASTRA_CORE_SYSTEM_PROMPT          (astra/ai/system_prompt.py)
+        +
+task/role-specific instructions   (UNDERSTAND, CLASSIFY, VERIFY, PROVIDER,
+                                    TOOL_PROTOCOL — each module's own
+                                    specialized layer)
+        +
+relevant runtime context          (history, terminal/execution state,
+                                    current task — sent as separate
+                                    message(s), never baked into the
+                                    system prompt itself)
+```
+
+`astra.ai.system_prompt.build_system_prompt()` is the single place the
+Core prompt (identity, operating principles, tool-use/hallucination/
+recovery/internal-output rules shared by every call) gets attached to a
+specialized prompt. Each `*_SYSTEM_PROMPT` constant in `chat_pipeline.py`
+and `gateway.py` is built through it once at import time; provider
+adapters (`astra/ai/adapters/*`) never inject it themselves and stay
+provider-agnostic. `AgentToolLoop.run()` (§1) guarantees the Core layer is
+present exactly once before appending `TOOL_PROTOCOL`, whether the caller
+already passed a Core-wrapped prompt (the normal case) or a bare
+specialized one — see `tests/test_system_prompt.py` for the full
+regression coverage (every call site receives Core, specialized layers
+remain intact, no duplication across retries/corrections, no leak into
+the user-facing reply).
+
 ---
 
 ## 4. Specialist agents (not plugins)

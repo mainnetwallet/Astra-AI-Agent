@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import urllib.request
 
+from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError
 
 
@@ -129,11 +130,16 @@ class ClaudeProvider(AIProvider):
     def _build_body(self, messages, model, max_tokens) -> dict:
         system = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
         user = _flatten([m for m in messages if m.get("role") != "system"])
+        # No caller-supplied system message: fall back to the same
+        # centralized Astra Core System Prompt every other call path uses,
+        # instead of a second, divergent hardcoded identity string. This
+        # only fires when a caller sends zero system-role messages — every
+        # current call path always supplies one via
+        # `astra.ai.system_prompt.build_system_prompt`.
         return {
             "model": model or self.models[0],
             "max_tokens": max_tokens,
-            "system": system or "You are Astra AI Agent, keep answers short, "
-                               "use Banglish when the user writes Banglish.",
+            "system": system or build_system_prompt(),
             "messages": [{"role": "user", "content": user[:12000]}],
         }
 

@@ -42,6 +42,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from astra.ai.credentials import CredentialPool
+from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError, TimeoutError
 from astra.core.events import new_op_id
 
@@ -1247,7 +1248,7 @@ def build_astra_ai_gateway(config=None, store=None,
 # of always paying for (and risking) a rewrite on every single message.
 NO_CHANGE_TOKEN = "NO_CHANGE_NEEDED"
 
-GATEWAY_UNDERSTANDING_SYSTEM_PROMPT = (
+_GATEWAY_UNDERSTANDING_SPECIALIZED_PROMPT = (
     "You are the Astra AI Gateway's Request Understanding layer. You do NOT "
     "answer the user's request and you do NOT perform the task yourself — a "
     "separate Provider AI does that after you, using only what you output. "
@@ -1298,6 +1299,9 @@ GATEWAY_UNDERSTANDING_SYSTEM_PROMPT = (
     "meta-commentary about what you changed."
 )
 
+GATEWAY_UNDERSTANDING_SYSTEM_PROMPT = build_system_prompt(
+    _GATEWAY_UNDERSTANDING_SPECIALIZED_PROMPT)
+
 GW_UNDERSTANDING_MAX_TOKENS = 400
 
 # Guard against the Request Understanding model slipping into
@@ -1332,7 +1336,7 @@ def _looks_like_assistant_voice(text: str) -> bool:
 # never picks a tool, and fails open (treats anything uncertain as a real
 # task) so a genuine request is never silently swallowed.
 
-GATEWAY_CLASSIFY_SYSTEM_PROMPT = (
+_GATEWAY_CLASSIFY_SPECIALIZED_PROMPT = (
     "You are the Astra AI Gateway's Intent Classifier. Decide whether the "
     "user's message is:\n"
     "  (a) small talk — a greeting, thanks, \"how are you\", or a vague "
@@ -1354,6 +1358,9 @@ GATEWAY_CLASSIFY_SYSTEM_PROMPT = (
     "description of what you decided.\n"
     "- Output ONLY the JSON object."
 )
+
+GATEWAY_CLASSIFY_SYSTEM_PROMPT = build_system_prompt(
+    _GATEWAY_CLASSIFY_SPECIALIZED_PROMPT)
 
 GW_CLASSIFY_MAX_TOKENS = 200
 

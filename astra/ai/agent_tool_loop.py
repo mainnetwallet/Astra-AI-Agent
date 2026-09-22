@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 
 from astra.ai.execution_history import AgentExecutionHistory
 from astra.ai.json_extract import loads_lenient
+from astra.ai.system_prompt import ASTRA_CORE_SYSTEM_PROMPT, build_system_prompt
 from astra.core.context import ToolContext
 from astra.core.events import new_op_id
 
@@ -256,8 +257,18 @@ class AgentToolLoop:
             trace: str = "") -> ToolLoopResult:
         catalog = build_tool_catalog(self.registry)
         protocol = TOOL_PROTOCOL.replace("{catalog}", catalog)
-        system = (system_prompt or "").strip()
-        system = (system + "\n\n" + protocol) if system else protocol
+        base = (system_prompt or "").strip()
+        # `base` is normally already Core+specialized (e.g. chat_pipeline's
+        # PROVIDER_SYSTEM_PROMPT / gateway.py's Gateway prompts, each built
+        # once via `build_system_prompt`). Only wrap it here if the caller
+        # passed a bare specialized prompt with no Core layer yet — this
+        # keeps the Core prompt present exactly once no matter which caller
+        # invokes the tool loop, without ever duplicating it.
+        if base and ASTRA_CORE_SYSTEM_PROMPT.strip() not in base:
+            base = build_system_prompt(base)
+        elif not base:
+            base = ASTRA_CORE_SYSTEM_PROMPT.strip()
+        system = base + "\n\n" + protocol
 
         blocks = [b for b in (context_blocks or []) if b]
         block_text = "\n\n".join(blocks)
@@ -276,9 +287,13 @@ class AgentToolLoop:
 
         messages: list[dict] = [{"role": "system", "content": system}]
         for turn in history or []:
-            if isinstance(turn, dict) and turn.get("content"):
-                messages.append({"role": turn.get("role") or "user",
-                                 "content": turn["content"]})
+            # Guard against a stray "system" role turn in prior conversation
+            # history ever inserting a second system message alongside the
+            # one built above — the Core+specialized system prompt must
+            # appear exactly once per request.
+            role = turn.get("role") or "user" if isinstance(turn, dict) else "user"
+            if isinstance(turn, dict) and turn.get("content") and role != "system":
+                messages.append({"role": role, "content": turn["content"]})
         messages.append({"role": "user", "content": user_content})
 
         ctx = ToolContext(registry=self.registry, events=self.events,

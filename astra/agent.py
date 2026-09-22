@@ -26,6 +26,8 @@ The old orchestrator/planner approve-reject round-trip no longer exists, so
 """
 from __future__ import annotations
 
+from astra.ai.response_boundary import sanitize_final_response
+
 
 class Agent:
     def __init__(self, orchestrator=None, pipeline=None):
@@ -55,9 +57,15 @@ class Agent:
                                      conversation_id=conversation_id,
                                      session_id=session_id)
         except Exception as e:          # never let a bug become a blank 500
-            return {"reply": f"Chat e ekta problem hoyeche — `{e}`",
-                    "action": "none", "ok": False,
-                    "data": {"error": str(e)}}
+            # `e` can legitimately contain a credential (e.g. a failed
+            # `git clone https://<token>@github.com/...` surfaces the URL,
+            # token included, in its exception message) or, in principle,
+            # stray internal tool-protocol text. Route it through the same
+            # response boundary as every other reply — see
+            # astra/ai/response_boundary.py.
+            safe = sanitize_final_response(f"Chat e ekta problem hoyeche — `{e}`")
+            return {"reply": safe, "action": "none", "ok": False,
+                    "data": {"error": sanitize_final_response(str(e))}}
 
     def help_text(self) -> str:
         """No plugins are registered yet — see plugins/README.md."""

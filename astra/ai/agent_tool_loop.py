@@ -93,18 +93,35 @@ def build_tool_catalog(registry, *, categories=None, max_tools=DEFAULT_MAX_TOOLS
 
 
 def _parse_action(text: str):
-    """Return a dict for a well-formed protocol action, else None."""
+    """Return a dict for a well-formed protocol action, else None.
+
+    ROOT CAUSE (see astra/ai/response_boundary.py for the full writeup):
+    the model's tool-call/final JSON is not always returned as a bare,
+    whole-string JSON object — chat-tuned models routinely wrap it in a
+    ```json fence or, far more commonly, add a short preamble/trailing
+    sentence around it, e.g.:
+
+        I'll clone that repository for you.
+
+        {"action": "tool", "tool": "terminal_exec", "args": {...}, ...}
+
+    `loads_lenient` (imported above) already knows how to find a JSON
+    object embedded anywhere in a string. The previous version of this
+    function gated the call behind
+    `raw.startswith("{") and raw.endswith("}")` — which is false for
+    every prefaced/suffixed reply like the example above, so
+    `loads_lenient` was never actually reached for them. The effect: the
+    whole raw reply — internal tool-call JSON included (tool/args/
+    session_id/thought) — was treated as the model's final
+    natural-language answer and returned straight to the user instead of
+    being executed. That is the exact "internal tool call leak" this
+    function must prevent. Always attempt `loads_lenient` first; only
+    fall back to "not an action" (plain-text final answer) when no JSON
+    object can be found in the text at all, or it doesn't carry a
+    recognized `action`.
+    """
     raw = (text or "").strip()
     if not raw:
-        return None
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        nl = raw.find("\n")
-        if nl != -1:
-            raw = raw[nl + 1:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-    if not (raw.startswith("{") and raw.endswith("}")):
         return None
     try:
         data = loads_lenient(raw)

@@ -53,6 +53,7 @@ from astra.ai.gateway_task_completion import (COMPLETE, FAILED, INCOMPLETE,
 from astra.ai.json_extract import loads_lenient
 from astra.ai.multimodal_messages import build_multimodal_content
 from astra.ai.execution_history import AgentExecutionHistory
+from astra.ai.response_boundary import sanitize_final_response
 from astra.ai.router import RoutingRequest, RoutingResult, classify
 from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError
@@ -616,7 +617,16 @@ class ChatPipeline:
         under `data["internal_note"]` instead, alongside the rest of this
         turn's trace (`data["verification"]`), for the Activity Log /
         server logs only — see test_no_internal_debug_text_in_chat_reply
-        in tests/test_chat_pipeline.py."""
+        in tests/test_chat_pipeline.py.
+
+        `text` is passed through `sanitize_final_response` here — this is
+        the ONE choke point every chat reply (tool loop, single-call
+        provider path, error fallback, verified/unverified) passes through
+        before leaving `ChatPipeline`, so it is where the response-boundary
+        guard belongs: strip any internal tool-call protocol JSON that
+        slipped through, and redact anything credential-shaped. See
+        astra/ai/response_boundary.py."""
+        text = sanitize_final_response(text)
         out = {"reply": text, "action": "none", "ok": ok, "data": data}
         if note:
             data["internal_note"] = note.strip()

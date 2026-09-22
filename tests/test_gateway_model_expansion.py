@@ -90,7 +90,11 @@ NEWLY_ADDED = {
         "@cf/ibm-granite/granite-4.0-h-micro",
         "@cf/zai-org/glm-4.7-flash",
     },
-    "GW_BEDROCK_MODELS": set(),  # explicitly excluded — no free Bedrock models
+    # Bedrock has no free tier, so it gained nothing from the free
+    # audit; GW_BEDROCK_MODELS is instead expanded separately to
+    # full Provider-catalog parity (see test below + the
+    # GatewayBedrockModelParityTests in test_gateway_providers.py).
+    "GW_BEDROCK_MODELS": set(),
     "GW_OPENROUTER_MODELS": {
         "minimax/minimax-m3:free", "cohere/north-mini-code:free",
         "minimax/minimax-m2.7:free", "dots-studio/dots-3-note-preview:free",
@@ -171,12 +175,20 @@ class GatewayModelExpansionAdditionTests(unittest.TestCase):
             self.assertFalse(
                 missing, f"{var} is missing planned free model(s): {missing}")
 
-    def test_bedrock_received_no_additions(self):
-        """Bedrock has no free tier in reality — the Gateway model list must
-        be untouched even though this audit added models everywhere else."""
-        self.assertEqual(
-            _split(self.env["GW_BEDROCK_MODELS"]),
-            _split(ORIGINAL_GATEWAY_MODELS["GW_BEDROCK_MODELS"]))
+    def test_bedrock_gained_no_free_models_but_covers_the_full_catalog(self):
+        """Bedrock has no free tier, so the free audit added nothing here —
+        but GW_BEDROCK_MODELS is separately expanded (a distinct change) to
+        full parity with the Provider's BEDROCK_MODELS catalog."""
+        gateway = set(_split(self.env["GW_BEDROCK_MODELS"]))
+        provider = set(_split(self.env.get("BEDROCK_MODELS", "")))
+        # not part of the free-model additions
+        self.assertEqual(NEWLY_ADDED["GW_BEDROCK_MODELS"], set())
+        # but now covers every Provider Bedrock model (nothing invented)
+        self.assertTrue(provider.issubset(gateway),
+                        f"Gateway missing Provider Bedrock ids: {provider - gateway}")
+        # the two original entries are retained
+        for mid in _split(ORIGINAL_GATEWAY_MODELS["GW_BEDROCK_MODELS"]):
+            self.assertIn(mid, gateway)
 
     def test_every_added_gateway_model_exists_in_provider_list(self):
         """Nothing was invented — every newly added Gateway model id must be

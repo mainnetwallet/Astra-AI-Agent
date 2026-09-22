@@ -93,36 +93,7 @@ class Tool:
             raise ValidationError(f"tool argument '{name}' must be {t}, got "
                                   f"{type(value).__name__}")
 
-    def _source(self) -> tuple[str, str]:
-        """(repo-relative file, callable name) for the registered function.
-
-        Introspection only — this is what lets the Agent Workflow node
-        inspector show the real implementation behind a tool instead of a
-        guess. Guarded so a builtin, a closure-bound terminal tool and a
-        `functools.partial` all describe themselves instead of raising.
-        `_wrap` (browser/) and `_bind` (terminal/) set `fn.__name__` back to
-        the real method, so the reported name is the implementation's, not
-        "wrapper"."""
-        import os
-        name = getattr(self.fn, "__name__", "") or ""
-        try:
-            import inspect
-            src = inspect.getsourcefile(self.fn) or ""
-        except Exception:
-            src = ""
-        if src:
-            try:
-                root = os.path.dirname(os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__))))
-                rel = os.path.relpath(os.path.abspath(src), root)
-                if not rel.startswith(".."):
-                    src = rel.replace(os.sep, "/")
-            except Exception:
-                pass
-        return src, name
-
     def describe(self) -> dict:
-        module, function = self._source()
         return {"name": self.name, "description": self.description,
                 "category": self.category, "input_schema": self.input,
                 "output_schema": self.output,
@@ -134,5 +105,4 @@ class Tool:
                 "idempotent": self.idempotent,
                 "supports_async": self.supports_async,
                 "rate_limit_per_min": self.rate_limit_per_min,
-                "strict": self.strict, "plugin": self.plugin,
-                "module": module, "function": function}
+                "strict": self.strict, "plugin": self.plugin}

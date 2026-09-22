@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import html
 import re
-import urllib.request
-
 TIMEOUT = 8
 UA = "Mozilla/5.0 (X11; Linux x86_64) AstraAI/1.0 (+research helper)"
 
@@ -26,16 +24,12 @@ def _fetch(url: str) -> tuple[str, str]:
 
     SSRF-guarded: only http/https to public addresses; loopback, link-local
     and private ranges are refused unless the operator explicitly opens them
-    with ASTRA_ALLOW_PRIVATE_URLS=1.
+    with ASTRA_ALLOW_PRIVATE_URLS=1. Every redirect hop is re-checked too, so
+    a public URL cannot bounce the fetch to an internal address.
     """
-    import os
-
     import astra.security as sec
-    if not sec.allow_url(url,
-                         allow_private=os.environ.get("ASTRA_ALLOW_PRIVATE_URLS") == "1"):
-        raise ValueError("refused URL (private/blocked network)")
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+    with sec.safe_urlopen(url, timeout=TIMEOUT,
+                          headers={"User-Agent": UA}) as resp:
         raw = resp.read(200_000)
         if resp.status >= 400:
             return "", ""

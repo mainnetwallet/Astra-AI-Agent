@@ -175,7 +175,11 @@ AI call -> decide: use a tool, or answer
   terminal context and gives it to BOTH. Nothing replays unlimited output.
 - **Isolation and lifecycle.** A conversation's terminal session id is
   `conv-<conversation_id>`, so unrelated chats never share cwd, processes or
-  history. Sessions are closed (and their process trees killed) on shutdown
+  history. A caller with no conversation id gets a request-scoped
+  `req-<request_id>` session that is closed when the turn ends (an embedder
+  that wants continuity without a conversation id passes an explicit
+  `session_id`), so unrelated callers never share terminal state by
+  accident. Sessions are closed (and their process trees killed) on shutdown
   (`web_fastapi.py` lifespan), on `terminal_close`, and by `close_idle`.
 - **Events.** `terminal.started`, `terminal.output` (capped snippets),
   `terminal.completed`, `terminal.failed`, `terminal.timeout`,

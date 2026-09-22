@@ -133,6 +133,23 @@ class TestBrowserMockedLive(unittest.TestCase):
         self.assertIn(shot.get("status"), ("ok", "error"))
         self.assertEqual(mgr.close_session("ut")["status"], "ok")
 
+    def test_redirect_to_private_address_is_refused(self):
+        """Regression: the pre-flight guard only checked the requested URL;
+        a public page that redirects to loopback/link-local/private space
+        (e.g. cloud metadata) was served to the model. The landed URL is
+        re-checked after navigation."""
+        page = fake_page(title="meta",
+                         url="http://169.254.169.254/latest/meta-data/")
+        fp = FakePlaywright(page)
+        fp.install_fake()
+        _fresh_session_state()
+        from astra.browser.manager import BrowserManager
+        mgr = BrowserManager()
+        r = mgr.browser_open({"url": "https://example.com", "session": "rd"})
+        self.assertEqual(r["status"], "error")
+        self.assertIn("redirect", r["error"])
+        mgr.close_session("rd")
+
     def test_captcha_pauses_and_never_bypasses(self):
         page = fake_page(title="Challenge", url="https://example.com/challenge")
         fp = FakePlaywright(page); fp.install_fake()

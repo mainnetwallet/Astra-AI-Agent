@@ -635,6 +635,17 @@ class ChatPipeline:
         if conversation_id in (None, "", 0):
             conversation_id = _cid_from_history(history)
 
+        # A caller with no conversation id has nowhere to persist terminal
+        # state. Instead of falling back to ONE process-wide "default"
+        # session (which would leak cwd/history/processes between unrelated
+        # callers), such a turn gets its own request-scoped session that is
+        # closed when the turn ends. Callers that need continuity without a
+        # conversation id pass an explicit `session_id` and keep it.
+        ephemeral_session = (not session_id
+                             and conversation_id in (None, "", 0))
+        if ephemeral_session:
+            session_id = f"req-{req}"
+
         # Any unexpected error must still close this turn's root operation:
         # without a terminal event the "Request received" row would stay
         # "… running" in the Activity Log forever (reconciliation keys off
@@ -649,6 +660,18 @@ class ChatPipeline:
                        op=f"chat:{req}", request=req, trace=req,
                        terminal=True)
             raise
+        finally:
+            if ephemeral_session:
+                self._close_session(session_id)
+
+    def _close_session(self, session_id) -> None:
+        """Close one request-scoped terminal session (best-effort)."""
+        if self.terminal is None:
+            return
+        try:
+            self.terminal.close(session_id)
+        except Exception:
+            pass
 
     def _run_turn(self, raw, context, hist_turns, attachments, req,
                   gateway_ok, trace, conversation_id=None,
@@ -668,10 +691,11 @@ class ChatPipeline:
                  else req)
         # An explicit session_id lets an embedder isolate callers that have
         # no conversation id (the web layer always has one). Without either,
-        # there is a single implicit conversation, so one stable default
-        # session — never a silent mix of unrelated explicit ids.
+        # fall back to a per-request id — never one process-wide "default"
+        # session shared by unrelated callers.
         session_id = (str(session_id_override) if session_id_override
-                      else default_session_id_for(conversation_id))
+                      else default_session_id_for(conversation_id,
+                                                  fallback=f"req-{req}"))
         terminal_context = self._terminal_context(session_id)
         exec_context = self.execution_history.context_text(scope)
         extra_context = "\n\n".join(

@@ -111,7 +111,8 @@ def search_web(args: dict, ctx=None) -> dict:
     req = urllib.request.Request(url, data=data, headers={
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AstraSearch/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        from astra.security import safe_urlopen
+        with safe_urlopen(req, timeout=8) as resp:
             html = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         return {"ok": False, "offline": True, "results": [], "count": 0,

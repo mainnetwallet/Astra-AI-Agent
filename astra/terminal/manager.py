@@ -192,8 +192,15 @@ class TerminalManager:
             pass
 
 
-def default_session_id_for(conversation_id) -> str:
-    """Stable, isolated session id for one chat conversation."""
+def default_session_id_for(conversation_id, *, fallback: str | None = None) -> str:
+    """Stable, isolated session id for one chat conversation.
+
+    A conversation always maps to `conv-<conversation_id>`, so its cwd,
+    processes and history persist across turns. Without a conversation id
+    there is nothing to persist into, so `fallback` (when given) is used —
+    callers that have no conversation should pass a per-request id rather
+    than let unrelated callers share one process-wide session.
+    """
     if conversation_id in (None, "", 0):
-        return DEFAULT_SESSION_ID
+        return fallback or DEFAULT_SESSION_ID
     return f"conv-{conversation_id}"

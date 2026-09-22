@@ -256,6 +256,73 @@ class SessionIsolationTests(unittest.TestCase):
         manager.close_all()
 
 
+class NoConversationSessionTests(unittest.TestCase):
+    """Regression: a caller with no conversation_id and no explicit
+    session_id used to share ONE process-wide "default" terminal session,
+    so unrelated callers inherited each other's cwd/history/processes.
+    Such a turn must get its own request-scoped session instead."""
+
+    class _Bus:
+        def __init__(self):
+            self.rows = []
+
+        def emit(self, kind, agent="", **data):
+            self.rows.append({"kind": kind, "agent": agent, "data": data})
+            return self.rows[-1]
+
+    @staticmethod
+    def _tool(command):
+        return json.dumps({"action": "tool", "tool": "terminal_exec",
+                           "args": {"command": command}})
+
+    @staticmethod
+    def _final(answer):
+        return json.dumps({"action": "final", "answer": answer})
+
+    def test_cidless_turns_get_isolated_request_scoped_sessions(self):
+        reg, manager = _stack()
+        bus = self._Bus()
+        manager.events = bus
+        base_a = tempfile.mkdtemp()
+
+        gw = FakeGateway([understand(final_request="go"), verdict("complete")])
+        rt = FakeRouter([self._tool(f"cd {base_a}"), self._final("done")])
+        pipe = ChatPipeline(gw, rt, registry=reg, terminal=manager)
+        out1 = pipe.run("go somewhere")
+        self.assertTrue(out1["ok"])
+        self.assertTrue(out1["data"]["terminal_session"].startswith("req-"))
+        # the request-scoped session is cleaned up when the turn ends
+        self.assertEqual(manager.session_ids(), [])
+
+        # a second cid-less turn must NOT see turn 1's cwd
+        gw.replies = [understand(final_request="where"), verdict("complete")]
+        rt.outputs = [self._tool("pwd"), self._final("here")]
+        self.assertTrue(pipe.run("where am i")["ok"])
+
+        started = [r["data"].get("cwd") for r in bus.rows
+                   if r["kind"] == "terminal.started"]
+        self.assertGreaterEqual(len(started), 2)
+        for cwd in started:
+            if cwd:
+                self.assertNotEqual(os.path.realpath(cwd),
+                                    os.path.realpath(base_a))
+        self.assertEqual(manager.session_ids(), [])
+
+    def test_conversation_session_still_persists_across_turns(self):
+        reg, manager = _stack()
+        base = tempfile.mkdtemp()
+        gw = FakeGateway([understand(final_request="go"), verdict("complete")])
+        rt = FakeRouter([self._tool(f"cd {base}"), self._final("done")])
+        pipe = ChatPipeline(gw, rt, registry=reg, terminal=manager)
+        hist = ConversationContext(messages=[], conversation_id=11)
+        pipe.run("go", history=hist)
+        # a conversation's session is kept (NOT closed at turn end)
+        self.assertIn("conv-11", manager.session_ids())
+        self.assertEqual(os.path.realpath(manager.get("conv-11").cwd),
+                         os.path.realpath(base))
+        manager.close_all()
+
+
 class GatewayBrainTests(unittest.TestCase):
     def test_gateway_brain_drives_the_same_loop_and_terminal(self):
         reg, manager = _stack()

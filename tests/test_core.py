@@ -139,11 +139,12 @@ class TestToolRegistry(unittest.TestCase):
         """search_web must not raise when the network is down — it returns a
         structured offline result (Section 4: offline-graceful)."""
         import urllib.error
-        import urllib.request
         from unittest import mock
         ctx = self._ctx()
-        with mock.patch.object(urllib.request, "urlopen",
-                               side_effect=urllib.error.URLError("offline")):
+        # search_web now fetches through the SSRF-safe opener
+        # (astra.security.safe_urlopen), so that is the call that fails here.
+        with mock.patch("astra.security.safe_urlopen",
+                        side_effect=urllib.error.URLError("offline")):
             out = self.reg.execute("search_web", {"query": "flip", "n": 3}, ctx)
         self.assertTrue(out.get("ok"))            # the tool itself succeeded
         res = out["result"]

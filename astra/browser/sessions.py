@@ -110,6 +110,24 @@ class BrowserSession:
             self._page = self._context.new_page()
         self._page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
         self._opened = True
+        # The pre-flight guard checked the *requested* URL; a public page can
+        # still redirect to loopback/link-local/private space (cloud metadata
+        # at 169.254.169.254 being the classic). Re-check where we actually
+        # landed before any page content is handed to the model.
+        landed = ""
+        try:
+            landed = self._page.url or ""
+        except Exception:
+            landed = ""
+        if landed and not allow_url(landed, allow_private=allow_private):
+            self._opened = False
+            try:
+                self._page.goto("about:blank")
+            except Exception:
+                pass
+            return {"status": "error", "url": url,
+                    "error": "refused: navigation redirected to a "
+                             "private/blocked address"}
         self._check_user_wall(self._page)
         return {"status": "ok", "url": url,
                 "title": self._page.title() or "",

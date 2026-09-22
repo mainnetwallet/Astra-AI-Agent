@@ -9,10 +9,13 @@ never hit the loopback / private network unless an operator opts in.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 
 # -- secret redaction ---------------------------------------------------------
@@ -224,3 +227,52 @@ def allow_url(url: str, allow_private: bool = False) -> bool:
     if allow_private:
         return bool(url)
     return not risky_url(url)
+
+
+# -- SSRF-safe HTTP fetch -----------------------------------------------------
+
+class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate EVERY redirect hop, not just the caller-supplied URL.
+
+    A public URL that passes `allow_url` can still 302 to
+    `http://169.254.169.254/` or `http://127.0.0.1:6379/`. urllib follows
+    redirects by default, so the guard would otherwise be trivially bypassed.
+    Returning/raising here refuses the hop instead of following it.
+    """
+
+    def __init__(self, allow_private: bool = False):
+        super().__init__()
+        self.allow_private = bool(allow_private)
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not allow_url(newurl, allow_private=self.allow_private):
+            raise urllib.error.HTTPError(
+                newurl, code,
+                "refused redirect to a private/blocked address", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_urlopen(url, *, timeout: float = 8.0, data=None, headers=None,
+                 allow_private: bool | None = None):
+    """`urllib.request.urlopen` with the SSRF guard applied to the initial
+    URL AND to every redirect hop. Raises `ValueError` for the initial
+    refusal (same contract callers already rely on) and
+    `urllib.error.HTTPError` for a refused redirect."""
+    if allow_private is None:
+        allow_private = os.environ.get("ASTRA_ALLOW_PRIVATE_URLS") == "1"
+    if isinstance(url, urllib.request.Request):
+        req = url
+        target = req.full_url
+        if headers:
+            for key, value in headers.items():
+                req.add_header(key, value)
+        if data is not None:
+            req.data = data
+    else:
+        target = str(url)
+        req = urllib.request.Request(target, data=data,
+                                     headers=dict(headers or {}))
+    if not allow_url(target, allow_private=allow_private):
+        raise ValueError("refused URL (private/blocked network)")
+    opener = urllib.request.build_opener(_SSRFRedirectHandler(allow_private))
+    return opener.open(req, timeout=timeout)

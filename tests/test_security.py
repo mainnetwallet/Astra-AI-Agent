@@ -16,7 +16,7 @@ import urllib.request
 from unittest.mock import patch
 
 from astra.security import (ApiError, RateLimiter, make_request_id, redact,
-                            redact_text, risky_url, allow_url)
+                            redact_text, risky_url, allow_url, safe_urlopen)
 
 
 class TestRedaction(unittest.TestCase):
@@ -73,6 +73,106 @@ class TestSsrfGuard(unittest.TestCase):
 
     def test_override_allows_private(self):
         self.assertTrue(allow_url("http://127.0.0.1/x", allow_private=True))
+
+
+class _RedirectServer:
+    """Tiny loopback HTTP server for redirect tests."""
+
+    def __init__(self):
+        import http.server
+        import threading
+        outer = self
+        self.redirect_to = ""
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/start":
+                    self.send_response(302)
+                    self.send_header("Location", outer.redirect_to)
+                    self.end_headers()
+                elif self.path == "/ok":
+                    body = b"hello-ok"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+
+    def url(self, path):
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class TestSsrfSafeRedirects(unittest.TestCase):
+    """Regression: the SSRF guard only checked the URL the caller supplied.
+    urllib follows redirects by default, so a public URL that 302s to
+    loopback/link-local/private space (cloud metadata) bypassed the guard.
+    Every hop must now be re-checked."""
+
+    def test_redirect_to_private_address_is_refused(self):
+        srv = _RedirectServer()
+        self.addCleanup(srv.stop)
+        srv.redirect_to = "http://169.254.169.254/latest/meta-data/"
+        real_allow = allow_url
+
+        def patched(url, allow_private=False):
+            # The test harness's own loopback start URL is "allowed" so the
+            # initial request can happen; the redirect target is judged by
+            # the real policy and must be refused.
+            if str(url).startswith(srv.url("/start")):
+                return True
+            return real_allow(url, allow_private=allow_private)
+
+        with patch("astra.security.allow_url", patched):
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                safe_urlopen(srv.url("/start"), timeout=5)
+        self.assertIn("refused redirect", str(cm.exception))
+
+    def test_redirect_to_allowed_target_is_still_followed(self):
+        srv = _RedirectServer()
+        self.addCleanup(srv.stop)
+        srv.redirect_to = srv.url("/ok")
+        with patch("astra.security.allow_url",
+                   lambda url, allow_private=False: True):
+            with safe_urlopen(srv.url("/start"), timeout=5) as resp:
+                self.assertEqual(resp.read(), b"hello-ok")
+
+    def test_initial_private_url_is_refused(self):
+        with self.assertRaises(ValueError):
+            safe_urlopen("http://127.0.0.1:9/x", timeout=1, allow_private=False)
+
+    def test_research_fetch_uses_the_redirect_safe_opener(self):
+        """The caller-supplied-URL guard is useless if the fetch layer still
+        follows an unchecked redirect: `_fetch` must go through the same
+        policy on every hop."""
+        from astra.research import lookup as research
+        srv = _RedirectServer()
+        self.addCleanup(srv.stop)
+        srv.redirect_to = "http://169.254.169.254/latest/meta-data/"
+        real_allow = allow_url
+
+        def patched(url, allow_private=False):
+            if str(url).startswith(srv.url("/start")):
+                return True
+            return real_allow(url, allow_private=allow_private)
+
+        with patch("astra.security.allow_url", patched):
+            with self.assertRaises(urllib.error.HTTPError):
+                research._fetch(srv.url("/start"))
 
 
 class TestRateLimiterRequestId(unittest.TestCase):

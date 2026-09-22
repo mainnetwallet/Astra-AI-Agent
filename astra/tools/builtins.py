@@ -345,19 +345,38 @@ def execution_history_read(args: dict, ctx=None) -> dict:
     current conversation/run — every recorded tool call, not just the
     recent ones already injected into context. Pass offset/next_offset
     from the previous call to continue; each entry has tool/ok/status/
-    summary/step/seq. Defaults to the current scope; pass `scope`
-    explicitly to read another one (e.g. a completed run)."""
+    summary/step/seq.
+
+    The scope is ALWAYS the trusted scope of this tool call
+    (`ctx.execution_scope`, set by the runtime from the session/
+    conversation this call belongs to) — a `scope` argument is never
+    accepted from the model, so one conversation can never read another
+    conversation's or run's history. Only `offset`/`length` are read from
+    args. A server-side component that legitimately needs another scope
+    uses `AgentExecutionHistory.read_log(scope, ...)` directly instead of
+    this AI-facing tool."""
     hist = getattr(ctx, "execution_history", None) if ctx else None
     if hist is None:
         return {"status": "error", "error": "execution history not "
                 "available in this context"}
-    scope = args.get("scope") or (getattr(ctx, "execution_scope", None)
-                                  if ctx else None)
+    # Trusted only: the scope comes from the runtime's ToolContext, never
+    # from the model's arguments. Conversation ids are not secrets, so
+    # treating a model-supplied scope as authorization would let any
+    # conversation page through any other conversation's execution log.
+    scope = getattr(ctx, "execution_scope", None) if ctx else None
     if not scope:
-        raise ValidationError("scope required (no current scope in "
-                              "this context)")
-    return hist.read_log(scope, offset=int(args.get("offset", 0) or 0),
-                         length=int(args.get("length", 6000) or 6000))
+        raise ValidationError("no execution scope in this context")
+    out = hist.read_log(scope, offset=int(args.get("offset", 0) or 0),
+                        length=int(args.get("length", 6000) or 6000))
+    # If the model asked for a different scope, say plainly that the
+    # argument was ignored so it never believes it read another scope.
+    requested = (args or {}).get("scope")
+    if requested not in (None, "") and str(requested) != str(scope):
+        note = ("scope argument ignored: execution history is read only "
+                "from the trusted scope of the current conversation/run")
+        prior = out.get("note")
+        out["note"] = f"{prior} — {note}" if prior else note
+    return out
 
 
 BUILTIN_TOOLS = [

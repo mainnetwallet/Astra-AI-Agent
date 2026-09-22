@@ -28,6 +28,45 @@ fallback path cannot grow without bound.
 
 This module intentionally knows nothing about browsers, terminals, tokens
 or models — it is just bounded, retrievable storage for large text.
+
+RETENTION (audited): there is deliberately NO TTL/GC/reaper here yet, and
+`output_blobs` rows are never deleted by this process. That is a real,
+documented production risk, not an oversight to paper over with an
+unsafe cleanup:
+
+* What is stored, by `kind`:
+    - `browser_page`              — full page text from `browser_observe`
+                                    (BrowserSession, one shared manager).
+    - `terminal_stdout_<pid>` /
+      `terminal_stderr_<pid>`     — full stdout/stderr of one foreground OR
+                                    background terminal command.
+    - `terminal_history_<sid>`    — the full append-only command log of one
+                                    terminal session.
+    - `execution_history_<scope>` — the full agent/tool execution log of one
+                                    conversation/run (scope = conversation id).
+* Reachability: only two things can name a blob again — (a) a live in-RAM
+  object (TerminalSession/TerminalManager hold their blob ids; an
+  AgentExecutionHistory holds `scope -> blob_id`), or (b) the model holding
+  a `*_blob_id`/`content_id` it was handed in a tool result. Blob ids are
+  64-bit-random capability tokens; there is no scope/owner check on read.
+* Orphans DO accumulate. `TerminalSession.close()`/manager reap and
+  `BrowserSession.close()` delete nothing; `AgentExecutionHistory` keeps its
+  `scope -> blob_id` map only in RAM, so after a process restart the
+  persisted `execution_history_*` rows are unreachable while still on disk
+  (the same applies to `terminal_history_*` for sessions that no longer
+  exist). Nothing in this process ever issues `DELETE FROM output_blobs`.
+* Therefore `output_blobs` grows without bound for the life of the SQLite
+  file. The fallback in-memory ring cap (`_FALLBACK_MAX_BYTES`) only applies
+  when NO Store is wired, i.e. never for the real app.
+
+Safe future GC needs, at minimum, ownership/lifecycle metadata that does not
+exist today: a `scope`/`owner` column recorded at write time (plus an
+`ALTER TABLE` migration in `astra.core.store_migrations`), a reference
+record for "blob X was handed to conversation/session Y", and a lifecycle
+hook that fires when a conversation/run/session is definitively gone. Until
+those exist, deleting by age alone would be able to drop a blob an open
+conversation (or an in-flight task) can still legitimately read, so deletion
+is intentionally not implemented.
 """
 from __future__ import annotations
 

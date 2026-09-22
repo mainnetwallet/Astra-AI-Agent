@@ -9,6 +9,7 @@ the new `*_read` tools.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -388,6 +389,186 @@ class ExecutionHistoryRetrievalTests(unittest.TestCase):
         self.assertEqual(recovered["tool"], "terminal_exec")
         self.assertEqual([e["tool"] for e in normal_entries],
                          ["terminal_output_read"])
+
+
+# ── BlobStore retention audit (no silent deletion) ─────────────────────
+
+class BlobStoreRetentionAuditTests(unittest.TestCase):
+    """Pins the audited retention contract: nothing in this process deletes
+    `output_blobs` rows. Closing/reaping a session must NOT drop the full
+    output a live model call may still be paging through, and a restart must
+    not delete persisted data (it can only make rows unreachable — the known,
+    documented orphan risk, not silent data loss)."""
+
+    def _store(self):
+        path = os.path.join(tempfile.mkdtemp(), "retention.db")
+        return Store(path)
+
+    def test_closing_a_session_does_not_delete_its_blobs(self):
+        from astra.terminal.manager import DEFAULT_SESSION_ID
+        store = self._store()
+        mgr = TerminalManager(store=store)
+        r = terminal_exec({"command": "python3 -c \"print('A'*30000)\""},
+                          ctx=None, manager=mgr)
+        self.assertEqual(r["status"], "completed")
+        self.assertTrue(r["truncated"])
+        blob_id = r["stdout_blob_id"]
+        rows_before = store.fetchone("SELECT COUNT(*) c FROM output_blobs")["c"]
+        self.assertGreaterEqual(rows_before, 1)
+
+        # Close AND reap the session.
+        self.assertTrue(mgr.close(DEFAULT_SESSION_ID))
+        mgr.close_idle(0)
+
+        rows_after = store.fetchone("SELECT COUNT(*) c FROM output_blobs")["c"]
+        self.assertGreaterEqual(rows_after, rows_before,
+                                "session close must not delete blobs")
+
+        # The full stdout is still retrievable by blob id after close.
+        collected, offset = [], 0
+        while True:
+            chunk = terminal_output_read({"blob_id": blob_id, "offset": offset,
+                                          "length": 6000}, manager=mgr)
+            self.assertEqual(chunk["status"], "ok")
+            collected.append(chunk["text"])
+            if chunk["done"]:
+                break
+            offset = chunk["next_offset"]
+        self.assertEqual(len("".join(collected)), r["stdout_total_chars"])
+
+    def test_restart_keeps_rows_but_drops_the_scope_mapping(self):
+        # Documents the exact orphan risk instead of pretending a GC exists:
+        # the persisted rows survive, but the in-RAM scope -> blob id map that
+        # made them readable does not, so they become unreachable, not lost.
+        store = self._store()
+        hist1 = AgentExecutionHistory(blobs=BlobStore(store))
+        hist1.record("conv-x", "toolx", ok=True, result="kept", step=1)
+        page = hist1.read_log("conv-x", offset=0, length=6000)
+        self.assertEqual(len(page["entries"]), 1)
+        rows = store.fetchone("SELECT COUNT(*) c FROM output_blobs")["c"]
+        self.assertEqual(rows, 1)
+
+        # "Restart": a fresh history over the same persistent Store.
+        hist2 = AgentExecutionHistory(blobs=BlobStore(store))
+        after = hist2.read_log("conv-x", offset=0, length=6000)
+        self.assertEqual(after["entries"], [])
+        self.assertTrue(after["done"])
+        # ...but the row is still there: no silent deletion.
+        self.assertEqual(
+            store.fetchone("SELECT COUNT(*) c FROM output_blobs")["c"], 1)
+
+
+# ── Execution history: trusted-scope isolation ─────────────────────────
+
+class ExecutionHistoryScopeIsolationTests(unittest.TestCase):
+    """`execution_history_read` must read ONLY the trusted scope the runtime
+    attached to the tool call. Conversation ids are not secrets, so a
+    model-supplied `scope` argument must never be used for lookup or
+    authorization — otherwise conversation A could page through B's log by
+    guessing/knowing B's id."""
+
+    def _hist_with_two_conversations(self):
+        hist = AgentExecutionHistory(max_entries=2)
+        for i in range(5):
+            hist.record("conv-a", "tool_a", ok=True, status="completed",
+                        result=f"a-result-{i}", step=i)
+        for i in range(5):
+            hist.record("conv-b", "tool_b", ok=True, status="completed",
+                        result=f"b-result-{i}", step=i)
+        return hist
+
+    def test_conversation_reads_its_own_history(self):
+        hist = self._hist_with_two_conversations()
+        ctx = ToolContext(execution_history=hist, execution_scope="conv-a")
+        page = execution_history_read({}, ctx=ctx)
+        self.assertEqual(page["status"], "ok")
+        self.assertEqual(page["scope"], "conv-a")
+        self.assertTrue(page["entries"])
+        self.assertTrue(all(e["tool"] == "tool_a" for e in page["entries"]))
+
+    def test_model_scope_argument_cannot_read_another_conversation(self):
+        hist = self._hist_with_two_conversations()
+        ctx = ToolContext(execution_history=hist, execution_scope="conv-a")
+        page = execution_history_read({"scope": "conv-b"}, ctx=ctx)
+        # Still conv-a's log — never conv-b's.
+        self.assertEqual(page["scope"], "conv-a")
+        self.assertTrue(page["entries"])
+        self.assertTrue(all(e["tool"] == "tool_a" for e in page["entries"]))
+        self.assertNotIn("tool_b", json.dumps(page))
+        # and the caller is told the argument was ignored
+        self.assertIn("ignored", page.get("note", ""))
+
+    def test_other_conversation_reads_its_own_history(self):
+        hist = self._hist_with_two_conversations()
+        ctx = ToolContext(execution_history=hist, execution_scope="conv-b")
+        page = execution_history_read({"scope": "conv-a"}, ctx=ctx)
+        self.assertEqual(page["scope"], "conv-b")
+        self.assertTrue(page["entries"])
+        self.assertTrue(all(e["tool"] == "tool_b" for e in page["entries"]))
+        self.assertNotIn("tool_a", json.dumps(page))
+
+    def test_pagination_contract_through_the_tool(self):
+        hist = AgentExecutionHistory(max_entries=1)
+        for i in range(12):
+            hist.record("conv-p", "toolp", ok=True, result=f"p-{i}", step=i)
+        ctx = ToolContext(execution_history=hist, execution_scope="conv-p")
+        rows, seen_offsets, offset = [], [], 0
+        while True:
+            page = execution_history_read(
+                {"offset": offset, "length": 200}, ctx=ctx)
+            self.assertEqual(page["status"], "ok")
+            self.assertEqual(page["offset"], offset)
+            self.assertIn("done", page)
+            self.assertIn("next_offset", page)
+            self.assertIn("total_chars", page)
+            seen_offsets.append(page["offset"])
+            rows.extend(page["entries"])
+            if page["done"]:
+                self.assertIsNone(page["next_offset"])
+                break
+            self.assertIsNotNone(page["next_offset"])
+            self.assertGreater(page["next_offset"], offset)
+            offset = page["next_offset"]
+        self.assertEqual([r["seq"] for r in rows], list(range(1, 13)))
+        self.assertEqual(len(seen_offsets), len(set(seen_offsets)))
+
+    def test_missing_trusted_scope_fails_closed(self):
+        # A context with history but NO trusted scope must not silently
+        # fall back to a model-supplied scope.
+        hist = self._hist_with_two_conversations()
+        ctx = ToolContext(execution_history=hist, execution_scope=None)
+        with self.assertRaises(Exception):
+            execution_history_read({"scope": "conv-b"}, ctx=ctx)
+
+    def test_no_scope_override_through_the_agent_tool_loop(self):
+        # End-to-end: the real loop builds the ToolContext, and the model's
+        # scripted call names another conversation's scope.
+        from astra.ai.agent_tool_loop import AgentToolLoop
+        from astra.core.permissions import Policy
+        from astra.tools.registry import ToolRegistry
+        from astra.tools.builtins import register_builtins
+        from tests.helpers import ScriptedBrain
+
+        hist = self._hist_with_two_conversations()
+        reg = ToolRegistry(policy=Policy(granted=["read"]))
+        register_builtins(reg)
+        brain = ScriptedBrain([
+            json.dumps({"action": "tool", "tool": "execution_history_read",
+                        "args": {"scope": "conv-b"},
+                        "thought": "read the other conversation"}),
+            json.dumps({"action": "final", "answer": "done"}),
+        ])
+        loop = AgentToolLoop(reg, execution_history=hist, max_steps=3)
+        res = loop.run("read the history", brain, system_prompt="You are Astra.",
+                       scope="conv-a")
+        self.assertTrue(res.ok)
+        # The tool result the model received must contain conv-a's entries
+        # only — never conv-b's.
+        joined = "\n".join(
+            str(m.get("content", "")) for m in brain.calls[1]
+            if m.get("role") == "user")
+        self.assertIn("tool_a", joined)
+        self.assertNotIn("tool_b", joined)
 
 
 if __name__ == "__main__":

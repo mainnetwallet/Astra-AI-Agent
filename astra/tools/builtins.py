@@ -340,6 +340,26 @@ def get_health(args: dict, ctx=None) -> dict:
 
 # ── registry helper ─────────────────────────────────────────────────────────────
 
+def execution_history_read(args: dict, ctx=None) -> dict:
+    """Page back through the FULL agent/tool execution history for the
+    current conversation/run — every recorded tool call, not just the
+    recent ones already injected into context. Pass offset/next_offset
+    from the previous call to continue; each entry has tool/ok/status/
+    summary/step/seq. Defaults to the current scope; pass `scope`
+    explicitly to read another one (e.g. a completed run)."""
+    hist = getattr(ctx, "execution_history", None) if ctx else None
+    if hist is None:
+        return {"status": "error", "error": "execution history not "
+                "available in this context"}
+    scope = args.get("scope") or (getattr(ctx, "execution_scope", None)
+                                  if ctx else None)
+    if not scope:
+        raise ValidationError("scope required (no current scope in "
+                              "this context)")
+    return hist.read_log(scope, offset=int(args.get("offset", 0) or 0),
+                         length=int(args.get("length", 6000) or 6000))
+
+
 BUILTIN_TOOLS = [
     # name, fn, category, risk, requires_confirmation, idempotent
     ("remember",       remember,       "memory",  Level.READ,           False, True),
@@ -362,6 +382,7 @@ BUILTIN_TOOLS = [
     ("search_files",   search_files,   "files",   Level.READ,           False, True),
     ("get_health",     get_health,     "system",  Level.READ,           False, True),
     ("generate_document", generate_document, "files", Level.LOW_RISK_WRITE, False, True),
+    ("execution_history_read", execution_history_read, "system", Level.READ, False, True),
 ]
 
 

@@ -127,15 +127,25 @@ def _parse_env_blob(blob: str) -> dict:
 
 
 class _OutputBuffer:
-    """A capped, thread-safe text buffer with an optional live callback."""
+    """A capped, thread-safe text buffer with an optional live callback.
 
-    def __init__(self, cap: int, on_chunk=None):
+    The cap bounds the in-memory hot copy only (protects RAM against a
+    pathologically chatty command). When `on_raw` is given, EVERY appended
+    chunk — capped or not — is also forwarded to it uncapped, so a caller
+    can persist the complete stream (see TerminalSession's use of
+    astra.core.blob_store) and nothing is silently lost even once the hot
+    buffer stops growing.
+    """
+
+    def __init__(self, cap: int, on_chunk=None, on_raw=None):
         self._parts: list[str] = []
         self._size = 0
         self._cap = max(0, int(cap))
         self._on_chunk = on_chunk
+        self._on_raw = on_raw
         self._lock = threading.Lock()
         self.truncated = False
+        self.full_size = 0
 
     def append(self, text: str) -> None:
         if not text:
@@ -149,6 +159,12 @@ class _OutputBuffer:
             else:
                 self._parts.append(text)
                 self._size += len(text)
+            self.full_size += len(text)
+        if self._on_raw is not None:
+            try:
+                self._on_raw(text)
+            except Exception:
+                pass
         if self._on_chunk is not None:
             try:
                 self._on_chunk(text)
@@ -183,7 +199,8 @@ class ProcessRecord:
 
     def __init__(self, process_id: str, command: str, popen, cwd: str,
                  started_at: float, max_output_chars: int,
-                 on_output=None, op: str = "", probes: dict | None = None):
+                 on_output=None, op: str = "", probes: dict | None = None,
+                 blobs=None):
         self.process_id = process_id
         self.command = command
         self.popen = popen
@@ -199,8 +216,19 @@ class ProcessRecord:
         self.exit_emitted = False
         self.status = RUNNING
         self.exit_code: int | None = None
-        self.stdout = _OutputBuffer(max_output_chars, on_output)
-        self.stderr = _OutputBuffer(max_output_chars, on_output)
+        if blobs is None:
+            from astra.core.blob_store import BlobStore
+            blobs = BlobStore()
+        # Full stdout/stderr for this background process, retrievable with
+        # terminal_output_read regardless of the hot-buffer cap.
+        self.stdout_blob_id = blobs.open(f"terminal_stdout_{process_id}")
+        self.stderr_blob_id = blobs.open(f"terminal_stderr_{process_id}")
+        self.stdout = _OutputBuffer(
+            max_output_chars, on_output,
+            on_raw=lambda t: blobs.append(self.stdout_blob_id, t))
+        self.stderr = _OutputBuffer(
+            max_output_chars, on_output,
+            on_raw=lambda t: blobs.append(self.stderr_blob_id, t))
         self._threads: list[threading.Thread] = []
         self._lock = threading.Lock()
 
@@ -252,6 +280,11 @@ class ProcessRecord:
         if include_output:
             out["stdout"] = self.stdout.text()
             out["stderr"] = self.stderr.text()
+            out["truncated"] = bool(self.stdout.truncated or self.stderr.truncated)
+            out["stdout_blob_id"] = self.stdout_blob_id
+            out["stdout_total_chars"] = self.stdout.full_size
+            out["stderr_blob_id"] = self.stderr_blob_id
+            out["stderr_total_chars"] = self.stderr.full_size
         return out
 
 
@@ -263,7 +296,7 @@ class TerminalSession:
                  platform: str | None = None, events=None,
                  max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
                  history_limit: int = DEFAULT_HISTORY_LIMIT,
-                 on_output=None):
+                 on_output=None, blobs=None):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.platform = platform or detect_platform()
         self.shell = dict(shell or detect_shell(self.platform))
@@ -292,6 +325,19 @@ class TerminalSession:
         self._exec_lock = threading.Lock()
         self._active = None            # currently-running foreground Popen
         self._probe_dir = tempfile.mkdtemp(prefix="astra-term-")
+        # Full stdout/stderr and full command history outlive the capped
+        # hot buffer / the bounded deque below — see astra.core.blob_store.
+        if blobs is None:
+            from astra.core.blob_store import BlobStore
+            blobs = BlobStore()
+        self._blobs = blobs
+        self._history_seq = 0
+        # One append-only, newline-delimited log per session: every command
+        # ever run here, regardless of the `history_limit` deque size. Used
+        # by `terminal_history_read` to page back past what the hot deque
+        # still holds.
+        self._history_blob_id = self._blobs.open(
+            f"terminal_history_{self.session_id}")
 
     def _probe_paths_for(self, tag: str) -> dict:
         """Probe files for ONE command.
@@ -332,6 +378,14 @@ class TerminalSession:
         if limit and limit > 0:
             rows = rows[-limit:]
         return rows
+
+    def history_log_chunk(self, offset: int = 0, length: int = 6000) -> dict:
+        """Raw newline-delimited-JSON chunk of the FULL, unbounded command
+        history for this session (every command ever run here), for
+        `terminal_history_read` to page through once a command has aged
+        out of the bounded `history()` deque."""
+        return self._blobs.read(self._history_blob_id, offset=offset,
+                                length=length)
 
     def processes(self) -> list[dict]:
         self._refresh_all()
@@ -521,10 +575,17 @@ class TerminalSession:
                        snippet=(text if len(text) <= 500 else text[:500] + "…"),
                        status=RUNNING)
 
+        # Full stdout/stderr are captured here regardless of the hot-buffer
+        # cap, so a chatty command's output is never lost — only deferred
+        # behind `terminal_output_read` once it exceeds max_output_chars.
+        stdout_blob = self._blobs.open(f"terminal_stdout_{process_id}")
+        stderr_blob = self._blobs.open(f"terminal_stderr_{process_id}")
         stdout = _OutputBuffer(self.max_output_chars,
-                               lambda t: _on_chunk(t, "stdout"))
+                               lambda t: _on_chunk(t, "stdout"),
+                               on_raw=lambda t: self._blobs.append(stdout_blob, t))
         stderr = _OutputBuffer(self.max_output_chars,
-                               lambda t: _on_chunk(t, "stderr"))
+                               lambda t: _on_chunk(t, "stderr"),
+                               on_raw=lambda t: self._blobs.append(stderr_blob, t))
         out_thread = threading.Thread(target=_read_stream,
                                       args=(popen.stdout, stdout), daemon=True)
         err_thread = threading.Thread(target=_read_stream,
@@ -580,6 +641,11 @@ class TerminalSession:
             "duration": duration,
             "duration_ms": duration,
             "truncated": bool(stdout.truncated or stderr.truncated),
+            # Full stream is always retrievable by these ids, whether or
+            # not this particular run was truncated — terminal_output_read
+            # is the one code path for "give me more output".
+            "stdout_blob_id": stdout_blob, "stdout_total_chars": stdout.full_size,
+            "stderr_blob_id": stderr_blob, "stderr_total_chars": stderr.full_size,
         }
         self._record(result)
         self._emit_output(op, process_id, result)
@@ -606,7 +672,8 @@ class TerminalSession:
         popen = self._popen(argv, base_env, cwd)
         record = ProcessRecord(process_id, command, popen, cwd, started,
                                self.max_output_chars, on_output=on_chunk,
-                               op=f"term:{process_id}", probes=probes)
+                               op=f"term:{process_id}", probes=probes,
+                               blobs=self._blobs)
         out_thread = threading.Thread(target=_read_stream,
                                       args=(popen.stdout, record.stdout),
                                       daemon=True)
@@ -739,17 +806,38 @@ class TerminalSession:
         return probe_rc
 
     def _record(self, result: dict) -> None:
+        with self._lock:
+            self._history_seq += 1
+            seq = self._history_seq
         entry = {
+            "seq": seq,
             "command": result.get("command", ""),
             "cwd": result.get("cwd", self.cwd),
             "status": result.get("status", ""),
             "exit_code": result.get("exit_code"),
             "duration_ms": result.get("duration_ms", 0.0),
+            # Bounded preview only — this is what the hot deque/context_text
+            # carries. Full stdout/stderr for this command stay retrievable
+            # via terminal_output_read using stdout_blob_id/stderr_blob_id
+            # below (never dropped, unlike the 1000-char cap that used to
+            # apply here with no way to get the rest back).
             "stdout": (result.get("stdout") or "")[:1000],
             "stderr": (result.get("stderr") or "")[:1000],
+            "stdout_blob_id": result.get("stdout_blob_id"),
+            "stderr_blob_id": result.get("stderr_blob_id"),
         }
         with self._lock:
             self._history.append(entry)
+        # Append-only persistent log: EVERY command this session ever ran,
+        # regardless of the deque's history_limit — terminal_history_read
+        # pages through it by seq once a command has aged out of the deque.
+        try:
+            import json
+            self._blobs.append(self._history_blob_id,
+                               json.dumps(entry, ensure_ascii=False,
+                                         default=str) + "\n")
+        except Exception:
+            pass
 
     # -- context for the AI --------------------------------------------------
     def context_text(self, *, max_commands: int = 8,

@@ -131,6 +131,66 @@ def terminal_sessions(args: dict, ctx=None, manager=None) -> dict:
     return {"sessions": mgr.snapshots()}
 
 
+def terminal_output_read(args: dict, ctx=None, manager=None) -> dict:
+    """Retrieve more of a command's full stdout/stderr after `terminal_exec`
+    / `terminal_status` reported `truncated: true`. Pass the
+    `stdout_blob_id`/`stderr_blob_id` it returned; chunked via
+    `offset`/`next_offset` until `done`."""
+    mgr = _manager(ctx, manager)
+    blob_id = args.get("blob_id", "")
+    if not blob_id:
+        raise ValidationError("blob_id required (stdout_blob_id or "
+                              "stderr_blob_id from a prior terminal result)")
+    return mgr.blobs.read(blob_id, offset=int(args.get("offset", 0) or 0),
+                          length=int(args.get("length", 6000) or 6000))
+
+
+def terminal_history_read(args: dict, ctx=None, manager=None) -> dict:
+    """Page back through this session's FULL command history — every
+    command ever run here, not just the recent ones `terminal_history`
+    keeps hot. Pass `offset`/`next_offset` from the previous call to
+    continue; each entry is one JSON object (command/status/exit_code/
+    stdout+stderr preview/blob ids for their full output)."""
+    session = _session(args, ctx, manager)
+    chunk = session.history_log_chunk(
+        offset=int(args.get("offset", 0) or 0),
+        length=int(args.get("length", 6000) or 6000))
+    if chunk.get("status") != "ok":
+        return chunk
+    import json
+    text = chunk.get("text", "")
+    offset = chunk["offset"]
+    total = chunk["total_chars"]
+    # A chunk boundary can land mid-line; only WHOLE lines are parsed, and
+    # `next_offset` only advances past whatever was actually consumed — a
+    # partial trailing line is left for the next call, never guessed at.
+    nl = text.rfind("\n")
+    if nl == -1:
+        # No complete line fit in this chunk — do not advance; ask the
+        # caller to retry with a larger `length` instead of losing data.
+        return {"status": "ok", "session_id": session.session_id,
+                "entries": [], "offset": offset, "next_offset": offset,
+                "done": offset >= total, "total_chars": total,
+                "note": ("no complete history line fit in this chunk; "
+                        "retry with a larger length")}
+    usable = text[:nl + 1]
+    entries = []
+    for line in usable.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+    next_offset = offset + len(usable)
+    done = next_offset >= total
+    return {"status": "ok", "session_id": session.session_id,
+            "entries": entries, "offset": offset,
+            "next_offset": None if done else next_offset, "done": done,
+            "total_chars": total}
+
+
 def terminal_close(args: dict, ctx=None, manager=None) -> dict:
     """Close a terminal session and kill any processes it started. Defaults
     to the current session."""
@@ -169,6 +229,17 @@ TERMINAL_TOOLS = [
     ("terminal_history", terminal_history,
      "Recent commands run in the terminal session and their outcomes.",
      {"limit": {"type": "int"}, **_SESSION_ARG}),
+    ("terminal_output_read", terminal_output_read,
+     "Retrieve more of a command's full stdout/stderr after "
+     "terminal_exec/terminal_status reported truncated=true. Pass the "
+     "blob_id it returned; chunked via offset/next_offset until done.",
+     {"blob_id": {"type": "string", "required": True},
+      "offset": {"type": "int"}, "length": {"type": "int"}}),
+    ("terminal_history_read", terminal_history_read,
+     "Page back through this session's FULL command history (every "
+     "command ever run here, beyond what terminal_history keeps hot). "
+     "Chunked via offset/next_offset until done.",
+     {"offset": {"type": "int"}, "length": {"type": "int"}, **_SESSION_ARG}),
     ("terminal_sessions", terminal_sessions,
      "List live terminal sessions with their cwd and processes.", {}),
     ("terminal_close", terminal_close,
@@ -176,7 +247,8 @@ TERMINAL_TOOLS = [
 ]
 
 # Tools that mutate session/process state — never blindly retried.
-_IDEMPOTENT = {"terminal_status", "terminal_history", "terminal_sessions"}
+_IDEMPOTENT = {"terminal_status", "terminal_history", "terminal_sessions",
+              "terminal_output_read", "terminal_history_read"}
 
 
 def register_terminal_tools(reg, manager) -> int:

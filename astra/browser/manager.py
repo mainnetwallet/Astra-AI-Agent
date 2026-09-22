@@ -12,7 +12,7 @@ from .sessions import BrowserSession, BrowserUnavailableError
 
 
 class BrowserManager:
-    def __init__(self, *, config=None, events=None):
+    def __init__(self, *, config=None, events=None, store=None):
         self.config = config or {}
         self.events = events
         # Sessions belong to THIS manager (not a module-global), so a long
@@ -20,6 +20,11 @@ class BrowserManager:
         # and close_all() can release every Playwright resource on shutdown.
         self._sessions: dict[str, BrowserSession] = {}
         self._lock = threading.Lock()
+        # Shared across every session on this manager so full page content
+        # saved by one session's observe() survives that session closing,
+        # and `browser_content_read` can find it by id alone.
+        from astra.core.blob_store import BlobStore
+        self._blobs = BlobStore(store)
 
     @property
     def available(self) -> bool:
@@ -47,7 +52,7 @@ class BrowserManager:
             s = self._sessions.get(sid)
             if s is None:
                 try:
-                    s = BrowserSession(config=self.config)
+                    s = BrowserSession(config=self.config, blobs=self._blobs)
                 except BrowserUnavailableError as exc:
                     raise BrowserUnavailableError(str(exc)) from None
                 self._sessions[sid] = s
@@ -103,3 +108,16 @@ class BrowserManager:
 
     def browser_close(self, args: dict) -> dict:
         return self.close_session(args.get("session", ""))
+
+    def browser_content_read(self, args: dict) -> dict:
+        """Retrieve more of a page's full text after `browser_observe`
+        reported `truncated: true` — bounded per call, chunked via
+        `offset`/`next_offset` until `done`. Content is looked up by
+        `content_id` alone (not tied to a live session), since the blob
+        store is shared across this manager's sessions."""
+        content_id = args.get("content_id", "")
+        if not content_id:
+            return {"status": "error", "error": "content_id required"}
+        return self._blobs.read(content_id,
+                                offset=int(args.get("offset", 0) or 0),
+                                length=int(args.get("length", 6000) or 6000))

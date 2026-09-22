@@ -371,7 +371,9 @@ class AgentToolLoop:
 
         ctx = ToolContext(registry=self.registry, events=self.events,
                           terminal=self.terminal,
-                          terminal_session_id=session_id)
+                          terminal_session_id=session_id,
+                          execution_history=self.execution_history,
+                          execution_scope=scope)
         op = new_op_id()
         # The loop's own start, so its terminal event can report a real
         # duration (sub-second accurate) instead of the row inheriting a

@@ -50,7 +50,7 @@ class BrowserSession:
 
     # -- lifecycle -----------------------------------------------------------
     def __init__(self, *, headless: bool = True, screenshots_dir: str = "",
-                 config=None):
+                 config=None, blobs=None):
         if not self._probe():
             raise BrowserUnavailableError(self.install_hint())
         self._lazy = None              # module: playwright.sync_api
@@ -59,6 +59,13 @@ class BrowserSession:
         self._page = None
         self._context = None
         self._headless = headless
+        # Full page text goes here when it exceeds `max_chars`, so a large
+        # page is never silently lost — see astra.core.blob_store and the
+        # `browser_content_read` tool.
+        if blobs is None:
+            from astra.core.blob_store import BlobStore
+            blobs = BlobStore()
+        self._blobs = blobs
         self._screenshots_dir = screenshots_dir or (
             config.get("BROWSER_SCREENSHOTS", "data/screenshots")
             if config else "data/screenshots")
@@ -203,14 +210,32 @@ class BrowserSession:
                     forms.append({"name": nm, "type": typ or "text"})
             text = "\n".join(
                 ln.strip() for ln in text.splitlines() if ln.strip())
-            if len(text) > max_chars:
+            full_chars = len(text)
+            content_id = None
+            if full_chars > max_chars:
+                # The full page text is never discarded: it is persisted
+                # here and retrievable with `browser_content_read`, using
+                # the id/total below. The hot result still carries only the
+                # bounded slice, so normal calls/context cost don't change.
+                content_id = self._blobs.put("browser_page", text)["id"]
                 text = text[:max_chars] + "\n[...truncated]"
             return {"status": "ok", "title": title, "url": url,
                     "text": text, "interactive": interactive, "forms": forms,
-                    "paused": False}
+                    "paused": False, "truncated": content_id is not None,
+                    "content_id": content_id, "content_total_chars": full_chars}
         except Exception as exc:
             return {"status": "error", "error": str(exc)[:300],
                     "paused": self._user_lock}
+
+    def read_content(self, *, content_id: str, offset: int = 0,
+                     length: int = 6000) -> dict:
+        """Retrieve a further chunk of a page's full text previously saved
+        by `observe()` when it exceeded `max_chars`. Bounded per call
+        (never the whole page at once) — call again with `next_offset`
+        until `done` is true."""
+        if not content_id:
+            return {"status": "error", "error": "content_id required"}
+        return self._blobs.read(content_id, offset=offset, length=length)
 
     # -- actions -------------------------------------------------------------
     def act(self, *, action: str, selector: str = "", value: str = "",

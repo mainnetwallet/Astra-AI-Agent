@@ -69,6 +69,11 @@ def register_browser_tools(reg, manager=None) -> int:
         ("browser_close", "browser_close",
          "Close a browser session and release its resources.",
          Level.LOW_RISK_WRITE, False),
+        ("browser_content_read", "browser_content_read",
+         "Retrieve more of a page's full text after browser_observe "
+         "reported truncated=true. Pass the content_id it returned; "
+         "chunked via offset/next_offset until done=true.",
+         Level.READ, False),
     ]
     n = 0
     for name, method, description, risk, conf in specs:
@@ -95,11 +100,15 @@ def register_browser_tools(reg, manager=None) -> int:
                     "as_table": {"type": "boolean"},
                     "name": {"type": "string"},
                     "index": {"type": "integer"},
+                    "content_id": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "length": {"type": "integer"},
                 },
             },
             timeout=60.0, retries=1, retry_backoff_s=1.0,
             idempotent=name in ("browser_open", "browser_observe",
-                                "browser_extract", "browser_close"),
+                                "browser_extract", "browser_close",
+                                "browser_content_read"),
             strict=False, plugin="core"))
         n += 1
     return n

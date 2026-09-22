@@ -36,6 +36,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(names, {
             "terminal_exec", "terminal_start", "terminal_status",
             "terminal_stop", "terminal_kill", "terminal_history",
+            "terminal_output_read", "terminal_history_read",
             "terminal_sessions", "terminal_close"})
         manager.close_all()
 

@@ -16,7 +16,8 @@ class ToolContext:
 
     def __init__(self, store=None, config=None, events=None, memory=None,
                  tasks=None, web3_manager=None, registry=None,
-                 terminal=None, terminal_session_id=None):
+                 terminal=None, terminal_session_id=None,
+                 execution_history=None, execution_scope=None):
         self.store = store
         self.config = config
         self.events = events
@@ -31,6 +32,12 @@ class ToolContext:
         # unrelated conversations from sharing cwd/history.
         self.terminal = terminal
         self.terminal_session_id = terminal_session_id
+        # Agent/tool execution history (astra.ai.execution_history) and the
+        # scope (conversation/run id) this tool call belongs to, so the
+        # `execution_history_read` tool can page back through it without
+        # needing the caller to pass a scope explicitly.
+        self.execution_history = execution_history
+        self.execution_scope = execution_scope
 
     def emit(self, kind: str, **data):
         if self.events:

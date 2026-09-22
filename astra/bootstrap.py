@@ -109,12 +109,13 @@ def build(store: Store | None = None, config=None,
     # tools
     registry = ToolRegistry(policy=policy, events=events, config=config)
     builtins.register_builtins(registry)
-    browser_manager = BrowserManager(config=config, events=events)
+    browser_manager = BrowserManager(config=config, events=events, store=store)
     register_browser_tools(registry, browser_manager)
     # Shared Terminal capability: ONE manager, ONE set of terminal tools on
     # the ONE ToolRegistry. The AI Gateway and every Provider reach the same
     # sessions through it — see astra/terminal/.
-    terminal_manager = TerminalManager(events=events, config=config)
+    terminal_manager = TerminalManager(events=events, config=config,
+                                       store=store)
     register_terminal_tools(registry, terminal_manager)
 
     # Web3 transaction manager: deterministic policy + encrypted keystore.
@@ -220,11 +221,17 @@ def build(store: Store | None = None, config=None,
     # verifies (fix/redo loop) -> user. The Gateway and the router are the
     # only AI paths; there is no direct/raw LLM path.
     from astra.ai.chat_pipeline import ChatPipeline
+    from astra.core.blob_store import BlobStore
+    # Full agent/tool execution history persists on the SAME store as
+    # everything else — see astra.ai.execution_history / blob_store — and
+    # is shared with the workflow ToolContext below so `execution_history_read`
+    # works identically from chat and from a workflow step.
+    execution_history = AgentExecutionHistory(blobs=BlobStore(store))
     chat_pipeline = ChatPipeline(
         gateway, router, events=events,
         max_tokens=_opt_int(config, "CHAT_MAX_TOKENS"),
         registry=registry, terminal=terminal_manager,
-        execution_history=AgentExecutionHistory(),
+        execution_history=execution_history,
         max_tool_steps=config.getint("CHAT_MAX_TOOL_STEPS", 8),
         agent_brain=config.get("CHAT_AGENT_BRAIN", "provider"))
 
@@ -236,7 +243,8 @@ def build(store: Store | None = None, config=None,
     tool_context = ToolContext(store=store, config=config, events=events,
                                memory=memory, tasks=tasks,
                                web3_manager=tx_manager, registry=registry,
-                               terminal=terminal_manager)
+                               terminal=terminal_manager,
+                               execution_history=execution_history)
     workflows = WorkflowEngine(store, registry, events, context=tool_context)
     scheduler = None
     if with_scheduler:

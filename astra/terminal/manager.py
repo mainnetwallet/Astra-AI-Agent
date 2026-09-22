@@ -33,7 +33,7 @@ class TerminalManager:
     def __init__(self, *, events=None, config=None, default_cwd=None,
                  max_output_chars=None, history_limit=None,
                  idle_seconds: float = DEFAULT_IDLE_SECONDS, on_output=None,
-                 max_sessions: int = DEFAULT_MAX_SESSIONS):
+                 max_sessions: int = DEFAULT_MAX_SESSIONS, store=None):
         self.events = events
         self.config = config
         self.default_cwd = default_cwd
@@ -44,6 +44,12 @@ class TerminalManager:
         self._history_limit = history_limit
         self._sessions: dict[str, TerminalSession] = {}
         self._lock = threading.RLock()
+        # Shared across every session this manager creates, so full
+        # stdout/stderr and full command history outlive the in-memory
+        # caps and a closed/reaped session — see astra.core.blob_store and
+        # the terminal_output_read / terminal_history_read tools.
+        from astra.core.blob_store import BlobStore
+        self.blobs = BlobStore(store)
 
     # -- lookup / creation ---------------------------------------------------
     def get(self, session_id: str | None = None, *, create: bool = True,
@@ -68,7 +74,7 @@ class TerminalManager:
                 history_limit=(self._history_limit
                                if self._history_limit is not None
                                else self._default("history_limit", 50)),
-                on_output=self.on_output)
+                on_output=self.on_output, blobs=self.blobs)
             self._sessions[key] = session
             self._emit("terminal.session_created", session_id=key,
                        cwd=session.cwd, shell=session.shell.get("name"),

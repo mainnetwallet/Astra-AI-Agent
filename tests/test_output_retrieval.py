@@ -257,6 +257,47 @@ class TerminalHistoryRetrievalTests(unittest.TestCase):
                          [f"echo cmd{i}" for i in range(5)])
         s.close()
 
+    def test_oversized_single_command_does_not_stall_retrieval(self):
+        # The command text itself is never capped in a history entry, so a
+        # single very long command line can exceed BlobStore's per-call
+        # chunk ceiling. terminal_history_read must still make forward
+        # progress and let the caller reconstruct it, never stall forever.
+        import json
+        s = _session(history_limit=5)
+        long_arg = "x" * 30000
+        r1 = s.exec(f"echo {long_arg}")
+        self.assertEqual(r1["status"], "completed")
+        r2 = s.exec("echo short")
+        self.assertEqual(r2["status"], "completed")
+
+        parts = []
+        normal_entries = []
+        offset = 0
+        for _ in range(20):
+            page = terminal_history_read(
+                {"session_id": "s1", "offset": offset, "length": 6000},
+                manager=_FakeManagerFor(s))
+            self.assertEqual(page["status"], "ok")
+            if page.get("partial_line") is not None:
+                parts.append(page["partial_line"])
+            normal_entries.extend(page["entries"])
+            if page["done"]:
+                break
+            self.assertIsNotNone(page["next_offset"],
+                                 "must not stall: next_offset required "
+                                 "while not done")
+            self.assertNotEqual(page["next_offset"], offset,
+                                "must not stall: offset must advance")
+            offset = page["next_offset"]
+        else:
+            self.fail("terminal_history_read never finished paging (stalled)")
+
+        recovered = json.loads("".join(parts))
+        self.assertIn(long_arg, recovered["command"])
+        self.assertEqual([e["command"] for e in normal_entries],
+                         ["echo short"])
+        s.close()
+
 
 class _FakeManagerFor:
     """Minimal manager stand-in so terminal_history_read can resolve a
@@ -308,6 +349,45 @@ class ExecutionHistoryRetrievalTests(unittest.TestCase):
         ctx = ToolContext()
         r = execution_history_read({}, ctx=ctx)
         self.assertEqual(r["status"], "error")
+
+    def test_oversized_single_entry_does_not_stall_retrieval(self):
+        # A single tool-result summary can now legitimately exceed
+        # BlobStore's per-call chunk ceiling (no artificial cap before
+        # 9435840/0d788f7). read_log must still make forward progress and
+        # let the caller reconstruct the complete entry, never get stuck
+        # returning zero entries at the same offset forever.
+        import json
+        hist = AgentExecutionHistory()
+        big = json.dumps({"stdout": "x" * 20000, "ok": True})
+        hist.record("s", "terminal_exec", ok=True, status="completed",
+                   result=big, step=1)
+        hist.record("s", "terminal_output_read", ok=True,
+                   status="completed", result="small", step=2)
+
+        parts = []
+        normal_entries = []
+        offset = 0
+        for _ in range(20):  # generous ceiling; must finish well before this
+            page = hist.read_log("s", offset=offset, length=6000)
+            self.assertEqual(page["status"], "ok")
+            if page.get("partial_line") is not None:
+                parts.append(page["partial_line"])
+            normal_entries.extend(page["entries"])
+            if page["done"]:
+                break
+            self.assertIsNotNone(page["next_offset"],
+                                 "must not stall: next_offset required "
+                                 "while not done")
+            self.assertNotEqual(page["next_offset"], offset,
+                                "must not stall: offset must advance")
+            offset = page["next_offset"]
+        else:
+            self.fail("read_log never finished paging (stalled)")
+
+        recovered = json.loads("".join(parts))
+        self.assertEqual(recovered["tool"], "terminal_exec")
+        self.assertEqual([e["tool"] for e in normal_entries],
+                         ["terminal_output_read"])
 
 
 if __name__ == "__main__":

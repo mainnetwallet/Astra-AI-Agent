@@ -166,29 +166,55 @@ def terminal_history_read(args: dict, ctx=None, manager=None) -> dict:
     # partial trailing line is left for the next call, never guessed at.
     nl = text.rfind("\n")
     if nl == -1:
-        # No complete line fit in this chunk — do not advance; ask the
-        # caller to retry with a larger `length` instead of losing data.
+        # A single history entry can legitimately exceed one chunk (a
+        # long command line, or a large stdout/stderr preview). Advance
+        # past whatever was actually read and hand back the raw fragment
+        # instead of stalling at the same offset forever: page on it like
+        # any other chunk, concatenating `partial_line` values until a
+        # newline appears, then parse the combined text.
+        next_offset = offset + len(text)
+        done = next_offset >= total
         return {"status": "ok", "session_id": session.session_id,
-                "entries": [], "offset": offset, "next_offset": offset,
-                "done": offset >= total, "total_chars": total,
-                "note": ("no complete history line fit in this chunk; "
-                        "retry with a larger length")}
+                "entries": [], "offset": offset,
+                "next_offset": None if done else next_offset,
+                "done": done, "total_chars": total,
+                "partial_line": text,
+                "note": ("this entry spans more than one chunk; "
+                        "partial_line holds this fragment — concatenate "
+                        "partial_line values across calls until a newline "
+                        "appears, then json.loads it (or pass a larger "
+                        "length to read more per call)")}
     usable = text[:nl + 1]
     entries = []
-    for line in usable.splitlines():
+    leading_partial = None
+    for idx, line in enumerate(usable.splitlines()):
         line = line.strip()
         if not line:
             continue
         try:
             entries.append(json.loads(line))
         except Exception:
+            # The first line of a chunk that resumes mid-entry (after a
+            # prior `partial_line` response) is the tail of that oversized
+            # entry, not a new one — it never parses alone. Surface it
+            # instead of silently dropping it.
+            if idx == 0:
+                leading_partial = line
             continue
     next_offset = offset + len(usable)
     done = next_offset >= total
-    return {"status": "ok", "session_id": session.session_id,
-            "entries": entries, "offset": offset,
-            "next_offset": None if done else next_offset, "done": done,
-            "total_chars": total}
+    out = {"status": "ok", "session_id": session.session_id,
+           "entries": entries, "offset": offset,
+           "next_offset": None if done else next_offset, "done": done,
+           "total_chars": total}
+    if leading_partial is not None:
+        out["partial_line"] = leading_partial
+        out["note"] = ("partial_line is the tail of an oversized entry "
+                       "from a prior chunk — concatenate it after your "
+                       "earlier partial_line fragments and json.loads "
+                       "the result; entries above are unrelated, "
+                       "already-complete entries from this same chunk")
+    return out
 
 
 def terminal_close(args: dict, ctx=None, manager=None) -> dict:

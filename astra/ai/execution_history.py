@@ -157,26 +157,58 @@ class AgentExecutionHistory:
         total = chunk["total_chars"]
         nl = text.rfind("\n")
         if nl == -1:
+            # A single entry can legitimately exceed one chunk now that
+            # results are no longer capped before being logged (a large
+            # tool result, e.g. a near-max terminal stdout preview,
+            # produces a JSONL line bigger than BlobStore's per-call
+            # ceiling). Advance past whatever was actually read and hand
+            # back the raw fragment instead of stalling at the same
+            # offset forever: the caller pages on exactly like any other
+            # chunk, concatenating `partial_line` values until a newline
+            # appears, then parses the combined text.
+            next_offset = off + len(text)
+            done = next_offset >= total
             return {"status": "ok", "scope": key, "entries": [],
-                    "offset": off, "next_offset": off, "done": off >= total,
-                    "total_chars": total,
-                    "note": ("no complete log line fit in this chunk; "
-                            "retry with a larger length")}
+                    "offset": off, "next_offset": None if done else next_offset,
+                    "done": done, "total_chars": total,
+                    "partial_line": text,
+                    "note": ("this entry spans more than one chunk; "
+                            "partial_line holds this fragment — "
+                            "concatenate partial_line values across calls "
+                            "until a newline appears, then json.loads it "
+                            "(or pass a larger length to read more per call)")}
         usable = text[:nl + 1]
         rows = []
-        for line in usable.splitlines():
+        leading_partial = None
+        for idx, line in enumerate(usable.splitlines()):
             line = line.strip()
             if not line:
                 continue
             try:
                 rows.append(json.loads(line))
             except Exception:
+                # The very first line of a chunk that resumes mid-entry
+                # (after a prior `partial_line` response) is the tail of
+                # that oversized entry, not a new one — it never parses
+                # alone. Surface it as `leading_partial` instead of
+                # silently dropping it, so the caller can complete the
+                # reconstruction it already started.
+                if idx == 0:
+                    leading_partial = line
                 continue
         next_offset = off + len(usable)
         done = next_offset >= total
-        return {"status": "ok", "scope": key, "entries": rows, "offset": off,
-                "next_offset": None if done else next_offset, "done": done,
-                "total_chars": total}
+        out = {"status": "ok", "scope": key, "entries": rows, "offset": off,
+               "next_offset": None if done else next_offset, "done": done,
+               "total_chars": total}
+        if leading_partial is not None:
+            out["partial_line"] = leading_partial
+            out["note"] = ("partial_line is the tail of an oversized entry "
+                           "from a prior chunk — concatenate it after your "
+                           "earlier partial_line fragments and json.loads "
+                           "the result; `entries` above are unrelated, "
+                           "already-complete entries from this same chunk")
+        return out
 
     def clear(self, scope: str | None = None) -> None:
         with self._lock:

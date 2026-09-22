@@ -605,12 +605,17 @@ function renderLogStats() {
 
 // header live state: ● LIVE | ○ RECONNECTING | Ⅱ PAUSED
 function setLiveState(state) {
-  const el = $("#logs-live");
-  if (!el) return;
-  el.textContent = state === "live" ? "● LIVE"
-                 : state === "paused" ? "Ⅱ PAUSED"
-                 : "○ RECONNECTING";
-  el.dataset.state = state;
+  const text = state === "live" ? "● LIVE"
+             : state === "paused" ? "Ⅱ PAUSED"
+             : "○ RECONNECTING";
+  // The Agent Workflow tab mirrors the same connection state, so the badge
+  // reads "LIVE" only when the shared feed really is live.
+  ["#logs-live", "#wf-live"].forEach((sel) => {
+    const el = $(sel);
+    if (!el) return;
+    el.textContent = text;
+    el.dataset.state = state;
+  });
 }
 function refreshLiveState() {
   setLiveState(LOGS.paused ? "paused" : SSE_STATE);
@@ -896,6 +901,9 @@ function upsertEvent(event, quiet) {
 
 // Live arrival path: skip noise/dupes, render now, or buffer while paused.
 function receiveEvent(event) {
+  // One shared SSE connection feeds both panels; the Agent Workflow tab gets
+  // every event regardless of the Activity Log's own pause/filter state.
+  if (window.AstraWorkflowFeed) window.AstraWorkflowFeed.ingest(event);
   const verdict = AstraLog.admit(LOGS, event);
   if (verdict === "skip") return;
   if (verdict === "buffer") {
@@ -1954,6 +1962,934 @@ loaders.web3 = async function () {
   }
 };
 
+/* --------------------------- 🔀 Agent Workflow (core) -----------------------
+ * A view over the REAL execution path — never a second engine:
+ *
+ *  · "Runtime pipeline" — one live ChatPipeline turn, one node per real stage
+ *    (astra/ai/chat_pipeline.py → gateway.py → router.py → agent_tool_loop.py
+ *    → tools/registry.py → gateway_task_completion.py → response_boundary.py).
+ *    Status is folded from the shared /api/events feed by
+ *    static/js/workflow_model.js (chat.pipeline.* / router.* / ai.* /
+ *    agent.tool_loop.* / tool.* / terminal.* / web3.* / gateway.*).
+ *
+ *  · "Workflows" — astra/workflows/engine.py definitions rendered as their
+ *    real step graph (`depends_on` + `{{step.param}}` + `if` conditions),
+ *    runs from GET /api/workflows/runs with live overlay, and the
+ *    SchedulerManager schedules that fire them.
+ *
+ *  · "Runs & schedules" — execution history (incl. step errors) + schedules.
+ *
+ * Everything the page shows comes from existing endpoints; the pure layout /
+ * reduction rules live in static/js/workflow_model.js and are node-tested.
+ */
+const WM = window.AstraWorkflow;
+
+const WFLOW = {
+  view: "pipeline",
+  booted: false, loading: false,
+  toolList: [], toolByName: {},
+  defs: [], runs: [], schedules: [],
+  defId: 0, viewRunId: null, nodeId: "",
+  builder: null,
+  live: null,
+  turns: [], turnIdx: -1,
+  seen: {},
+  runsTimer: null, edgeFrame: null,
+};
+if (WM) WFLOW.live = WM.emptyRun();
+
+/* ---------------------------------------------------------------- helpers */
+function wfDot(status) { return `<span class="wf-dot ${esc(status || "info")}"></span>`; }
+function wfChip(status, text) {
+  return `<span class="wf-chip ${esc(status || "info")}">${esc(text)}</span>`;
+}
+function wfParamsText(obj) {
+  try { return JSON.stringify(obj || {}, null, 0); } catch (_) { return "{}"; }
+}
+function wfPre(host, label, text) {
+  const wrap = document.createElement("div");
+  wrap.className = "wf-block";
+  const h = document.createElement("h5");
+  h.textContent = label;
+  const pre = document.createElement("pre");
+  pre.className = "mono small";
+  pre.textContent = text == null ? "" : String(text);
+  wrap.appendChild(h);
+  wrap.appendChild(pre);
+  host.appendChild(wrap);
+}
+
+function wfViewSet(name) {
+  WFLOW.view = name;
+  $$("#wf-views .chip").forEach((c) =>
+    c.classList.toggle("active", c.dataset.view === name));
+  ["pipeline", "workflows", "runs"].forEach((v) => {
+    const el = $("#wf-view-" + v);
+    if (el) el.hidden = v !== name;
+  });
+  if (name === "workflows") requestAnimationFrame(wfDrawEdges);
+}
+
+/* ------------------------------------------------------- runtime pipeline */
+function wfTurnCurrent() { return WFLOW.turns[WFLOW.turnIdx] || null; }
+
+function wfRenderTurnNav() {
+  const label = $("#wf-turn-label");
+  if (!label) return;
+  const t = wfTurnCurrent();
+  label.textContent = !t ? "no turn yet"
+    : `turn ${WFLOW.turnIdx + 1}/${WFLOW.turns.length} · ${String(t.key).slice(0, 14)}…`;
+}
+
+function wfRenderPipeline() {
+  const flow = $("#wf-flow");
+  if (!flow) return;
+  const t = wfTurnCurrent();
+  wfRenderTurnNav();
+  if (!t) {
+    flow.innerHTML = `<div class="empty">Kono chat turn ekhono nei — Assistant tab e kotha bolun, tarpor ekhane live dekhun.</div>`;
+    const meta0 = $("#wf-turn-meta"); if (meta0) meta0.innerHTML = "";
+    const ev0 = $("#wf-events");
+    if (ev0) ev0.innerHTML = `<div class="empty">…</div>`;
+    return;
+  }
+  flow.innerHTML = WM.PIPELINE_STAGES.map((s, i) => {
+    const st = t.stages[s.id] || { status: "info", detail: "", count: 0 };
+    const running = st.status === "running" ? " is-running" : "";
+    const chips = (s.id === "tools" && t.tools.length)
+      ? `<div class="wf-toolchips">` +
+        t.tools.slice(0, 8).map((n) => `<span class="tinytag">${esc(n)}</span>`).join("") +
+        (t.tools.length > 8 ? `<span class="tinytag">+${t.tools.length - 8}</span>` : "") +
+        `</div>` : "";
+    return (i ? `<div class="wf-arrow" aria-hidden="true">→</div>` : "") +
+      `<div class="wf-stage${running}" data-stage="${esc(s.id)}">
+         <div class="wf-stage-top">${wfDot(st.status)}
+           <span class="wf-stage-label">${s.icon} ${esc(s.label)}</span></div>
+         <div class="wf-stage-src mono">${esc(s.file)} :: ${esc(s.symbol)}</div>
+         <div class="wf-stage-detail">${esc(st.detail || (st.count ? st.count + " event(s)" : "—"))}</div>
+         ${chips}
+       </div>`;
+  }).join("");
+
+  const meta = $("#wf-turn-meta");
+  if (meta) {
+    const bits = [];
+    const cls = t.status === "ok" ? "ok" : t.status === "err" ? "err"
+              : t.status === "warn" ? "warn" : "running";
+    bits.push(wfChip(cls, "turn: " + t.status));
+    if (t.label) bits.push(`<span class="tag">${esc(t.label)}</span>`);
+    if (t.provider || t.model) {
+      bits.push(`<span class="tag">${esc([t.provider, t.model].filter(Boolean).join(" · "))}</span>`);
+    }
+    if (t.verdict) bits.push(`<span class="tag">verify: ${esc(t.verdict)}</span>`);
+    bits.push(`<span class="muted small">${t.events.length} events · turn ${esc(t.key)}</span>`);
+    meta.innerHTML = bits.join(" ");
+  }
+  wfRenderTurnEvents(t);
+}
+
+/* Event-derived text is written with textContent (never injected as HTML). */
+function wfRenderTurnEvents(t) {
+  const host = $("#wf-events");
+  if (!host) return;
+  host.innerHTML = "";
+  const evs = (t.events || []).slice(-120);
+  if (!evs.length) {
+    host.innerHTML = `<div class="empty">No stage events yet.</div>`;
+    return;
+  }
+  evs.forEach((e) => {
+    const m = AstraLog.normalize(e);
+    const row = document.createElement("div");
+    row.className = "wf-erow";
+    row.dataset.status = m.status;
+    const ico = document.createElement("span");
+    ico.className = "tl-ico";
+    ico.textContent = m.icon || "•";
+    const main = document.createElement("div");
+    main.className = "tl-main";
+    const title = document.createElement("div");
+    title.className = "tl-title";
+    title.textContent = m.title + (m.subject ? " · " + m.subject : "");
+    const sub = document.createElement("div");
+    sub.className = "tl-sub";
+    sub.textContent = [m.kind, m.detail].filter(Boolean).join(" — ");
+    main.appendChild(title);
+    main.appendChild(sub);
+    const time = document.createElement("span");
+    time.className = "tl-time";
+    time.textContent = m.time || "";
+    row.appendChild(ico);
+    row.appendChild(main);
+    row.appendChild(time);
+    host.appendChild(row);
+  });
+  host.scrollTop = host.scrollHeight;
+}
+
+function wfRenderSrcMap() {
+  const host = $("#wf-srcmap");
+  if (!host || !WM) return;
+  host.innerHTML = WM.PIPELINE_STAGES.map((s) =>
+    `<div class="wf-srcrow"><span class="wf-srcico">${s.icon}</span>` +
+    `<div class="wf-srcbody"><div>${esc(s.label)}</div>` +
+    `<div class="mono small">${esc(s.file)} :: ${esc(s.symbol)}</div>` +
+    `<div class="muted small">${esc(s.note)}</div></div></div>`).join("");
+}
+
+/* The real state vocabulary, spelled out — every value below is one the
+ * engine/registry actually produces (astra/core/state.py + engine results). */
+function wfRenderLegend() {
+  const host = $("#wf-legend");
+  if (!host || !WM) return;
+  host.innerHTML = [
+    ["info", "pending"], ["running", "running"], ["ok", "completed"],
+    ["err", "failed"], ["warn", "skipped / blocked"],
+  ].map(([cls, label]) => `<span>${wfDot(cls)}${esc(label)}</span>`).join("") +
+    `<span class="muted">· dashed edge = {{step.param}} data flow</span>`;
+}
+
+/* ------------------------------------------------------------ definitions */
+function wfCurrentDef() {
+  return WFLOW.defs.find((d) => Number(d.id) === Number(WFLOW.defId)) || null;
+}
+function wfSteps(steps) { return WM.normalizeSteps(steps); }
+
+function wfBuilderDef() {
+  if (!WFLOW.builder) return null;
+  const collected = wfCollectBuilder();
+  return { id: 0, name: collected.name, description: collected.description,
+           steps: collected.steps };
+}
+function wfGraphDef() { return WFLOW.builder ? wfBuilderDef() : wfCurrentDef(); }
+
+/* Real per-node state: the live event snapshot when the displayed run is the
+ * one currently emitting events, otherwise the run's persisted `results`. */
+function wfNodeStates(def) {
+  const out = {};
+  if (!def) return out;
+  const steps = wfSteps(def.steps);
+  const runId = WFLOW.viewRunId;
+  if (runId != null && WFLOW.live && String(WFLOW.live.run_id) === String(runId)) {
+    steps.forEach((s) => {
+      const st = WFLOW.live.steps[s.id];
+      out[s.id] = st ? st.state : "pending";
+    });
+    return out;
+  }
+  const run = WFLOW.runs.find((r) => Number(r.id) === Number(runId));
+  if (run) return WM.runStates(run, steps);
+  return out;
+}
+
+function wfRenderDefControls() {
+  const sel = $("#wf-select");
+  if (sel) {
+    sel.innerHTML = WFLOW.defs.length
+      ? WFLOW.defs.map((d) =>
+          `<option value="${d.id}"${Number(d.id) === Number(WFLOW.defId) ? " selected" : ""}>` +
+          `${esc(d.name)}${d.enabled ? "" : " (disabled)"}</option>`).join("")
+      : `<option value="">no workflows</option>`;
+  }
+  const hint = $("#wf-def-hint");
+  const def = wfCurrentDef();
+  if (hint) {
+    if (!def) hint.textContent = "Kono workflow definition nei — ＋ New diye ekta banao.";
+    else {
+      const steps = wfSteps(def.steps);
+      const run = WFLOW.runs.find((r) => Number(r.id) === Number(WFLOW.viewRunId));
+      hint.textContent = `${steps.length} step(s) · id ${def.id}` +
+        (run ? ` · showing run #${run.id} (${run.status})` : " · live view");
+    }
+  }
+  const cards = $("#wf-cards");
+  if (cards) {
+    const def2 = def;
+    const steps = def2 ? wfSteps(def2.steps) : [];
+    const g = def2 ? WM.buildGraph(def2.steps) : { edges: [], run_params: [] };
+    const deps = g.edges.filter((e) => e.kind === "dep").length;
+    const dataEdges = g.edges.filter((e) => e.kind === "data").length;
+    const conds = steps.filter((s) => s.if).length;
+    cards.innerHTML = [
+      { v: steps.length, k: "steps", s: "workflow_definitions.steps" },
+      { v: deps, k: "depends_on edges", s: "engine._topo()" },
+      { v: dataEdges, k: "{{ref}} flows", s: "engine._resolve()" },
+      { v: conds, k: "if conditions", s: "engine._condition()" },
+      { v: WFLOW.runs.length, k: "runs recorded", s: "workflow_runs" },
+    ].map((c) => `<div class="card"><div class="card-v">${esc(c.v)}</div>` +
+                 `<div class="card-k">${esc(c.k)}</div>` +
+                 `<div class="card-s">${esc(c.s)}</div></div>`).join("");
+  }
+}
+
+function wfRenderGraph() {
+  const host = $("#wf-graph");
+  if (!host || !WM) return;
+  const def = wfGraphDef();
+  if (!def || !wfSteps(def.steps).length) {
+    host.innerHTML = `<div class="empty">Kono step nei — ${WFLOW.builder ? "＋ Add step" : "＋ New"} diye shuru korun.</div>`;
+    wfDrawEdges();
+    return;
+  }
+  const g = WM.buildGraph(def.steps);
+  const states = WFLOW.builder ? {} : wfNodeStates(def);
+  host.innerHTML = g.layers.map((ids, col) =>
+    `<div class="wf-col" data-col="${col}">` +
+    ids.map((id) => {
+      const n = g.nodes.find((x) => x.id === id) || { id: id, tool: "", condition: null };
+      const state = states[id] || "pending";
+      const status = (WM.STEP_STATE_STATUS[state] || "info");
+      const tool = WFLOW.toolByName[n.tool] || {};
+      const cond = (n.condition && n.condition.step)
+        ? `<span class="tinytag">if ${esc(n.condition.step)}${n.condition.op ? " " + esc(n.condition.op) : ""}</span>`
+        : "";
+      const sel = WFLOW.nodeId === id ? " selected" : "";
+      return `<div class="wf-gnode${sel}" data-node="${esc(id)}" tabindex="0" role="button">` +
+        `<div class="wf-gnode-head">${wfDot(status)}<b>${esc(id)}</b>` +
+        `<span class="wf-gnode-tool mono">${esc(n.tool || "?")}</span></div>` +
+        `<div class="wf-gnode-sub">${esc(tool.category ? tool.category + " · " + state : state)}</div>` +
+        cond + `</div>`;
+    }).join("") + `</div>`).join("");
+  wfDrawEdges();
+}
+
+function wfDrawEdges() {
+  const svg = $("#wf-edges");
+  const host = $("#wf-graph");
+  const wrap = $(".wf-graph-wrap");
+  if (!svg || !host || !wrap || !WM) return;
+  const def = wfGraphDef();
+  if (!def || !wfSteps(def.steps).length) { svg.innerHTML = ""; return; }
+  const g = WM.buildGraph(def.steps);
+  const wbox = wrap.getBoundingClientRect();
+  const pts = {};
+  $$(".wf-gnode", host).forEach((el) => {
+    const r = el.getBoundingClientRect();
+    pts[el.dataset.node] = { x: r.left - wbox.left, y: r.top - wbox.top,
+                             w: r.width, h: r.height };
+  });
+  const paths = g.edges.map((e) => {
+    const a = pts[e.from], b = pts[e.to];
+    if (!a || !b) return "";
+    const x1 = a.x + a.w, y1 = a.y + a.h / 2;
+    const x2 = b.x, y2 = b.y + b.h / 2;
+    if (x2 <= x1) return "";
+    const mx = (x1 + x2) / 2;
+    const cls = e.kind === "data" ? "wf-edge data" : "wf-edge";
+    const tip = e.kind === "data" ? `<title>${esc(e.via || "")}</title>` : "";
+    return `<path class="${cls}" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}">${tip}</path>`;
+  }).join("");
+  svg.setAttribute("viewBox", `0 0 ${wbox.width} ${wbox.height}`);
+  svg.setAttribute("width", String(wbox.width));
+  svg.setAttribute("height", String(wbox.height));
+  svg.innerHTML = paths;
+}
+
+function wfRenderInspector() {
+  const host = $("#wf-inspector");
+  if (!host || !WM) return;
+  const def = wfGraphDef();
+  const id = WFLOW.nodeId;
+  if (!def || !id) {
+    host.innerHTML = `<div class="empty">Graph e ekta node click korun.</div>`;
+    return;
+  }
+  const g = WM.buildGraph(def.steps);
+  const n = g.nodes.find((x) => x.id === id);
+  if (!n) {
+    host.innerHTML = `<div class="empty">Node paoa jay ni.</div>`;
+    return;
+  }
+  const tool = WFLOW.toolByName[n.tool] || null;
+  const run = WFLOW.runs.find((r) => Number(r.id) === Number(WFLOW.viewRunId)) || null;
+  const live = (WFLOW.live && String(WFLOW.live.run_id) === String(WFLOW.viewRunId))
+    ? WFLOW.live.steps[id] : null;
+  const result = (run && run.results) ? run.results[id] : null;
+  const state = live ? live.state : (result ? WM.stepStateFromResult(result) : "pending");
+  const status = WM.STEP_STATE_STATUS[state] || "info";
+  const resolved = WM.resolveParams(n.params, (run && run.results) || {},
+                                    (run && run.params) || {});
+  const row = (k, v) => `<div class="row wf-irow"><b>${esc(k)}</b><span>${esc(v)}</span></div>`;
+  const err = (live && live.error) || (result ? WM.stepError(result) : "");
+
+  let html = `<div class="wf-ihead">${wfDot(status)} <b>${esc(id)}</b> ${wfChip(status, state)}`;
+  if (n.name) html += ` <span class="muted small">${esc(n.name)}</span>`;
+  html += `</div>`;
+
+  html += `<div class="wf-isect"><h5>Tool</h5>`;
+  if (tool) {
+    html += row("name", tool.name);
+    html += row("source", `${tool.module || "?"} :: ${tool.function || "?"}`);
+    html += row("category", tool.category);
+    html += row("risk", tool.risk_level + (tool.requires_confirmation ? " · requires confirmation" : ""));
+    html += row("calls", `timeout ${tool.timeout_s || 0}s · retries ${tool.retries || 0} · rate limit ${tool.rate_limit_per_min || 0}/min`);
+    if (tool.description) html += `<div class="muted small wf-idesc">${esc(tool.description)}</div>`;
+  } else {
+    html += `<div class="muted small">Tool <b>${esc(n.tool || "?")}</b> registry te nei — engine.run() e ei step ta failed hobe (KeyError).</div>`;
+  }
+  html += `</div>`;
+
+  html += `<div class="wf-isect"><h5>Wiring</h5>`;
+  html += row("depends_on", n.depends_on.length ? n.depends_on.join(", ") : "—");
+  html += row("dependents", n.dependents.length ? n.dependents.join(", ") : "—");
+  html += row("{{refs}}", n.refs.length ? n.refs.join(", ") : "—");
+  html += row("condition", n.condition && n.condition.step
+    ? `if ${n.condition.step} ${n.condition.op || "ok"}` : "—");
+  html += `</div>`;
+
+  if (tool && tool.input_schema && tool.input_schema.properties) {
+    const props = tool.input_schema.properties;
+    const keys = Object.keys(props);
+    html += `<div class="wf-isect"><h5>Input schema (registry)</h5>`;
+    html += keys.length
+      ? keys.map((k) => {
+          const spec = props[k] || {};
+          const req = spec.required ? " · required" : "";
+          return `<div class="row wf-irow"><b class="mono">${esc(k)}</b><span>${esc(spec.type || "any")}${esc(req)}</span></div>`;
+        }).join("")
+      : `<div class="muted small">no declared arguments</div>`;
+    html += `</div>`;
+  }
+
+  host.innerHTML = html;
+  wfPre(host, "params (definition)", wfParamsText(n.params));
+  wfPre(host, "resolved input (engine._resolve preview)", wfParamsText(resolved));
+  if (result) {
+    wfPre(host, "run result #" + (run ? run.id : ""),
+          JSON.stringify(result, null, 2));
+  }
+  if (err) wfPre(host, "error", err);
+}
+
+/* ----------------------------------------------------------------- runs */
+function wfRenderRuns() {
+  const host = $("#wf-runs");
+  if (!host || !WM) return;
+  if (!WFLOW.runs.length) {
+    host.innerHTML = `<div class="empty">Kono run nei — ekta workflow ▶ Run korun.</div>`;
+    return;
+  }
+  host.innerHTML = WFLOW.runs.map((r) => {
+    const status = r.status || "?";
+    const cls = WM.RUN_STATUS_STATUS[status] || "info";
+    const sel = Number(r.id) === Number(WFLOW.viewRunId) ? " selected" : "";
+    const spanR = [r.started_at, r.completed_at].filter(Boolean).join(" → ");
+    const failed = Object.keys(r.results || {}).filter((k) => {
+      const res = r.results[k];
+      return res && res.ok === false;
+    });
+    const err = r.error ? `<div class="muted small">${esc(String(r.error).slice(0, 160))}</div>` : "";
+    const ferr = failed.length
+      ? `<div class="muted small">failed steps: ${esc(failed.join(", "))}</div>` : "";
+    return `<div class="row wf-runrow${sel}" data-run="${r.id}" tabindex="0" role="button">` +
+      `<b>#${esc(r.id)}</b><span class="wf-runname">${esc(r.name || "")}</span>` +
+      `${wfChip(cls, status)}` +
+      `<span class="muted small">${esc(r.current_step ? "at step " + r.current_step : "")}</span>` +
+      `<span class="muted small">${esc(spanR)}</span>${err}${ferr}</div>`;
+  }).join("");
+}
+
+function wfRenderSchedules() {
+  const host = $("#wf-schedules");
+  if (!host) return;
+  if (!WFLOW.schedules.length) {
+    host.innerHTML = `<div class="empty">Kono schedule nei.</div>`;
+    return;
+  }
+  host.innerHTML = WFLOW.schedules.map((s) => {
+    const wf = WFLOW.defs.find((d) => Number(d.id) === Number(s.workflow_id));
+    return `<div class="row wf-runrow">` +
+      `<b>${esc(s.name)}</b><span>${esc(s.kind)}</span>` +
+      `<span class="mono small">${esc(s.value || "")}</span>` +
+      `${wfChip(s.enabled ? "ok" : "warn", s.enabled ? "enabled" : "disabled")}` +
+      `<span class="muted small">${esc(wf ? "→ " + wf.name : (s.workflow_id ? "→ workflow #" + s.workflow_id : "no workflow"))}</span>` +
+      `<span class="muted small">${esc(s.next_run ? "next " + s.next_run : "")}</span></div>`;
+  }).join("");
+}
+
+/* ---------------------------------------------------------------- builder */
+function wfOpenBuilder(def) {
+  WFLOW.builder = {
+    id: def && def.id ? def.id : 0,
+    name: def ? (def.name || "") : "",
+    description: def ? (def.description || "") : "",
+    steps: def ? WM.normalizeSteps(def.steps).map((s) => ({ ...s })) : [],
+  };
+  if (!WFLOW.builder.steps.length) {
+    const first = WFLOW.toolList[0] || null;
+    WFLOW.builder.steps.push(WM.newStepTemplate(first, []));
+  }
+  const nameEl = $("#wf-builder-name");
+  const descEl = $("#wf-builder-desc");
+  if (nameEl) nameEl.value = WFLOW.builder.name;
+  if (descEl) descEl.value = WFLOW.builder.description;
+  const panel = $("#wf-builder");
+  if (panel) panel.hidden = false;
+  const hint = $("#wf-builder-hint");
+  if (hint) hint.textContent = def
+    ? `Editing “${def.name}” — 💾 Save PATCHes /api/workflows/${def.id} in place; the definition's run history is preserved.`
+    : "New workflow — 💾 Save POSTs /api/workflows (the name must be unique).";
+  wfRenderBuilderSteps();
+  WFLOW.nodeId = "";
+  wfRenderGraph();
+  wfRenderInspector();
+}
+
+function wfCloseBuilder() {
+  WFLOW.builder = null;
+  const panel = $("#wf-builder");
+  if (panel) panel.hidden = true;
+  wfRenderAll();
+}
+
+function wfRenderBuilderSteps() {
+  const host = $("#wf-builder-steps");
+  if (!host || !WFLOW.builder) return;
+  const steps = WFLOW.builder.steps || [];
+  host.innerHTML = steps.map((s, i) => {
+    const cond = s.if || {};
+    const depsText = (s.depends_on || []).join(", ");
+    const params = wfParamsText(s.params);
+    const idList = steps.map((x) => x.id).filter(Boolean);
+    return `<div class="wf-bstep" data-idx="${i}">
+      <div class="wf-bstep-head">
+        <input class="wf-bstep-id mono" value="${esc(s.id || "")}" placeholder="step id" aria-label="step id">
+        <input class="wf-bstep-tool mono" list="wf-tools" value="${esc(s.tool || "")}" placeholder="tool" aria-label="tool">
+        <span class="tinytag">#${i + 1}</span>
+        <button type="button" class="btn mini danger wf-bstep-del" data-idx="${i}" aria-label="Remove step">✕</button>
+      </div>
+      <div class="wf-bstep-grid">
+        <label>params (JSON object)
+          <textarea class="wf-bstep-params mono" rows="3" spellcheck="false">${esc(params)}</textarea></label>
+        <label>depends_on (comma ids)
+          <input class="wf-bstep-deps mono" value="${esc(depsText)}" placeholder="${esc(idList.join(", "))}"></label>
+        <label>if step
+          <input class="wf-bstep-ifstep mono" value="${esc(cond.step || "")}" placeholder="(always run)"></label>
+        <label>if op
+          <input class="wf-bstep-ifop mono" value="${esc(cond.op || "")}" placeholder="ok"></label>
+      </div>
+    </div>`;
+  }).join("") || `<div class="empty">Kono step nei — ＋ Add step.</div>`;
+}
+
+function wfCollectBuilder() {
+  const host = $("#wf-builder-steps");
+  const steps = [];
+  if (host) {
+    $$(".wf-bstep", host).forEach((el) => {
+      const model = (WFLOW.builder && WFLOW.builder.steps[Number(el.dataset.idx)]) || {};
+      const paramsRaw = ($(".wf-bstep-params", el) || {}).value || "";
+      const parsed = WM.parseParamsJson(paramsRaw);
+      const deps = (($(".wf-bstep-deps", el) || {}).value || "")
+        .split(",").map((x) => x.trim()).filter(Boolean);
+      const ifStep = (($(".wf-bstep-ifstep", el) || {}).value || "").trim();
+      const ifOp = (($(".wf-bstep-ifop", el) || {}).value || "").trim();
+      const step = {
+        id: (($(".wf-bstep-id", el) || {}).value || "").trim(),
+        tool: (($(".wf-bstep-tool", el) || {}).value || "").trim(),
+        params: parsed.ok ? parsed.value : {},
+      };
+      if (model.name) step.name = model.name;
+      if (deps.length) step.depends_on = deps;
+      if (ifStep) step.if = { step: ifStep, op: ifOp || "ok" };
+      step.__params_error = parsed.ok ? "" : parsed.error;
+      steps.push(step);
+    });
+  }
+  return {
+    name: ($("#wf-builder-name") || {}).value || "",
+    description: ($("#wf-builder-desc") || {}).value || "",
+    steps: steps,
+  };
+}
+
+async function wfSaveBuilder() {
+  const collected = wfCollectBuilder();
+  const hint = $("#wf-builder-hint");
+  const steps = collected.steps.map((s) => {
+    const c = { ...s };
+    delete c.__params_error;
+    return c;
+  });
+  const known = {};
+  WFLOW.toolList.forEach((t) => { known[t.name] = t; });
+  const v = WM.validateDefinition(collected.name, steps, known);
+  collected.steps.forEach((s) => {
+    if (s.__params_error) v.errors.push(`step ${s.id || "?"}: params is not a valid JSON object — ${s.__params_error}`);
+  });
+  const editing = WFLOW.builder && Number(WFLOW.builder.id) > 0;
+  // workflow_definitions.name is UNIQUE — catch the collision locally instead
+  // of surfacing a raw IntegrityError. An edit keeps its own row, so only a
+  // create can collide.
+  if (!editing && WFLOW.defs.some((d) => d.name === collected.name.trim())) {
+    v.errors.push(`name “${collected.name.trim()}” already exists (workflow_definitions.name is UNIQUE)`);
+  }
+  if (!v.ok) {
+    if (hint) hint.textContent = "✕ " + v.errors.join(" · ");
+    return;
+  }
+  const payload = { name: collected.name.trim(), description: collected.description,
+                    steps: steps };
+  const res = editing
+    ? await patch(`/api/workflows/${encodeURIComponent(WFLOW.builder.id)}`, payload)
+    : await post("/api/workflows", payload);
+  if (!res || !res.ok) {
+    if (hint) hint.textContent = "✕ " + ((res && res.error) || "save failed");
+    return;
+  }
+  if (hint) {
+    hint.textContent = `✓ ${editing ? "updated" : "saved"} “${collected.name.trim()}” (id ${res.data.id})` +
+      (v.warnings.length ? " ⚠ " + v.warnings.join(" · ") : "");
+  }
+  WFLOW.builder = null;
+  const panel = $("#wf-builder");
+  if (panel) panel.hidden = true;
+  WFLOW.defId = res.data.id;
+  WFLOW.viewRunId = null;
+  await wfLoadDefinitions(true);
+  await wfLoadRuns();
+  wfRenderAll();
+}
+
+async function wfDeleteCurrent() {
+  const def = wfCurrentDef();
+  if (!def) return;
+  const hint = $("#wf-def-hint");
+  const yes = window.confirm(`Delete workflow “${def.name}”? Its runs (workflow_runs) cascade.`);
+  if (!yes) return;
+  const res = await del(`/api/workflows/${encodeURIComponent(def.id)}`);
+  if (!res || !res.ok) {
+    if (hint) hint.textContent = "✕ " + ((res && res.error) || "delete failed");
+    return;
+  }
+  WFLOW.viewRunId = null;
+  WFLOW.nodeId = "";
+  await Promise.all([wfLoadDefinitions(true), wfLoadRuns()]);
+  wfRenderAll();
+  if (hint) hint.textContent = `✓ deleted “${def.name}”`;
+}
+
+async function wfRunCurrent() {
+  const def = wfCurrentDef();
+  const hint = $("#wf-def-hint");
+  if (!def) { if (hint) hint.textContent = "Kono workflow select kora nei."; return; }
+  const parsed = WM.parseParamsJson(($("#wf-run-params") || {}).value || "{}");
+  if (!parsed.ok) { if (hint) hint.textContent = "✕ run params: " + parsed.error; return; }
+  if (hint) hint.textContent = `▶ running “${def.name}”…`;
+  const res = await post(`/api/workflows/${encodeURIComponent(def.id)}/run`,
+                         { params: parsed.value });
+  if (!res || !res.ok) {
+    if (hint) hint.textContent = "✕ " + ((res && res.error) || "run failed");
+    return;
+  }
+  const run = res.data || {};
+  WFLOW.viewRunId = run.id;
+  wfViewSet("workflows");
+  await wfLoadRuns();
+  wfRenderAll();
+  if (hint) hint.textContent = `✓ run #${run.id} → ${run.status}`;
+}
+
+/* ------------------------------------------------------------- data loads */
+async function wfLoadTools() {
+  const r = await api("/api/tools");
+  const tools = (r && r.ok && r.data && r.data.tools) || [];
+  WFLOW.toolList = tools;
+  WFLOW.toolByName = {};
+  tools.forEach((t) => { WFLOW.toolByName[t.name] = t; });
+  const dl = $("#wf-tools");
+  if (dl) dl.innerHTML = tools.map((t) => `<option value="${esc(t.name)}"></option>`).join("");
+}
+
+async function wfLoadDefinitions(keepSelection) {
+  const r = await api("/api/workflows");
+  const defs = (r && r.ok && r.data) || [];
+  WFLOW.defs = Array.isArray(defs) ? defs : [];
+  if (!WFLOW.defs.length) { WFLOW.defId = 0; return; }
+  const stillThere = WFLOW.defs.some((d) => Number(d.id) === Number(WFLOW.defId));
+  if (!keepSelection || !stillThere) WFLOW.defId = WFLOW.defs[0].id;
+}
+
+async function wfLoadRuns() {
+  const r = await api("/api/workflows/runs");
+  const runs = (r && r.ok && r.data) || [];
+  WFLOW.runs = Array.isArray(runs) ? runs : [];
+}
+
+async function wfLoadSchedules() {
+  const r = await api("/api/schedules");
+  const sc = (r && r.ok && r.data) || [];
+  WFLOW.schedules = Array.isArray(sc) ? sc : [];
+}
+
+function wfRenderAll() {
+  wfRenderDefControls();
+  wfRenderGraph();
+  wfRenderInspector();
+  wfRenderRuns();
+  wfRenderSchedules();
+  wfRenderLegend();
+}
+
+/* Schedule a runs refresh (the run list is the source of truth once a run
+ * ends; the live event stream is the source of truth while it runs). */
+function wfRefreshRunsSoon() {
+  if (WFLOW.runsTimer) return;
+  WFLOW.runsTimer = setTimeout(async () => {
+    WFLOW.runsTimer = null;
+    await wfLoadRuns();
+    if (WFLOW.view === "runs") wfRenderRuns();
+    else { wfRenderRuns(); wfRenderDefControls(); }
+  }, 400);
+}
+
+/* --------------------------------------------------- live event ingestion */
+function wfIngestTurn(event) {
+  const key = WM.turnKeyOf(event);
+  if (!key) return;
+  const t = WFLOW.turns.find((x) => x.key === key);
+  let target = t;
+  if (!target) {
+    target = WM.newTurn(key, event, event.id);
+    WFLOW.turns.push(target);
+    if (WFLOW.turns.length > 40) {
+      WFLOW.turns.shift();
+      if (WFLOW.turnIdx > 0) WFLOW.turnIdx -= 1;
+    }
+    WFLOW.turnIdx = Math.max(0, WFLOW.turns.length - 1);
+  }
+  WM.reduceTurn(target, event);
+  if (WFLOW.view === "pipeline" && wfTurnCurrent() === target) wfRenderPipeline();
+  else wfRenderTurnNav();
+}
+
+function wfIngest(event) {
+  if (!event || event.id == null || !WM) return;
+  const k = String(event.id);
+  if (WFLOW.seen[k]) return;
+  WFLOW.seen[k] = 1;
+  const keys = Object.keys(WFLOW.seen);
+  if (keys.length > 4000) keys.slice(0, 2000).forEach((x) => { delete WFLOW.seen[x]; });
+
+  const data = event.data || {};
+  const kind = String(event.kind || "");
+  const runId = WM.runIdOf(data);
+  if (runId) {
+    if (kind === "workflow.started") {
+      WFLOW.live = WM.emptyRun();
+      // Live-follow: a run of the definition the user is looking at (the
+      // SchedulerManager fires these in a background thread too) becomes the
+      // displayed run, so the graph tracks it as it executes.
+      const def = WFLOW.defs.find((d) => d.name === String(data.workflow || ""));
+      if (def && Number(def.id) === Number(WFLOW.defId)) {
+        WFLOW.viewRunId = runId;
+        if (WFLOW.view === "workflows") {
+          wfRenderDefControls();
+          wfRenderGraph();
+          wfRenderInspector();
+        }
+      }
+    }
+    else if (WFLOW.live.run_id && WFLOW.live.run_id !== runId) return;
+    WM.reduceRun(WFLOW.live, event);
+    if (String(WFLOW.viewRunId) === String(runId) && WFLOW.view === "workflows") {
+      wfRenderGraph();
+      wfRenderInspector();
+    }
+    if (kind === "workflow.started" || kind === "workflow.completed" ||
+        kind === "workflow.failed") wfRefreshRunsSoon();
+    // fall through — a run's events also belong to the pipeline view
+  }
+  if (WM.turnKeyOf(event)) wfIngestTurn(event);
+}
+
+window.AstraWorkflowFeed = { ingest: wfIngest };
+
+/* ------------------------------------------------------------------- wire */
+function wfWire() {
+  const views = $("#wf-views");
+  if (views && !views.dataset.hooked) {
+    views.dataset.hooked = "1";
+    views.addEventListener("click", (e) => {
+      const chip = e.target.closest(".chip");
+      if (chip) wfViewSet(chip.dataset.view);
+    });
+  }
+  const prev = $("#btn-wf-turn-prev");
+  const next = $("#btn-wf-turn-next");
+  if (prev && !prev.dataset.hooked) {
+    prev.dataset.hooked = "1";
+    prev.addEventListener("click", () => {
+      WFLOW.turnIdx = Math.max(0, WFLOW.turnIdx - 1);
+      wfRenderPipeline();
+    });
+  }
+  if (next && !next.dataset.hooked) {
+    next.dataset.hooked = "1";
+    next.addEventListener("click", () => {
+      WFLOW.turnIdx = Math.min(WFLOW.turns.length - 1, WFLOW.turnIdx + 1);
+      wfRenderPipeline();
+    });
+  }
+  const sel = $("#wf-select");
+  if (sel && !sel.dataset.hooked) {
+    sel.dataset.hooked = "1";
+    sel.addEventListener("change", () => {
+      WFLOW.defId = Number(sel.value) || 0;
+      WFLOW.viewRunId = null;
+      WFLOW.nodeId = "";
+      wfRenderAll();
+    });
+  }
+  const newBtn = $("#btn-wf-new");
+  if (newBtn && !newBtn.dataset.hooked) {
+    newBtn.dataset.hooked = "1";
+    newBtn.addEventListener("click", () => wfOpenBuilder(null));
+  }
+  const editBtn = $("#btn-wf-edit");
+  if (editBtn && !editBtn.dataset.hooked) {
+    editBtn.dataset.hooked = "1";
+    editBtn.addEventListener("click", () => wfOpenBuilder(wfCurrentDef()));
+  }
+  const delBtn = $("#btn-wf-delete");
+  if (delBtn && !delBtn.dataset.hooked) {
+    delBtn.dataset.hooked = "1";
+    delBtn.addEventListener("click", wfDeleteCurrent);
+  }
+  const runBtn = $("#btn-wf-run");
+  if (runBtn && !runBtn.dataset.hooked) {
+    runBtn.dataset.hooked = "1";
+    runBtn.addEventListener("click", wfRunCurrent);
+  }
+  const refresh = $("#btn-wf-refresh");
+  if (refresh && !refresh.dataset.hooked) {
+    refresh.dataset.hooked = "1";
+    refresh.addEventListener("click", async () => {
+      await Promise.all([wfLoadTools(), wfLoadDefinitions(true), wfLoadRuns(),
+                         wfLoadSchedules()]);
+      wfRenderAll();
+    });
+  }
+  const runsRefresh = $("#btn-wf-runs-refresh");
+  if (runsRefresh && !runsRefresh.dataset.hooked) {
+    runsRefresh.dataset.hooked = "1";
+    runsRefresh.addEventListener("click", async () => {
+      await Promise.all([wfLoadRuns(), wfLoadSchedules()]);
+      wfRenderRuns();
+      wfRenderSchedules();
+    });
+  }
+  const addStep = $("#btn-wf-add-step");
+  if (addStep && !addStep.dataset.hooked) {
+    addStep.dataset.hooked = "1";
+    addStep.addEventListener("click", () => {
+      if (!WFLOW.builder) return;
+      const collected = wfCollectBuilder();
+      WFLOW.builder.steps = collected.steps;
+      const preferred = WFLOW.toolByName[collected.steps.length
+        ? collected.steps[collected.steps.length - 1].tool : ""] ||
+        WFLOW.toolList[0] || null;
+      WFLOW.builder.steps.push(WM.newStepTemplate(preferred, collected.steps));
+      wfRenderBuilderSteps();
+      wfRenderGraph();
+    });
+  }
+  const save = $("#btn-wf-save");
+  if (save && !save.dataset.hooked) {
+    save.dataset.hooked = "1";
+    save.addEventListener("click", wfSaveBuilder);
+  }
+  const cancel = $("#btn-wf-cancel");
+  if (cancel && !cancel.dataset.hooked) {
+    cancel.dataset.hooked = "1";
+    cancel.addEventListener("click", wfCloseBuilder);
+  }
+  const graph = $("#wf-graph");
+  if (graph && !graph.dataset.hooked) {
+    graph.dataset.hooked = "1";
+    graph.addEventListener("click", (e) => {
+      const node = e.target.closest(".wf-gnode");
+      if (!node) return;
+      WFLOW.nodeId = node.dataset.node;
+      wfRenderGraph();
+      wfRenderInspector();
+    });
+    graph.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const node = e.target.closest(".wf-gnode");
+      if (!node) return;
+      e.preventDefault();
+      WFLOW.nodeId = node.dataset.node;
+      wfRenderGraph();
+      wfRenderInspector();
+    });
+  }
+  const runsList = $("#wf-runs");
+  if (runsList && !runsList.dataset.hooked) {
+    runsList.dataset.hooked = "1";
+    runsList.addEventListener("click", (e) => {
+      const row = e.target.closest(".wf-runrow");
+      if (!row) return;
+      WFLOW.viewRunId = Number(row.dataset.run);
+      wfViewSet("workflows");
+      wfRenderAll();
+      const hint = $("#wf-def-hint");
+      const run = WFLOW.runs.find((r) => Number(r.id) === Number(WFLOW.viewRunId));
+      if (hint && run) {
+        hint.textContent = `Showing run #${run.id} (${run.status}) on the graph.`;
+      }
+    });
+  }
+  const builderSteps = $("#wf-builder-steps");
+  if (builderSteps && !builderSteps.dataset.hooked) {
+    builderSteps.dataset.hooked = "1";
+    builderSteps.addEventListener("input", () => {
+      if (!WFLOW.builder) return;
+      WFLOW.builder.steps = wfCollectBuilder().steps;
+      if (WFLOW.edgeFrame) cancelAnimationFrame(WFLOW.edgeFrame);
+      WFLOW.edgeFrame = requestAnimationFrame(() => { wfRenderGraph(); });
+    });
+    builderSteps.addEventListener("click", (e) => {
+      const del2 = e.target.closest(".wf-bstep-del");
+      if (!del2 || !WFLOW.builder) return;
+      const idx = Number(del2.dataset.idx);
+      WFLOW.builder.steps = wfCollectBuilder().steps.filter((_, i) => i !== idx);
+      wfRenderBuilderSteps();
+      wfRenderGraph();
+    });
+  }
+  if (!window.__astraWfResize) {
+    window.__astraWfResize = true;
+    window.addEventListener("resize", () => {
+      if (WFLOW.view === "workflows") wfDrawEdges();
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ loader */
+loaders.workflows = async function () {
+  if (!WM) return;
+  wfWire();
+  wfRenderSrcMap();
+  await ensureLiveFeed();
+  if (!WFLOW.booted) {
+    WFLOW.booted = true;
+    const hist = await api("/api/events?limit=500");
+    const rows = (hist && hist.ok && Array.isArray(hist.data)) ? hist.data : [];
+    // /api/events is newest-first; the reducer wants chronological order.
+    WFLOW.turns = WM.pipelineTurns(AstraLog.orderHistory(rows));
+    rows.forEach((e) => { if (e && e.id != null) WFLOW.seen[String(e.id)] = 1; });
+    WFLOW.turnIdx = WFLOW.turns.length - 1;
+    await Promise.all([wfLoadTools(), wfLoadDefinitions(false), wfLoadRuns(),
+                       wfLoadSchedules()]);
+  } else {
+    await Promise.all([wfLoadRuns(), wfLoadSchedules()]);
+  }
+  wfRenderPipeline();
+  wfRenderAll();
+  wfViewSet(WFLOW.view);
+};
+
 async function eventsPoll() {
   // Polling fallback for browsers without EventSource. Id-based dedupe in
   // receiveEvent() makes a repeated window harmless, so re-offer the tail.
@@ -1965,11 +2901,17 @@ async function eventsPoll() {
 // SSE connection state for the header badge (● LIVE / ○ RECONNECTING).
 // Initialized at script load, before the Logs tab is ever opened.
 let SSE_STATE = "reconnecting";
+// One EventSource for the whole app (Logs + Agent Workflow). Two consumers
+// used to mean two connections to an SSE endpoint that holds each one open;
+// a single fan-out keeps an idle phone to one.
+let SSE_ES = null;
 
 function openSse(afterId) {
+  if (SSE_ES) return SSE_ES;
   const url = afterId ? `/api/events/stream?after_id=${encodeURIComponent(afterId)}`
                        : "/api/events/stream";
   const es = new EventSource(url);
+  SSE_ES = es;
   es.onopen = () => { SSE_STATE = "live"; refreshLiveState(); };
   es.onmessage = (ev) => {
     let e = {};
@@ -1982,6 +2924,21 @@ function openSse(afterId) {
     SSE_STATE = "reconnecting";
     refreshLiveState();
   };
+  return es;
+}
+
+// Open the shared feed if nobody has yet (the Workflow tab may be the first
+// tab opened). Resumes from the newest persisted id so nothing is replayed;
+// duplicates are deduped by id on both consumers anyway.
+async function ensureLiveFeed() {
+  if (SSE_ES) return;
+  if (!window.EventSource) { setInterval(eventsPoll, 3000); return; }
+  let lastId = 0;
+  try {
+    const r = await api("/api/events/last");
+    if (r && r.ok) lastId = (r.data || {}).last_id || 0;
+  } catch (_) { /* connect from now */ }
+  openSse(lastId);
 }
 
 /* ------------------------------ attachments (multimodal) --------------------- */

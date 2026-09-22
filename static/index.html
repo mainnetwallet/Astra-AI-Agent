@@ -25,6 +25,139 @@
 
   <!-- plugin tabviews are created dynamically by astra.js -->
 
+  <!-- ======== AGENT WORKFLOW (core) ========
+       A view over the REAL execution path: the live ChatPipeline turn
+       (Gateway → AstraRouter → AgentToolLoop → ToolRegistry → Gateway
+       verify) and the real WorkflowEngine definitions/runs/schedules.
+       State comes from /api/events (+/stream) and /api/workflows…, never
+       from a second engine. -->
+  <section id="tab-workflows" class="tabview">
+    <div class="panel">
+      <div class="panel-head">
+        <h3>🔀 Agent Workflow</h3>
+        <div class="logs-head-right">
+          <span class="logs-live" id="wf-live" data-state="idle">● LIVE</span>
+        </div>
+      </div>
+      <p class="muted hint" style="margin-top:0">
+        Real execution — ChatPipeline turn (Gateway → Router → Agent →
+        ToolRegistry → Verify) ebong real WorkflowEngine. Sob node real
+        module/function/event er upor base kora, kono mock engine nei.
+      </p>
+      <div class="chips wf-views" id="wf-views">
+        <span class="chip active" data-view="pipeline">🛰 Runtime pipeline</span>
+        <span class="chip" data-view="workflows">🧩 Workflows</span>
+        <span class="chip" data-view="runs">🗂 Runs &amp; schedules</span>
+      </div>
+    </div>
+
+    <!-- ---------- runtime pipeline (live chat turn) ---------- -->
+    <div class="wf-view" id="wf-view-pipeline">
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Live turn</h3>
+          <div class="row">
+            <button class="btn mini" id="btn-wf-turn-prev" aria-label="Previous turn">←</button>
+            <span class="tinytag" id="wf-turn-label">no turn yet</span>
+            <button class="btn mini" id="btn-wf-turn-next" aria-label="Next turn">→</button>
+          </div>
+        </div>
+        <div class="wf-flow" id="wf-flow">
+          <div class="empty">Kono chat turn ekhono nei — Assistant tab e kotha bolun,
+            tarpor ekhane live dekhun.</div>
+        </div>
+        <div class="wf-turn-meta" id="wf-turn-meta"></div>
+      </div>
+      <div class="grid2">
+        <div class="panel">
+          <h3>Stage events</h3>
+          <div class="list wf-events" id="wf-events"><div class="empty">…</div></div>
+        </div>
+        <div class="panel">
+          <h3>Real code map</h3>
+          <p class="muted small" style="margin-top:0">Every stage below is a view of
+            this exact file + symbol.</p>
+          <div class="list wf-srcmap" id="wf-srcmap"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------- workflows (definitions + graph) ---------- -->
+    <div class="wf-view" id="wf-view-workflows" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Workflow</h3>
+          <div class="row">
+            <button class="btn mini" id="btn-wf-new">＋ New</button>
+            <button class="btn mini" id="btn-wf-refresh">⟳ Refresh</button>
+          </div>
+        </div>
+        <div class="wf-picker">
+          <select id="wf-select" aria-label="Workflow definition"></select>
+          <button class="btn mini primary" id="btn-wf-run">▶ Run</button>
+          <button class="btn mini" id="btn-wf-edit">✎ Edit in builder</button>
+          <button class="btn mini danger" id="btn-wf-delete">🗑 Delete</button>
+        </div>
+        <div class="wf-runparams">
+          <label class="small muted" for="wf-run-params">run params (JSON object)</label>
+          <textarea id="wf-run-params" class="mono" rows="2" spellcheck="false">{}</textarea>
+        </div>
+        <div class="hint" id="wf-def-hint"></div>
+        <div class="cards mini" id="wf-cards"></div>
+        <div class="wf-graph-wrap">
+          <div class="wf-graph" id="wf-graph">
+            <div class="empty">Kono workflow nei — ＋ New diye ekta banao.</div>
+          </div>
+          <svg class="wf-edges" id="wf-edges" aria-hidden="true"></svg>
+        </div>
+        <div class="wf-legend" id="wf-legend"></div>
+      </div>
+
+      <div class="panel" id="wf-inspector-wrap">
+        <h3>Node inspector</h3>
+        <div class="list" id="wf-inspector">
+          <div class="empty">Graph e ekta node click korun.</div>
+        </div>
+      </div>
+
+      <div class="panel" id="wf-builder" hidden>
+        <div class="panel-head">
+          <h3>Builder</h3>
+          <div class="row">
+            <button class="btn mini" id="btn-wf-add-step">＋ Add step</button>
+            <button class="btn mini primary" id="btn-wf-save">💾 Save</button>
+            <button class="btn mini" id="btn-wf-cancel">✕ Cancel</button>
+          </div>
+        </div>
+        <div class="wf-builder-head">
+          <input id="wf-builder-name" placeholder="workflow name (unique)" maxlength="120">
+          <input id="wf-builder-desc" placeholder="description (optional)" maxlength="200">
+        </div>
+        <div class="list" id="wf-builder-steps"></div>
+        <div class="hint" id="wf-builder-hint"></div>
+        <datalist id="wf-tools"></datalist>
+      </div>
+    </div>
+
+    <!-- ---------- runs + schedules ---------- -->
+    <div class="wf-view" id="wf-view-runs" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Execution history</h3>
+          <button class="btn mini" id="btn-wf-runs-refresh">⟳ Refresh</button>
+        </div>
+        <div class="list table" id="wf-runs"><div class="empty">Loading…</div></div>
+      </div>
+      <div class="panel">
+        <h3>Schedules</h3>
+        <p class="muted small" style="margin-top:0">SchedulerManager fires these
+          through the same WorkflowEngine (oneshot / interval / daily / weekly /
+          deadline).</p>
+        <div class="list table" id="wf-schedules"><div class="empty">Loading…</div></div>
+      </div>
+    </div>
+  </section>
+
   <!-- ======== ACTIVITY LOG (core) ======== -->
   <section id="tab-logs" class="tabview">
     <div class="panel">
@@ -169,6 +302,7 @@
 </main>
 
 <script src="/static/js/log_model.js"></script>
+<script src="/static/js/workflow_model.js"></script>
 <script src="/static/js/astra.js"></script>
 </body>
 </html>

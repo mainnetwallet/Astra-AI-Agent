@@ -60,6 +60,8 @@ System endpoints:
   GET/POST /api/memory      memory save/list; /api/memory/search
   GET  /api/experiences     experience memory
   GET/POST /api/workflows   workflow definitions; runs via POST {id}/run
+  PATCH    /api/workflows/<id>   edit a definition in place (runs preserved)
+  DELETE   /api/workflows/<id>   remove a definition (its runs cascade)
   GET/POST /api/schedules   scheduler CRUD
   GET  /api/providers       AI provider health/latency/cost
   GET  /api/gateway/health  Astra AI Gateway status (connections + fallback)
@@ -154,6 +156,7 @@ CONTENT_TYPES = {
 CORE_TABS = [
     {"tab": "dashboard", "label": "\U0001f4ca Dashboard", "core": True},
     {"tab": "assistant", "label": "\U0001f916 Assistant", "core": True},
+    {"tab": "workflows", "label": "\U0001f500 Agent Workflow", "core": True},
     {"tab": "providers", "label": "\U0001f50c AI Providers health", "core": True},
     {"tab": "router", "label": "\U0001f9e0 Router", "core": True},
     {"tab": "web3", "label": "\u26d3\ufe0f Wallet", "core": True},
@@ -1059,6 +1062,38 @@ class WebApp:
                                            path[2], name="workflow_id"),
                                        params=body.get("params") or {})
             return json_response({"ok": True, "data": run}, rid=req.rid)
+        # PATCH edits a definition in place (the engine's update_definition
+        # keeps workflow_runs, so an edit never discards the run history the
+        # page shows). PATCH is used rather than PUT because it is already in
+        # the CORS Access-Control-Allow-Methods list (see SECURITY_HEADERS).
+        if len(path) == 3 and path[:2] == ["api", "workflows"] and method == "PATCH":
+            wf = site.workflows()
+            wf_id = int_arg(path[2], name="workflow_id")
+            steps = body.get("steps")
+            if steps is not None and not isinstance(steps, list):
+                return error_response("steps must be a list", 400, "bad_request",
+                                      req.rid)
+            try:
+                updated = wf.update_definition(
+                    wf_id, name=body.get("name"), description=body.get("description"),
+                    steps=steps, enabled=body.get("enabled"))
+            except ValueError as exc:
+                return error_response(str(exc), 400, "bad_request", req.rid)
+            if not updated:
+                return error_response("workflow not found", 404, "bad_request",
+                                      req.rid)
+            return json_response({"ok": True, "data": updated}, rid=req.rid)
+        # DELETE a definition. WorkflowEngine.delete_definition already
+        # existed but had no route, so a definition created from the UI could
+        # never be removed. workflow_runs cascades on the FK (see engine SCHEMA).
+        if len(path) == 3 and path[:2] == ["api", "workflows"] and method == "DELETE":
+            wf = site.workflows()
+            wf_id = int_arg(path[2], name="workflow_id")
+            if not wf.get_definition(wf_id):
+                return error_response("workflow not found", 404, "bad_request",
+                                      req.rid)
+            wf.delete_definition(wf_id)
+            return json_response({"ok": True, "data": {"id": wf_id}}, rid=req.rid)
         if path == ["api", "workflows", "runs"] and method == "GET":
             return json_response({"ok": True, "data": site.workflows().list_runs()},
                                  rid=req.rid)

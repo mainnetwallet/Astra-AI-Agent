@@ -95,6 +95,37 @@ class WorkflowEngine:
     def delete_definition(self, wf_id: int) -> None:
         self.store.exec("DELETE FROM workflow_definitions WHERE id = ?", (wf_id,))
 
+    def update_definition(self, wf_id: int, *, name: str | None = None,
+                          description: str | None = None,
+                          steps: list | None = None,
+                          enabled: bool | None = None) -> dict | None:
+        """Edit a definition in place. Returns None when it does not exist.
+
+        Deliberately an UPDATE rather than delete+redefine: `workflow_runs`
+        records the history of the definition (started_at/status/current_step/
+        results), and a cascade delete would throw that audit trail away just
+        because the step list changed. Run history is therefore preserved.
+        """
+        if not self.get_definition(wf_id):
+            return None
+        fields: dict = {}
+        if name is not None:
+            name = name.strip()
+            if not name:
+                raise ValueError("workflow name required")
+            fields["name"] = name
+        if description is not None:
+            fields["description"] = description
+        if steps is not None:
+            fields["steps"] = json.dumps(steps, ensure_ascii=False)
+        if enabled is not None:
+            fields["enabled"] = 1 if enabled else 0
+        if fields:
+            cols = ", ".join(f"{k} = ?" for k in fields)
+            self.store.exec(f"UPDATE workflow_definitions SET {cols} WHERE id = ?",
+                            (*fields.values(), wf_id))
+        return self.get_definition(wf_id)
+
     # -- runs ----------------------------------------------------------------
     def create_run(self, wf_id: int, params: dict | None = None) -> dict:
         d = self.get_definition(wf_id)

@@ -164,7 +164,7 @@ class TerminalManager:
 
     # -- context for the AI --------------------------------------------------
     def context_text(self, session_id: str | None = None, *,
-                     max_commands: int = 8, max_chars: int = 2000) -> str:
+                     max_commands: int = 8, max_chars: int | None = None) -> str:
         session = self.get(session_id, create=False)
         if session is None:
             return ""

@@ -83,13 +83,14 @@ _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
                               "summarization", "research", "planning"})
 
 MAX_TARGETS_IN_PROMPT = 60
-MAX_OUTPUT_CHARS_IN_VERIFY = 12000
-# The Gateway picks ITS OWN model by keyword-classifying user-role text. These
-# control prompts embed the provider catalogue ("...vision...") and provider
-# output, which would trip the hard vision/json filters, so the pipeline
-# states the category explicitly instead of letting it be guessed.
-UNDERSTAND_MAX_TOKENS = 700
-VERIFY_MAX_TOKENS = 600
+# NOTE: there is deliberately no Astra-imposed output-token cap for the
+# Gateway UNDERSTAND/VERIFY calls or the Provider call. The Gateway picks its
+# OWN model by keyword-classifying user-role text; those control prompts embed
+# the provider catalogue and provider output, which would trip the hard
+# vision/json filters, so the pipeline states the category explicitly instead
+# of letting it be guessed. Output length is left to the selected model
+# (astra.ai.token_limits) — an explicit CHAT_MAX_TOKENS override is honoured
+# verbatim, and None means "provider/model decides".
 
 # NOTE: each *_SYSTEM_PROMPT below is the specialized layer for its role
 # only. The Astra Core System Prompt (identity, operating principles,
@@ -304,7 +305,9 @@ def _with_tool_summary(messages: list, steps: list,
             if code is not None:
                 line += f", exit_code={code}"
             if not s.ok and s.error:
-                line += f", error={s.error[:120]}"
+                # Full error text (no artificial cap): this block is what the
+                # correcting Gateway reads to understand why a tool failed.
+                line += f", error={s.error}"
             lines.append(line)
         parts.append("Tool actions ALREADY performed for this task (do not "
                      "repeat them; use their results):\n" + "\n".join(lines))
@@ -366,7 +369,7 @@ class _ChatPort(ProviderExecutionPort):
         self._trace = trace
         self.last_text = ""
 
-    def execute(self, target, messages: list, max_tokens: int = 500,
+    def execute(self, target, messages: list, max_tokens: int | None = None,
                 **kwargs) -> str:
         rr = self._router.route_request(RoutingRequest(
             task_type=self._task_type, messages=messages,
@@ -391,7 +394,7 @@ class _GatewayPort(ProviderExecutionPort):
         self._trace = trace
         self.last_text = ""
 
-    def execute(self, target, messages: list, max_tokens: int = 500,
+    def execute(self, target, messages: list, max_tokens: int | None = None,
                 **kwargs) -> str:
         text = self._gateway.chat(messages, max_tokens=max_tokens,
                                   category="general", trace=self._trace)
@@ -437,7 +440,7 @@ class _ToolLoopPort(ProviderExecutionPort):
         self.exec_context = exec_context or ""
         self.last_text = ""
 
-    def execute(self, target, messages: list, max_tokens: int = 500,
+    def execute(self, target, messages: list, max_tokens: int | None = None,
                 **kwargs) -> str:
         from astra.ai.agent_tool_loop import AgentToolLoop
         # The correction instruction the supervisor appended as the last
@@ -474,13 +477,16 @@ class _ToolLoopPort(ProviderExecutionPort):
 # ── the pipeline ────────────────────────────────────────────────────────────
 class ChatPipeline:
     def __init__(self, gateway, router, events=None, *,
-                 max_tokens: int = 1500, registry=None, terminal=None,
+                 max_tokens: int | None = None, registry=None, terminal=None,
                  execution_history=None, max_tool_steps: int = 8,
                  agent_brain: str = "provider"):
         self.gateway = gateway
         self.router = router
         self.events = events
-        self.max_tokens = int(max_tokens or 1500)
+        # None => the provider/model decides the output length. Only an
+        # explicit operator/caller budget is forwarded (astra.ai.token_limits).
+        self.max_tokens = (None if max_tokens in (None, "", 0)
+                           else int(max_tokens))
         # Shared Terminal + tool surface. When wired (production, via
         # astra.bootstrap), the provider step becomes a real multi-step
         # agent tool loop over the SAME ToolRegistry the Gateway uses.
@@ -633,8 +639,7 @@ class ChatPipeline:
             raw = self.gateway.chat(
                 [{"role": "system", "content": UNDERSTAND_SYSTEM_PROMPT},
                  {"role": "user", "content": "\n\n".join(parts)}],
-                max_tokens=UNDERSTAND_MAX_TOKENS, category="general",
-                trace=req)
+                max_tokens=None, category="general", trace=req)
         except Exception as e:
             self._emit("chat.pipeline.understand_failed", error=str(e),
                        request=req, trace=req)
@@ -677,7 +682,10 @@ class ChatPipeline:
         judge whether the work is actually done rather than guess."""
         def verifier(contract, result, evidence):
             state["verifications"] += 1
-            output = (result.text or "")[:MAX_OUTPUT_CHARS_IN_VERIFY]
+            # No character cap: the verifier sees the provider's full output
+            # (the selected model's real context window is respected by the
+            # gateway call below via astra.ai.context_budget).
+            output = result.text or ""
             crit = "\n".join(f"- {c}" for c in brief["criteria"]) or "- (none)"
             exec_ctx = self.execution_history.context_text(scope or "") \
                 if scope else ""
@@ -717,7 +725,7 @@ class ChatPipeline:
                 raw = self.gateway.chat(
                     [{"role": "system", "content": VERIFY_SYSTEM_PROMPT},
                      {"role": "user", "content": prompt}],
-                    max_tokens=VERIFY_MAX_TOKENS, category="reasoning",
+                    max_tokens=None, category="reasoning",
                     trace=req)
             except Exception as e:
                 state["unavailable"] = str(e)

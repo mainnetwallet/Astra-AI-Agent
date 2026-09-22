@@ -31,13 +31,13 @@ from __future__ import annotations
 
 import dataclasses
 
-# Safe defaults for a request body that gets embedded in a Gateway/Provider
-# prompt. These are characters, not tokens (no tokenizer dependency here),
-# but scaled conservatively (~4 chars/token) to stay well inside any small
-# model's context window even before the system prompt and current message
-# are added.
-DEFAULT_MAX_CHARS = 6000
-DEFAULT_MAX_TURNS = 20
+# No Astra-imposed limit by default: the full useful conversation is carried,
+# and provider-aware fitting against the selected model's REAL context window
+# happens where the model is known (astra.ai.context_budget, applied in the
+# router/gateway). `None` means "no limit"; callers that genuinely need a
+# smaller budget can still pass a number.
+DEFAULT_MAX_CHARS = None
+DEFAULT_MAX_TURNS = None
 
 
 @dataclasses.dataclass
@@ -83,11 +83,11 @@ class ConversationContextBuilder:
     silently drift apart.
     """
 
-    def __init__(self, chat_log, *, max_chars: int = DEFAULT_MAX_CHARS,
-                 max_turns: int = DEFAULT_MAX_TURNS):
+    def __init__(self, chat_log, *, max_chars: int | None = DEFAULT_MAX_CHARS,
+                 max_turns: int | None = DEFAULT_MAX_TURNS):
         self.chat_log = chat_log
-        self.max_chars = int(max_chars)
-        self.max_turns = int(max_turns)
+        self.max_chars = None if max_chars is None else int(max_chars)
+        self.max_turns = None if max_turns is None else int(max_turns)
 
     def build(self, conversation_id: int | None, *,
               exclude_message_id: int | None = None,
@@ -105,14 +105,20 @@ class ConversationContextBuilder:
         if self.chat_log is None or conversation_id is None:
             return ConversationContext(messages=[], conversation_id=conversation_id)
 
-        turns_limit = max(1, int(max_turns if max_turns is not None else self.max_turns))
-        chars_limit = max(0, int(max_chars if max_chars is not None else self.max_chars))
+        effective_turns = max_turns if max_turns is not None else self.max_turns
+        effective_chars = max_chars if max_chars is not None else self.max_chars
+        # 0 == "no limit" (see `_trim`).
+        turns_limit = 0 if effective_turns is None else max(0, int(effective_turns))
+        chars_limit = 0 if effective_chars is None else max(0, int(effective_chars))
 
         # Over-fetch a bit: some rows may be dropped below (the excluded
         # current message, empty text, failed assistant replies), and we
         # still want `turns_limit` genuine turns to trim from afterwards.
+        # With no turn limit we ask for the WHOLE conversation (limit=0),
+        # never an artificial ceiling.
+        fetch_limit = (max(turns_limit * 3 + 10, 50) if turns_limit else 0)
         raw = self.chat_log.history(
-            limit=max(turns_limit * 3 + 10, 50), conversation_id=conversation_id)
+            limit=fetch_limit, conversation_id=conversation_id)
         rows = raw.get("messages") or []
 
         turns = []
@@ -134,12 +140,13 @@ class ConversationContextBuilder:
 
     @staticmethod
     def _trim(turns: list[dict], max_chars: int, max_turns: int) -> list[dict]:
-        """Deterministic trim: keep the newest turns first, then drop older
-        ones once the character budget is spent. Never returns an empty
-        result just because the single newest turn already exceeds the
-        budget on its own — at least the latest turn is always kept, since
-        that is exactly what a "why?"/"continue" follow-up needs to resolve
-        against."""
+        """Deterministic trim. `0` for either limit means NO LIMIT — the full
+        history is preserved (provider-aware fitting to the selected model's
+        real context window happens later, in astra.ai.context_budget). When
+        a budget IS supplied, keep the newest turns first and drop older ones
+        once it is spent; never return empty just because the newest turn
+        alone exceeds the budget — at least the latest turn is always kept,
+        since that is what a "why?"/"continue" follow-up resolves against."""
         candidates = turns[-max_turns:] if max_turns else list(turns)
         kept = []
         total = 0

@@ -70,6 +70,22 @@ _MULTIMODAL_OUTPUT: dict[str, list[str]] = {
     "titan-image": ["image"],
 }
 
+# Documented per-family OUTPUT token ceiling (how many tokens a model may
+# emit in one completion), where the provider publishes one. This is model
+# CAPABILITY metadata, not an Astra-imposed cap: it is used only when a
+# provider's API requires an explicit output limit (see
+# astra.ai.token_limits) so that the derived value reflects the model, not a
+# universal small number. Families absent here let the provider decide.
+_MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "claude": 8192,
+    "gemini": 8192,
+    "gpt": 16384,
+    "openai": 16384,
+    "qwen": 16384,
+    "deepseek": 8192,
+    "command": 4096,
+}
+
 _FAST_WORDS = ("flash", "lightning", "lite", "nano", "small", "mini", "micro",
                "speedy", "scarlet", "sapphire", "amber", "gray", "swift")
 _HIGH_WORDS = ("opus", "pro", "sonnet", "reasoning", "ultra", "max", "large",
@@ -92,6 +108,7 @@ PROVIDER_VAR = {
 class Model:
     """One AI model resource. Immutable-ish metadata, mutable status."""
     __slots__ = ("provider", "model_id", "display_name", "capabilities", "context_window",
+                 "max_output_tokens",
                  "input_modalities", "output_modalities", "supports_streaming",
                  "supports_tools", "supports_json", "supports_vision",
                  "reasoning_level", "speed_class", "quality_class", "cost_class",
@@ -99,6 +116,7 @@ class Model:
 
     def __init__(self, provider: str, model_id: str, *, display_name: str = "",
                  capabilities: list[str] | None = None, context_window: int = 128000,
+                 max_output_tokens: int | None = None,
                  input_modalities: list[str] | None = None, output_modalities: list[str] | None = None,
                  supports_streaming: bool = True, supports_tools: bool = False,
                  supports_json: bool = False, supports_vision: bool = False,
@@ -111,6 +129,7 @@ class Model:
         self.display_name = display_name or model_id
         self.capabilities = list(capabilities or ["chat"])
         self.context_window = context_window
+        self.max_output_tokens = max_output_tokens
         self.input_modalities = list(input_modalities or ["text"])
         self.output_modalities = list(output_modalities or ["text"])
         self.supports_streaming = supports_streaming
@@ -138,6 +157,7 @@ class Model:
             "provider": self.provider, "model": self.model_id,
             "display_name": self.display_name, "capabilities": list(self.capabilities),
             "context_window": self.context_window,
+            "max_output_tokens": self.max_output_tokens,
             "input_modalities": list(self.input_modalities),
             "output_modalities": list(self.output_modalities),
             "supports_streaming": self.supports_streaming,
@@ -223,6 +243,7 @@ def metadata_for(model_id: str, provider: str | None = None) -> dict:
     return {
         "provider": provider or base_provider or fam or "unknown",
         "capabilities": caps, "context_window": ctx,
+        "max_output_tokens": _MAX_OUTPUT_TOKENS.get(fam),
         "quality_class": q, "cost_class": cost,
         "supports_vision": vision, "supports_json": bool(struct),
         "supports_tools": "tools" in caps,

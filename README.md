@@ -180,13 +180,15 @@ configured.
 | `AI_ROUTING_PREFERENCE` | balanced | AstraRouter scoring preference |
 | `AI_MAX_RETRIES` | 2 | Retries per provider before failing over to the next |
 | `AI_BACKOFF` | 1.0 | Base seconds for exponential retry backoff |
-| `CHAT_MAX_TOKENS` | 1500 | Provider completion budget per chat turn |
+| `CHAT_MAX_TOKENS` | *(unset)* | Optional explicit output budget per chat turn. Unset = provider/model decides (no Astra-imposed cap). |
+| `CHAT_CONTEXT_MAX_CHARS` | *(unset)* | Optional history character ceiling. Unset = no limit; provider-aware fitting uses the selected model's real context window. |
+| `CHAT_CONTEXT_MAX_TURNS` | *(unset)* | Optional history turn ceiling. Unset = no limit. |
 | `ASTRA_STARTUP_DISCOVERY` | 0 | Run model discovery once at boot |
 | `GRANTED_PERMISSIONS` | `read low_risk_write browser_action system_action` | Tool permission levels granted to the agent (`system_action` powers the shared Terminal; remove it to fail terminal tools closed) |
 | `CHAT_MAX_TOOL_STEPS` | 8 | Max tool calls per chat turn before the agent tool loop stops |
 | `CHAT_AGENT_BRAIN` | provider | Which AI drives the tool loop: `provider` (AstraRouter) or `gateway` (Gateway's own connections). Both use the same shared Terminal. |
 | `ASTRA_TERMINAL_SHELL` | *(auto-detect)* | Override the terminal shell (e.g. `/bin/sh`, `pwsh`); auto-detects bash/sh, PowerShell/cmd and Termux |
-| `TERMINAL_MAX_OUTPUT_CHARS` | 20000 | Per-command stdout/stderr cap held in the terminal session |
+| `TERMINAL_MAX_OUTPUT_CHARS` | 20000 | Resource-safety buffer cap for stdout/stderr held in the terminal session. Not an AI context limit — full output reaches the model while its context window allows. |
 | `TERMINAL_HISTORY_LIMIT` | 50 | Commands retained in each terminal session's history |
 | `DATA_DIR` | ./data | Runtime data directory (SQLite DB + `uploads/`) |
 | `DATABASE` | `<DATA_DIR>/astra.db` | Explicit SQLite file path |

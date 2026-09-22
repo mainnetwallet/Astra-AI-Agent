@@ -46,7 +46,12 @@ from astra.core.context import ToolContext
 from astra.core.events import new_op_id
 
 DEFAULT_MAX_STEPS = 8
-DEFAULT_MAX_TOOL_RESULT_CHARS = 6000
+# None => NO artificial cap on the tool result fed back to the model. The
+# result is kept whole whenever the provider's real context window permits
+# (provider-aware fitting happens at the router/gateway boundary — see
+# astra.ai.context_budget); only an explicit caller override re-imposes a
+# character cap.
+DEFAULT_MAX_TOOL_RESULT_CHARS = None
 DEFAULT_MAX_TOOLS_IN_PROMPT = 40
 DEFAULT_MAX_DESC_CHARS = 160
 
@@ -198,7 +203,7 @@ class ToolCaller:
 
     name = "caller"
 
-    def chat(self, messages: list, *, max_tokens: int = 1500,
+    def chat(self, messages: list, *, max_tokens: int | None = None,
              trace: str = "") -> str:
         raise NotImplementedError
 
@@ -210,7 +215,7 @@ class GatewayToolCaller(ToolCaller):
         self.gateway = gateway or None
         self.category = category
 
-    def chat(self, messages, *, max_tokens=1500, trace=""):
+    def chat(self, messages, *, max_tokens=None, trace=""):
         return self.gateway.chat(messages, max_tokens=max_tokens,
                                  category=self.category, trace=trace)
 
@@ -243,7 +248,7 @@ class ProviderToolCaller(ToolCaller):
             vision=self.vision, max_tokens=max_tokens,
             no_fallback=self.no_fallback, trace=trace or self.trace))
 
-    def chat(self, messages, *, max_tokens=1500, trace=""):
+    def chat(self, messages, *, max_tokens=None, trace=""):
         rr = self._request(messages, max_tokens, trace, self.task_type)
         if (rr is None or not rr.ok) and self.task_type not in ("simple_chat",
                                                                 "vision") \
@@ -299,13 +304,14 @@ class ToolLoopResult:
 class AgentToolLoop:
     def __init__(self, registry, *, terminal=None, events=None,
                  max_steps: int = DEFAULT_MAX_STEPS,
-                 max_tool_result_chars: int = DEFAULT_MAX_TOOL_RESULT_CHARS,
+                 max_tool_result_chars: int | None = DEFAULT_MAX_TOOL_RESULT_CHARS,
                  execution_history: AgentExecutionHistory | None = None):
         self.registry = registry
         self.terminal = terminal
         self.events = events
         self.max_steps = max(1, int(max_steps))
-        self.max_tool_result_chars = int(max_tool_result_chars)
+        self.max_tool_result_chars = (None if max_tool_result_chars is None
+                                      else int(max_tool_result_chars))
         self.execution_history = execution_history or AgentExecutionHistory()
 
     # -- events --------------------------------------------------------------
@@ -320,7 +326,7 @@ class AgentToolLoop:
     # -- the loop ------------------------------------------------------------
     def run(self, task, caller: ToolCaller, *, system_prompt: str,
             history=None, context_blocks=None, session_id: str | None = None,
-            scope: str | None = None, max_tokens: int = 1500,
+            scope: str | None = None, max_tokens: int | None = None,
             trace: str = "") -> ToolLoopResult:
         catalog = build_tool_catalog(self.registry)
         protocol = TOOL_PROTOCOL.replace("{catalog}", catalog)

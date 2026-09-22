@@ -52,7 +52,16 @@ def estimated_cost_usd(model: Model, request) -> float:
     Used to give max_cost_usd real influence over scoring even though no
     per-token pricing table exists at this layer — see BASE_COST_PER_TOKEN_USD.
     """
-    tokens = max(1, int(getattr(request, "max_tokens", 0) or 500))
+    requested = getattr(request, "max_tokens", None)
+    try:
+        tokens = int(requested) if requested else 0
+    except (TypeError, ValueError):
+        tokens = 0
+    if tokens <= 0:
+        # No explicit budget -> estimate from the model's OWN context window
+        # rather than a fixed universal number. Used only for the relative
+        # cost ranking; it is never sent to a provider as a token limit.
+        tokens = max(1, int(getattr(model, "context_window", 0) or 0) // 8)
     return tokens * BASE_COST_PER_TOKEN_USD * model.cost_multiplier
 
 

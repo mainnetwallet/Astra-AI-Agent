@@ -176,12 +176,16 @@ class _GatewayCompatibleConnection:
         return results
 
     # -- interface ------------------------------------------------------------
-    def chat(self, messages, model=None, max_tokens=500) -> str:
+    def chat(self, messages, model=None, max_tokens=None) -> str:
         cred = self._pick()
         if cred is None:
             raise ProviderError(f"{self.name}: no healthy credential configured")
         body = {"model": model or (self.models[0] if self.models else ""),
-                "max_tokens": max_tokens, "messages": messages}
+                "messages": messages}
+        # Output limit is optional for these APIs: an unset budget is omitted
+        # so the model uses its own maximum (astra.ai.token_limits).
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         data = self._post(f"{self._api_base()}/chat/completions", body, cred)
         self._done(cred)
         try:
@@ -191,7 +195,7 @@ class _GatewayCompatibleConnection:
         self._last_usage = data.get("usage", {})
         return text.strip() or "(no reply)"
 
-    def stream(self, messages, model=None, max_tokens=500):
+    def stream(self, messages, model=None, max_tokens=None):
         cred = self._pick()
         if cred is None:
             raise ProviderError(f"{self.name}: no healthy credential configured")
@@ -199,7 +203,9 @@ class _GatewayCompatibleConnection:
             self.events.emit("ai.started", agent="gateway", provider=self.name,
                              model=model or (self.models[0] if self.models else ""))
         body = {"model": model or (self.models[0] if self.models else ""),
-                "max_tokens": max_tokens, "messages": messages, "stream": True}
+                "messages": messages, "stream": True}
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(f"{self._api_base()}/chat/completions",
                                      data=data, headers=self._headers(cred))
@@ -450,13 +456,14 @@ class AstraGatewayBedrock:
             else:
                 blocks = [{"text": str(content)}]
             convo.append({"role": role, "content": blocks})
-        body = {"modelId": model, "messages": convo,
-                "inferenceConfig": {"maxTokens": max_tokens}}
+        body = {"modelId": model, "messages": convo}
+        if max_tokens is not None:
+            body["inferenceConfig"] = {"maxTokens": max_tokens}
         if system:
             body["system"] = [{"text": system}]
         return body
 
-    def chat(self, messages, model=None, max_tokens=500) -> str:
+    def chat(self, messages, model=None, max_tokens=None) -> str:
         model = model or (self.models[0] if self.models else "")
         if not model:
             raise ProviderError(f"{self.name}: no model configured")
@@ -468,7 +475,7 @@ class AstraGatewayBedrock:
         blocks = data.get("output", {}).get("message", {}).get("content", [])
         return "".join(b.get("text", "") for b in blocks).strip() or "(no reply)"
 
-    def stream(self, messages, model=None, max_tokens=500):
+    def stream(self, messages, model=None, max_tokens=None):
         model = model or (self.models[0] if self.models else "")
         if not model:
             raise ProviderError(f"{self.name}: no model configured")
@@ -734,8 +741,40 @@ class AstraAIGateway:
                         if is_user:
                             texts.append(block["text"])
         text = " ".join(texts)
-        context_tokens = chars // 4
+        # No tokenizer is bundled, so this is an ESTIMATE, not an exact token
+        # count (see astra.ai.context_budget); it feeds the model-selection
+        # context gate, which is itself a soft preference now that the
+        # selected model's real window is used to fit the prompt below.
+        from astra.ai.context_budget import estimate_tokens_from_chars
+        context_tokens = estimate_tokens_from_chars(chars)
         return text, context_tokens, vision
+
+    def _catalog_model(self, model_id):
+        """Look up the live `Model` for a model id from this gateway's own
+        catalog, so an explicit-model call can fit the prompt to that model's
+        real context window. Returns None when unknown."""
+        if not model_id:
+            return None
+        for _conn, model in self._catalog:
+            if getattr(model, "model_id", "") == model_id:
+                return model
+        return None
+
+    @staticmethod
+    def _fit_messages(messages, model, max_tokens=None):
+        """Provider-aware context fitting: keep the full prompt when it fits
+        the target model's real context window, otherwise drop the oldest
+        middle turns (never the system prompt or the current request). See
+        astra.ai.context_budget."""
+        from astra.ai.context_budget import default_reserve_tokens, fit_messages
+        from astra.ai.token_limits import resolve_output_tokens
+        ctx = int(getattr(model, "context_window", 0) or 0)
+        out = resolve_output_tokens(max_tokens,
+                                    provider=getattr(model, "provider", ""),
+                                    model_meta=model)
+        reserve = out if out else default_reserve_tokens(ctx)
+        return fit_messages(messages, context_window=ctx,
+                            reserve_tokens=reserve)
 
     def _select_order(self, messages, max_tokens, category=None):
         from astra.ai.gateway_routing import (REQUEST_CATEGORIES,
@@ -756,6 +795,14 @@ class AstraAIGateway:
         targets = eligible_targets(self._catalog, self.routing_state,
                                    category=category,
                                    context_tokens=context_tokens)
+        if not targets and context_tokens:
+            # The prompt does not fit any candidate's window AS-IS, but
+            # astra.ai.context_budget will fit it to whichever model is
+            # selected — so a large context must not hard-fail target
+            # selection. Retry the gate without the context filter and let
+            # provider-aware fitting shrink the prompt to the chosen model.
+            targets = eligible_targets(self._catalog, self.routing_state,
+                                       category=category, context_tokens=0)
         ranked = rank_targets(targets, category=category)
         ranked = prefer_last_successful(ranked, self.routing_state.last_successful())
         return category, ranked
@@ -767,16 +814,20 @@ class AstraAIGateway:
             except Exception:
                 pass
 
-    def chat(self, messages, model=None, max_tokens=500, category=None,
+    def chat(self, messages, model=None, max_tokens=None, category=None,
              trace="") -> str:
         """`category` (optional, one of gateway_routing.REQUEST_CATEGORIES)
         overrides the keyword classification of the user-role text; leave it
-        unset for ordinary requests."""
+        unset for ordinary requests. `max_tokens` unset means the provider /
+        model decides (no Astra-imposed cap)."""
         op = new_op_id()
         if model:
+            target = self._catalog_model(model)
+            fitted = (self._fit_messages(messages, target, max_tokens)
+                      if target is not None else messages)
             return self._try_connections(
-                lambda c, m: c.chat(messages, model=m, max_tokens=max_tokens),
-                model=model, messages=messages, max_tokens=max_tokens,
+                lambda c, m: c.chat(fitted, model=m, max_tokens=max_tokens),
+                model=model, messages=fitted, max_tokens=max_tokens,
                 op=op, trace=trace)
 
         category, ranked = self._select_order(messages, max_tokens, category)
@@ -800,8 +851,9 @@ class AstraAIGateway:
             self.last_attempts = attempts
             start = time.perf_counter()
             try:
-                result = conn.chat(messages, model=target_model.model_id,
-                                   max_tokens=max_tokens)
+                result = conn.chat(
+                    self._fit_messages(messages, target_model, max_tokens),
+                    model=target_model.model_id, max_tokens=max_tokens)
             except (ProviderError, TimeoutError) as e:
                 last_error = getattr(e, "message", None) or str(e)
                 self.routing_state.record_failure(target_model.provider,
@@ -835,7 +887,7 @@ class AstraAIGateway:
         raise ProviderError(
             f"Astra AI Gateway: all suitable targets failed —— {last_error}")
 
-    def stream(self, messages, model=None, max_tokens=500, trace=""):
+    def stream(self, messages, model=None, max_tokens=None, trace=""):
         op = new_op_id()
         if model:
             # Generator fallback: first connection's stream that starts wins
@@ -854,7 +906,10 @@ class AstraAIGateway:
                 used_model = call_model or (conn.models[0] if conn.models else "")
                 start = time.perf_counter()
                 try:
-                    for chunk in conn.stream(messages, model=call_model,
+                    fit = self._fit_messages(messages,
+                                             self._catalog_model(call_model),
+                                             max_tokens)
+                    for chunk in conn.stream(fit, model=call_model,
                                              max_tokens=max_tokens):
                         yield chunk
                 except (ProviderError, TimeoutError) as e:
@@ -893,8 +948,9 @@ class AstraAIGateway:
         for conn, target_model, health in ranked:
             start = time.perf_counter()
             try:
-                for chunk in conn.stream(messages, model=target_model.model_id,
-                                         max_tokens=max_tokens):
+                for chunk in conn.stream(
+                        self._fit_messages(messages, target_model, max_tokens),
+                        model=target_model.model_id, max_tokens=max_tokens):
                     emitted_any = True
                     yield chunk
             except (ProviderError, TimeoutError) as e:
@@ -960,6 +1016,9 @@ class AstraAIGateway:
         model list."""
         start = time.perf_counter()
         try:
+            # Deliberately tiny output for a latency/health probe — this is
+            # a connectivity test, not AI content, so it is the one place a
+            # small explicit budget is correct (astra.ai.token_limits).
             conn.chat(self._TEST_MESSAGES, model=model_id, max_tokens=8)
         except (ProviderError, TimeoutError) as e:
             error = getattr(e, "message", None) or str(e)
@@ -1121,7 +1180,7 @@ class AstraAIGateway:
     # and the caller-supplied port.
     # ═══════════════════════════════════════════════════════════════════
     def supervise_execution(self, port, target, messages, result, *,
-                            max_tokens: int = 500, require_json: bool = False,
+                            max_tokens: int | None = None, require_json: bool = False,
                             required_fields: tuple = ()):
         """Validate `result` (a ProviderExecutionResult); if invalid/partial,
         send a correction back through `port` to `target` and validate again
@@ -1133,7 +1192,7 @@ class AstraAIGateway:
 
     def supervise_task(self, port, target, messages, result, contract, *,
                        evidence: dict | None = None, semantic_verifier=None,
-                       max_tokens: int = 500):
+                       max_tokens: int | None = None):
         """Validate `result` (a ProviderExecutionResult) against a
         `TaskCompletionContract` (§1-§8): deterministic shape, then
         evidence, then an optional semantic verifier. If not COMPLETE,
@@ -1150,7 +1209,7 @@ class AstraAIGateway:
     def run_tool_loop(self, task, *, registry, system_prompt="", history=None,
                       context_blocks=None, terminal=None, session_id=None,
                       scope=None, execution_history=None,
-                      max_steps: int = 8, max_tokens: int = 1500,
+                      max_steps: int = 8, max_tokens: int | None = None,
                       trace: str = ""):
         """Drive the shared `AgentToolLoop` with the Gateway's own AI
         connections. The tools it can call are the same `ToolRegistry`
@@ -1302,7 +1361,9 @@ _GATEWAY_UNDERSTANDING_SPECIALIZED_PROMPT = (
 GATEWAY_UNDERSTANDING_SYSTEM_PROMPT = build_system_prompt(
     _GATEWAY_UNDERSTANDING_SPECIALIZED_PROMPT)
 
-GW_UNDERSTANDING_MAX_TOKENS = 400
+# No Astra-imposed output cap: unset => the Gateway connection's
+# model decides (see astra.ai.token_limits).
+GW_UNDERSTANDING_MAX_TOKENS = None
 
 # Guard against the Request Understanding model slipping into
 # assistant-voice (answering the message instead of rewriting it) — most
@@ -1362,7 +1423,8 @@ _GATEWAY_CLASSIFY_SPECIALIZED_PROMPT = (
 GATEWAY_CLASSIFY_SYSTEM_PROMPT = build_system_prompt(
     _GATEWAY_CLASSIFY_SPECIALIZED_PROMPT)
 
-GW_CLASSIFY_MAX_TOKENS = 200
+# Unset => model-decided, same as above.
+GW_CLASSIFY_MAX_TOKENS = None
 
 
 class GatewayRequestIntelligence:
@@ -1393,7 +1455,7 @@ class GatewayRequestIntelligence:
         return self.gateway is not None and self.gateway.is_usable()
 
     def process(self, raw_text: str, *,
-               max_tokens: int = GW_UNDERSTANDING_MAX_TOKENS,
+               max_tokens: int | None = GW_UNDERSTANDING_MAX_TOKENS,
                context: str = "") -> dict:
         """Understand + structure `raw_text` into a Provider-ready prompt.
 
@@ -1453,7 +1515,7 @@ class GatewayRequestIntelligence:
                 "raw_text": text}
 
     def classify(self, raw_text: str, *, context: str = "",
-                max_tokens: int = GW_CLASSIFY_MAX_TOKENS) -> dict:
+                max_tokens: int | None = GW_CLASSIFY_MAX_TOKENS) -> dict:
         """Decide whether `raw_text` is an actual task or just small talk —
         the Gateway managing this up front, so the chat pipeline never has
         to guess and never forces a greeting/thanks/vague opener through the

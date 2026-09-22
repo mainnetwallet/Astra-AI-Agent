@@ -753,7 +753,7 @@ class TerminalSession:
 
     # -- context for the AI --------------------------------------------------
     def context_text(self, *, max_commands: int = 8,
-                     max_chars: int = 2000) -> str:
+                     max_chars: int | None = None) -> str:
         self._refresh_all()
         with self._lock:
             history = list(self._history)[-max(1, max_commands):]
@@ -778,7 +778,10 @@ class TerminalSession:
                     head += f" exit={h['exit_code']}"
                 lines.append(head)
                 if h["status"] in (FAILED, TIMEOUT) and h.get("stderr"):
-                    snippet = " ".join((h["stderr"] or "").split())[:200]
+                    # No artificial cap here: this text is shown to the AI so
+                    # it can reason about the failure. The command's full
+                    # stdout/stderr is already returned by the tool itself.
+                    snippet = " ".join((h["stderr"] or "").split())
                     if snippet:
                         lines.append(f"    stderr: {snippet}")
         text = "\n".join(lines)

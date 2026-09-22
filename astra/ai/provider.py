@@ -24,6 +24,7 @@ import json
 import urllib.request
 
 from astra.ai.system_prompt import build_system_prompt
+from astra.ai.token_limits import resolve_output_tokens
 from astra.core.exceptions import ProviderError
 
 
@@ -53,7 +54,7 @@ class AIProvider:
         self.config = config
 
     def chat(self, messages: list[dict], model: str | None = None,
-             max_tokens: int = 500) -> str:
+             max_tokens: int | None = None) -> str:
         raise NotImplementedError
 
     def stream(self, messages: list[dict], model: str | None = None):
@@ -128,6 +129,13 @@ class ClaudeProvider(AIProvider):
         self.events = events
 
     def _build_body(self, messages, model, max_tokens) -> dict:
+        # Anthropic's Messages API REQUIRES max_tokens. When the caller has
+        # no explicit budget, derive one from the selected model's own
+        # capability (astra.ai.token_limits) instead of a fixed small
+        # number; when the caller DOES pass one, honour it verbatim.
+        max_tokens = resolve_output_tokens(
+            max_tokens, provider=self.name,
+            model_meta={"model": model or self.models[0]})
         system = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
         user = _flatten([m for m in messages if m.get("role") != "system"])
         # No caller-supplied system message: fall back to the same
@@ -140,7 +148,7 @@ class ClaudeProvider(AIProvider):
             "model": model or self.models[0],
             "max_tokens": max_tokens,
             "system": system or build_system_prompt(),
-            "messages": [{"role": "user", "content": user[:12000]}],
+            "messages": [{"role": "user", "content": user}],
         }
 
     def _request_headers(self) -> dict:
@@ -150,7 +158,7 @@ class ClaudeProvider(AIProvider):
         }
 
     def chat(self, messages: list[dict], model: str | None = None,
-             max_tokens: int = 500) -> str:
+             max_tokens: int | None = None) -> str:
         if not self.api_key:
             raise ProviderError("ANTHROPIC_API_KEY not set")
         body = json.dumps(self._build_body(messages, model, max_tokens)).encode()
@@ -166,7 +174,7 @@ class ClaudeProvider(AIProvider):
         return "".join(b.get("text", "") for b in blocks).strip() or "(no reply)"
 
     def stream(self, messages: list[dict], model: str | None = None,
-               max_tokens: int = 500):
+               max_tokens: int | None = None):
         """Real Anthropic streaming via SSE — yields token-sized text chunks."""
         if not self.api_key:
             raise ProviderError("ANTHROPIC_API_KEY not set")
@@ -231,12 +239,11 @@ class OpenAICompatibleProvider(AIProvider):
         return h
 
     def chat(self, messages: list[dict], model: str | None = None,
-             max_tokens: int = 500) -> str:
-        body = json.dumps({
-            "model": model or self.models[0],
-            "max_tokens": max_tokens,
-            "messages": messages,
-        }).encode()
+             max_tokens: int | None = None) -> str:
+        payload = {"model": model or self.models[0], "messages": messages}
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        body = json.dumps(payload).encode()
         req = urllib.request.Request(f"{self.base_url}/chat/completions",
                                     data=body, headers=self._headers())
         try:
@@ -248,17 +255,16 @@ class OpenAICompatibleProvider(AIProvider):
         return data.get("choices", [{}])[0].get("message", {}).get("content", "") or "(no reply)"
 
     def stream(self, messages: list[dict], model: str | None = None,
-               max_tokens: int = 500):
+               max_tokens: int | None = None):
         """Real streaming via OpenAI-compatible SSE."""
         if self.events:
             self.events.emit("ai.started", agent="provider",
                              provider=self.name, model=model or self.models[0])
-        body = json.dumps({
-            "model": model or self.models[0],
-            "max_tokens": max_tokens,
-            "messages": messages,
-            "stream": True,
-        }).encode()
+        payload = {"model": model or self.models[0], "messages": messages,
+                   "stream": True}
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        body = json.dumps(payload).encode()
         req = urllib.request.Request(f"{self.base_url}/chat/completions",
                                     data=body, headers=self._headers())
         try:

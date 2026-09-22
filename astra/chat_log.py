@@ -332,14 +332,25 @@ class ChatLog:
     def history(self, after_id: int = 0, limit: int = 200,
                 conversation_id: int | None = None) -> dict:
         cid = conversation_id if conversation_id is not None else self.current_id
+        # `limit <= 0` means "no limit" — used when a caller wants the FULL
+        # conversation (no Astra-imposed turn ceiling). SQLite has no
+        # LIMIT-less-with-0 shorthand, so the WHERE/ORDER clause is shared and
+        # only the LIMIT clause is dropped.
+        unlimited = not limit or int(limit) <= 0
         if after_id > 0:
-            rows = self.store.fetch(
-                "SELECT * FROM astra_chat_messages WHERE conversation_id = ? AND id > ? "
-                "ORDER BY id ASC LIMIT ?", (cid, after_id, limit))
+            sql = ("SELECT * FROM astra_chat_messages WHERE conversation_id = ? "
+                   "AND id > ? ORDER BY id ASC")
+            params = (cid, after_id)
         else:
-            rows = list(reversed(self.store.fetch(
-                "SELECT * FROM astra_chat_messages WHERE conversation_id = ? "
-                "ORDER BY id DESC LIMIT ?", (cid, limit))))
+            sql = ("SELECT * FROM astra_chat_messages WHERE conversation_id = ? "
+                   "ORDER BY id DESC")
+            params = (cid,)
+        if not unlimited:
+            sql += " LIMIT ?"
+            params = params + (int(limit),)
+        rows = self.store.fetch(sql, params)
+        if after_id <= 0:
+            rows = list(reversed(rows))
 
         def load(v, default):
             try:

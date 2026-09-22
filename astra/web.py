@@ -445,6 +445,20 @@ def parse_multipart_body(raw: bytes, content_type: str) -> tuple:
     return fields, files
 
 
+def _opt_int(cfg, key: str):
+    """Optional integer config knob: return None when unset/blank so the
+    caller keeps its "no limit" default instead of an artificial ceiling."""
+    if cfg is None:
+        return None
+    value = cfg.get(key)
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def content_type_for(path: str) -> str:
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     return CONTENT_TYPES.get(ext, "application/octet-stream")
@@ -473,8 +487,8 @@ class AstraSite:
         # whatever (if anything) a client happened to send.
         self.context_builder = ConversationContextBuilder(
             self.chat_log,
-            max_chars=(cfg.getint("CHAT_CONTEXT_MAX_CHARS", 6000) if cfg else 6000),
-            max_turns=(cfg.getint("CHAT_CONTEXT_MAX_TURNS", 20) if cfg else 20))
+            max_chars=_opt_int(cfg, "CHAT_CONTEXT_MAX_CHARS"),
+            max_turns=_opt_int(cfg, "CHAT_CONTEXT_MAX_TURNS"))
         # -- security knobs (all safe defaults) --------------------------------
         self.env = (cfg.get("ENV") if cfg else None) or os.environ.get("ENV", "development")
         self.operator_token = (cfg.get("ASTRA_TOKEN") if cfg else None) \

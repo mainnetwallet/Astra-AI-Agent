@@ -43,6 +43,7 @@ from datetime import datetime
 
 from astra.ai.gateway_contract import ProviderExecutionPort
 from astra.ai.models import Model, metadata_for
+from astra.ai.token_limits import resolve_output_tokens
 from astra.ai.routing_policy import RoutingDecisionPolicy
 from astra.core.exceptions import ProviderError, TimeoutError
 from astra.core.events import new_op_id
@@ -114,7 +115,7 @@ class RoutingRequest:
                  max_latency_ms: int | None = None, max_cost_usd: float | None = None,
                  structured_output: bool = False, streaming: bool = False,
                  vision: bool = False, reasoning_level: str = "auto",
-                 user_preference: str | None = None, max_tokens: int = 500,
+                 user_preference: str | None = None, max_tokens: int | None = None,
                  no_fallback: bool = False, task_contract=None,
                  evidence: dict | None = None, semantic_verifier=None,
                  required_input_modalities: list | None = None,
@@ -134,7 +135,8 @@ class RoutingRequest:
         self.vision = vision
         self.reasoning_level = reasoning_level
         self.user_preference = user_preference or "balanced"
-        self.max_tokens = int(max_tokens or 500)
+        # None => let the provider/model decide (no Astra-imposed cap).
+        self.max_tokens = max_tokens
         self.no_fallback = bool(no_fallback)
         self.task_contract = task_contract
         self.evidence = evidence
@@ -266,7 +268,7 @@ class _RouterExecutionPort(ProviderExecutionPort):
         self._by_key = by_key
         self._req = req
 
-    def execute(self, target, messages: list, max_tokens: int = 500,
+    def execute(self, target, messages: list, max_tokens: int | None = None,
                 **kwargs) -> str:
         entry = self._by_key.get(target.key())
         if entry is None:
@@ -1069,6 +1071,21 @@ class AstraRouter:
         return [self.test_provider(getattr(p, "name", "?"))
                 for p in self.providers]
 
+    @staticmethod
+    def _fit_messages(messages, model, max_tokens=None):
+        """Provider-aware context fitting against the target model's real
+        context window (keep everything when it fits; drop oldest middle
+        turns only when it genuinely does not). See astra.ai.context_budget."""
+        from astra.ai.context_budget import default_reserve_tokens, fit_messages
+        from astra.ai.token_limits import resolve_output_tokens
+        ctx = int(getattr(model, "context_window", 0) or 0)
+        out = resolve_output_tokens(max_tokens,
+                                    provider=getattr(model, "provider", ""),
+                                    model_meta=model)
+        reserve = out if out else default_reserve_tokens(ctx)
+        return fit_messages(messages, context_window=ctx,
+                            reserve_tokens=reserve)
+
     def _attempt(self, adapter, model: Model, req: RoutingRequest) -> RoutingResult | None:
         name = getattr(adapter, "name", "")
         op = new_op_id()
@@ -1085,6 +1102,8 @@ class AstraRouter:
                 self._emit("router.retry", provider=name, model=model.model_id,
                            attempt=attempt, op=op, trace=req.trace)
             try:
+                messages = self._fit_messages(req.messages, model,
+                                              req.max_tokens)
                 # Multimodal dispatch: use specialized adapter methods
                 # for non-chat output modalities (image generation, TTS)
                 # before falling through to the normal chat path.
@@ -1097,20 +1116,21 @@ class AstraRouter:
                     text = adapter.text_to_speech(prompt, model=model.model_id)
                 elif req.required_tools or req.structured_output or req.task_contract is not None:
                     # §JSON mode: ask the provider API to enforce JSON, not
-                    # just the prompt text — a chatty/"reasoning" free model
-                    # (e.g. nvidia/nemotron-3.5-lightning:free) otherwise
-                    # spends its whole token budget on an unstructured
-                    # "thinking process" and never emits JSON, exhausting
-                    # the Gateway's correction loop with no usable reply.
-                    # Also give it real headroom: 500 tokens is not enough
-                    # for a reasoning model's preamble AND the JSON answer.
-                    structured_tokens = max(req.max_tokens, 1200)
-                    text = adapter.chat(req.messages, model=model.model_id,
-                                        max_tokens=structured_tokens,
-                                        response_format="json_object")
+                    # just the prompt text. No invented token floor: an
+                    # explicit budget is honoured, otherwise the field is
+                    # omitted (or derived from the model for providers whose
+                    # API requires it) so a reasoning model gets its real
+                    # maximum instead of a small Astra cap.
+                    text = adapter.chat(
+                        messages, model=model.model_id,
+                        max_tokens=resolve_output_tokens(
+                            req.max_tokens, provider=name, model_meta=model),
+                        response_format="json_object")
                 else:
-                    text = adapter.chat(req.messages, model=model.model_id,
-                                        max_tokens=req.max_tokens)
+                    text = adapter.chat(
+                        messages, model=model.model_id,
+                        max_tokens=resolve_output_tokens(
+                            req.max_tokens, provider=name, model_meta=model))
                 ms = duration_ms(t0)
                 cost = self._estimate_cost_adapter(adapter, text)
                 self._latency[name].append(ms)
@@ -1229,7 +1249,7 @@ class AstraRouter:
                       session_id=None, scope=None, task_type: str = "coding",
                       vision: bool = False, provider: str | None = None,
                       model: str | None = None, no_fallback: bool = False,
-                      max_steps: int = 8, max_tokens: int = 1500,
+                      max_steps: int = 8, max_tokens: int | None = None,
                       trace: str = ""):
         """Drive the shared `AgentToolLoop` with the existing Provider
         system (`route_request`). Identical loop, identical `ToolRegistry`,
@@ -1272,7 +1292,7 @@ class AstraRouter:
               max_tokens: int | None = None) -> tuple:
         """Legacy tuple interface, now routed through the full pipeline."""
         req = RoutingRequest(task_type=capability or "simple_chat",
-                             messages=messages, max_tokens=max_tokens or 500)
+                             messages=messages, max_tokens=max_tokens)
         rr = self.route_request(req)
         return (rr.provider or None, rr.model or None,
                 rr.text if rr.ok else None)

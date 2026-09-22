@@ -154,7 +154,7 @@ class ProviderExecutionPort:
     """
 
     def execute(self, target: ProviderExecutionTarget, messages: list,
-                max_tokens: int = 500, **kwargs) -> str:
+                max_tokens: int | None = None, **kwargs) -> str:
         raise NotImplementedError
 
 

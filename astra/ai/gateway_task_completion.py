@@ -349,7 +349,7 @@ class GatewayTaskCompletionSupervisor:
                   target: ProviderExecutionTarget, messages: list,
                   result: ProviderExecutionResult,
                   contract: TaskCompletionContract, *, evidence: dict | None = None,
-                  semantic_verifier=None, max_tokens: int = 500
+                  semantic_verifier=None, max_tokens: int | None = None
                   ) -> tuple[ProviderExecutionResult, TaskVerificationOutcome, int]:
         """Returns `(final_result, final_outcome, attempts)`. The caller
         is the one that ultimately tells the user "done" or "incomplete"

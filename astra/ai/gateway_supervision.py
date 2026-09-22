@@ -144,7 +144,7 @@ class GatewayResultSupervision:
 
     def supervise(self, port: ProviderExecutionPort,
                   target: ProviderExecutionTarget, messages: list,
-                  result: ProviderExecutionResult, *, max_tokens: int = 500,
+                  result: ProviderExecutionResult, *, max_tokens: int | None = None,
                   require_json: bool = False, required_fields: tuple = ()
                   ) -> tuple[ProviderExecutionResult, ExecutionValidationOutcome]:
         """Validate `result`; if invalid/partial, send a correction back

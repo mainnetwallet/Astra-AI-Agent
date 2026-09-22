@@ -46,6 +46,21 @@ from astra.workflows.scheduler import SchedulerManager
 from astra.agent import Agent
 from astra.store import Store
 
+def _opt_int(config, key):
+    """Optional integer config knob (None when unset/blank) so an unset
+    CHAT_MAX_TOKENS lets the provider/model decide instead of a fixed cap."""
+    try:
+        value = config.get(key)
+    except Exception:
+        return None
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def default_db_path(config=None) -> str:
     # DATA_DIR is a documented storage-location knob; it must be honoured
     # whether it arrives via the environment, `.env` or `config.json` (the
@@ -207,7 +222,7 @@ def build(store: Store | None = None, config=None,
     from astra.ai.chat_pipeline import ChatPipeline
     chat_pipeline = ChatPipeline(
         gateway, router, events=events,
-        max_tokens=config.getint("CHAT_MAX_TOKENS", 1500),
+        max_tokens=_opt_int(config, "CHAT_MAX_TOKENS"),
         registry=registry, terminal=terminal_manager,
         execution_history=AgentExecutionHistory(),
         max_tool_steps=config.getint("CHAT_MAX_TOOL_STEPS", 8),

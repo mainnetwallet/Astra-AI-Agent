@@ -115,10 +115,16 @@ Key properties:
   canonical turn list and hands it to both the Gateway's understand prompt
   and the Provider's `messages[]`, so they can't silently disagree about
   "the conversation so far".
-- **Deterministic trimming** — bounded by `CHAT_CONTEXT_MAX_CHARS` (default
-  6000) and `CHAT_CONTEXT_MAX_TURNS` (default 20); always keeps the newest
-  turns and always keeps at least the single latest turn even if it alone
-  exceeds the budget.
+- **No artificial trimming** — history is carried whole by default; there
+  is no fixed character/turn ceiling. Provider-aware fitting to the selected
+  model's REAL context window happens where the model is known
+  (`astra.ai.context_budget`, applied in the router/gateway), and only drops
+  the oldest middle turns when the prompt genuinely does not fit. The
+  leading system prompt (Core + Gateway execution decision + live
+  capability/terminal/execution state + tool protocol) and the current user
+  request are structurally protected and are never removed. `CHAT_CONTEXT_MAX_CHARS`
+  / `CHAT_CONTEXT_MAX_TURNS` remain optional operator overrides (unset =
+  unlimited).
 - **Retry/refresh safe** — `ChatLog.add_user()` (and the public
   `is_duplicate_pending()` check `astra/web.py` makes first) detects a
   resubmission of the exact same text while that conversation's turn is
@@ -275,6 +281,38 @@ context block is redacted before it is injected into any prompt, and
 `sanitize_final_response` remains the last gate before the reply reaches the
 user.
 
+### 1.4 Token and context policy (no artificial API caps)
+
+Astra no longer imposes small fixed completion or context caps. Two modules
+own the policy, and every Gateway/Provider request goes through them:
+
+- `astra.ai.token_limits` — output length. OpenAI-compatible HTTP and
+  Bedrock Converse treat the output-token field as **optional**, so an unset
+  budget is *omitted* and the model uses its own maximum. Anthropic's
+  Messages API **requires** the field, so an unset budget is *derived from
+  the selected model's capability* (`Model.max_output_tokens`, else its
+  `context_window`), never a universal small number. An explicit budget
+  (`CHAT_MAX_TOKENS`, or a caller-passed value) is honoured verbatim.
+- `astra.ai.context_budget` — input length. `fit_messages()` keeps the full
+  prompt when it fits the target model's real `context_window`, and only
+  drops the **oldest middle turns** when it does not. Messages are sized as
+  an explicitly-labelled *estimate* (no tokenizer is bundled); the window it
+  is compared against is real model metadata. Reduction priority is: Core
+  system instructions → Gateway execution decision → current user request →
+  tool protocol/schema → live terminal/execution state → recent tool results
+  → recent conversation → oldest history; the first five live in the system
+  prompt (or are the final message) and can never be dropped.
+
+Both apply inside `AstraRouter._attempt` (the single Provider choke point, so
+the AgentToolLoop's growing multi-step conversation is fitted on every step)
+and inside `AstraAIGateway.chat`/`stream` (including the tool-loop Gateway
+calls). Because fitting is done per **selected** target, a provider failover
+preserves the complete useful context subject only to the fallback model's
+own window — never a smaller generic budget. Terminal resource controls
+(process timeout, process-tree cleanup, the stdout/stderr memory buffer,
+`CHAT_MAX_TOOL_STEPS`) are separately retained: those are resource safety,
+not AI context limits.
+
 ## 2. Directory map
 
 ```
@@ -295,6 +333,8 @@ astra/
 │   ├── adapters/          10 concrete provider adapters (see §3)
 │   ├── registry.py        Builds the provider list from env config
 │   ├── models.py          Model registry (capabilities, context, cost class)
+│   ├── token_limits.py    Provider-aware OUTPUT token resolution (§1.4)
+│   ├── context_budget.py  Provider-aware INPUT/context fitting (§1.4)
 │   ├── discovery.py        Model discovery / refresh
 │   ├── credentials.py      Per-provider credential pools (health, cooldown)
 │   ├── router.py           AstraRouter — scores + routes + rotates creds

@@ -24,14 +24,21 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict, deque
 
+# Memory/resource bounds on how many entries and scopes are RETAINED (a
+# long-lived server must not grow without limit) — these are not AI context
+# limits. Content itself is no longer truncated: the full tool result is kept
+# so the model can reason about it, and provider-aware fitting to the
+# selected model's real context window happens later (astra.ai.context_budget).
 DEFAULT_MAX_ENTRIES = 40
 DEFAULT_MAX_SCOPES = 200
 DEFAULT_CONTEXT_ENTRIES = 12
-DEFAULT_CONTEXT_CHARS = 2500
+DEFAULT_CONTEXT_CHARS = None
 
 
-def _summarize(value, limit: int = 240) -> str:
-    """Small, deterministic, JSON-safe summary of a tool result."""
+def _summarize(value, limit: int | None = None) -> str:
+    """Deterministic, JSON-safe view of a tool result. No artificial cap by
+    default (limit=None); an explicit limit still truncates when a caller
+    genuinely wants a short summary."""
     import json
     try:
         if isinstance(value, str):
@@ -41,7 +48,9 @@ def _summarize(value, limit: int = 240) -> str:
     except Exception:
         text = str(value)
     text = " ".join(text.split())
-    return text[:limit] + ("…" if len(text) > limit else "")
+    if limit and len(text) > limit:
+        return text[:limit] + "…"
+    return text
 
 
 class ExecutionEntry:
@@ -103,7 +112,7 @@ class AgentExecutionHistory:
                 self._scopes.pop(str(scope or "default"), None)
 
     def context_text(self, scope: str, *, max_entries: int = DEFAULT_CONTEXT_ENTRIES,
-                     max_chars: int = DEFAULT_CONTEXT_CHARS,
+                     max_chars: int | None = DEFAULT_CONTEXT_CHARS,
                      exclude_step: int | None = None) -> str:
         rows = self.entries(scope, limit=max_entries)
         if exclude_step is not None:

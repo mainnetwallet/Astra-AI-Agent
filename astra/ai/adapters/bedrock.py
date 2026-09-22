@@ -194,8 +194,12 @@ class BedrockAdapter(AIProvider):
             else:
                 blocks = [{"text": str(content)}]
             convo.append({"role": role, "content": blocks})
-        body = {"modelId": model, "messages": convo,
-                "inferenceConfig": {"maxTokens": max_tokens}}
+        body = {"modelId": model, "messages": convo}
+        # Converse treats inferenceConfig as optional — omitting maxTokens
+        # lets the model use its own maximum. Only an explicit budget is
+        # forwarded; see astra.ai.token_limits.
+        if max_tokens is not None:
+            body["inferenceConfig"] = {"maxTokens": max_tokens}
         if system:
             body["system"] = [{"text": system}]
         return body
@@ -229,7 +233,7 @@ class BedrockAdapter(AIProvider):
                 blocks.append({"text": part.get("text", str(part))})
         return blocks or [{"text": ""}]
 
-    def chat(self, messages, model=None, max_tokens=500,
+    def chat(self, messages, model=None, max_tokens=None,
               response_format: str | None = None) -> str:
         # Bedrock's Converse API has no OpenAI-style response_format
         # knob — accepted-and-ignored so callers that ask every adapter
@@ -247,7 +251,7 @@ class BedrockAdapter(AIProvider):
         blocks = data.get("output", {}).get("message", {}).get("content", [])
         return "".join(b.get("text", "") for b in blocks).strip() or "(no reply)"
 
-    def stream(self, messages, model=None, max_tokens=500):
+    def stream(self, messages, model=None, max_tokens=None):
         model = model or (self.models[0] if self.models else "")
         if not model:
             raise ProviderError("bedrock: no model configured")

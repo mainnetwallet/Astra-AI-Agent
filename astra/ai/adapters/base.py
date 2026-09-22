@@ -147,13 +147,19 @@ class CompatibleAdapter(AIProvider):
         raise ProviderError(f"{self.name} http {code}")
 
     # -- interface ------------------------------------------------------------
-    def chat(self, messages, model=None, max_tokens=500,
+    def chat(self, messages, model=None, max_tokens=None,
               response_format: str | None = None) -> str:
         cred = self._pick(model or (self.models[0] if self.models else ""))
         if cred is None:
             raise ProviderError(f"{self.name}: no healthy credential configured")
         body = {"model": model or (self.models[0] if self.models else ""),
-                "max_tokens": max_tokens, "messages": messages}
+                "messages": messages}
+        # OpenAI-compatible APIs treat the output limit as optional: omitting
+        # it lets the model use its own maximum, so an unset budget is left
+        # out entirely rather than replaced with an invented number. See
+        # astra.ai.token_limits.
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         # OpenAI-compatible JSON mode. Prompt text alone ("return ONLY
         # JSON") is not enough for chatty/"reasoning" free models (e.g.
         # nvidia/nemotron-3.5-lightning:free on OpenRouter) — they burn
@@ -176,7 +182,7 @@ class CompatibleAdapter(AIProvider):
         self._last_latency_ms = int((time.perf_counter() - t0) * 1000)
         return text.strip() or "(no reply)"
 
-    def stream(self, messages, model=None, max_tokens=500):
+    def stream(self, messages, model=None, max_tokens=None):
         used_model = model or (self.models[0] if self.models else "")
         cred = self._pick(used_model)
         if cred is None:
@@ -184,8 +190,9 @@ class CompatibleAdapter(AIProvider):
         if self.events:
             self.events.emit("ai.started", agent="provider", provider=self.name,
                              model=used_model)
-        body = {"model": used_model,
-                "max_tokens": max_tokens, "messages": messages, "stream": True}
+        body = {"model": used_model, "messages": messages, "stream": True}
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(f"{self._api_base()}/chat/completions",
                                      data=data, headers=self._headers(cred))

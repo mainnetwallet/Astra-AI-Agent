@@ -879,11 +879,18 @@
       return;
     }
     state.mounted = true;
-    buildLayout(root);
-    bindViewport();
-    listFiles();
-    refreshStatus(true);
-    state.statusTimer = setInterval(() => refreshStatus(false), 15000);
+    try {
+      buildLayout(root);
+      bindViewport();
+      listFiles();
+      refreshStatus(true);
+      state.statusTimer = setInterval(() => refreshStatus(false), 15000);
+    } catch (err) {
+      state.mounted = false;         // allow the next tab visit to retry
+      root.innerHTML = '<div class="at-empty">Terminal failed to start: '
+        + esc(String(err && err.message || err)) + ' — switch tabs and back to retry.</div>';
+      console.error("terminal mount failed", err);
+    }
   }
 
   window.AstraTerminal = {
@@ -897,4 +904,7 @@
   // Core-tab loader: astra.js's showTab() calls this the first time the
   // Astra Agent Terminal tab is opened, and on every return to it.
   if (window.Astra && Astra.loaders) Astra.loaders.terminal = mount;
+  // If boot() already opened this tab before this script executed, mount now.
+  { const el = document.getElementById("tab-terminal");
+    if (el && el.classList.contains("active")) mount(); }
 })();

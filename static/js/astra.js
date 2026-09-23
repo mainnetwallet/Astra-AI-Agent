@@ -15,11 +15,16 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({
 }[c]));
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      ...opts,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch (e) {                       // server restarting / connection dropped
+    return { ok: false, error: "network: " + (e && e.message || e) };
+  }
   let body = {};
   try { body = await res.json(); } catch (_) { /* empty */ }
   return body;
@@ -2722,9 +2727,38 @@ function hideUploadIndicator() {
 }
 
 /* ---------------------------------- boot ------------------------------------ */
+/* Resolves once every <script> in index.html has executed. terminal.js and
+ * workflow.js register their loaders when they run; if showTab() fired before
+ * that (fast /api/manifest on a refresh) the saved tab opened with no loader
+ * and the page stayed blank. */
+function pageScriptsReady() {
+  if (document.readyState === "complete") return Promise.resolve();
+  return new Promise((res) => window.addEventListener("load", res, { once: true }));
+}
+
+function showBootError(msg) {
+  const dash = $("#dash-blocks") || $("#view");
+  if (!dash) return;
+  dash.innerHTML = `<div class="empty" style="padding:24px;text-align:center">
+    <div style="margin-bottom:10px">⚠ Astra could not finish loading: ${esc(msg)}</div>
+    <button class="btn" id="boot-retry">Retry</button></div>`;
+  const b = $("#boot-retry");
+  if (b) b.addEventListener("click", () => { boot(); });
+}
+
 async function boot() {
-  const r = await api("/api/manifest");
-  if (!r.ok) { $("#netstatus").textContent = "✗"; return; }
+  let r = null;
+  for (let attempt = 0; attempt < 4; attempt++) {     // ride out a busy/restarting server
+    r = await api("/api/manifest");
+    if (r && r.ok) break;
+    await new Promise((res) => setTimeout(res, 400 * (attempt + 1)));
+  }
+  if (!r || !r.ok) {
+    $("#netstatus").textContent = "✗";
+    showBootError((r && r.error) || "server not responding");
+    return;
+  }
+  $("#netstatus").textContent = "●";
   MANIFEST = r.data;
   document.title = MANIFEST.name;
   MANIFEST.tabs.forEach((t) => { TAB_LABELS[t.tab] = t.label; });
@@ -2735,15 +2769,18 @@ async function boot() {
   $$("#nav .tab").forEach((t) =>
     t.addEventListener("click", () => showTab(t.dataset.tab)));
 
-  // per-plugin tabview + load plugin JS
+  // per-plugin tabview + load plugin JS (one failing plugin must not abort boot)
   const scriptLoads = [];
   MANIFEST.tabs.forEach((t) => {
     if (!t.plugin) return;
-    const section = document.createElement("section");
-    section.id = `tab-${t.plugin}`;
-    section.className = "tabview";
+    let section = $(`#tab-${t.plugin}`);
+    if (!section) {
+      section = document.createElement("section");
+      section.id = `tab-${t.plugin}`;
+      section.className = "tabview";
+      $("#view").appendChild(section);
+    }
     section.innerHTML = `<div class="empty">Loading ${esc(t.title)}…</div>`;
-    $("#view").appendChild(section);
     scriptLoads.push(loadScript(t.js).then(() => {
       const def = Astra.plugins[t.plugin];
       loaders[t.plugin] = async () => {
@@ -2753,9 +2790,12 @@ async function boot() {
           if (def.render) def.render($("#tab-" + t.plugin));
         }
       };
+    }).catch(() => {
+      section.innerHTML = `<div class="empty">Could not load ${esc(t.title)}. Refresh to retry.</div>`;
     }));
   });
-  await Promise.all(scriptLoads);
+  await Promise.allSettled(scriptLoads);
+  await pageScriptsReady();          // terminal.js / workflow.js have registered
 
   // Reopen whichever tab was active before the last refresh, if it still
   // exists; otherwise fall back to Dashboard. showTab runs the tab's loader,
@@ -2766,10 +2806,17 @@ async function boot() {
     const saved = localStorage.getItem("astra:active-tab");
     if (saved && $("#tab-" + saved)) initialTab = saved;
   } catch (_) { /* ignore */ }
-  showTab(initialTab);
-  setInterval(() => {
-    if ($("#tab-dashboard").classList.contains("active")) loaders.dashboard();
-  }, 60_000);
+  try {
+    showTab(initialTab);
+  } catch (e) {                      // a broken saved tab must not blank the app
+    console.error("tab failed to open:", initialTab, e);
+    if (initialTab !== "dashboard") showTab("dashboard");
+  }
+  if (!window.__astraDashTimer) {
+    window.__astraDashTimer = setInterval(() => {
+      if ($("#tab-dashboard").classList.contains("active")) loaders.dashboard();
+    }, 60_000);
+  }
 }
 
 function loadScript(src) {

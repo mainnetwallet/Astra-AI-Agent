@@ -598,5 +598,131 @@ class ApprovalApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
 
 
+# ── conversation isolation (audit fix) ──────────────────────────────────────
+
+class ApprovalConversationIsolationTests(unittest.TestCase):
+    """Allow/Deny must resume into the approval's OWN conversation, even when
+    the user has switched to a different chat before deciding.
+
+    Regression for the audit finding: `_terminal_approval_resolve` used
+    `chat_log.current_id`, so resolving from another open conversation
+    redirected the continuation (and the card write-back) into that chat.
+    """
+
+    def setUp(self):
+        from astra.web import AstraSite, WebApp
+        from tests.helpers import make_stack
+        self.stack = make_stack()
+        self.approvals = self.stack["approvals"]
+        self.exec = FakeHost()
+        self.approvals.set_executor(self.exec)
+        self.seen = {}
+
+        def resumer(request, operation, result, allowed):
+            self.seen = {"request": request, "operation": operation,
+                         "result": result, "allowed": allowed}
+            return {"reply": "continued", "action": "none", "ok": True,
+                    "data": {}}
+
+        self.approvals.set_resumer(resumer)
+        self.site = AstraSite(("127.0.0.1", 0), self.stack["store"],
+                              self.stack["agent"], stack=self.stack)
+        self.app = WebApp(self.site)
+        self.log = self.site.chat_log
+
+    def tearDown(self):
+        self.stack["store"].close()
+
+    def _call(self, method, path, body=None):
+        from astra.web import Request
+        kw = {}
+        if body is not None:
+            kw["body"] = body
+            kw["headers"] = {"Content-Type": "application/json"}
+        resp = self.app.handle(Request(method, path, **kw))
+        return resp.status, json.loads(resp.body.decode("utf-8"))
+
+    def _create_in(self, conv_id, command="echo hi"):
+        _s, body = self._call("POST", "/api/terminal/approval",
+                              {"command": command,
+                               "conversation_id": conv_id})
+        return body["data"]["approval"]
+
+    def _open_second_conversation(self):
+        # Give the current chat a message so new_conversation() opens a NEW
+        # thread instead of reusing the (still empty) current one, then switch.
+        self.log.add_user("seed", conversation_id=self.log.current_id)
+        return self.log.new_conversation()
+
+    def test_allow_resumes_into_the_bound_conversation_not_the_open_one(self):
+        conv_a = self.log.current_id
+        approval = self._create_in(conv_a)
+        ap_id = approval["approval_id"]
+        self.assertEqual(approval["conversation_id"], conv_a)
+
+        conv_b = self._open_second_conversation()
+        self.assertNotEqual(conv_a, conv_b)
+        self.assertEqual(self.log.current_id, conv_b)
+        before_a = len(self.log.history(conversation_id=conv_a)["messages"])
+        before_b = len(self.log.history(conversation_id=conv_b)["messages"])
+
+        status, resp = self._call("POST", "/api/terminal/approval/" + ap_id,
+                                  {"decision": "allow"})
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["data"]["conversation_id"], conv_a,
+                         "the reply reports the ORIGINAL conversation")
+        self.assertEqual(self.exec.calls, [("echo hi", "")])
+
+        msgs_a = self.log.history(conversation_id=conv_a)["messages"]
+        msgs_b = self.log.history(conversation_id=conv_b)["messages"]
+        self.assertEqual(len(msgs_a), before_a + 1, "reply written to A")
+        self.assertEqual(len(msgs_b), before_b, "B is untouched")
+        self.assertEqual(self.log.current_id, conv_b, "open chat unchanged")
+
+        # the SAME logical operation was resumed, bound to A
+        self.assertEqual(self.seen["request"].conversation_id, conv_a)
+        self.assertTrue(self.seen["allowed"])
+
+        # the card metadata write-back is bound to a message inside A
+        ap = self.approvals.get(ap_id)
+        self.assertIsNotNone(ap.message_id)
+        self.assertIn(ap.message_id, [m["id"] for m in msgs_a])
+        self.assertNotIn(ap.message_id, [m["id"] for m in msgs_b])
+
+    def test_deny_resumes_into_the_bound_conversation(self):
+        conv_a = self.log.current_id
+        approval = self._create_in(conv_a, command="echo nope")
+        ap_id = approval["approval_id"]
+        conv_b = self._open_second_conversation()
+        before_a = len(self.log.history(conversation_id=conv_a)["messages"])
+        before_b = len(self.log.history(conversation_id=conv_b)["messages"])
+
+        status, resp = self._call("POST", "/api/terminal/approval/" + ap_id,
+                                  {"decision": "deny"})
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["data"]["conversation_id"], conv_a)
+        self.assertEqual(self.exec.calls, [], "deny never runs the command")
+
+        msgs_a = self.log.history(conversation_id=conv_a)["messages"]
+        msgs_b = self.log.history(conversation_id=conv_b)["messages"]
+        self.assertEqual(len(msgs_a), before_a + 1, "denial reply written to A")
+        self.assertEqual(len(msgs_b), before_b, "B is untouched")
+        self.assertEqual(self.log.current_id, conv_b)
+        self.assertFalse(self.seen["allowed"])
+
+    def test_same_conversation_flow_still_works(self):
+        conv_a = self.log.current_id
+        approval = self._create_in(conv_a, command="echo same")
+        before = len(self.log.history(conversation_id=conv_a)["messages"])
+        status, resp = self._call(
+            "POST", "/api/terminal/approval/" + approval["approval_id"],
+            {"decision": "allow"})
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["data"]["conversation_id"], conv_a)
+        self.assertEqual(self.exec.calls, [("echo same", "")])
+        msgs = self.log.history(conversation_id=conv_a)["messages"]
+        self.assertEqual(len(msgs), before + 1)
+
+
 if __name__ == "__main__":
     unittest.main()

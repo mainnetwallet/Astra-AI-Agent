@@ -849,6 +849,30 @@ class WebApp:
         except Exception:
             pass
 
+    def _approval_conversation(self, approval_id):
+        """The conversation an approval is BOUND to — its authoritative
+        continuation scope, or None when the id is not a known approval (or
+        the approval carries no conversation binding).
+
+        Allow/Deny must never follow the conversation the user happens to
+        have open: an approval continuation resumes the ORIGINAL operation
+        and writes its reply back to the ORIGINAL conversation (spec §5/§9).
+        """
+        mgr = self.site._get("approvals")
+        if mgr is None or not approval_id:
+            return None
+        try:
+            approval = mgr.get(approval_id)
+        except Exception:
+            approval = None
+        cid = getattr(approval, "conversation_id", None) if approval else None
+        if cid in (None, "", 0):
+            return None
+        try:
+            return int(cid)
+        except (TypeError, ValueError):
+            return None
+
     # -- gate ----------------------------------------------------------------
     def _authorized(self, req: Request) -> bool:
         """Operator token gate. ASTRA_TOKEN unset = open (local-first);
@@ -1156,9 +1180,15 @@ class WebApp:
             return error_response("approval not found", 404, "not_found",
                                   req.rid)
         allow = decision in ("allow", "approve")
-        # Pin the chat: a switch mid-decision must not send the follow-up
-        # reply into a different conversation (same rule as /api/chat).
-        cid = self.site.chat_log.current_id
+        # Pin the chat to the approval's OWN conversation. The user may have
+        # switched chats (or opened a new one) since the card appeared; the
+        # continuation must resume and write back to the ORIGINAL
+        # conversation, NEVER to whatever is currently open (§5/§9). Only an
+        # approval with no conversation binding at all falls back to the
+        # active chat (there is nowhere else to write).
+        bound_cid = self._approval_conversation(approval_id)
+        cid = (bound_cid if bound_cid is not None
+               else self.site.chat_log.current_id)
         token = self.site.chat_log.begin(cid)
         try:
             reply = self.site.agent.resume(approval_id, allow)
@@ -1577,10 +1607,15 @@ class WebApp:
             if not eid:
                 return error_response("execution_id required", 400, "bad_request",
                                       req.rid)
-            # Same pin as /api/chat: capture the chat this approval was
-            # made in now, so a chat switch mid-resume can't send the
-            # follow-up reply to the wrong conversation.
-            cid = site.chat_log.current_id
+            # When `eid` is a host-fallback approval, its OWN conversation is
+            # authoritative for the continuation: the user may have switched
+            # chats (or opened a new one) since the card appeared, and the
+            # reply must resume and be written back to the ORIGINAL chat —
+            # never to whatever is currently open. A non-approval id keeps
+            # the previous behaviour (pin to the active chat).
+            bound_cid = self._approval_conversation(eid)
+            cid = (bound_cid if bound_cid is not None
+                   else site.chat_log.current_id)
             token = site.chat_log.begin(cid)
             try:
                 reply = site.agent.resume(eid, bool(body.get("allow", True)))

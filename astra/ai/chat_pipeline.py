@@ -1126,18 +1126,26 @@ class ChatPipeline:
             err = (trace.get("error") or getattr(rr, "error", "") or
                    "unknown error")
             trace["error"] = err
-            self._emit("chat.pipeline.failed", error=err, op=f"chat:{req}",
-                       request=req, trace=req, terminal=True)
             if "no eligible" in err:
                 # No Provider key is configured (empty/missing plain
-                # *_API_KEYS in .env). Name whichever of Provider/Gateway
-                # is actually missing so the user fixes the right thing —
-                # `gateway_ok` was already computed once per turn above.
+                # *_API_KEYS in .env). This isn't a real runtime failure to
+                # show the user as a red "✕ Failed · ProviderError: ..."
+                # status card (that's just noise for a config issue) — emit
+                # a plain "finished" terminal event, same as the normal
+                # success path, so only the friendly chat reply below shows.
+                # Name whichever of Provider/Gateway is actually missing so
+                # the user fixes the right thing — `gateway_ok` was already
+                # computed once per turn above.
+                self._emit("chat.pipeline.finished", status="no_provider",
+                           op=f"chat:{req}", request=req, trace=req,
+                           terminal=True)
                 if gateway_ok:
                     msg = _NO_PROVIDER_CONFIGURED_MESSAGE
                 else:
                     msg = _NO_PROVIDER_AND_GATEWAY_CONFIGURED_MESSAGE
                 return self._reply(msg, False, trace)
+            self._emit("chat.pipeline.failed", error=err, op=f"chat:{req}",
+                       request=req, trace=req, terminal=True)
             return self._reply(
                 "Provider theke kono uttor pawa jayni. Kichukkhon pore abar "
                 f"try korun. (`{err}`)", False, trace)

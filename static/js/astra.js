@@ -476,13 +476,13 @@ function chatStatusStepEl(step) {
   return wrap;
 }
 
-// Build (once per turn) the status row: avatar, compact line, step timeline.
+// Build (once per turn) the status row: compact line, step timeline.
+// No avatar here (by design) — the status card is a system-style progress
+// indicator, not a chat message from Astra, so it doesn't carry the brand
+// avatar the way actual assistant replies do.
 function chatStatusBuild() {
   const row = document.createElement("div");
   row.className = "msg assistant chat-status-row";
-  const avatar = document.createElement("div");
-  avatar.className = "msg-avatar";
-  avatar.textContent = "🚀";
   const content = document.createElement("div");
   content.className = "msg-content";
 
@@ -531,7 +531,7 @@ function chatStatusBuild() {
   });
 
   content.append(btn, steps, cards);
-  row.append(avatar, content);
+  row.append(content);
   return { row: row, btn: btn, summary: summary, line: line, steps: steps,
            cards: cards };
 }

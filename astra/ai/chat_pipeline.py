@@ -82,15 +82,26 @@ from astra.terminal.manager import default_session_id_for
 _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
                               "summarization", "research", "planning"})
 
-# Friendly, plain-text reply shown when routing fails with "no eligible
-# provider/model available" — i.e. no AI provider key is configured yet
-# (fresh install, empty/missing .env). The chat UI shows this as plain
-# text (no markdown rendering), so no headings/backticks are used here.
+# Plain-text replies for missing AI configuration. Shown as-is (no
+# markdown rendering in the chat UI — see the note on _run_turn's fail
+# branch and the pass-through branch below for where each applies.
 _NO_PROVIDER_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI provider-er API key set kora nei, tai reply dite parchi na.\n\n"
     "Thik korte: .env file e (cp .env.example .env kore) ekta provider-er "
     "key bosao — jemon GEMINI_API_KEYS othoba GROQ_API_KEYS — tarpor "
     "server restart koro (bash start.sh)."
+)
+_NO_GATEWAY_CONFIGURED_MESSAGE = (
+    "⚠️ Kono AI gateway-er API key set kora nei.\n\n"
+    ".env file e ekta GW_ prefix-wala key bosao — jemon GW_GEMINI_API_KEYS "
+    "othoba GW_GROQ_API_KEYS — tarpor server restart koro (bash start.sh)."
+)
+_NO_PROVIDER_AND_GATEWAY_CONFIGURED_MESSAGE = (
+    "⚠️ Kono AI provider ba gateway-er API key set kora nei, tai reply "
+    "dite parchi na.\n\n"
+    "Thik korte: .env file e (cp .env.example .env kore) provider-er key "
+    "(jemon GEMINI_API_KEYS) ebong gateway-er key (jemon GW_GEMINI_API_KEYS) "
+    "bosao — tarpor server restart koro (bash start.sh)."
 )
 
 MAX_TARGETS_IN_PROMPT = 60
@@ -1118,12 +1129,15 @@ class ChatPipeline:
             self._emit("chat.pipeline.failed", error=err, op=f"chat:{req}",
                        request=req, trace=req, terminal=True)
             if "no eligible" in err:
-                # No AI provider is configured at all (empty/missing .env) —
-                # a raw "ProviderError: no eligible provider/model
-                # available" is meaningless to a first-time user, so give a
-                # clear, actionable setup message instead of the raw error.
-                return self._reply(_NO_PROVIDER_CONFIGURED_MESSAGE, False,
-                                   trace)
+                # No Provider key is configured (empty/missing plain
+                # *_API_KEYS in .env). Name whichever of Provider/Gateway
+                # is actually missing so the user fixes the right thing —
+                # `gateway_ok` was already computed once per turn above.
+                if gateway_ok:
+                    msg = _NO_PROVIDER_CONFIGURED_MESSAGE
+                else:
+                    msg = _NO_PROVIDER_AND_GATEWAY_CONFIGURED_MESSAGE
+                return self._reply(msg, False, trace)
             return self._reply(
                 "Provider theke kono uttor pawa jayni. Kichukkhon pore abar "
                 f"try korun. (`{err}`)", False, trace)
@@ -1139,7 +1153,11 @@ class ChatPipeline:
             # skipped, so its started row never stays "running" in the log.
             self._emit("chat.pipeline.finished", status="skipped",
                        op=f"chat:{req}", request=req, trace=req, terminal=True)
-            return self._reply(rr.text, True, trace,
+            # Provider answered fine here (we're past the failure branch
+            # above), so Gateway is the ONLY thing missing — flag it
+            # plainly rather than silently skipping verification forever.
+            reply_text = rr.text + "\n\n" + _NO_GATEWAY_CONFIGURED_MESSAGE
+            return self._reply(reply_text, True, trace,
                                self._artifacts(rr.text, raw))
 
         # 3) Gateway verifies; fix/redo loop until complete or bound reached

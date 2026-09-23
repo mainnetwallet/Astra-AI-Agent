@@ -28,10 +28,24 @@
     ai: "🧠", browser: "🌐", terminal: "⌨️", web3: "⛓️", memory: "🧩",
     tasks: "✅", files: "📄", research: "🔎", system: "🩺", wallet: "👛",
   };
-  var NODE_W = 232;
-  var NODE_H = 84;
-  var COL_GAP = 300;
-  var ROW_GAP = 132;
+  /* Node geometry — matches the design reference: a compact horizontal
+   * card (icon tile + title + subtitle) roughly 168x60, stacked on a grid
+   * with a narrow gutter so the flow reads top-to-bottom. */
+  var NODE_W = 168;
+  var NODE_H = 60;
+  var COL_GAP = 224;
+  var ROW_GAP = 104;
+  var STACK_W = 248;   // phone column width (design reference)
+
+  /* The four accent tones the reference uses for node cards. Everything
+   * maps onto them, so the palette stays coherent no matter how many real
+   * tool categories the ToolRegistry reports. */
+  var CATEGORY_TONES = {
+    ai: "violet", memory: "violet",
+    browser: "blue", research: "blue", files: "blue",
+    web3: "magenta", wallet: "magenta",
+    terminal: "green", system: "green", tasks: "green",
+  };
 
   function categoryLabel(cat) {
     var key = String(cat == null ? "" : cat).toLowerCase();
@@ -40,6 +54,10 @@
   function categoryIcon(cat) {
     var key = String(cat == null ? "" : cat).toLowerCase();
     return CATEGORY_ICONS[key] || "🔧";
+  }
+  function categoryTone(cat) {
+    var key = String(cat == null ? "" : cat).toLowerCase();
+    return CATEGORY_TONES[key] || "blue";
   }
 
   function clone(value) {
@@ -330,6 +348,7 @@
       name: "Trigger",
       subtitle: d.scheduleLabel || "Manual run",
       icon: "▶",
+      tone: "green",
     });
     topoOrder(d.steps || []).forEach(function (s) {
       var tool = (toolMap || {})[s.tool];
@@ -341,6 +360,7 @@
         toolLabel: s.tool,
         category: (tool && tool.category) || "",
         icon: categoryIcon(tool && tool.category),
+        tone: categoryTone(tool && tool.category),
         subtitle: summaryOf(s, toolMap),
         cond: s.if || null,
         deps: (s.depends_on || []).slice(),
@@ -355,6 +375,7 @@
         name: "Condition",
         subtitle: shortId(c.step) + (c.op === "not_ok" ? " did not succeed" : " succeeded"),
         icon: "⚑",
+        tone: "magenta",
       });
     });
     return nodes;
@@ -408,7 +429,17 @@
   /* Positions live in `layout` (persisted with the definition), keyed by
    * node id; anything missing gets a deterministic column position so a
    * fresh workflow still looks like a flow. */
-  function withPositions(nodes, layout) {
+  function withPositions(nodes, layout, opts) {
+    /* `opts.stack` is the phone layout from the design reference: one
+     * centred column of wide cards, top-to-bottom, ignoring the saved
+     * desktop layout (which is kept intact for the desktop view). */
+    if (opts && opts.stack) {
+      var top = 28;
+      (nodes || []).forEach(function (n, i) {
+        n.x = 28; n.y = top + i * ROW_GAP; n.w = STACK_W; n.h = NODE_H;
+      });
+      return nodes;
+    }
     var lay = layout || {};
     var seen = [];
     (nodes || []).forEach(function (n, i) {
@@ -611,6 +642,8 @@
     nextUid: nextUid,
     categoryLabel: categoryLabel,
     categoryIcon: categoryIcon,
+    categoryTone: categoryTone,
+    CATEGORY_TONES: CATEGORY_TONES,
     blankDraft: blankDraft,
     draftFromDefinition: draftFromDefinition,
     definitionFromDraft: definitionFromDraft,

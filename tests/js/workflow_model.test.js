@@ -321,3 +321,36 @@ test("category labels fall back for an unknown category", () => {
   assert.strictEqual(M.categoryLabel("research"), "Web / API");
   assert.strictEqual(M.categoryLabel("quantum"), "Quantum");
 });
+
+test("nodes carry a design tone and the phone layout is one centred column", () => {
+  assert.strictEqual(M.categoryTone("ai"), "violet");
+  assert.strictEqual(M.categoryTone("browser"), "blue");
+  assert.strictEqual(M.categoryTone("terminal"), "green");
+  assert.strictEqual(M.categoryTone("web3"), "magenta");
+  assert.strictEqual(M.categoryTone("mystery"), "blue");   // safe default
+
+  const draft = { steps: [
+    { id: "s1", tool: "ai_generate", params: {}, depends_on: [] },
+    { id: "s2", tool: "get_health", params: {}, depends_on: ["s1"] }] };
+  const toolMap = M.toolMapFrom(TOOLS);
+  const list = M.canvasNodes(draft, toolMap);
+  assert.strictEqual(list[0].kind, "trigger");
+  assert.strictEqual(list[0].tone, "green");
+  const ai = list.find((n) => n.id === "s1");
+  assert.strictEqual(ai.tone, "violet");
+  assert.strictEqual(list.find((n) => n.id === "s2").tone, "green");
+
+  // phone: single column, all the same width, y increasing top-to-bottom
+  const stacked = M.withPositions(M.canvasNodes(draft, toolMap), { s1: { x: 900, y: 700 } },
+                                  { stack: true });
+  const xs = new Set(stacked.map((n) => n.x));
+  assert.strictEqual(xs.size, 1, "one column");
+  assert.ok(stacked.every((n) => n.w === stacked[0].w), "uniform width");
+  for (let i = 1; i < stacked.length; i++) {
+    assert.ok(stacked[i].y > stacked[i - 1].y, "stacked top-to-bottom");
+  }
+  // desktop still honours the saved layout
+  const desktop = M.withPositions(M.canvasNodes(draft, toolMap), { s1: { x: 900, y: 700 } });
+  assert.deepStrictEqual([desktop.find((n) => n.id === "s1").x,
+                          desktop.find((n) => n.id === "s1").y], [900, 700]);
+});

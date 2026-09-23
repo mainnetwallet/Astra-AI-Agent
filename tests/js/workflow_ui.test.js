@@ -433,3 +433,50 @@ test("the workflow script never installs inline event handlers (CSP)", () => {
   assert.doesNotMatch(SOURCE, /\son(click|change|input|load)\s*=/,
                       "script-src 'self' forbids inline handlers");
 });
+
+/* ---------------------------------------------------------------- shell -- */
+
+test("the tab renders the reference shell: header, rail, canvas, inspector, panel", () => {
+  for (const frag of ['class="wf-app"', 'class="wf-head"', 'class="wf-brand-mark"',
+                      'class="wf-grid"', 'class="wf-workspace"', 'class="wf-canvas-wrap"',
+                      'id="wf-run"', 'id="wf-run" title="Run now"',
+                      'wf-btn wf-btn-primary', 'id="wf-add"', 'id="wf-tabs"',
+                      'class="wf-tab active" data-wf-tab="log"']) {
+    assert.ok(HTML.includes(frag), `index.html is missing ${frag}`);
+  }
+  // the app header carries the primary Run action and the phone toggles
+  assert.match(HTML, /id="wf-run"[^>]*>▶ Run/);
+  assert.match(HTML, /id="wf-rail-toggle"/);
+  assert.match(HTML, /id="wf-inspector-toggle"/);
+});
+
+test("the stylesheet defines the reference palette, tones and phone sheet", () => {
+  const css = require("node:fs").readFileSync(
+    path.join(ROOT, "static/css/style.css"), "utf8");
+  for (const frag of ["--wf-accent: #4f17fd", "--tone-green: #01a252",
+                      "--tone-violet: #6716fd", "--tone-blue: #006bfb",
+                      '--tone-magenta: #f60b7f', '"rail workspace inspector"',
+                      ".wf-node.tone-violet .wf-node-icon", ".wf-inspector.open",
+                      "body:has(#tab-workflow.active) .topbar"]) {
+    assert.ok(css.includes(frag), `style.css is missing ${frag}`);
+  }
+  assert.strictEqual((css.match(/\{/g) || []).length,
+                     (css.match(/\}/g) || []).length, "css braces must balance");
+});
+
+test("canvas nodes render as tinted cards with a coloured icon tile", async () => {
+  const env = await booted();
+  // give the workflow an AI step so a violet card is produced
+  env.win.AstraWorkflow.state.toolMap = {
+    get_health: TOOLS[0], ai_generate: TOOLS[1] };
+  env.win.AstraWorkflow.state.draft.steps = [
+    { id: "s1", name: "Ask", tool: "ai_generate", params: {}, depends_on: [] },
+    { id: "s2", name: "Health", tool: "get_health", params: {}, depends_on: ["s1"] }];
+  env.win.AstraWorkflow.refresh();
+  const nodes = env.doc.getElementById("wf-nodes").innerHTML;
+  assert.match(nodes, /wf-node-icon/);
+  assert.match(nodes, /tone-violet/);       // the AI step
+  assert.match(nodes, /tone-green/);        // the trigger + system step
+  assert.doesNotMatch(nodes, /wf-node-bar/, "the old left bar is gone");
+  assert.match(nodes, /data-node-id="s1"/);
+});

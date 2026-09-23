@@ -49,6 +49,7 @@
     sse: null,
     connectFrom: null,    // node id while dragging a connection
     drag: null,
+    narrow: null,         // true when the phone (stacked) layout is in use
   };
 
   const STATUS_TEXT = {
@@ -472,6 +473,12 @@
   }
 
   /* ---- canvas ---- */
+  function isNarrow() {
+    try {
+      return !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
+    } catch (_) { return false; }
+  }
+
   function canvasNodes() {
     if (!WF.draft) return [];
     const list = M.canvasNodes(WF.draft, WF.toolMap);
@@ -482,7 +489,10 @@
         ? "Schedule: " + scheds.map((s) => s.kind + " " + s.value).join(", ")
         : "Manual run";
     }
-    return M.withPositions(list, WF.draft.layout || {});
+    // Phones use the reference's single centred column; desktop uses the
+    // saved layout (dragging a node on desktop persists to `layout`).
+    return M.withPositions(list, WF.draft.layout || {},
+                           isNarrow() ? { stack: true } : null);
   }
 
   function nodeStatusOf(node) {
@@ -516,8 +526,8 @@
   }
 
   function nodeClass(node, status) {
-    return "wf-node kind-" + node.kind + " status-" + status +
-           (WF.selected === node.id ? " selected" : "");
+    return "wf-node kind-" + node.kind + " tone-" + (node.tone || "blue") +
+           " status-" + status + (WF.selected === node.id ? " selected" : "");
   }
 
   function renderCanvas() {
@@ -542,39 +552,39 @@
     paintCanvas();
   }
 
+  /* The node face matches the design reference: a rounded card tinted by
+   * category tone, a coloured icon tile on the left, then the step name and
+   * a one-line configuration summary. Everything else (tool, params,
+   * dependencies, condition) is real data surfaced in the inspector and in
+   * the title tooltip — the card itself stays as clean as the reference. */
   function renderNode(n) {
     const status = nodeStatusOf(n);
-    const tags = [];
-    if (n.kind === "tool" || n.kind === "ai") {
-      tags.push(`<span class="wf-tag">${esc(n.toolLabel || "")}</span>`);
-      if (n.category) tags.push(`<span class="wf-tag alt">${esc(M.categoryLabel(n.category))}</span>`);
-      if (n.deps && n.deps.length) tags.push(`<span class="wf-tag">↳ ${esc(n.deps.join(","))}</span>`);
-      if (n.cond) {
-        tags.push(`<span class="wf-tag cond">⚑ ${esc(n.cond.step)} ${
-          n.cond.op === "not_ok" ? "not ok" : "ok"}</span>`);
-      }
-    }
-    if (n.kind === "condition") {
-      tags.push(`<span class="wf-tag">gates ${esc(String(n.gates.length))}</span>`);
-    }
+    const tip = nodeTooltip(n);
     const ports = n.kind === "trigger"
       ? `<span class="wf-port out" data-port="out"></span>`
       : `<span class="wf-port in" data-port="in"></span>
          <span class="wf-port out" data-port="out"></span>`;
     return `<div class="${nodeClass(n, status)}" data-node-id="${esc(n.id)}"
-                 style="left:${n.x}px;top:${n.y}px;width:${n.w}px">
-        <span class="wf-node-bar"></span>
-        <div class="wf-node-main">
-          <span class="wf-node-icon">${n.icon || "🔧"}</span>
-          <div class="wf-node-text">
-            <div class="wf-node-title">${esc(truncate(n.name, 26))}</div>
-            <div class="wf-node-sub">${esc(truncate(n.subtitle || "", 34))}</div>
-          </div>
-          <span class="wf-node-status ${statusClass(status)}" title="${esc(status)}"></span>
-        </div>
-        ${tags.length ? `<div class="wf-node-tags">${tags.join("")}</div>` : ""}
+                 title="${esc(tip)}"
+                 style="left:${n.x}px;top:${n.y}px;width:${n.w}px;height:${n.h}px">
+        <span class="wf-node-icon">${n.icon || "🔧"}</span>
+        <span class="wf-node-text">
+          <span class="wf-node-title">${esc(truncate(n.name, 22))}</span>
+          <span class="wf-node-sub">${esc(truncate(n.subtitle || "", 26))}</span>
+        </span>
+        <span class="wf-node-status ${statusClass(status)}" title="${esc(status)}"></span>
         ${ports}
       </div>`;
+  }
+
+  function nodeTooltip(n) {
+    const bits = [];
+    if (n.toolLabel) bits.push("tool: " + n.toolLabel);
+    if (n.category) bits.push("category: " + M.categoryLabel(n.category));
+    if (n.deps && n.deps.length) bits.push("depends on: " + n.deps.join(", "));
+    if (n.cond) bits.push("if " + n.cond.step + (n.cond.op === "not_ok" ? " not ok" : " ok"));
+    if (n.kind === "condition") bits.push("gates: " + (n.gates || []).join(", "));
+    return bits.join(" · ") || n.name || "";
   }
 
   function drawEdges(nodes) {
@@ -1123,7 +1133,6 @@
           esc(STATUS_TEXT[WF.run.status] || WF.run.status) : "no run selected"}</span>
         <span class="grow"></span>
         <input id="wf-run-params" class="wf-params-input" placeholder='run params JSON ({{key}})' >
-        <button class="btn mini" id="wf-cancel" ${WF.run && WF.run.status === "running" ? "" : "hidden"}>■ Cancel</button>
       </div>`;
     if (!WF.events.length) {
       return head + `<div class="empty">${
@@ -1454,10 +1463,29 @@
       el("wf-inspector").classList.remove("open"));
   }
 
+  /* The workflow workspace fills the viewport below the app top bar. The
+   * bar can wrap to two lines on narrow screens, so measure it instead of
+   * guessing a fixed offset (the CSS falls back to 59px). */
+  function measureTopBar() {
+    try {
+      const bar = document.querySelector(".topbar");
+      const app = document.querySelector(".wf-app");
+      if (!bar || !app || !bar.getBoundingClientRect) return;
+      const h = bar.getBoundingClientRect().height;
+      if (h) app.style.setProperty("--wf-top", Math.round(h) + "px");
+    } catch (_) { /* keep the CSS fallback */ }
+  }
+
   /* --------------------------------------------------------------- boot --- */
   async function boot() {
     if (WF.ready || !el("tab-workflow")) return;
     WF.ready = true;
+    measureTopBar();
+    window.addEventListener("resize", () => {
+      measureTopBar();
+      const narrow = isNarrow();
+      if (narrow !== WF.narrow) { WF.narrow = narrow; renderCanvas(); }
+    });
     wireShell();
     wireCanvas();
     renderBottom();

@@ -63,10 +63,16 @@ def main() -> int:
     print(f"  🔒 Bind: {bind} | "
           f"API auth: {'token protected' if token else 'OPEN (set ASTRA_TOKEN)'}")
     gw = stack["router"].gateway
+    gw_names = [getattr(c, "name", "?") for c in (gw.connections if gw else [])]
+    provider_names = [getattr(p, "name", "?") for p in stack["router"].providers]
     print(f"  🧠 Chat pipeline ON (Gateway "
-          f"{'ready' if gw is not None and gw.is_usable() else 'not configured — answers unverified'}) | "
+          f"{'ready' if gw is not None and gw.is_usable() else 'not configured — answers unverified'}"
+          f" — {len(gw_names)} set"
+          f"{': ' + ', '.join(gw_names) if gw_names else ''}) | "
           f"Tools: {len(stack['registry'].list())} | "
-          f"AI: {'configured' if stack['router'].providers else 'not configured'}")
+          f"AI: {'configured' if stack['router'].providers else 'not configured'}"
+          f" — {len(provider_names)} set"
+          f"{': ' + ', '.join(provider_names) if provider_names else ''}")
     if stack["scheduler"]:
         sched = stack["scheduler"]
         print(f"  ⏰ Scheduler running ({len(sched.list())} schedule)")

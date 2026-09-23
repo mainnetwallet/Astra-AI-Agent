@@ -187,8 +187,10 @@ test("three terminal_exec calls render three separate cards under the live statu
   const row = env.statusRow();
   const statusBtn = findEl(row, "chat-status");
   assert.ok(statusBtn, "the compact status button survives");
-  assert.ok(row.children.length >= 2);
   const cardsBox = findEl(row, "chat-cards");
+  assert.ok(cardsBox, "the cards container lives in the status row");
+  assert.strictEqual(cardsBox.children.length, 3,
+                     "one card element per terminal execution");
   const order = [];
   (function walk(node) {
     if (node === statusBtn) order.push("status");

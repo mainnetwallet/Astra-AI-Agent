@@ -86,22 +86,14 @@ _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
 # markdown rendering in the chat UI — see the note on _run_turn's fail
 # branch and the pass-through branch below for where each applies.
 _NO_PROVIDER_CONFIGURED_MESSAGE = (
-    "⚠️ Kono AI provider-er API key set kora nei, tai reply dite parchi na.\n\n"
-    "Thik korte: .env file e (cp .env.example .env kore) ekta provider-er "
-    "key bosao — jemon GEMINI_API_KEYS othoba GROQ_API_KEYS — tarpor "
-    "server restart koro (bash start.sh)."
+    "⚠️ Kono AI provider-er API key set kora nei, tai reply dite parchi na."
 )
 _NO_GATEWAY_CONFIGURED_MESSAGE = (
-    "⚠️ Kono AI gateway-er API key set kora nei.\n\n"
-    ".env file e ekta GW_ prefix-wala key bosao — jemon GW_GEMINI_API_KEYS "
-    "othoba GW_GROQ_API_KEYS — tarpor server restart koro (bash start.sh)."
+    "⚠️ Kono AI gateway-er API key set kora nei."
 )
 _NO_PROVIDER_AND_GATEWAY_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI provider ba gateway-er API key set kora nei, tai reply "
-    "dite parchi na.\n\n"
-    "Thik korte: .env file e (cp .env.example .env kore) provider-er key "
-    "(jemon GEMINI_API_KEYS) ebong gateway-er key (jemon GW_GEMINI_API_KEYS) "
-    "bosao — tarpor server restart koro (bash start.sh)."
+    "dite parchi na."
 )
 
 MAX_TARGETS_IN_PROMPT = 60

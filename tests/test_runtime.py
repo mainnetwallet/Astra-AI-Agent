@@ -690,3 +690,16 @@ class TestGatewayCapabilityAwareness(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PromptTests(unittest.TestCase):
+    def test_prompt_is_astra_not_root_at_localhost(self):
+        """The distro .bashrc overwrites a plain PS1, so the prompt must also
+        be re-applied via a self-removing PROMPT_COMMAND."""
+        from astra.runtime.engine import ASTRA_PS1, _prompt_env
+        env = _prompt_env()
+        self.assertIn("astra", ASTRA_PS1)
+        self.assertNotIn("\\h", ASTRA_PS1)          # no hostname (=localhost)
+        self.assertEqual(env["PS1"], ASTRA_PS1)
+        self.assertIn("unset PROMPT_COMMAND", env["PROMPT_COMMAND"])
+        self.assertNotIn("'", ASTRA_PS1)              # safe inside PS1='...'

@@ -68,6 +68,28 @@ GUEST_PATH = ("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:"
               "/sbin:/bin:/root/.local/bin:/root/.npm-global/bin")
 
 
+# The prompt the Agent Terminal shows: `astra:/workspace$` (short enough for a
+# phone screen). Colours are wrapped in \[ \] so bash measures line width right.
+ASTRA_PS1 = ("\\[\\e[1;35m\\]astra\\[\\e[0m\\]:"
+             "\\[\\e[1;34m\\]\\w\\[\\e[0m\\]$ ")
+
+
+def _prompt_env() -> dict:
+    """Env that makes the interactive prompt `astra:<cwd>$`.
+
+    A bare `PS1=` in the environment is NOT enough: the guest distro's
+    `~/.bashrc` runs when the interactive shell starts and overwrites it with
+    `\\u@\\h:\\w\\$` (which is where `root@localhost:/workspace#` came
+    from). `PROMPT_COMMAND` runs just before the first prompt — i.e. after
+    `.bashrc` — so it applies ours once, then removes itself so any PS1 the
+    user sets later still sticks.
+    """
+    return {
+        "PS1": ASTRA_PS1,
+        "PROMPT_COMMAND": f"PS1='{ASTRA_PS1}'; unset PROMPT_COMMAND",
+    }
+
+
 def _user_scope_env() -> dict:
     """Environment that redirects every user-scope package manager into
     THIS runtime's private `$HOME`.
@@ -243,8 +265,8 @@ class RuntimeEngine:
             "COLORTERM": "truecolor",
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
-            "PS1": "\\u@astra:\\w\\$ ",
         }
+        child_env.update(_prompt_env())
         # Per-runtime writable package state (see `_user_scope_env`).
         child_env.update(_user_scope_env())
         for key, value in (env or {}).items():

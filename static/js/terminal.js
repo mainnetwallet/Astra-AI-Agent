@@ -605,7 +605,8 @@
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(view);
-    hardenInput(term);
+    const live = isTouchInput();
+    hardenInput(term, live);
 
     const tab = {
       sessionId, name, term, fit, view,
@@ -615,12 +616,14 @@
     state.tabs.set(sessionId, tab);
     state.order.push(sessionId);
     bindTouchSelect(tab);
+    if (live) bindLiveInput(tab);
     term.onSelectionChange(() => { if (!term.hasSelection()) hideSelBar(); });
 
     // Keyboard -> PTY. xterm already encodes Enter/Backspace/arrows/Tab/
     // Home/End/PageUp/PageDown and Ctrl+<letter> control bytes; we simply
     // forward what it produces unless the browser should handle it.
     term.attachCustomKeyEventHandler((ev) => {
+      if (tab.live && tab.live.keyGate(ev) === false) return false;
       if (ev.type !== "keydown") return true;
       // Let the browser do copy/paste/select-all/new-tab.
       if (ev.ctrlKey && ev.shiftKey
@@ -895,7 +898,7 @@
    * hidden xterm textarea unless the field says "no suggestions". Chrome maps
    * autocomplete="off" to Android's NO_SUGGESTIONS input flag, so characters
    * arrive one by one, un-corrected. xterm only sets the other three attrs. */
-  function hardenInput(term) {
+  function hardenInput(term, live) {
     const ta = term && term.textarea;
     if (!ta) return;
     ta.setAttribute("autocomplete", "off");
@@ -906,6 +909,7 @@
     ta.setAttribute("enterkeyhint", "enter");
     ta.setAttribute("data-gramm", "false");        // Grammarly & friends
     ta.setAttribute("data-lpignore", "true");      // password managers
+    if (live) return;      // phones: bindLiveInput() owns composition + clearing
     // The textarea accumulates typed text; keyboards then try to "fix" old
     // words in it. Keep it empty whenever no composition is in progress.
     let composing = false, t = null;
@@ -916,6 +920,63 @@
     ta.addEventListener("compositionstart", () => { composing = true; clearTimeout(t); });
     ta.addEventListener("compositionend", () => { composing = false; later(80); });
     ta.addEventListener("input", () => { if (!composing) later(0); });
+  }
+
+  /* Phones: type live. Android keyboards (Gboard, Samsung) keep the current
+   * word "composing"; stock xterm hides it in a separate overlay box and only
+   * sends it to the shell when the word ends — so it looks like the cursor sits
+   * BEFORE the word and nothing is running until you press space. Instead we
+   * send every composition change straight to the PTY (backspace + new tail),
+   * and stop xterm's own composition handling so no overlay box appears. */
+  function isTouchInput() {
+    try { return !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); }
+    catch (_) { return false; }
+  }
+
+  function bindLiveInput(tab) {
+    const term = tab.term, ta = term.textarea, view = tab.view;
+    const st = { composing: false, sent: "", lastKey: 0, lastCode: 0, clearT: null };
+    tab.live = st;
+    const send = (s) => { if (s) term.input(s, true); };   // -> onData -> sticky Ctrl/Alt -> PTY
+    const clearLater = (ms) => {
+      clearTimeout(st.clearT);
+      st.clearT = setTimeout(() => { if (!st.composing && ta.value) ta.value = ""; }, ms);
+    };
+    // Make the shell's line match `next` (the current composition text).
+    const reconcile = (next) => {
+      const a = Array.from(st.sent), b = Array.from(next || "");
+      let p = 0;
+      while (p < a.length && p < b.length && a[p] === b[p]) p++;
+      send("\x7f".repeat(a.length - p) + b.slice(p).join(""));
+      st.sent = next || "";
+    };
+    // xterm's keydown path must not ALSO forward IME (keyCode 229) input.
+    st.keyGate = (ev) => {
+      if (ev.type !== "keydown") return true;
+      if (ev.keyCode === 229 || ev.isComposing) return false;
+      st.lastKey = performance.now(); st.lastCode = ev.keyCode;
+      return true;
+    };
+    // Capture on an ancestor so xterm's own textarea listeners never see these.
+    const own = (fn) => (ev) => { if (ev.target !== ta) return; ev.stopPropagation(); fn(ev); };
+    view.addEventListener("compositionstart", own(() => {
+      st.composing = true; st.sent = ""; clearTimeout(st.clearT);
+    }), true);
+    view.addEventListener("compositionupdate", own((ev) => reconcile(ev.data)), true);
+    view.addEventListener("compositionend", own((ev) => {
+      if (ev.data) reconcile(ev.data);       // "" = cancelled: keep what is already typed
+      st.sent = ""; st.composing = false; clearLater(80);
+    }), true);
+    view.addEventListener("input", own((ev) => {
+      if (ev.isComposing || st.composing) return;      // composition events own this
+      const recent = performance.now() - st.lastKey < 120;
+      const t = ev.inputType;
+      if (t === "insertText" && ev.data) send(ev.data);
+      else if (t === "deleteContentBackward" && !(recent && st.lastCode === 8)) send("\x7f");
+      else if ((t === "insertLineBreak" || t === "insertParagraph")
+               && !(recent && st.lastCode === 13)) send("\r");
+      clearLater(0);
+    }), true);
   }
 
   function toast(msg) {
@@ -1207,7 +1268,7 @@
     refreshStatus,
     pressKey,
     state,
-    _t: { wordBounds, applySelection, bufferText, copyText, hardenInput, bindTouchSelect, showSelBar },
+    _t: { wordBounds, applySelection, bufferText, copyText, hardenInput, bindTouchSelect, showSelBar, bindLiveInput, isTouchInput },
     EXTRA_KEYS,
   };
   // Core-tab loader: astra.js's showTab() calls this the first time the

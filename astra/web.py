@@ -56,6 +56,12 @@ System endpoints:
   GET  /api/events          recent live events; ?after_id= for tailing
   GET  /api/events/stream   Server-Sent Events feed (Live tab)
   GET  /api/tools           universal tool registry listing
+  GET  /api/v1/terminal/output   read-only page of ONE terminal execution's
+                             captured output (?process_id=&stream=stdout|stderr
+                             &offset=&length=) for the chat execution cards.
+                             Never starts/stops/re-runs a command; full output
+                             pages through the same BlobStore
+                             `terminal_output_read` uses.
   GET/POST /api/tasks       generic task engine (task/{id} GET/…)
   GET/POST /api/memory      memory save/list; /api/memory/search
   GET  /api/experiences     experience memory
@@ -474,6 +480,147 @@ def _opt_int(cfg, key: str):
         return None
 
 
+# How much of a command's captured stdout/stderr rides along as an inline
+# preview. The FULL stream is always available by paging `blob_id` with
+# offset/length; the preview is only so the chat's execution-card detail has
+# something to show before the first explicit "load full output" tap.
+TERMINAL_PREVIEW_CHARS = 4000
+
+
+def _session_owns_process(session, process_id: str) -> bool:
+    """True when this terminal session ran (or is running) `process_id`.
+
+    Read-only: a live background process is in `session.processes()`, while a
+    finished FOREGROUND command only lives in the session's history — both
+    carry the process id, so neither needs the command to be re-run."""
+    try:
+        if any(p.get("process_id") == process_id
+               for p in session.processes()):
+            return True
+    except Exception:
+        pass
+    try:
+        return any(h.get("process_id") == process_id
+                   for h in session.history(limit=0))
+    except Exception:
+        return False
+
+
+def _session_process_record(session, process_id: str):
+    """The captured record for one process id, or None.
+
+    Prefers the live process record (status + output + blob handles); falls
+    back to the session's history entry for a finished foreground command —
+    the same data `terminal_output_read` pages, never a re-execution."""
+    try:
+        return session.status(process_id)
+    except Exception:
+        pass
+    try:
+        rows = session.history(limit=0)
+    except Exception:
+        return None
+    for row in rows:
+        if row.get("process_id") != process_id:
+            continue
+        return {
+            "process_id": process_id,
+            "command": row.get("command", ""),
+            "cwd": row.get("cwd", ""),
+            "status": row.get("status", ""),
+            "exit_code": row.get("exit_code"),
+            "duration_ms": row.get("duration_ms"),
+            "stdout": row.get("stdout", ""),
+            "stderr": row.get("stderr", ""),
+            "stdout_blob_id": row.get("stdout_blob_id"),
+            "stderr_blob_id": row.get("stderr_blob_id"),
+        }
+    return None
+
+
+def _blob_total(manager, record: dict, name: str, stream: str,
+                chunk: dict) -> int:
+    """Total captured chars for one stream, preferring the record's own count
+    and falling back to the blob/chunk size for a history-preview record."""
+    total = record.get(name + "_total_chars")
+    if total is None and stream == name:
+        total = chunk.get("total_chars") if chunk else None
+    if total is None:
+        blob_id = record.get(name + "_blob_id") or ""
+        if blob_id:
+            try:
+                total = manager.blobs.size(blob_id)
+            except Exception:
+                total = None
+    if total is None:
+        total = len(record.get(name) or "")
+    return total
+
+
+def _terminal_output_payload(manager, session_id: str, process_id: str,
+                             record: dict, blob_id: str, stream: str,
+                             offset: int, length: int) -> dict:
+    """One read-only page of a terminal execution's output.
+
+    Wraps the SAME BlobStore the `terminal_output_read` tool uses, so the
+    chat can page through a command's full stdout/stderr without ever
+    re-running it. Falls back to offset-paging the bounded capture when a
+    record predates blob capture (keeps the offset/next_offset contract)."""
+    record = record or {}
+    preview = record.get("stdout") if stream == "stdout" else record.get("stderr")
+    preview = preview or ""
+    if not blob_id:
+        blob_id = (record.get("stdout_blob_id") if stream == "stdout"
+                   else record.get("stderr_blob_id")) or ""
+    chunk = None
+    if blob_id:
+        try:
+            candidate = manager.blobs.read(blob_id, offset=offset,
+                                           length=length or 6000)
+        except Exception:
+            candidate = None
+        if candidate and candidate.get("status") == "ok":
+            chunk = candidate
+        elif not preview:
+            # An explicitly requested blob that does not exist (and no live
+            # capture to fall back on) is a real 404, not an empty page.
+            return {"error": "unknown blob id", "blob_id": blob_id}
+    if chunk is None:
+        total = len(preview)
+        start = max(0, int(offset or 0))
+        size = max(1, int(length or 6000))
+        piece = preview[start:start + size]
+        nxt = start + len(piece)
+        chunk = {"id": blob_id, "offset": start, "total_chars": total,
+                 "chars_returned": len(piece), "text": piece,
+                 "done": nxt >= total,
+                 "next_offset": None if nxt >= total else nxt}
+    return {
+        "process_id": record.get("process_id", "") or process_id,
+        "session_id": session_id,
+        "command": record.get("command", ""),
+        "cwd": record.get("cwd", ""),
+        "status": record.get("status", ""),
+        "exit_code": record.get("exit_code"),
+        "duration_ms": record.get("duration_ms"),
+        "truncated": bool(record.get("truncated")),
+        "stdout_preview": (record.get("stdout") or "")[:TERMINAL_PREVIEW_CHARS],
+        "stderr_preview": (record.get("stderr") or "")[:TERMINAL_PREVIEW_CHARS],
+        "stdout_total_chars": _blob_total(manager, record, "stdout",
+                                          stream, chunk),
+        "stderr_total_chars": _blob_total(manager, record, "stderr",
+                                          stream, chunk),
+        "stream": stream,
+        "blob_id": blob_id,
+        "offset": chunk["offset"],
+        "chars_returned": chunk["chars_returned"],
+        "total_chars": chunk["total_chars"],
+        "text": chunk["text"],
+        "done": chunk["done"],
+        "next_offset": chunk["next_offset"],
+    }
+
+
 def content_type_for(path: str) -> str:
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     return CONTENT_TYPES.get(ext, "application/octet-stream")
@@ -830,6 +977,66 @@ class WebApp:
             headers=[("Connection", "keep-alive")],
         )
 
+    def _terminal_output(self, req: Request) -> Response:
+        """Read-only retrieval of one terminal execution's captured output.
+
+        The Assistant chat's execution cards use this to lazily page through
+        a command's FULL stdout/stderr after the fact (the card itself only
+        ever carries a short preview). It is a thin, read-only wrapper over
+        the SAME TerminalManager/BlobStore `terminal_output_read` uses: it
+        resolves the owning session with `create=False` and only reads —
+        nothing here can start, stop or re-run a command."""
+        q = req.query
+        manager = self.site._get("terminal")
+        if manager is None:
+            return error_response("terminal capability unavailable", 404,
+                                  "not_found", req.rid)
+        process_id = str(q.get("process_id") or "").strip()
+        blob_id = str(q.get("blob_id") or "").strip()
+        if not process_id and not blob_id:
+            return error_response("process_id or blob_id required", 400,
+                                  "bad_request", req.rid)
+        session = None
+        session_id = str(q.get("session_id") or "").strip()
+        if session_id:
+            session = manager.get(session_id, create=False)
+        if session is None and process_id:
+            # The terminal lifecycle events carry a process_id but no session
+            # id, so the card asks for one; resolve the owning session by
+            # scanning the live sessions. Read-only: no session is created.
+            for candidate_id in manager.session_ids():
+                candidate = manager.get(candidate_id, create=False)
+                if candidate is None:
+                    continue
+                if _session_owns_process(candidate, process_id):
+                    session = candidate
+                    break
+        record = None
+        if session is not None and process_id:
+            record = _session_process_record(session, process_id)
+        if record is None and not blob_id:
+            return error_response(
+                "terminal output for this process is no longer available",
+                404, "not_found", req.rid)
+        stream = str(q.get("stream") or "stdout").strip().lower()
+        if stream not in ("stdout", "stderr"):
+            stream = "stdout"
+        length = int_arg(q.get("length"), 0, name="length")
+        if record is None:
+            # No live record (a reaped session, or the card carries the blob
+            # id straight from the lifecycle event): page the blob directly.
+            record = {}
+        payload = _terminal_output_payload(
+            manager, session.session_id if session is not None else session_id,
+            process_id, record, blob_id, stream,
+            int_arg(q.get("offset"), 0, name="offset"), length or 0)
+        if payload.get("error"):
+            return error_response(payload["error"], 404, "not_found", req.rid)
+        if not payload.get("blob_id") and not payload.get("text"):
+            return error_response("terminal output not found", 404,
+                                  "not_found", req.rid)
+        return json_response({"ok": True, "data": payload}, rid=req.rid)
+
     # -- main route table ----------------------------------------------------
     def _route(self, req: Request, path: list) -> Response:
         site, q, body = self.site, req.query, req.body
@@ -998,6 +1205,8 @@ class WebApp:
                                   "data": {"tools": site.registry().list(),
                                            "stats": site.registry().stats()}},
                                  rid=req.rid)
+        if path == ["api", "terminal", "output"] and method == "GET":
+            return self._terminal_output(req)
         if path == ["api", "tasks"] and method == "GET":
             return json_response({"ok": True,
                                   "data": site.tasks().list(

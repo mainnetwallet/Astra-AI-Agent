@@ -23,7 +23,9 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JS_TESTS = [os.path.join(ROOT, "tests", "js", "chat_status.test.js"),
-            os.path.join(ROOT, "tests", "js", "chat_status_ui.test.js")]
+            os.path.join(ROOT, "tests", "js", "chat_status_ui.test.js"),
+            os.path.join(ROOT, "tests", "js", "chat_cards.test.js"),
+            os.path.join(ROOT, "tests", "js", "chat_cards_ui.test.js")]
 
 
 def _read(*parts):

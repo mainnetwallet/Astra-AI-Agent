@@ -452,6 +452,8 @@ function chatStatusReset() {
   CHAT_STATUS.summary = null;
   CHAT_STATUS.line = null;
   CHAT_STATUS.steps = null;
+  CHAT_STATUS.cards = null;
+  chatCardsReset();
 }
 
 function chatStatusStepEl(step) {
@@ -515,6 +517,11 @@ function chatStatusBuild() {
   steps.className = "chat-steps";
   steps.hidden = true;
 
+  // The execution cards live BELOW the compact status (and below the step
+  // timeline): one card per real tool execution, in order.
+  const cards = document.createElement("div");
+  cards.className = "chat-cards";
+
   btn.addEventListener("click", () => {
     // The ONLY thing this click does: reveal the timeline. No tool is ever
     // re-invoked from here (nothing but classList/hidden/aria is touched).
@@ -523,9 +530,10 @@ function chatStatusBuild() {
     btn.setAttribute("aria-expanded", open ? "true" : "false");
   });
 
-  content.append(btn, steps);
+  content.append(btn, steps, cards);
   row.append(avatar, content);
-  return { row: row, btn: btn, summary: summary, line: line, steps: steps };
+  return { row: row, btn: btn, summary: summary, line: line, steps: steps,
+           cards: cards };
 }
 
 function chatStatusPaint(snap) {
@@ -554,7 +562,250 @@ function chatStatusPaint(snap) {
 function chatStatusTrack(event) {
   if (!CHAT_STATUS.tracker) return;     // nothing on screen — ignore it
   chatStatusPaint(CHAT_STATUS.tracker.apply(event));
+  chatCardsTrack(event);                // and the per-execution cards
 }
+
+/* --------------------- assistant execution cards ---------------------------
+ * Claude-style EXECUTION CARDS rendered under the compact live status: ONE
+ * card per REAL tool execution — a terminal command is exactly one card, and
+ * three terminal_exec calls are three cards, never merged into one timeline
+ * row. AstraChatStatus.createCardTracker() owns the correlation/order/stale
+ * rules; this code only paints them and toggles their detail.
+ *
+ * Tapping a card ONLY expands a read-only detail built from the values the
+ * lifecycle events already carried — it never calls an API and never re-runs
+ * a tool. "Load full output" is a separate, explicit button that pages the
+ * existing read-only terminal retrieval endpoint; nothing is dumped into the
+ * chat itself.
+ */
+const CHAT_CARDS = { tracker: null, box: null, els: {} };
+const CHAT_CARD_MARK = { running: "●", completed: "✓", failed: "✕",
+                         stopped: "■" };
+const CHAT_CARD_OUT_CHUNK = 6000;
+
+function chatCardsReset() {
+  CHAT_CARDS.tracker = null;
+  CHAT_CARDS.box = null;
+  CHAT_CARDS.els = {};
+}
+
+function chatCardsClear() {
+  CHAT_CARDS.els = {};
+  const box = CHAT_CARDS.box;
+  if (box) while (box.firstChild) box.removeChild(box.firstChild);
+}
+
+function chatCardField(label, value, mono) {
+  const row = document.createElement("div");
+  row.className = "chat-exec-row";
+  const k = document.createElement("span");
+  k.className = "chat-exec-k";
+  k.textContent = label;
+  const v = document.createElement("span");
+  v.className = "chat-exec-v" + (mono ? " mono" : "");
+  v.textContent = value;                 // textContent: an event cannot inject markup
+  row.append(k, v);
+  return row;
+}
+
+// Lazily page the full stdout/stderr through the EXISTING read-only retrieval
+// endpoint. Exposed as its own function so tests can assert the card toggle
+// itself never fetches while this explicit action does exactly one GET.
+async function chatCardLoadOutput(el, stream) {
+  const snap = el.snap || {};
+  const o = el.out || (el.out = { stream: "stdout", text: "", offset: 0,
+                                 done: false, loading: false, loaded: false,
+                                 error: "" });
+  if (stream && stream !== o.stream) {
+    o.stream = stream;
+    o.text = ""; o.offset = 0; o.done = false; o.loaded = false; o.error = "";
+  }
+  if (o.loading || o.done) return o;
+  o.loading = true;
+  const blob = o.stream === "stderr" ? snap.blobErr : snap.blobId;
+  let url = "/api/terminal/output?stream=" + o.stream +
+            "&offset=" + o.offset + "&length=" + CHAT_CARD_OUT_CHUNK;
+  if (blob) url += "&blob_id=" + encodeURIComponent(blob);
+  else if (snap.processId) url += "&process_id=" + encodeURIComponent(snap.processId);
+  try {
+    const r = await api(url);
+    if (!r || !r.ok || !r.data) {
+      o.error = (r && r.error) || "Full output is no longer available.";
+    } else {
+      const d = r.data;
+      o.text = (o.loaded ? o.text : "") + (d.text || "");
+      o.loaded = true;
+      const next = d.next_offset;
+      o.offset = (next === null || next === undefined)
+        ? o.offset + (d.chars_returned || 0) : next;
+      o.done = !!d.done;
+      o.error = "";
+    }
+  } catch (err) {
+    o.error = "Full output could not be loaded.";
+  }
+  o.loading = false;
+  chatCardDetail(el, el.snap);
+  return o;
+}
+
+function chatCardOutput(el, snap) {
+  const box = document.createElement("div");
+  box.className = "chat-exec-outbox";
+  const o = el.out || (el.out = { stream: "stdout", text: "", offset: 0,
+                                  done: false, loading: false, loaded: false,
+                                  error: "" });
+  if (snap.blobErr) {
+    const tabs = document.createElement("div");
+    tabs.className = "chat-exec-tabs";
+    ["stdout", "stderr"].forEach((name) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chat-exec-tab" + (o.stream === name ? " active" : "");
+      b.textContent = name;
+      b.addEventListener("click", () => chatCardLoadOutput(el, name));
+      tabs.appendChild(b);
+    });
+    box.appendChild(tabs);
+  }
+  const pre = document.createElement("pre");
+  pre.className = "chat-exec-pre";
+  pre.textContent = o.loaded ? o.text
+                             : (snap.preview || "No output captured yet.");
+  box.appendChild(pre);
+  const note = document.createElement("div");
+  note.className = "chat-exec-note";
+  if (o.error) note.textContent = o.error;
+  else if (o.loading) note.textContent = "Loading…";
+  else if (o.done) note.textContent = "End of output";
+  box.appendChild(note);
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "chat-exec-more";
+  more.textContent = o.loaded ? "Load more" : "Load full output";
+  more.hidden = o.done;
+  more.addEventListener("click", () => chatCardLoadOutput(el, o.stream));
+  box.appendChild(more);
+  return box;
+}
+
+// The read-only detail panel. Built from lifecycle values ONLY — nothing here
+// re-runs the tool, and only the terminal "load full output" button touches
+// the network.
+function chatCardDetail(el, snap) {
+  const d = el.detail;
+  if (!d) return;
+  snap = snap || el.snap || {};
+  while (d.firstChild) d.removeChild(d.firstChild);
+  d.appendChild(chatCardField("Action", snap.title || "Tool"));
+  if (snap.command) d.appendChild(chatCardField("Command", snap.command, true));
+  if (snap.cwd) d.appendChild(chatCardField("Directory", snap.cwd, true));
+  d.appendChild(chatCardField("Status", snap.stateText || ""));
+  if (snap.exitCode !== null && snap.exitCode !== undefined) {
+    d.appendChild(chatCardField("Exit code", String(snap.exitCode)));
+  }
+  d.appendChild(chatCardField("Duration",
+    snap.duration || (snap.state === "running" ? "running" : "")));
+  if (snap.kind === "terminal") d.appendChild(chatCardOutput(el, snap));
+  else if (snap.preview) {
+    const pre = document.createElement("pre");
+    pre.className = "chat-exec-pre";
+    pre.textContent = snap.preview;
+    d.appendChild(pre);
+  }
+}
+
+// One card = one real execution. Elements are reconciled by card id so an
+// update never disturbs an open detail panel or the order on screen.
+function chatCardEl(snap) {
+  let el = CHAT_CARDS.els[snap.id];
+  if (el) return el;
+  const wrap = document.createElement("div");
+  wrap.className = "chat-exec " + snap.kind;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chat-exec-card";
+  btn.setAttribute("aria-expanded", "false");
+  const mark = document.createElement("span");
+  mark.className = "chat-exec-mark";
+  mark.setAttribute("aria-hidden", "true");
+  const main = document.createElement("span");
+  main.className = "chat-exec-main";
+  const title = document.createElement("span");
+  title.className = "chat-exec-title";
+  const sub = document.createElement("span");
+  sub.className = "chat-exec-sub";
+  main.append(title, sub);
+  const dur = document.createElement("span");
+  dur.className = "chat-exec-dur";
+  const chev = document.createElement("span");
+  chev.className = "chat-exec-chev";
+  chev.setAttribute("aria-hidden", "true");
+  chev.textContent = "›";
+  btn.append(mark, main, dur, chev);
+  const detail = document.createElement("div");
+  detail.className = "chat-exec-detail";
+  detail.hidden = true;
+  el = { wrap, btn, mark, title, sub, dur, detail, snap: snap, out: null };
+  btn.addEventListener("click", () => {
+    // The ONLY thing this click does: reveal/hide the read-only detail.
+    const open = wrap.classList.toggle("open");
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    detail.hidden = !open;
+    if (open) chatCardDetail(el, el.snap);
+  });
+  wrap.append(btn, detail);
+  CHAT_CARDS.els[snap.id] = el;
+  return el;
+}
+
+function chatCardPaint(snap) {
+  const el = chatCardEl(snap);
+  el.snap = snap;
+  el.wrap.className = "chat-exec " + snap.kind;
+  el.btn.className = "chat-exec-card " + snap.state;
+  el.mark.textContent = CHAT_CARD_MARK[snap.state] || "•";
+  el.title.textContent = snap.title || snap.tool || "Tool";
+  el.sub.textContent = snap.command || "";
+  el.sub.hidden = !snap.command;
+  el.dur.textContent = snap.duration || "";
+  el.dur.hidden = !snap.duration;
+  if (!el.detail.hidden) chatCardDetail(el, snap);
+  return el;
+}
+
+function chatCardsPaint(snaps) {
+  const box = CHAT_CARDS.box;
+  if (!box) return;
+  const seen = {};
+  (snaps || []).forEach((snap) => {
+    seen[snap.id] = true;
+    const el = chatCardPaint(snap);
+    if (el.wrap.parentElement !== box) box.appendChild(el.wrap);
+  });
+  Object.keys(CHAT_CARDS.els).forEach((id) => {
+    if (seen[id]) return;
+    const el = CHAT_CARDS.els[id];
+    if (el && el.wrap.parentElement === box) box.removeChild(el.wrap);
+    delete CHAT_CARDS.els[id];
+  });
+  const log = $("#chat-log");
+  if (log && box.parentElement) log.scrollTop = log.scrollHeight;
+}
+
+// One live event (the same object the status tracker just consumed).
+function chatCardsTrack(event) {
+  if (!CHAT_CARDS.tracker) return;
+  chatCardsPaint(CHAT_CARDS.tracker.apply(event));
+}
+
+// The turn is over (reply landed, or failed): no card may still say Running.
+function chatCardsEnd() {
+  if (!CHAT_CARDS.tracker) return;
+  CHAT_CARDS.tracker.endTurn();
+  chatCardsPaint(CHAT_CARDS.tracker.list());
+}
+
 
 // The reply landed (or the transport failed): close the status out with the
 // steps that were really observed.
@@ -562,12 +813,14 @@ function chatStatusFinish() {
   if (!CHAT_STATUS.tracker) return null;
   const snap = CHAT_STATUS.tracker.complete();
   chatStatusPaint(snap);
+  chatCardsEnd();
   return snap;
 }
 function chatStatusFail(reason) {
   if (!CHAT_STATUS.tracker) return null;
   const snap = CHAT_STATUS.tracker.fail(reason);
   chatStatusPaint(snap);
+  chatCardsEnd();
   return snap;
 }
 
@@ -586,9 +839,15 @@ function chatTyping() {
     CHAT_STATUS.summary = built.summary;
     CHAT_STATUS.line = built.line;
     CHAT_STATUS.steps = built.steps;
+    CHAT_STATUS.cards = built.cards;
     log.appendChild(built.row);
   }
   CHAT_STATUS.tracker = AstraChatStatus.createTracker();
+  // A new turn owns a fresh card list: the previous turn's cards are history
+  // that the transcript already shows, and must not be extended by this one.
+  CHAT_CARDS.box = CHAT_STATUS.cards;
+  CHAT_CARDS.tracker = AstraChatStatus.createCardTracker();
+  chatCardsClear();
   chatStatusPaint(CHAT_STATUS.tracker.begin());
   // The chat needs the live feed whether or not the Logs tab was ever opened.
   ensureEventStream();

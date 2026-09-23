@@ -594,7 +594,9 @@ class TerminalSession:
         err_thread.start()
         self._emit("terminal.started", op=op, process_id=process_id,
                    command=command, cwd=self.cwd,
-                   shell=self.shell.get("name"), status=RUNNING)
+                   shell=self.shell.get("name"), status=RUNNING,
+                   stdout_blob_id=stdout_blob,
+                   stderr_blob_id=stderr_blob)
         timed_out = False
         try:
             try:
@@ -653,7 +655,9 @@ class TerminalSession:
                 "timeout": "terminal.timeout"}.get(status, "terminal.failed")
         self._emit(kind, op=op, process_id=process_id, command=command,
                    cwd=result["cwd"], exit_code=rc, duration=duration,
-                   status=status, terminal=True)
+                   status=status, terminal=True,
+                   stdout_blob_id=result.get("stdout_blob_id", ""),
+                   stderr_blob_id=result.get("stderr_blob_id", ""))
         return result
 
     def _run_background(self, command, env) -> dict:
@@ -688,7 +692,9 @@ class TerminalSession:
         self._emit("terminal.started", op=record.op, process_id=process_id,
                    command=command, cwd=cwd,
                    shell=self.shell.get("name"), status=RUNNING,
-                   background=True)
+                   background=True,
+                   stdout_blob_id=record.stdout_blob_id,
+                   stderr_blob_id=record.stderr_blob_id)
         result = {
             "command": command,
             "cwd": cwd,
@@ -737,7 +743,9 @@ class TerminalSession:
         result["session_id"] = self.session_id
         self._emit("terminal.stopped", op=record.op, process_id=process_id,
                    command=record.command, cwd=record.cwd,
-                   status=STOPPED, terminal=True)
+                   status=STOPPED, terminal=True,
+                   stdout_blob_id=record.stdout_blob_id,
+                   stderr_blob_id=record.stderr_blob_id)
         return result
 
     def kill(self, process_id: str) -> dict:
@@ -767,7 +775,9 @@ class TerminalSession:
                        command=record.command, cwd=record.cwd,
                        exit_code=record.exit_code,
                        duration=record.duration_ms(),
-                       status=record.status, terminal=True)
+                       status=record.status, terminal=True,
+                       stdout_blob_id=record.stdout_blob_id,
+                       stderr_blob_id=record.stderr_blob_id)
 
     # -- results / probes ----------------------------------------------------
     def _apply_probes(self, probes: dict) -> int | None:
@@ -811,6 +821,7 @@ class TerminalSession:
             seq = self._history_seq
         entry = {
             "seq": seq,
+            "process_id": result.get("process_id", ""),
             "command": result.get("command", ""),
             "cwd": result.get("cwd", self.cwd),
             "status": result.get("status", ""),

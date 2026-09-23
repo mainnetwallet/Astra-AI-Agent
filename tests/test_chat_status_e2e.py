@@ -59,6 +59,18 @@ console.log(JSON.stringify({lines: lines, states: lineStates, summary: s.summary
                             failure: s.failure}));
 """
 
+# The execution-card model over the same real events: one card per real tool
+# execution, in the order the turn ran them.
+CARDS_DRIVER = """
+"use strict";
+const S = require(%(model)s);
+const fs = require("fs");
+const events = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const t = S.createCardTracker();
+for (const e of events) t.apply(e);
+console.log(JSON.stringify({cards: t.list()}));
+"""
+
 
 class RecordingHarness(Harness):
     """Harness + the full event records (id/created_at) the turn emitted."""
@@ -78,7 +90,14 @@ class RecordingHarness(Harness):
 
     def feed_to_status_model(self):
         """Run the REAL frontend model over the REAL emitted events."""
-        driver_src = DRIVER % {"model": json.dumps(STATUS_MODEL)}
+        return self._run_model(DRIVER)
+
+    def feed_to_cards_model(self):
+        """Run the REAL frontend CARD model over the REAL emitted events."""
+        return self._run_model(CARDS_DRIVER)
+
+    def _run_model(self, template):
+        driver_src = template % {"model": json.dumps(STATUS_MODEL)}
         # the model reuses the Activity Log's redaction/noise filter, and the
         # browser loads log_model.js before it — mirror that load order here.
         prelude_src = ("globalThis.AstraLog = require(%s);\n"
@@ -160,6 +179,45 @@ class ChatStatusAcceptanceTests(unittest.TestCase):
             self.assertNotIn("{", line)
             self.assertNotRegex(line, r"req-|op:|trace:|process_id")
             self.assertLessEqual(len(line), 140)
+
+    def test_multiple_terminal_calls_render_separate_cards(self):
+        """A real turn that runs three commands produces three cards."""
+        sample = os.path.join(tempfile.mkdtemp(prefix="astra-cards-"),
+                              "sample.txt")
+        with open(sample, "w", encoding="utf-8") as fh:
+            fh.write("hello\n")
+        h = RecordingHarness(
+            [understand("Run three commands.", required=True,
+                        capability="terminal", intent="run three commands"),
+             verdict("complete")],
+            [tool_call("echo astra-one"),
+             tool_call("cat " + sample),
+             tool_call("echo astra-three"),
+             final("All three ran.")])
+        out = h.run("Run three commands and tell me about it")
+        self.assertTrue(out["ok"])
+        self.assertEqual(len([k for k in h.kinds() if k == "terminal.started"]), 3,
+                         "the turn really ran three terminal executions")
+
+        cards = h.feed_to_cards_model()["cards"]
+        self.assertEqual(len(cards), 3, "one card per terminal execution")
+        self.assertTrue(all(c["kind"] == "terminal" for c in cards))
+        self.assertTrue(all(c["state"] == "completed" for c in cards),
+                        [c["state"] for c in cards])
+        self.assertEqual([c["title"] for c in cards],
+                         ["Run command", "Read sample.txt", "Run command"])
+        # every card is one distinct real execution
+        self.assertEqual(len({c["processId"] for c in cards}), 3)
+        self.assertEqual(len({c["id"] for c in cards}), 3)
+        # and each card carries the handle for its own full output
+        self.assertTrue(all(c["blobId"] for c in cards))
+        # the card carries a SHORT single-line preview, never the raw stream
+        for c in cards:
+            self.assertLessEqual(len(c["preview"]), 140)
+            self.assertNotIn("\n", c["preview"])
+        blob = json.dumps(cards)
+        self.assertNotIn('"stdout"', blob)
+        self.assertNotIn('"args"', blob)
 
     def test_failing_command_does_not_end_the_turn(self):
         h = RecordingHarness(

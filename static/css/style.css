@@ -322,6 +322,84 @@ a[class*="hl-"] { pointer-events: none; }
   40% { opacity: 1; transform: translateY(-3px); }
 }
 
+/* Assistant execution cards: ONE compact clickable card per REAL tool
+   execution, stacked under the live status (never one merged timeline row).
+   Mobile-first: 44px tap target, no horizontal overflow, detail panel stays
+   inside the bubble. */
+.chat-cards { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.chat-cards:empty { display: none; }
+.chat-exec { min-width: 0; }
+.chat-exec-card {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; max-width: 100%; box-sizing: border-box;
+  min-height: 44px; padding: 8px 10px;
+  text-align: left; font: inherit; color: var(--text);
+  background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 10px; cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.chat-exec-card:hover { border-color: var(--accent); }
+.chat-exec-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat-exec-card.running { border-color: var(--accent2); }
+.chat-exec-mark { flex-shrink: 0; width: 14px; text-align: center; color: var(--muted); }
+.chat-exec-card.running .chat-exec-mark { color: var(--accent2); }
+.chat-exec-card.completed .chat-exec-mark { color: var(--good); }
+.chat-exec-card.failed .chat-exec-mark { color: var(--bad); }
+.chat-exec-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.chat-exec-title {
+  font-size: 12.5px; font-weight: 600; line-height: 1.35;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chat-exec-sub {
+  font-size: 11px; color: var(--muted); line-height: 1.35;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chat-exec-sub[hidden] { display: none; }
+.chat-exec-dur { flex-shrink: 0; font-size: 11px; color: var(--muted); }
+.chat-exec-dur[hidden] { display: none; }
+.chat-exec-chev {
+  flex-shrink: 0; color: var(--muted); font-size: 11px;
+  transition: transform .15s;
+}
+.chat-exec.open .chat-exec-chev { transform: rotate(90deg); }
+.chat-exec-detail {
+  margin-top: 6px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel2); font-size: 11.5px;
+}
+.chat-exec-detail[hidden] { display: none; }
+.chat-exec-row { display: flex; gap: 8px; padding: 2px 0; align-items: baseline; }
+.chat-exec-k {
+  flex-shrink: 0; width: 68px; font-size: 10px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.chat-exec-v { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.chat-exec-v.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.chat-exec-outbox { margin-top: 8px; }
+.chat-exec-tabs { display: flex; gap: 6px; margin-bottom: 6px; }
+.chat-exec-tab {
+  min-height: 32px; padding: 4px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent;
+  color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.chat-exec-tab.active { color: var(--accent2); border-color: var(--accent2); }
+.chat-exec-pre {
+  margin: 0; padding: 8px; max-height: 220px; overflow: auto;
+  background: var(--panel); border-radius: 8px;
+  font-size: 11px; line-height: 1.45; white-space: pre-wrap;
+  overflow-wrap: anywhere; word-break: break-word;
+  -webkit-overflow-scrolling: touch;
+}
+.chat-exec-note { font-size: 10.5px; color: var(--muted); padding: 4px 0; }
+.chat-exec-more {
+  min-height: 36px; padding: 6px 14px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent;
+  color: var(--accent2); font-size: 12px; cursor: pointer;
+}
+.chat-exec-more[hidden] { display: none; }
+.chat-exec-more:hover { border-color: var(--accent); color: var(--accent); }
+
 .chat-composer {
   display: flex; align-items: flex-end; gap: 8px;
   background: var(--panel2); border: 1px solid var(--line);

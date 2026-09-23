@@ -16,11 +16,18 @@
  *     An event that never arrives never changes the status; the step timeline
  *     only ever contains operations that really started.
  *
+ * It also owns the EXECUTION-CARD model (createCardTracker): ONE card per
+ * REAL tool execution, so a turn that runs three terminal commands shows
+ * three separate cards underneath the compact status (a separate card
+ * collection, never a restyled single timeline). Same events, same
+ * correlation, same stale/ordering rules.
+ *
  * DOM-free on purpose (like log_model.js) so the mapping, the
- * current-operation tracking (including out-of-order/stale events) and the
- * completion/failure summaries are unit-testable under node — see
- * tests/js/chat_status.test.js, tests/js/chat_status_ui.test.js and
- * tests/test_chat_status_ui.py.
+ * current-operation tracking (including out-of-order/stale events), the card
+ * correlation and the completion/failure summaries are unit-testable under
+ * node — see tests/js/chat_status.test.js, tests/js/chat_cards.test.js,
+ * tests/js/chat_status_ui.test.js, tests/js/chat_cards_ui.test.js,
+ * tests/test_chat_status_ui.py and tests/test_chat_cards_ui.py.
  */
 (function (root, factory) {
   if (typeof module === "object" && module.exports) module.exports = factory(root);
@@ -767,6 +774,412 @@
     };
   }
 
+  /* ------------------------------------------------------- execution cards --
+   * Claude-style execution cards: ONE card per REAL tool execution, rendered
+   * underneath the compact live status. A terminal command is exactly one
+   * card — `terminal.started` opens it, `terminal.output` only ever updates
+   * that same card, and `terminal.completed`/`failed`/`timeout`/`stopped`
+   * closes it. Several `terminal_exec` calls are several cards, never merged
+   * into one timeline row.
+   *
+   * Like the status model this is DOM-free: astra.js paints the cards from
+   * these snapshots, so the correlation, ordering, stale-event and redaction
+   * rules are unit-testable under node. It consumes the SAME lifecycle events
+   * (no second event system, no timers, no simulated progress). */
+
+  var CARD = { RUNNING: "running", DONE: "completed", FAILED: "failed",
+               STOPPED: "stopped" };
+  var CARD_KIND = { TERMINAL: "terminal", BROWSER: "browser", FILE: "file",
+                    WEB: "web", WEB3: "web3", TOOL: "tool" };
+
+  var MAX_CARDS = 50;         // bounded: a long tool loop must not grow forever
+  var PREVIEW_MAX = 140;      // one short, scrubbed line — never raw output
+  var CMD_MAX = 200;
+
+  // Tools whose execution is real but whose card would only add noise (they
+  // introspect other operations, or are pure bookkeeping). Terminal EXECUTION
+  // tools (exec/start) are cards; terminal *status* tools are not — the card
+  // for the process they name already exists.
+  var CARD_SKIP = /^(recall|remember|search_memory|create_task|list_tasks|update_task|get_health|list_tools|check_health|execution_history_read|terminal_status|terminal_history|terminal_history_read|terminal_sessions|terminal_output_read|terminal_stop|terminal_kill|list_workflows|ai_generate)$/;
+  // Only the tools that really spawn a command open a "pending" card that the
+  // following terminal.started attaches to.
+  var TERMINAL_PENDING = /^terminal_(exec|start)$/;
+  // Same events the status model exempts from the Activity Log's noise filter.
+  var CARD_NOISE_EXEMPT = /^(terminal\.|tool\.|chat\.pipeline\.)/;
+
+  /* Human words, never an internal id or a protocol payload. */
+  function plain(value, max) {
+    var s = scrub(value).replace(/\s+/g, " ").trim();
+    return clip(s, max || PREVIEW_MAX).trim();
+  }
+  function basenameOf(value) {
+    var s = String(value || "").replace(/["']/g, "");
+    var parts = s.split(/[\\/]/);
+    for (var i = parts.length - 1; i >= 0; i--) {
+      if (parts[i]) return parts[i];
+    }
+    return "";
+  }
+  function fileArgOf(tokens) {
+    for (var i = tokens.length - 1; i >= 1; i--) {
+      var t = tokens[i];
+      if (!t || t.charAt(0) === "-") continue;
+      if (/[\\/.]/.test(t)) return basenameOf(t);
+    }
+    return "";
+  }
+  function kindForTool(tool) {
+    var name = String(tool || "");
+    if (/^terminal_/.test(name)) return CARD_KIND.TERMINAL;
+    if (/^browser_/.test(name)) return CARD_KIND.BROWSER;
+    if (/^(read|list|search|write|edit|apply|patch)_file|^generate_document/.test(name)) return CARD_KIND.FILE;
+    if (/^search_web$|^fetch_url$/.test(name)) return CARD_KIND.WEB;
+    if (/^tx_|^token_balance$|^chain_status$|^rpc_status$|^wallet_balances$/.test(name)) return CARD_KIND.WEB3;
+    return CARD_KIND.TOOL;
+  }
+
+  /* A terminal command, said in human words. Deterministic: derived only from
+   * the real command string — never a guess, never a rotation. */
+  var TEST_CMD = /\b(pytest|py\.test|jest|vitest|mocha|rspec|tox|unittest|nose2|npm\s+(run\s+)?test|yarn\s+test|pnpm\s+test|bun\s+test|cargo\s+test|go\s+test|make\s+(test|check)|gradle\s+test|mvn\s+test|ctest)\b/i;
+  function terminalAction(command) {
+    var cmd = plain(command, CMD_MAX);
+    if (!cmd) return "Running terminal command";
+    var head = cmd.replace(/^(?:sudo|env)\s+/, "");
+    var first = head.split(/\s*(?:&&|\|\||[;|]|\n)\s*/)[0].trim();
+    var tokens = first.split(/\s+/).filter(function (t) { return t; });
+    if (!tokens.length) return "Running terminal command";
+    if (TEST_CMD.test(first)) return "Run tests";
+    var bin = basenameOf(tokens[0]);
+    if (/^(cat|head|tail|less|more|bat|nl|wc|type)$/.test(bin)) {
+      var f = fileArgOf(tokens);
+      return f ? "Read " + f : "Read file";
+    }
+    if (/^(sed|awk)$/.test(bin)) {
+      var sf = fileArgOf(tokens);
+      var editing = tokens.indexOf("-i") >= 0 ||
+                    /^-i/.test(tokens.slice(1).join(" "));
+      if (editing) return sf ? "Edit " + sf : "Edit file";
+      return sf ? "Read " + sf : "Read file";
+    }
+    if (/^(ls|ll|dir|tree|find|fd|du|df)$/.test(bin)) return "List files";
+    if (/^(grep|rg|ag|ack|egrep|fgrep)$/.test(bin)) return "Search files";
+    if (bin === "git") {
+      var sub = tokens[1] || "";
+      if (sub === "status") return "Check git status";
+      if (sub === "diff" || sub === "show") return "Review git diff";
+      if (sub === "log") return "Review git log";
+      if (sub === "add" || sub === "commit" || sub === "stash") return "Commit changes";
+      if (sub === "push" || sub === "pull" || sub === "fetch") return "Sync with remote";
+      if (sub === "checkout" || sub === "switch" || sub === "branch") return "Switch branch";
+      return "Run git command";
+    }
+    if (/^(pip|pip3|npm|yarn|pnpm|bun|apt|apt-get|pkg|cargo|go|gem|composer|poetry)$/.test(bin) &&
+        /^(install|add|get|upgrade|update|ci)$/.test(tokens[1] || "")) {
+      return "Install packages";
+    }
+    if (/^(curl|wget|http|https)$/.test(bin)) return "Fetch URL";
+    if (/^(rm|rmdir|unlink)$/.test(bin)) {
+      var rf = fileArgOf(tokens);
+      return rf ? "Delete " + rf : "Delete file";
+    }
+    if (/^(mkdir|touch|cp|mv|ln)$/.test(bin)) {
+      var cf = fileArgOf(tokens);
+      return cf ? "Create " + cf : "Create file";
+    }
+    if (/^(make|ninja)$/.test(bin)) return "Build project";
+    if (/^(python3?|node|deno|bun|ruby|perl|php|java|go|rustc|bash|sh|zsh)$/.test(bin)) {
+      var script = fileArgOf(tokens);
+      return script ? "Run " + script : "Run script";
+    }
+    if (/^(echo|printf|tee)$/.test(bin) && first.indexOf(">") >= 0) return "Write file";
+    return "Run command";
+  }
+
+  function cardStateText(c) {
+    if (c.state === CARD.RUNNING) return "Running";
+    if (c.state === CARD.FAILED) {
+      return c.status === "timeout" ? "Timed out" : "Failed";
+    }
+    if (c.state === CARD.STOPPED) return "Stopped";
+    if (c.status === "ended") return "Ended";
+    return "Completed";
+  }
+
+  function cardSnapshot(c) {
+    return {
+      id: c.id,
+      kind: c.kind,
+      title: c.title,
+      command: c.command,
+      cwd: c.cwd,
+      state: c.state,
+      status: c.status,
+      stateText: cardStateText(c),
+      exitCode: c.exitCode,
+      durationMs: c.durationMs,
+      duration: c.state === CARD.RUNNING ? "" : fmtMs(c.durationMs),
+      preview: c.preview,
+      tool: c.tool,
+      op: c.op,
+      processId: c.process_id,
+      blobId: c.blob_out,
+      blobErr: c.blob_err,
+      startedId: c.startId,
+      updatedId: c.updateId,
+    };
+  }
+
+  function createCardTracker() {
+    var cards = [];
+    var byKey = {};
+    var pending = [];
+    var seen = {};
+    var seenCount = 0;
+    var lastId = null;
+    var active = false;
+    var seq = 0;
+
+    function reset() {
+      cards = []; byKey = {}; pending = []; lastId = null;
+      active = false; seq = 0;
+      return list();
+    }
+
+    function list() { return cards.map(cardSnapshot); }
+
+    function index(c) {
+      byKey[c.id] = c;
+      if (c.op) byKey["op:" + c.op] = c;
+      if (c.process_id) byKey["proc:" + c.process_id] = c;
+      if (c.toolOp) byKey["tool:" + c.toolOp] = c;
+    }
+
+    function newCard(kind, title) {
+      seq += 1;
+      var c = {
+        id: "c" + seq, kind: kind, title: title || "",
+        command: "", cwd: "", state: CARD.RUNNING, status: "running",
+        exitCode: null, durationMs: null, preview: "", tool: "", op: "",
+        process_id: "", blob_out: "", blob_err: "", toolOp: "",
+        startId: null, updateId: null,
+      };
+      cards.push(c);
+      if (cards.length > MAX_CARDS) cards.shift();
+      index(c);
+      return c;
+    }
+
+    function dropPending(c) {
+      var i = pending.indexOf(c);
+      if (i >= 0) pending.splice(i, 1);
+    }
+
+    /* The command that just finished reports its real duration in `duration`
+     * (ms) — that is the authoritative value the card shows. */
+    function durationOf(data) {
+      if (data.duration_ms !== undefined && data.duration_ms !== null) {
+        return data.duration_ms;
+      }
+      if (data.duration !== undefined && data.duration !== null) {
+        return data.duration;
+      }
+      return null;
+    }
+
+    function applyTool(kind, data, event) {
+      var tool = String(data.tool || "");
+      var op = String(data.op || "");
+      if (kind === "tool.started") {
+        if (!tool || CARD_SKIP.test(tool)) return false;
+        if (op && byKey["tool:" + op]) return true;      // replayed start
+        var card = newCard(kindForTool(tool), labelForTool(tool));
+        card.tool = tool;
+        card.toolOp = op;
+        card.op = op;
+        card.startId = event.id;
+        card.updateId = event.id;
+        index(card);
+        if (TERMINAL_PENDING.test(tool)) pending.push(card);
+        return true;
+      }
+      var target = op ? byKey["tool:" + op] : null;
+      if (!target) return false;
+      if (target.updateId !== null && event.id < target.updateId) return false;
+      target.updateId = event.id;
+      if (kind === "tool.completed") {
+        if (target.state === CARD.RUNNING) {
+          target.state = CARD.DONE;
+          target.status = "completed";
+          var ms = durationOf(data);
+          if (ms !== null) target.durationMs = ms;
+        }
+      } else if (target.state === CARD.RUNNING) {
+        target.state = CARD.FAILED;
+        target.status = "failed";
+        var why = plain(data.error, PREVIEW_MAX);
+        if (why) target.preview = why;
+        var fms = durationOf(data);
+        if (fms !== null) target.durationMs = fms;
+      }
+      dropPending(target);
+      return true;
+    }
+
+    function applyTerminal(kind, data, event) {
+      var pid = String(data.process_id || "");
+      var op = String(data.op || "");
+      if (kind === "terminal.started") {
+        // A replay of a start we already applied must never reopen a finished
+        // execution (or fork a second card for the same process id).
+        if ((pid && byKey["proc:" + pid]) || (op && byKey["op:" + op])) {
+          return true;
+        }
+        // Attach to the execution card its tool.started opened; if there is
+        // none (a terminal used directly by a workflow/tool), the process id
+        // alone is still a real execution and gets its own card.
+        var card = pending.length ? pending.shift() : null;
+        if (card) dropPending(card);
+        if (!card) {
+          card = newCard(CARD_KIND.TERMINAL, terminalAction(data.command));
+          card.startId = event.id;
+        }
+        card.process_id = pid || card.process_id;
+        card.op = op || card.op;
+        var cmd = plain(data.command, CMD_MAX);
+        if (cmd) {
+          card.command = cmd;
+          card.title = terminalAction(cmd);
+        }
+        var cwd = plain(data.cwd, CMD_MAX);
+        if (cwd) card.cwd = cwd;
+        if (data.stdout_blob_id) card.blob_out = String(data.stdout_blob_id);
+        if (data.stderr_blob_id) card.blob_err = String(data.stderr_blob_id);
+        card.state = CARD.RUNNING;
+        card.status = "running";
+        card.updateId = event.id;
+        if (card.startId === null) card.startId = event.id;
+        index(card);
+        return true;
+      }
+      var target = (pid && byKey["proc:" + pid]) ||
+                   (op && byKey["op:" + op]) || null;
+      if (!target) return false;
+      if (target.updateId !== null && event.id < target.updateId) return false;
+      target.updateId = event.id;
+      if (kind === "terminal.output") {
+        var snip = plain(data.snippet, PREVIEW_MAX);
+        if (snip) target.preview = snip;
+        return true;
+      }
+      if (data.stdout_blob_id) target.blob_out = String(data.stdout_blob_id);
+      if (data.stderr_blob_id) target.blob_err = String(data.stderr_blob_id);
+      var ms = durationOf(data);
+      if (ms !== null) target.durationMs = ms;
+      if (data.exit_code !== undefined) target.exitCode = data.exit_code;
+      var status = String(data.status || "");
+      if (kind === "terminal.completed") {
+        target.state = CARD.DONE;
+        target.status = status || "completed";
+      } else if (kind === "terminal.stopped") {
+        target.state = CARD.STOPPED;
+        target.status = "stopped";
+      } else if (kind === "terminal.timeout") {
+        target.state = CARD.FAILED;
+        target.status = "timeout";
+      } else {
+        target.state = CARD.FAILED;
+        target.status = status || "failed";
+      }
+      dropPending(target);
+      return true;
+    }
+
+    /* The turn is over: nothing may still be "running" forever. A card that
+     * never got its terminal event is marked Ended WITHOUT inventing a
+     * duration; a later real terminal event may still refine it. */
+    function endTurn() {
+      cards.forEach(function (c) {
+        if (c.state === CARD.RUNNING) {
+          c.state = CARD.DONE;
+          c.status = "ended";
+        }
+      });
+      pending = [];
+    }
+
+    function markSeen(id) {
+      seen[id] = 1;
+      seenCount++;
+      if (seenCount > SEEN_MAX) {
+        var keys = Object.keys(seen);
+        for (var i = 0; i < keys.length / 2; i++) delete seen[keys[i]];
+        seenCount = Object.keys(seen).length;
+      }
+    }
+
+    function isCardEvent(event) {
+      if (isMeaningful(event)) return true;
+      var kind = String(event && event.kind ? event.kind : "");
+      return CARD_NOISE_EXEMPT.test(kind);
+    }
+
+    function apply(event) {
+      if (!event || event.id === null || event.id === undefined) return list();
+      var id = String(event.id);
+      if (seen[id]) return list();
+      var kind = String(event.kind === null || event.kind === undefined
+                        ? "" : event.kind);
+      var data = (event.data && typeof event.data === "object") ? event.data : {};
+
+      if (kind === "chat.pipeline.started") {
+        markSeen(id);
+        lastId = event.id;
+        active = true;
+        cards = []; byKey = {}; pending = []; seq = 0;
+        return list();
+      }
+      if (kind === "chat.pipeline.finished" || kind === "chat.pipeline.failed" ||
+          kind === "chat.pipeline.verify_error") {
+        markSeen(id);
+        lastId = event.id;
+        active = false;
+        endTurn();
+        return list();
+      }
+      if (!isCardEvent(event)) return list();
+      if (!active) return list();          // stale: another turn owns the cards
+      if (lastId !== null && event.id < lastId) {
+        // An out-of-order replay may still REFINE a card it owns, but it can
+        // never open a new one or resurrect a finished execution.
+        var pid = String(data.process_id || "");
+        var op = String(data.op || "");
+        var known = (pid && byKey["proc:" + pid]) || (op && byKey["op:" + op]) ||
+                    (op && byKey["tool:" + op]);
+        if (!known) return list();
+      }
+      var handled = false;
+      if (/^tool\.(started|completed|failed)$/.test(kind)) {
+        handled = applyTool(kind, data, event);
+      } else if (/^terminal\./.test(kind)) {
+        handled = applyTerminal(kind, data, event);
+      }
+      if (handled) {
+        markSeen(id);
+        lastId = lastId === null ? event.id : Math.max(lastId, event.id);
+      }
+      return list();
+    }
+
+    return {
+      reset: reset,
+      apply: apply,
+      list: list,
+      endTurn: endTurn,
+      size: function () { return cards.length; },
+      CARD: CARD,
+    };
+  }
+
   /* --------------------------------------------------------------- helpers */
   function stampOf(event) {
     return String(event && event.created_at ? event.created_at : "").trim();
@@ -854,7 +1267,13 @@
     branded: branded,
     summaryFor: summaryFor,
     nextStepFor: nextStepFor,
+    createCardTracker: createCardTracker,
+    terminalAction: terminalAction,
+    kindForTool: kindForTool,
+    CARD: CARD,
+    CARD_KIND: CARD_KIND,
     MAX_STEPS: MAX_STEPS,
+    MAX_CARDS: MAX_CARDS,
     MAPPING: M,
   };
 });

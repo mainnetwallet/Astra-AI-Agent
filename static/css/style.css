@@ -263,13 +263,60 @@ a[class*="hl-"] { pointer-events: none; }
 .msg-approve-btn:hover:not(:disabled) { background: rgba(52,211,153,.12); }
 .msg-reject-btn { color: var(--bad); border-color: var(--bad); }
 .msg-reject-btn:hover:not(:disabled) { background: rgba(248,113,113,.12); }
-.typing { display: flex; gap: 4px; padding: 8px 0 4px; }
-.typing span {
-  width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+/* Assistant execution status: ONE compact live line under the Astra avatar
+   (avatar + "Working…" + the real current operation), expandable into the
+   step timeline. Mobile-first: it fits the narrowest screen, never overflows
+   horizontally, wraps long operation names and keeps a 44px tap target. */
+.chat-status {
+  display: block; width: 100%; max-width: 100%; box-sizing: border-box;
+  text-align: left; font: inherit; color: var(--text);
+  background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 14px; padding: 9px 12px; min-height: 44px;
+  cursor: pointer; overflow-wrap: anywhere; word-break: break-word;
+}
+.chat-status:hover { border-color: var(--accent); }
+.chat-status:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat-status-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.chat-status-summary { font-size: 13px; font-weight: 600; }
+.chat-status.completed .chat-status-summary { color: var(--good); }
+.chat-status.failed .chat-status-summary { color: var(--bad); }
+.chat-status-dots { display: inline-flex; gap: 3px; align-items: center; }
+.chat-status-dots i {
+  width: 5px; height: 5px; border-radius: 50%; background: var(--muted);
   animation: chatTyping 1.2s infinite ease-in-out;
 }
-.typing span:nth-child(2) { animation-delay: .15s; }
-.typing span:nth-child(3) { animation-delay: .3s; }
+.chat-status-dots i:nth-child(2) { animation-delay: .15s; }
+.chat-status-dots i:nth-child(3) { animation-delay: .3s; }
+.chat-status.completed .chat-status-dots,
+.chat-status.failed .chat-status-dots { display: none; }
+.chat-status-caret {
+  margin-left: auto; color: var(--muted); font-size: 10px;
+  transition: transform .15s;
+}
+.chat-status.open .chat-status-caret { transform: rotate(180deg); }
+.chat-status-action {
+  display: block; margin-top: 3px; font-size: 12.5px; line-height: 1.45;
+  color: var(--accent2);
+}
+.chat-status-action:empty { display: none; }
+.chat-steps { margin-top: 8px; padding-left: 10px; border-left: 2px solid var(--line); }
+.chat-steps[hidden] { display: none; }
+.chat-steps-head {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); margin-bottom: 6px;
+}
+.chat-step { display: flex; gap: 6px; align-items: baseline; font-size: 12.5px; line-height: 1.5; }
+.chat-step-mark { flex-shrink: 0; width: 12px; text-align: center; color: var(--muted); }
+.chat-step.done .chat-step-mark { color: var(--good); }
+.chat-step.active .chat-step-mark { color: var(--accent2); }
+.chat-step.failed .chat-step-mark { color: var(--bad); }
+.chat-step.active .chat-step-label { font-weight: 600; }
+.chat-step.pending { opacity: .6; }
+.chat-step-label { min-width: 0; overflow-wrap: anywhere; }
+.chat-step-dur {
+  margin-left: auto; padding-left: 8px; flex-shrink: 0;
+  font-size: 11px; color: var(--muted);
+}
 @keyframes chatTyping {
   0%, 80%, 100% { opacity: .25; transform: translateY(0); }
   40% { opacity: 1; transform: translateY(-3px); }

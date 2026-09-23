@@ -158,6 +158,7 @@ function chatEnterView(conversationId) {
   CHAT.conversationId = conversationId;
   CHAT.lastId = 0;
   CHAT.viewGen++;
+  chatStatusReset();
   const send = $("#chat-send");
   const input = $("#chat-input");
   if (send) {
@@ -198,11 +199,11 @@ function chatWaitForReply(gen, conversationId) {
   const input = $("#chat-input");
   send.dataset.busy = "1";
   send.disabled = true;
-  let typing = chatTyping();
+  chatTyping();
   const started = Date.now();
   const finish = () => {
     if (gen !== CHAT.viewGen) return;   // a later view already owns this state
-    if (typing) typing.remove();
+    chatStatusFinish();
     delete send.dataset.busy;
     send.disabled = !input.value.trim();
   };
@@ -217,9 +218,8 @@ function chatWaitForReply(gen, conversationId) {
     if (r && r.ok && r.data) {
       const fresh = r.data.messages || [];
       if (fresh.length) {
-        typing.remove();
         chatRenderMessages(fresh, false);
-        typing = r.data.pending ? chatTyping() : null;
+        if (r.data.pending) chatTyping();   // same row, back at the bottom
       }
       if (!r.data.pending) return finish();
     }
@@ -393,18 +393,19 @@ function chatBubble(who, text, action, attachedFiles, artifacts, meta) {
       approveBtn.disabled = true;
       rejectBtn.disabled = true;
       wrap.classList.add("resolved");
-      const typingRow = chatTyping();
+      chatTyping();
       try {
         const r = await post("/api/chat/resume", { execution_id: eid, allow });
-        typingRow.remove();
         if (!r.ok || !r.data) {
+          chatStatusFail(r.error || "the approval could not be applied");
           chatBubble("ai", "Server e problem — `" + (r.error || "unknown error") + "`");
           return;
         }
+        chatStatusFinish();
         chatBubble("ai", r.data.reply, r.data.action, null,
                    r.data.artifacts, r.data.data);
       } catch (err) {
-        typingRow.remove();
+        chatStatusFail(String(err));
         chatBubble("ai", "Server e problem — `" + err + "`");
       }
     };
@@ -426,15 +427,173 @@ function chatBubble(who, text, action, attachedFiles, artifacts, meta) {
   $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
   return row;
 }
+/* --------------------- assistant execution status --------------------------
+ * The compact live status under the Astra avatar ("🚀 Working… • • •" + the
+ * operation Astra is really running right now). It is driven by the SAME
+ * lifecycle events the Activity Log consumes: AstraChatStatus
+ * (static/js/chat_status.js) maps one event to a human-readable line plus a
+ * step timeline, and this code only paints it. No timers, no simulated
+ * progress, no second event system — an event that never arrives never
+ * changes the line.
+ *
+ * Tapping the status expands the step timeline. It NEVER re-runs a terminal,
+ * browser, file or web3 operation: the click handler only toggles a class.
+ */
+const CHAT_STATUS = { tracker: null, row: null, btn: null, summary: null,
+                      line: null, steps: null };
+const CHAT_STEP_MARK = { done: "✓", active: "●", failed: "✕", pending: "○" };
+
+// A different chat view is taking over: drop the per-turn status state (the
+// DOM row goes away with the re-rendered transcript).
+function chatStatusReset() {
+  CHAT_STATUS.tracker = null;
+  CHAT_STATUS.row = null;
+  CHAT_STATUS.btn = null;
+  CHAT_STATUS.summary = null;
+  CHAT_STATUS.line = null;
+  CHAT_STATUS.steps = null;
+}
+
+function chatStatusStepEl(step) {
+  const wrap = document.createElement("div");
+  wrap.className = "chat-step " + (step.state || "pending");
+  const mark = document.createElement("span");
+  mark.className = "chat-step-mark";
+  mark.setAttribute("aria-hidden", "true");
+  mark.textContent = CHAT_STEP_MARK[step.state] || "○";
+  const label = document.createElement("span");
+  label.className = "chat-step-label";
+  label.textContent = step.label || "";   // textContent: an event cannot inject markup
+  wrap.append(mark, label);
+  if (step.duration) {
+    const dur = document.createElement("span");
+    dur.className = "chat-step-dur";
+    dur.textContent = step.duration;
+    wrap.appendChild(dur);
+  }
+  return wrap;
+}
+
+// Build (once per turn) the status row: avatar, compact line, step timeline.
+function chatStatusBuild() {
+  const row = document.createElement("div");
+  row.className = "msg assistant chat-status-row";
+  const avatar = document.createElement("div");
+  avatar.className = "msg-avatar";
+  avatar.textContent = "🚀";
+  const content = document.createElement("div");
+  content.className = "msg-content";
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chat-status working";
+  btn.setAttribute("aria-expanded", "false");
+  btn.setAttribute("aria-label", "Execution status — tap to see the steps");
+
+  const head = document.createElement("span");
+  head.className = "chat-status-head";
+  const summary = document.createElement("span");
+  summary.className = "chat-status-summary";
+  summary.setAttribute("role", "status");
+  summary.setAttribute("aria-live", "polite");
+  const dots = document.createElement("span");
+  dots.className = "chat-status-dots";
+  dots.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 3; i++) dots.appendChild(document.createElement("i"));
+  const caret = document.createElement("span");
+  caret.className = "chat-status-caret";
+  caret.setAttribute("aria-hidden", "true");
+  caret.textContent = "▾";
+  head.append(summary, dots, caret);
+
+  const line = document.createElement("span");
+  line.className = "chat-status-action";
+
+  btn.append(head, line);
+
+  const steps = document.createElement("div");
+  steps.className = "chat-steps";
+  steps.hidden = true;
+
+  btn.addEventListener("click", () => {
+    // The ONLY thing this click does: reveal the timeline. No tool is ever
+    // re-invoked from here (nothing but classList/hidden/aria is touched).
+    const open = btn.classList.toggle("open");
+    steps.hidden = !open;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
+  content.append(btn, steps);
+  row.append(avatar, content);
+  return { row: row, btn: btn, summary: summary, line: line, steps: steps };
+}
+
+function chatStatusPaint(snap) {
+  if (!CHAT_STATUS.btn || !snap) return;
+  CHAT_STATUS.btn.classList.remove("working", "completed", "failed");
+  CHAT_STATUS.btn.classList.add(snap.state || "working");
+  CHAT_STATUS.summary.textContent = snap.summary || "Working…";
+  CHAT_STATUS.line.textContent = snap.current || "";
+
+  const steps = CHAT_STATUS.steps;
+  while (steps.firstChild) steps.removeChild(steps.firstChild);
+  const head = document.createElement("div");
+  head.className = "chat-steps-head";
+  head.textContent = (snap.state === "working" ? "🚀 " : "") +
+                     (snap.panelTitle || "Execution steps");
+  steps.appendChild(head);
+  (snap.steps || []).forEach((st) => steps.appendChild(chatStatusStepEl(st)));
+
+  const log = $("#chat-log");
+  if (log && CHAT_STATUS.row && CHAT_STATUS.row.parentElement === log) {
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+// One live event (the same object the Activity Log just received).
+function chatStatusTrack(event) {
+  if (!CHAT_STATUS.tracker) return;     // nothing on screen — ignore it
+  chatStatusPaint(CHAT_STATUS.tracker.apply(event));
+}
+
+// The reply landed (or the transport failed): close the status out with the
+// steps that were really observed.
+function chatStatusFinish() {
+  if (!CHAT_STATUS.tracker) return null;
+  const snap = CHAT_STATUS.tracker.complete();
+  chatStatusPaint(snap);
+  return snap;
+}
+function chatStatusFail(reason) {
+  if (!CHAT_STATUS.tracker) return null;
+  const snap = CHAT_STATUS.tracker.fail(reason);
+  chatStatusPaint(snap);
+  return snap;
+}
+
 function chatTyping() {
   hideChatEmpty();
-  const row = document.createElement("div");
-  row.className = "msg assistant";
-  row.innerHTML = `<div class="msg-avatar">🚀</div>
-    <div class="msg-content"><div class="typing"><span></span><span></span><span></span></div></div>`;
-  $("#chat-log").appendChild(row);
-  $("#chat-log").scrollTop = $("#chat-log").scrollHeight;
-  return row;
+  if (typeof AstraChatStatus === "undefined") return null;
+  const log = $("#chat-log");
+  if (CHAT_STATUS.row && CHAT_STATUS.row.parentElement === log) {
+    // A restored/pending turn re-opens the indicator: keep the SAME row and
+    // move it back to the bottom, never a second one.
+    log.appendChild(CHAT_STATUS.row);
+  } else {
+    const built = chatStatusBuild();
+    CHAT_STATUS.row = built.row;
+    CHAT_STATUS.btn = built.btn;
+    CHAT_STATUS.summary = built.summary;
+    CHAT_STATUS.line = built.line;
+    CHAT_STATUS.steps = built.steps;
+    log.appendChild(built.row);
+  }
+  CHAT_STATUS.tracker = AstraChatStatus.createTracker();
+  chatStatusPaint(CHAT_STATUS.tracker.begin());
+  // The chat needs the live feed whether or not the Logs tab was ever opened.
+  ensureEventStream();
+  log.scrollTop = log.scrollHeight;
+  return CHAT_STATUS.row;
 }
 function hideChatEmpty() {
   const empty = $("#chat-empty");
@@ -480,7 +639,7 @@ $("#chat-form").addEventListener("submit", async (e) => {
   input.value = "";
   input.style.height = "auto";
   $("#chat-send").disabled = true;
-  const typingRow = chatTyping();
+  chatTyping();
   showUploadIndicator(hasAttachments);
   try {
     let r;
@@ -496,17 +655,18 @@ $("#chat-form").addEventListener("submit", async (e) => {
     }
     hideUploadIndicator();
     if (sentGen !== CHAT.viewGen) return;   // moved to a different chat — leave it be
-    typingRow.remove();
     if (!r.ok || !r.data) {
+      chatStatusFail(r.error || "the server returned no reply");
       chatBubble("ai", "Server e problem — `" + (r.error || "unknown error") + "`");
       return;
     }
-    chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts, r.data.data);
+    chatStatusFinish();
     if (r.data.action === "dashboard") loaders.dashboard();
+    chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts, r.data.data);
   } catch (err) {
     hideUploadIndicator();
     if (sentGen !== CHAT.viewGen) return;   // moved to a different chat — leave it be
-    typingRow.remove();
+    chatStatusFail(String(err));
     chatBubble("ai", "Server e problem — `" + err + "`");
   }
 });
@@ -1962,22 +2122,37 @@ async function eventsPoll() {
   // receiveEvent() makes a repeated window harmless, so re-offer the tail.
   const r = await api("/api/events?limit=50");
   if (!r.ok) return;
-  AstraLog.orderHistory(r.data || []).forEach((e) => receiveEvent(e));
+  AstraLog.orderHistory(r.data || []).forEach((e) => {
+    receiveEvent(e);
+    chatStatusTrack(e);
+  });
 }
 
 // SSE connection state for the header badge (● LIVE / ○ RECONNECTING).
 // Initialized at script load, before the Logs tab is ever opened.
 let SSE_STATE = "reconnecting";
 
-function openSse(afterId) {
+// ONE shared live feed for the whole app. The Activity Log and the Assistant
+// chat both consume the same /api/events/stream (the chat must not depend on
+// the user having opened the Logs tab first, and the server must not get a
+// second connection). Idempotent: the first caller sets the resume point,
+// later callers reuse the connection — id-based de-dupe in receiveEvent() /
+// AstraChatStatus.apply() keeps a replay harmless.
+let EVENT_SOURCE = null;
+
+function ensureEventStream(afterId) {
+  if (!window.EventSource) return false;
+  if (EVENT_SOURCE) return true;
   const url = afterId ? `/api/events/stream?after_id=${encodeURIComponent(afterId)}`
                        : "/api/events/stream";
   const es = new EventSource(url);
+  EVENT_SOURCE = es;
   es.onopen = () => { SSE_STATE = "live"; refreshLiveState(); };
   es.onmessage = (ev) => {
     let e = {};
     try { e = JSON.parse(ev.data); } catch (_) { return; }
     receiveEvent(e);
+    chatStatusTrack(e);        // the same event, as a human-readable line
   };
   es.onerror = () => {
     // EventSource auto-reconnects, resuming via Last-Event-ID — reflect that
@@ -1985,7 +2160,10 @@ function openSse(afterId) {
     SSE_STATE = "reconnecting";
     refreshLiveState();
   };
+  return true;
 }
+
+function openSse(afterId) { return ensureEventStream(afterId); }
 
 /* ------------------------------ attachments (multimodal) --------------------- */
 const _pendingAttachments = [];

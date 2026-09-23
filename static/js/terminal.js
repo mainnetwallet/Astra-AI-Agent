@@ -844,11 +844,17 @@
         // The software keyboard shrinks the visual viewport; pin the
         // terminal to it so no output hides behind the keyboard and xterm
         // is refitted to the smaller size.
-        root.style.setProperty("--at-vh", Math.round(vv.height) + "px");
+        // Subtract everything above the terminal (browser/app header) so the
+        // status line and extra keys stay on-screen at the bottom.
+        const top = root.getBoundingClientRect().top + window.scrollY;
+        const avail = Math.max(240, Math.round(vv.height - top - 6));
+        root.style.setProperty("--at-vh", avail + "px");
       }
       fitActive();
     };
     window.addEventListener("resize", apply);
+    apply();                                   // size correctly on first paint
+    requestAnimationFrame(apply);              // ...and once layout has settled
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", apply);
       window.visualViewport.addEventListener("scroll", apply);

@@ -47,6 +47,13 @@
     sans-serif;
 }
 
+/* style.css ships `.tabview.active { display: block }`, which out-specifies
+ * `.at-app { display: flex }` and collapsed the viewport to 0px (extra keys
+ * and status line ended up on top of the prompt). Pin the flex layout with
+ * a higher-specificity selector. */
+#tab-terminal.at-app { display: none; }
+#tab-terminal.at-app.active { display: flex; }
+
 /* ------------------------------- top bar -------------------------------- */
 .at-top {
   display: flex;
@@ -309,7 +316,8 @@
   .at-brand-sub { display: none; }
   .at-tab { max-width: 132px; padding: 5px 8px; font-size: 12px; }
   .at-icon { padding: 7px 9px; font-size: 14px; }
-  .at-keys { display: flex; }
+  .at-keys { display: flex; order: 99; }   /* always at the very bottom */
+  .at-bar { order: 98; }
   .at-bar { font-size: 10px; }
   .at-side { width: 86%; }
   .at-menu { min-width: 200px; }

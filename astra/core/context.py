@@ -18,7 +18,8 @@ class ToolContext:
                  tasks=None, web3_manager=None, registry=None,
                  terminal=None, terminal_session_id=None,
                  execution_history=None, execution_scope=None,
-                 runtime=None, runtime_session_id=None):
+                 runtime=None, runtime_session_id=None,
+                 agent_execution: bool = False):
         self.store = store
         self.config = config
         self.events = events
@@ -46,6 +47,11 @@ class ToolContext:
         # astra/runtime/manager.py.
         self.runtime = runtime
         self.runtime_session_id = runtime_session_id
+        # Structural marker: True only for Agent/Provider tool-loop and
+        # workflow step execution. `ToolRegistry.execute` refuses any
+        # `agent_forbidden` tool (the legacy HOST terminal family) when
+        # this is set — see astra/tools/registry.py.
+        self.agent_execution = bool(agent_execution)
 
     def emit(self, kind: str, **data):
         if self.events:

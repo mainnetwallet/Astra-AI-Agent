@@ -46,8 +46,10 @@ from astra.core.permissions import Policy
 from astra.core.config import Config
 from astra.store import Store
 from astra.chat_log import ChatLog
+from astra.runtime.tools import register_runtime_tools
 from astra.terminal import (TerminalManager, TerminalSession,
                             register_terminal_tools)
+from tests.helpers import LocalRuntimeStub
 from astra.tools.builtins import register_builtins
 from astra.tools.registry import ToolRegistry
 
@@ -55,7 +57,7 @@ from tests.helpers import ScriptedBrain
 
 
 def _tool(command):
-    return json.dumps({"action": "tool", "tool": "terminal_exec",
+    return json.dumps({"action": "tool", "tool": "runtime_command",
                        "args": {"command": command}, "thought": "go"})
 
 
@@ -299,15 +301,17 @@ class ToolResultAndTerminalTests(unittest.TestCase):
         register_builtins(reg)
         manager = TerminalManager()
         register_terminal_tools(reg, manager)
-        return reg, manager
+        runtime = LocalRuntimeStub()
+        register_runtime_tools(reg, runtime)
+        return reg, manager, runtime
 
     def test_long_tool_result_reaches_the_model(self):
-        registry, terminal = self._stack()
+        registry, terminal, runtime = self._stack()
         brain = ScriptedBrain([
             _tool("printf 'Z%.0s' $(seq 1 9000)"),
             _final("done"),
         ])
-        loop = AgentToolLoop(registry, terminal=terminal,
+        loop = AgentToolLoop(registry, terminal=terminal, runtime=runtime,
                              execution_history=AgentExecutionHistory())
         result = loop.run("show output", brain, system_prompt="sys",
                           session_id="c1", scope="1")
@@ -319,6 +323,7 @@ class ToolResultAndTerminalTests(unittest.TestCase):
                      and "Z" * 9000 in m["content"]]
         self.assertTrue(tool_msgs, "full tool output was truncated before the model")
         terminal.close_all()
+        runtime.close_all()
 
     def test_terminal_context_text_has_no_char_cap(self):
         import tempfile
@@ -345,12 +350,15 @@ class MultiStepLargeContextTests(unittest.TestCase):
         register_builtins(registry)
         terminal = TerminalManager(events=None)
         register_terminal_tools(registry, terminal)
+        runtime = LocalRuntimeStub()
+        register_runtime_tools(registry, runtime)
         brain = ScriptedBrain([
             _tool("seq 1 200"),
             _tool("echo second-step"),
             _final("finished both steps"),
         ])
-        loop = AgentToolLoop(registry, terminal=terminal, max_steps=8,
+        loop = AgentToolLoop(registry, terminal=terminal, runtime=runtime,
+                             max_steps=8,
                              execution_history=AgentExecutionHistory())
         result = loop.run("run two steps", brain, system_prompt="sys")
         self.assertTrue(result.ok)

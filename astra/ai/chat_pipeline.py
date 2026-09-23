@@ -467,6 +467,7 @@ class _ToolLoopPort(ProviderExecutionPort):
             model=target.model_id or None, req=self.req)
         loop = AgentToolLoop(self._pipeline.registry,
                              terminal=self._pipeline.terminal,
+                             runtime=self._pipeline.runtime,
                              events=self._pipeline.events,
                              max_steps=self._pipeline.max_tool_steps,
                              execution_history=self._pipeline.execution_history)
@@ -492,7 +493,7 @@ class _ToolLoopPort(ProviderExecutionPort):
 class ChatPipeline:
     def __init__(self, gateway, router, events=None, *,
                  max_tokens: int | None = None, registry=None, terminal=None,
-                 execution_history=None, max_tool_steps: int = 8,
+                 runtime=None, execution_history=None, max_tool_steps: int = 8,
                  agent_brain: str = "provider"):
         self.gateway = gateway
         self.router = router
@@ -508,6 +509,11 @@ class ChatPipeline:
         # tests), the original single-call provider path is used unchanged.
         self.registry = registry
         self.terminal = terminal
+        # The isolated Agent Runtime. The Agent tool loop is handed THIS,
+        # not the host terminal: every shell/git/test action the Agent takes
+        # runs inside the runtime, on the same PTY the Astra Agent Terminal
+        # opens for the conversation. See astra/runtime/.
+        self.runtime = runtime
         self.max_tool_steps = max(1, int(max_tool_steps or 8))
         self.execution_history = execution_history or AgentExecutionHistory()
         # Which AI drives the agent tool loop: the Provider system (default)
@@ -521,7 +527,8 @@ class ChatPipeline:
         if self.registry is None:
             return False
         try:
-            return bool(self.registry.list("terminal"))
+            return bool(self.registry.list("runtime")
+                        or self.registry.list("terminal"))
         except Exception:
             return False
 
@@ -765,8 +772,17 @@ class ChatPipeline:
 
     # -- terminal context + agent tool loop ---------------------------------------
     def _terminal_context(self, session_id) -> str:
-        """Deterministic, bounded view of the terminal session this
-        conversation owns. Empty when no terminal is wired."""
+        """Deterministic, bounded view of the execution session this
+        conversation owns. Prefers the ISOLATED AGENT RUNTIME (the surface
+        Agent work actually runs on), falling back to the legacy host
+        terminal only when no runtime is wired. Empty when neither is."""
+        if self.runtime is not None:
+            try:
+                text = self.runtime.context_text(session_id) or ""
+                if text:
+                    return text
+            except Exception:
+                pass
         if self.terminal is None:
             return ""
         try:
@@ -787,6 +803,7 @@ class ChatPipeline:
             task_type, vision, provider=brief["provider"] or None,
             model=brief["model"] or None, req=req)
         loop = AgentToolLoop(self.registry, terminal=self.terminal,
+                             runtime=self.runtime,
                              events=self.events,
                              max_steps=self.max_tool_steps,
                              execution_history=self.execution_history)
@@ -991,7 +1008,14 @@ class ChatPipeline:
                 self._close_session(session_id)
 
     def _close_session(self, session_id) -> None:
-        """Close one request-scoped terminal session (best-effort)."""
+        """Close one request-scoped execution session (best-effort) — both
+        the isolated runtime's PTY and, when wired, the legacy host
+        terminal's, so an ephemeral turn leaks neither."""
+        if self.runtime is not None:
+            try:
+                self.runtime.close_terminal(session_id)
+            except Exception:
+                pass
         if self.terminal is None:
             return
         try:

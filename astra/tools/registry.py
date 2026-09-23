@@ -6,6 +6,10 @@ through — builtins (astra/tools/builtins.py), browser tools
 (astra/browser/__init__.py), and web3 tools (astra/web3/tools.py) are
 all registered here the same way. It enforces, in order:
 
+  0. the agent-execution guard — a tool flagged `agent_forbidden` (the
+     legacy HOST terminal tools) returns a structured "blocked" result and
+     executes nothing when the call comes from Agent/Provider/workflow
+     execution (`ctx.agent_execution`). There is no host fallback.
   1. permission-level policy (astra.core.permissions.Policy.decision) —
      "deny" raises, "ask" returns a non-executing result, "allow" proceeds
   2. input-schema validation (Tool.satisfies) — raises immediately,
@@ -163,12 +167,42 @@ class ToolRegistry:
         raise last_exc  # pragma: no cover — loop always returns or raises
 
     # -- the one true execution path ------------------------------------------
+    @staticmethod
+    def _is_agent_execution(ctx) -> bool:
+        """True when this call is being made by the Agent/Provider tool loop
+        (or a workflow step) rather than by Astra's own trusted internals.
+
+        `AgentToolLoop` marks its `ToolContext` with `agent_execution=True`;
+        nothing else does. The marker — not a system prompt — is what makes
+        the host-terminal block structural: an Agent cannot reach a
+        `agent_forbidden` tool no matter what it writes in its tool call."""
+        return bool(getattr(ctx, "agent_execution", False))
+
     def execute(self, name: str, args: dict | None = None, ctx=None,
                 allow_confirmation: bool = True, trace: str = "") -> dict:
         args = dict(args or {})
         tool = self._tools.get(name)
         if tool is None:
             raise KeyError(f"unknown tool: {name}")
+
+        # HARD BLOCK: a tool marked `agent_forbidden` (the legacy HOST
+        # terminal_exec family) can never run inside Agent/Provider/workflow
+        # execution. Structurally enforced here — the single path every tool
+        # call takes — so it does not depend on the model obeying a prompt,
+        # and no host command is ever spawned. The only supported execution
+        # surface for Agent work is the isolated Agent Runtime
+        # (`runtime_command`). Returns a structured, non-executing result
+        # (same shape as the policy "ask" branch) instead of raising, so the
+        # tool loop feeds the refusal back to the model as usable feedback.
+        if tool.agent_forbidden and self._is_agent_execution(ctx):
+            self._emit_tool("tool.blocked", tool, trace=trace,
+                            input=self._brief(args),
+                            reason="agent_forbidden")
+            return {"ok": False, "decision": "blocked", "tool": name,
+                    "reason": (f"tool '{name}' is host-only and unavailable "
+                               "to Agent execution; run the command inside "
+                               "the isolated Agent Runtime instead "
+                               "(runtime_command)")}
 
         delegate = tool.confirmation_delegate if allow_confirmation else ""
         decision = self.policy.decision(

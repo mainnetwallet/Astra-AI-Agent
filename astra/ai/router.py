@@ -1246,7 +1246,8 @@ class AstraRouter:
 
     # -- shared agent tool loop (Provider as the driving brain) --------------
     def run_tool_loop(self, task, *, registry, system_prompt="", history=None,
-                      context_blocks=None, terminal=None, execution_history=None,
+                      context_blocks=None, terminal=None, runtime=None,
+                      execution_history=None,
                       session_id=None, scope=None, task_type: str = "coding",
                       vision: bool = False, provider: str | None = None,
                       model: str | None = None, no_fallback: bool = False,
@@ -1258,7 +1259,8 @@ class AstraRouter:
 
         Returns an `astra.ai.agent_tool_loop.ToolLoopResult`."""
         from astra.ai.agent_tool_loop import AgentToolLoop, ProviderToolCaller
-        loop = AgentToolLoop(registry, terminal=terminal, events=self.events,
+        loop = AgentToolLoop(registry, terminal=terminal, runtime=runtime,
+                             events=self.events,
                              max_steps=max_steps,
                              execution_history=execution_history)
         caller = ProviderToolCaller(self, task_type=task_type, vision=vision,

@@ -34,6 +34,7 @@ import threading
 import time
 import uuid
 
+from astra.core.events import new_op_id
 from astra.core.exceptions import ValidationError
 from astra.runtime import files as runtime_files
 from astra.runtime import packages as runtime_packages
@@ -107,6 +108,12 @@ class AgentRuntime:
         if self.blobs is None:
             from astra.core.blob_store import BlobStore
             self.blobs = BlobStore()
+        # Bounded per-session log of the commands run through this runtime.
+        # It is what the Gateway/Provider are shown as "Live runtime context"
+        # (see context_text) so both the chat agent and the terminal see the
+        # same execution history, and it never grows without limit.
+        self._command_log: dict[str, list[dict]] = {}
+        self._command_log_max = self._cfg_int("RUNTIME_COMMAND_LOG_MAX", 50)
 
     # -- config --------------------------------------------------------------
     def _cfg_int(self, key: str, default: int) -> int:
@@ -399,8 +406,25 @@ class AgentRuntime:
         guest_out = f"{GUEST_TMP}/{out_name}"
         host_out = os.path.join(self.tmp_dir, out_name)
         marker = f"__ASTRA_DONE_{token}__"
-        self._emit("terminal.command.started", session_id=key,
-                   command=text[:400])
+        # Per-command lifecycle on the SAME event contract the legacy host
+        # terminal uses (`terminal.started` -> `terminal.output` ->
+        # `terminal.completed`/`terminal.failed`, all sharing one `op`), so
+        # the Activity Log, the chat execution cards and the status model
+        # treat runtime work exactly like any other real execution.
+        op = new_op_id()
+        # Per-execution identity. The runtime keeps ONE persistent shell per
+        # session (that is what makes cwd/export persist and the Astra Agent
+        # Terminal show the same state), so the shell's pid is the same for
+        # every command. The per-command handle every consumer pairs on is
+        # therefore this execution id (`process_id`, matching the terminal
+        # event contract); the real PTY pid rides along as `shell_pid`.
+        exec_id = token
+        prior = self.session_history(key, limit=1)
+        self._emit("terminal.started", session_id=key, op=op,
+                   process_id=exec_id, shell_pid=process.pid,
+                   command=text[:400],
+                   cwd=prior[-1]["cwd"] if prior else GUEST_WORKSPACE,
+                   shell="bash", status="running", runtime=self.runtime_id)
         # A brace group runs in the CURRENT shell (so `cd`/`export` persist)
         # while redirecting only the command's own output.
         script = (
@@ -440,6 +464,10 @@ class AgentRuntime:
             os.remove(host_out)
         except OSError:
             pass
+        # Keep this execution's full stdout retrievable (BlobStore), exactly
+        # like the host terminal's `terminal_stdout_<pid>` blob, so the card's
+        # "full output" always resolves through the ONE retrieval path.
+        stdout_blob = self._store_output(exec_id, stdout)
 
         duration_ms = int((time.time() - started_at) * 1000)
         timed_out = exit_code is None and process.alive
@@ -460,14 +488,93 @@ class AgentRuntime:
             "truncated": len(stdout) > 20000,
             "stream_offset_end": payload.get("next_offset"),
             "blob_id": process.blob_id,
+            "stdout_blob_id": stdout_blob,
+            "execution_id": exec_id,
         }
-        if exit_code == 0:
-            self._emit("terminal.completed", session_id=key, exit_code=0,
-                       command=text[:200], duration_ms=duration_ms)
-        else:
-            self._emit("terminal.failed", session_id=key, exit_code=exit_code,
-                       command=text[:200], duration_ms=duration_ms)
+        # Bounded output snippet for the Activity Log — the full text stays
+        # in the result / BlobStore, never in the event table.
+        if stdout:
+            self._emit("terminal.output", session_id=key, op=op,
+                       process_id=exec_id, stream="stdout",
+                       chars=len(stdout),
+                       snippet=(stdout[-500:] if len(stdout) > 500
+                                else stdout), status=status)
+        status_event = ("terminal.completed" if exit_code == 0
+                        else "terminal.timeout" if status == "timeout"
+                        else "terminal.failed")
+        self._emit(status_event, session_id=key, op=op, process_id=exec_id,
+                   command=text[:200], cwd=result["cwd"], exit_code=exit_code,
+                   status=status, terminal=True, duration=duration_ms,
+                   stdout_blob_id=stdout_blob, stderr_blob_id="")
+        self._remember(key, {"command": text, "status": status,
+                             "exit_code": exit_code, "cwd": result["cwd"],
+                             "duration_ms": duration_ms,
+                             # Bounded: this log is prompt context, not an
+                             # output store — the full text is in the result
+                             # and the BlobStore.
+                             "stderr": str(result.get("stderr") or "")[:2000]})
         return result
+
+    def _store_output(self, exec_id: str, text: str) -> str:
+        """Persist one execution's full stdout in the shared BlobStore.
+        Best-effort: retrieval is a convenience, never a failure mode."""
+        if not self.blobs or not text:
+            return ""
+        try:
+            blob = self.blobs.open(f"runtime_stdout_{exec_id}")
+            self.blobs.append(blob, text)
+            return blob
+        except Exception:
+            return ""
+
+    # -- shared execution context (chat <-> terminal) -----------------------
+    def _remember(self, session_id: str, entry: dict) -> None:
+        with self._lock:
+            log = self._command_log.setdefault(session_id, [])
+            # Also cap how many SESSIONS are remembered, so a long-lived
+            # process with many conversations cannot grow this unbounded.
+            if len(self._command_log) > 64 and session_id not in self._command_log:
+                for stale in list(self._command_log)[:-32]:
+                    if stale != session_id:
+                        self._command_log.pop(stale, None)
+            log.append(entry)
+            del log[:-max(1, self._command_log_max)]
+
+    def session_history(self, session_id: str, *, limit: int = 20) -> list[dict]:
+        """Recent commands run on `session_id`, most recent last."""
+        with self._lock:
+            return list(self._command_log.get(
+                str(session_id or self.runtime_id), []))[-max(1, limit):]
+
+    def context_text(self, session_id: str | None = None, *,
+                     max_commands: int = 8,
+                     max_chars: int | None = None) -> str:
+        """Bounded, deterministic view of one runtime session's state —
+        cwd, live processes and recent commands. Empty when the session has
+        never been used, so a fresh conversation adds nothing to the prompt."""
+        key = str(session_id or self.runtime_id)
+        history = self.session_history(key, limit=max(1, max_commands))
+        process = self.get_terminal(key)
+        if not history and process is None:
+            return ""
+        lines = [f"Agent Runtime session {key} "
+                 f"(runtime={self.runtime_id}, shell=bash, "
+                 f"cwd={history[-1]['cwd'] if history else GUEST_WORKSPACE})"]
+        if process is not None:
+            lines.append(f"Live PTY: pid={process.pid} "
+                         f"alive={'yes' if process.alive else 'no'} "
+                         f"bytes={process.total_bytes()}")
+        if history:
+            lines.append("Recent commands (most recent last):")
+            for h in history:
+                head = f"  $ {h['command']}  -> status={h['status']}"
+                if h.get("exit_code") is not None:
+                    head += f" exit={h['exit_code']}"
+                lines.append(head)
+        text = "\n".join(lines)
+        if max_chars and len(text) > max_chars:
+            text = text[-max_chars:]
+        return text
 
     def one_shot(self, command: str, *, cwd: str = GUEST_WORKSPACE,
                  timeout: float = DEFAULT_TIMEOUT) -> dict:

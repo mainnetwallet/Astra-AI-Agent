@@ -159,3 +159,109 @@ test("terminal.js encodes the real control bytes for Ctrl keys", () => {
   assert.ok(JS.includes("/api/runtime/terminal/stream"),
             "output must come from the PTY stream");
 });
+
+/* ------------------------------------------------ terminal-first UI ---- */
+
+const CSS = fs.readFileSync(path.join(ROOT, "static/css/terminal.css"), "utf8");
+
+test("the terminal viewport is the primary UI, not a dashboard", () => {
+  // The viewport owns every pixel the one header line + one status line do
+  // not: it flexes to fill the app and the app is a full-height column.
+  assert.ok(/\.at-stage\s*\{[^}]*flex:\s*1 1 auto/.test(CSS),
+            "the terminal stage must flex to fill the app");
+  assert.ok(/\.at-app\s*\{[^}]*height:\s*calc\(100vh/.test(CSS),
+            "the app must be a full-height column");
+  assert.ok(/\.at-views\s*\{[^}]*position:\s*relative/.test(CSS));
+  // no permanent sidebar stealing the viewport
+  assert.ok(/\.at-side\s*\{[^}]*position:\s*absolute/.test(CSS),
+            "the file drawer must overlay, not reserve layout width");
+  assert.ok(/\.at-side\s*\{[^}]*translateX\(-101%\)/.test(CSS),
+            "the file drawer must start hidden");
+});
+
+test("the only chrome is one header line, tabs and one status line", () => {
+  // Tabs live INSIDE the header (like a desktop terminal), not in a card row.
+  assert.ok(/\.at-top\s*\{[^}]*display:\s*flex/.test(CSS));
+  assert.ok(/\.at-tabs\s*\{[^}]*flex:\s*1 1 auto/.test(CSS));
+  assert.ok(/\.at-bar\s*\{[^}]*display:\s*flex/.test(CSS));
+  assert.ok(/\.at-bar\s*\{[^}]*font-family:\s*ui-monospace/.test(CSS),
+            "status line is terminal-typed, not dashboard-typed");
+  // no oversized rounded dashboard containers
+  assert.ok(!/\.at-app\s*\{[^}]*border-radius:\s*(1[2-9]|[2-9]\d)px/.test(CSS),
+            "no oversized rounded app container");
+});
+
+test("terminal colors/typography match a real terminal", () => {
+  assert.ok(/--at-bg:\s*#0b0f14/.test(CSS), "dark terminal background");
+  assert.ok(/#0b0f14.*foreground/s.test(JS) || /background:\s*"#0b0f14"/.test(JS),
+            "xterm theme uses the dark terminal palette");
+  assert.ok(/monospace/.test(CSS));
+  assert.ok(/cursorBlink:\s*true/.test(JS), "blinking cursor enabled");
+  assert.ok(/scrollback:\s*\d{4,}/.test(JS), "real terminal scrollback");
+});
+
+test("a compact Termux-style extra-key row exists for mobile", () => {
+  const keyIds = [...JS.matchAll(/\{\s*id:\s*"([a-z]+)",\s*label:/g)]
+    .map((m) => m[1]);
+  for (const k of ["esc", "tab", "ctrl", "alt", "slash", "dash", "home",
+                   "end", "up", "down", "left", "right", "pgup", "pgdn"]) {
+    assert.ok(keyIds.includes(k), `missing extra key: ${k}`);
+  }
+  assert.ok(/\.at-keys\s*\{[^}]*display:\s*none/.test(CSS),
+            "extra keys hidden on desktop");
+  assert.ok(/@media[^{]*\{\s*\.at-keys\s*\{[^}]*display:\s*flex/.test(
+              CSS.replace(/\n/g, " ")) ||
+            /\.at-keys\s*\{\s*display:\s*flex/.test(
+              CSS.split("@media")[1] || ""),
+            "extra keys shown on mobile");
+  // compact, terminal-oriented buttons (never huge rounded cards)
+  assert.ok(/\.at-key\s*\{[^}]*border-radius:\s*5px/.test(CSS));
+  assert.ok(!/\.at-key\s*\{[^}]*border-radius:\s*(1[2-9]|[2-9]\d)px/.test(CSS));
+});
+
+test("the extra-key row sends real control bytes to the PTY", () => {
+  // ESC/TAB/arrows/Home/End/PageUp/PageDown are the actual escapes a
+  // terminal sends; Ctrl/Alt are sticky modifiers.
+  const expect = {
+    ESC: "\\x1b", TAB: "\\t", HOME: "\\x1b[H", END: "\\x1b[F",
+    up: "\\x1b[A", down: "\\x1b[B", left: "\\x1b[D", right: "\\x1b[C",
+    pgup: "\\x1b[5~", pgdn: "\\x1b[6~",
+  };
+  for (const seq of Object.values(expect)) {
+    assert.ok(JS.includes(`data: "${seq}"`), `missing key sequence ${seq}`);
+  }
+  assert.ok(/mod:\s*true/.test(JS), "Ctrl/Alt are modifiers");
+  assert.ok(/applySticky/.test(JS),
+            "sticky Ctrl/Alt must convert the next input to real bytes");
+});
+
+test("mobile keyboard never hides the terminal (VisualViewport)", () => {
+  assert.ok(/visualViewport/.test(JS),
+            "the terminal must track the visual viewport");
+  assert.ok(/--at-vh/.test(JS) && /--at-vh/.test(CSS),
+            "the app height must follow the visual viewport");
+  assert.ok(/height:\s*var\(--at-vh/.test(CSS));
+});
+
+test("runtime lifecycle + files live in a compact ⋮ menu, not big cards", () => {
+  assert.ok(/id="at-menu"/.test(JS) || /at-menu/.test(JS));
+  for (const act of ["reconnect", "restart", "clear", "files", "status",
+                     "stop", "kill"]) {
+    assert.ok(JS.includes(`data-act="${act}"`) || JS.includes(`"${act}"`),
+              `menu action missing: ${act}`);
+  }
+  // the menu (and the drawer) start hidden; the terminal area stays visible
+  assert.ok(/menu\.hidden = true/.test(JS) || /hidden>/.test(JS));
+  assert.ok(/side\.hidden = true/.test(JS));
+});
+
+test("the runtime-unavailable state is compact and never covers a ready runtime", () => {
+  // It is a small bordered notice, not a full dashboard, and it is hidden
+  // the moment the runtime reports available.
+  assert.ok(/un\.hidden = ok/.test(JS),
+            "the unavailable overlay must hide when the runtime is ready");
+  assert.ok(/unavailable\.hidden = true/.test(JS),
+            "the overlay starts hidden");
+  assert.ok(/\.at-unavailable-card\s*\{[^}]*max-width:\s*4\d\dpx/.test(CSS),
+            "the notice must stay compact");
+});

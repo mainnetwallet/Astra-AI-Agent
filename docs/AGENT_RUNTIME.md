@@ -63,6 +63,30 @@ and gives each runtime its own `/workspace`, `/root` and `/tmp`;
 `copy` clones the rootfs per runtime when globally installed packages must
 also be per-runtime.
 
+### Per-runtime private package state (default)
+
+Private writable state is the **default**, not an option. Even with the
+shared rootfs, `RuntimeEngine.build_argv` injects a user-scope environment
+(`_user_scope_env`) that redirects every user-scope package manager into
+the runtime's own `$HOME` — and `$HOME` (`/root`) is a per-runtime bind:
+
+| Variable | Points at |
+| --- | --- |
+| `PIP_USER=1`, `PYTHONUSERBASE`, `PIP_CACHE_DIR` | `/root/.local`, `/root/.cache/pip` |
+| `NPM_CONFIG_PREFIX`, `NPM_CONFIG_CACHE`, `NODE_PATH` | `/root/.npm-global`, `/root/.npm` |
+| `CARGO_HOME`, `GOPATH`, `GEM_HOME` | `/root/.cargo`, `/root/go`, `/root/.gem` |
+| `XDG_DATA_HOME` / `XDG_CONFIG_HOME` / `XDG_CACHE_HOME` | `/root/.local/share` / `/root/.config` / `/root/.cache` |
+
+`PATH` ends with `/root/.local/bin:/root/.npm-global/bin`, so a tool
+installed by one runtime is both private to it *and* runnable inside it.
+Consequence: `pip install <pkg>` in runtime A is importable from A and
+importable in A after A is restarted, and is **not** importable in
+runtime B. Verified by `tests/test_runtime.py::TestPerRuntimeIsolation`.
+
+`apt`/`apk` (system-level installs) still write into the shared rootfs
+under `RUNTIME_ROOTFS_MODE=shared`; use `copy` when even that must be
+private.
+
 ### Deliberately not a login shell
 
 The runtime's shells are **not** login shells. The container ships
@@ -115,6 +139,21 @@ SSE feed.
 `static/js/terminal.js` drives the pane; the emulator is **xterm.js**
 (vendored) plus the fit addon. The pane is not a log view: input is raw
 keystrokes, output is the PTY byte stream including escape sequences.
+
+**The terminal is the UI.** The chrome is one header line (brand, tabs, and
+a `⋮` overflow menu) and one status line (`● Connected · Agent Runtime ·
+bash · /workspace · session conv-7`). There is no sidebar, no runtime card
+and no dashboard consuming the viewport: `.at-stage` flexes to fill
+everything the two lines do not, exactly like a desktop terminal. On
+phones `.at-keys` adds a compact, Termux-style extra-key row (`ESC TAB
+CTRL ALT / - HOME END ↑ ↓ ← → PGUP PGDN`); `CTRL`/`ALT` are sticky
+modifiers, and the app height follows `visualViewport` so the software
+keyboard never covers the prompt.
+
+The file/workspace drawer (`.at-side`) and the runtime lifecycle actions
+(`reconnect`, `restart session`, `clear`, `stop`, `kill`, `runtime status`)
+live behind the `⋮` menu, hidden until asked for — they do not compete with
+the terminal.
 
 | Browser action | Endpoint | Effect |
 | --- | --- | --- |
@@ -232,6 +271,26 @@ Lifecycle/execution/install tools are `system_action` risk and therefore
 gated by `GRANTED_PERMISSIONS`; reads are `read`; file mutations are
 `low_risk_write`.
 
+### The legacy host terminal is structurally blocked for Agent work
+
+`astra/terminal/` still exists for Astra's own trusted internals, but every
+tool it registers is marked **`agent_forbidden`** on its `ToolSchema`. The
+guard is enforced in `ToolRegistry.execute` — the single path every tool
+call takes — *not* by a system prompt:
+
+```python
+if tool.agent_forbidden and self._is_agent_execution(ctx):
+    self._emit_tool("tool.blocked", tool, reason="agent_forbidden")
+    return {"ok": False, "decision": "blocked", ...}   # nothing was spawned
+```
+
+`_is_agent_execution(ctx)` is true only when `ToolContext.agent_execution`
+is set, which only `AgentToolLoop` and workflow steps do. So an Agent,
+Provider or workflow that names `terminal_exec` gets a structured refusal
+the model can read (`Decision: blocked`), no host process is started, and
+`build_tool_catalog` never advertises a host tool to a model at all.
+Regression coverage: `tests/test_host_terminal_block.py`.
+
 ---
 
 ## 9. Events
@@ -271,7 +330,33 @@ the full stream lives in the BlobStore.
 
 ---
 
-## 11. Known limitations
+## 11. Verifying it yourself (real acceptance run)
+
+`scripts/runtime_acceptance.py` is the operator-runnable end-to-end
+acceptance test for everything this document claims. It drives the REAL
+proot runtime (no mocks) and exits non-zero if any check fails:
+
+```sh
+python3 scripts/runtime_acceptance.py
+RUNTIME_CONTAINER=alpine python3 scripts/runtime_acceptance.py
+ASTRA_ACCEPTANCE_DIR=~/.astra/accept ASTRA_ACCEPTANCE_KEEP=1 \
+    python3 scripts/runtime_acceptance.py
+```
+
+It checks, in order: the real toolchain inside the guest; a live PTY with
+`echo` and a `TIOCSWINSZ` resize the guest observes via `tput`; package
+detection, a **verified** install and an import check; persistence across a
+restart; Runtime A/B private state in both directions; host isolation (host
+file unreadable, Termux prefix invisible, host write refused, guest `PATH`
+clean); Chat ↔ Terminal sharing ONE PTY; and that the legacy host
+`terminal_exec` is refused for Agent execution while still working for
+trusted internals.
+
+The hermetic suite that runs on every `pytest tests/` is
+`tests/test_runtime.py` + `tests/test_host_terminal_block.py`; the frontend
+contract is `tests/js/terminal_assets.test.js` (`node --test tests/js/`).
+
+## 12. Known limitations
 
 * **One shared rootfs by default.** `RUNTIME_ROOTFS_MODE=shared` means two
   runtimes on the same container share globally installed packages;
@@ -291,5 +376,7 @@ the full stream lives in the BlobStore.
   `python` or `vim`) should be driven from the Astra Agent Terminal pane.
 * **Legacy host terminal still exists.** `astra/terminal/` (the
   `terminal_exec` family) remains for Astra's own diagnostics and is still
-  registered as a tool. Agent *work* belongs on the runtime tools
+  registered as a tool — but it is `agent_forbidden`, never advertised to a
+  model, and hard-blocked in `ToolRegistry.execute` for any Agent,
+  Provider or workflow call (see §8). Agent *work* uses the runtime tools
   (`runtime_command`, `runtime_package_install`, …).

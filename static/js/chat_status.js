@@ -150,6 +150,8 @@
   };
   var TOOL_PREFIX = [
     [/^terminal_(exec|start|status|stop|kill|history|sessions|close|output_read)/, "Running terminal command"],
+    [/^runtime_command$/, "Running terminal command"],
+    [/^runtime_(status|start|stop|restart|reset|destroy)$/, "Managing the Agent Runtime"],
     [/^browser_(open|navigate)/, "Opening webpage"],
     [/^browser_(observe|read|content_read|extract|screenshot|action|close)/, "Reading webpage"],
     [/^tx_|^token_balance$|^chain_status$|^rpc_status$|^wallet_balances$/, "Checking blockchain data"],
@@ -800,10 +802,13 @@
   // introspect other operations, or are pure bookkeeping). Terminal EXECUTION
   // tools (exec/start) are cards; terminal *status* tools are not — the card
   // for the process they name already exists.
-  var CARD_SKIP = /^(recall|remember|search_memory|create_task|list_tasks|update_task|get_health|list_tools|check_health|execution_history_read|terminal_status|terminal_history|terminal_history_read|terminal_sessions|terminal_output_read|terminal_stop|terminal_kill|list_workflows|ai_generate)$/;
+  var CARD_SKIP = /^(recall|remember|search_memory|create_task|list_tasks|update_task|get_health|list_tools|check_health|execution_history_read|terminal_status|terminal_history|terminal_history_read|terminal_sessions|terminal_output_read|terminal_stop|terminal_kill|runtime_status|runtime_package_manager_detect|list_workflows|ai_generate)$/;
   // Only the tools that really spawn a command open a "pending" card that the
-  // following terminal.started attaches to.
-  var TERMINAL_PENDING = /^terminal_(exec|start)$/;
+  // following terminal.started attaches to. `runtime_command` is the Agent's
+  // shell surface — it runs a real command in the isolated Agent Runtime and
+  // emits the same terminal.started/output/completed lifecycle, so it must
+  // fold into ONE card exactly like the legacy host terminal_exec did.
+  var TERMINAL_PENDING = /^(terminal_(exec|start)|runtime_command)$/;
   // Same events the status model exempts from the Activity Log's noise filter.
   var CARD_NOISE_EXEMPT = /^(terminal\.|tool\.|chat\.pipeline\.)/;
 
@@ -830,7 +835,10 @@
   }
   function kindForTool(tool) {
     var name = String(tool || "");
-    if (/^terminal_/.test(name)) return CARD_KIND.TERMINAL;
+    // `runtime_*` shell/lifecycle work is the Agent Runtime's terminal
+    // surface — it renders as a terminal execution card, the same as the
+    // legacy host `terminal_*` tools always did.
+    if (/^terminal_/.test(name) || /^runtime_(command|start|stop|kill|status|restart)$/.test(name)) return CARD_KIND.TERMINAL;
     if (/^browser_/.test(name)) return CARD_KIND.BROWSER;
     if (/^(read|list|search|write|edit|apply|patch)_file|^generate_document/.test(name)) return CARD_KIND.FILE;
     if (/^search_web$|^fetch_url$/.test(name)) return CARD_KIND.WEB;

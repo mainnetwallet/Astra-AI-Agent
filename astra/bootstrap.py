@@ -248,6 +248,7 @@ def build(store: Store | None = None, config=None,
         gateway, router, events=events,
         max_tokens=_opt_int(config, "CHAT_MAX_TOKENS"),
         registry=registry, terminal=terminal_manager,
+        runtime=runtime_manager,
         execution_history=execution_history,
         max_tool_steps=config.getint("CHAT_MAX_TOOL_STEPS", 8),
         agent_brain=config.get("CHAT_AGENT_BRAIN", "provider"))
@@ -257,12 +258,17 @@ def build(store: Store | None = None, config=None,
     # touch (memory, tasks, web3). Without it context-dependent tools fail
     # when run as workflow steps.
     from astra.core.context import ToolContext
+    # `agent_execution=True`: a workflow step is Agent execution, so the
+    # legacy HOST terminal tools are structurally refused here too (see
+    # astra/tools/registry.py). A step that needs a shell uses
+    # `runtime_command`, which runs inside the isolated Agent Runtime.
     tool_context = ToolContext(store=store, config=config, events=events,
                                memory=memory, tasks=tasks,
                                web3_manager=tx_manager, registry=registry,
                                terminal=terminal_manager,
                                execution_history=execution_history,
-                               runtime=runtime_manager)
+                               runtime=runtime_manager,
+                               agent_execution=True)
     workflows = WorkflowEngine(store, registry, events, context=tool_context)
     scheduler = None
     if with_scheduler:

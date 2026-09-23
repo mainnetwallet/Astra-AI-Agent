@@ -33,6 +33,10 @@ EVENT_KINDS = (
     "task.done", "task.completed", "task.failed", "task.cancelled", "task.skipped",
     # tool registry
     "tool.started", "tool.completed", "tool.failed",
+    # ToolRegistry refuses an `agent_forbidden` tool (the legacy HOST
+    # terminal) when the call comes from Agent/Provider/workflow
+    # execution — nothing runs, and this event records the refusal.
+    "tool.blocked",
     # AI providers
     "ai.started", "ai.token", "ai.completed", "ai.failed",
     # memory + experiences + workflows + scheduler

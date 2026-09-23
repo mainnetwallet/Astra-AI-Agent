@@ -119,3 +119,209 @@ class ScriptedBrain:
         if isinstance(reply, Exception):
             raise reply
         return reply
+
+
+class LocalRuntimeStub:
+    """A stand-in for one `AgentRuntime` whose isolation backend is the
+    local shell instead of proot.
+
+    Unit tests that drive the AGENT TOOL LOOP use this so they stay fast and
+    hermetic: the loop, the `ToolRegistry`, every runtime tool schema and the
+    runtime TOOL functions under test are all the real production ones — only
+    the process backend behind them is local. It implements the same surface
+    the runtime tools resolve against (`exec_command`, `status`, `get`,
+    lifecycle no-ops) and emits the same `terminal.*` lifecycle events, so
+    the Activity Log / op-correlation paths are exercised for real.
+
+    Genuine proot isolation is covered by `tests/test_runtime.py`; this stub
+    must never be used to claim isolation.
+    """
+
+    def __init__(self, workspace=None, events=None):
+        import os
+        import tempfile
+
+        self.runtime_id = "test"
+        self.title = "test"
+        self.events = events
+        self.workspace = workspace or tempfile.mkdtemp(prefix="astra-stub-")
+        self.home_dir = os.path.join(self.workspace, ".home")
+        self.tmp_dir = os.path.join(self.workspace, ".tmp")
+        self.uploads_dir = os.path.join(self.workspace, ".uploads")
+        for d in (self.home_dir, self.tmp_dir, self.uploads_dir):
+            os.makedirs(d, exist_ok=True)
+        self.paths = _StubPaths()
+        self._cwd: dict[str, str] = {}
+        self._started: set[str] = set()
+        self._history: dict[str, list] = {}
+        self.commands: list[tuple[str, str]] = []
+
+    # -- lifecycle (no-ops the runtime tools call) --------------------------
+    def default(self):
+        return self
+
+    def get(self, runtime_id=None, **_kw):
+        return self
+
+    def create(self, **_kw):
+        return self.status()
+
+    def start(self):
+        return self.status()
+
+    def stop(self):
+        return self.status()
+
+    def restart(self):
+        return self.status()
+
+    def reset(self):
+        return self.status()
+
+    def status(self, **_kw):
+        return {"available": True, "state": "running",
+                "runtime_id": self.runtime_id, "backend": "local-stub",
+                "container": "stub", "workspace": self.workspace,
+                "terminals": [], "tools": {}}
+
+    def capabilities(self, refresh=False):
+        return self.status()
+
+    def open_terminal(self, session_id=None, **_kw):
+        return None
+
+    def close_terminal(self, session_id):
+        key = str(session_id or self.runtime_id)
+        self._cwd.pop(key, None)
+        self._started.discard(key)
+        return True
+
+    def terminals(self):
+        return []
+
+    def close_all(self):
+        self._cwd.clear()
+        self._started.clear()
+        return 0
+
+    # -- the execution surface the runtime tools use ------------------------
+    def exec_command(self, command, *, session_id="", timeout=None,
+                     rows=24, cols=80):
+        import os
+        import shlex
+        import subprocess
+        import time
+
+        text = str(command or "").strip()
+        if not text:
+            raise ValueError("command required")
+        from astra.core.events import new_op_id
+
+        key = str(session_id or self.runtime_id)
+        cwd = self._cwd.get(key, self.workspace)
+        op = new_op_id()
+        exec_id = "exec-" + op
+        # per-command lifecycle, exactly like the real runtime (one
+        # persistent shell, so the per-command handle is the execution id)
+        self._started.add(key)
+        self._emit("terminal.started", session_id=key, shell="sh", op=op,
+                   process_id=exec_id, shell_pid=0, command=text[:400],
+                   cwd=cwd)
+        rc_mark = "__ASTRA_STUB_RC__"
+        pwd_mark = "__ASTRA_STUB_PWD__"
+        # Capture the command's OWN exit status before the metadata printf
+        # (which would otherwise become the script's status), so a failing
+        # command is reported as failed exactly like the real runtime does.
+        script = ("cd {cwd} || exit 1\n{cmd}\n__astra_rc=$?\n"
+                  "printf '\\n{r}%s\\n{p}%s\\n' \"$__astra_rc\" \"$PWD\"\n"
+                  ).format(cwd=shlex.quote(cwd), cmd=text, r=rc_mark, p=pwd_mark)
+        started = time.time()
+        proc = subprocess.run(["/bin/sh", "-c", script], capture_output=True,
+                              text=True)
+        out = proc.stdout
+        exit_code = proc.returncode
+        idx = out.rfind(rc_mark)
+        if idx >= 0:
+            meta = out[idx + len(rc_mark):].splitlines()
+            out = out[:idx]
+            try:
+                exit_code = int(meta[0].strip())
+            except (IndexError, ValueError):
+                pass
+            for line in meta[1:]:
+                if line.startswith(pwd_mark):
+                    tail = line[len(pwd_mark):].strip()
+                    if tail and os.path.isdir(tail):
+                        self._cwd[key] = tail
+                    break
+        self.commands.append((key, text))
+        self._history.setdefault(key, []).append({"command": text})
+        status = "completed" if exit_code == 0 else "failed"
+        blob = "stub-blob-" + exec_id if out else ""
+        self._emit("terminal.output", session_id=key, op=op,
+                   process_id=exec_id, stream="stdout", chars=len(out),
+                   snippet=out[-500:], status=status)
+        self._emit("terminal.completed" if exit_code == 0 else "terminal.failed",
+                   session_id=key, op=op, process_id=exec_id,
+                   exit_code=exit_code, status=status, terminal=True,
+                   stdout_blob_id=blob, stderr_blob_id="")
+        return {"ok": exit_code == 0, "status": status, "session_id": key,
+                "runtime": self.runtime_id, "command": text,
+                "cwd": self._cwd.get(key, cwd), "exit_code": exit_code,
+                "stdout": out, "stderr": proc.stderr,
+                "duration_ms": int((time.time() - started) * 1000),
+                "truncated": False, "blob_id": ""}
+
+    def context_text(self, session_id=None, *, max_commands=8, max_chars=None):
+        key = str(session_id or self.runtime_id)
+        hist = self.history(key, limit=max_commands)
+        if not hist:
+            return ""
+        lines = [f"Agent Runtime session {key} (runtime={self.runtime_id}, "
+                 f"shell=sh, cwd={self._cwd.get(key, self.workspace)})"]
+        for h in hist:
+            lines.append(f"  $ {h['command']}")
+        text = "\n".join(lines)
+        if max_chars and len(text) > max_chars:
+            text = text[-max_chars:]
+        return text
+
+    # -- helpers the tests read back ----------------------------------------
+    def session_ids(self):
+        return list(self._cwd.keys())
+
+    def cwd(self, session_id=""):
+        key = str(session_id or self.runtime_id)
+        return self._cwd.get(key, self.workspace)
+
+    def history(self, session_id="", limit=20):
+        return list(self._history.get(str(session_id or self.runtime_id), []))
+
+    def session(self, session_id=""):
+        key = str(session_id or self.runtime_id)
+        stub = self
+
+        class _Session:
+            session_id = key
+            cwd = stub._cwd.get(key, stub.workspace)
+            shell = {"name": "sh"}
+
+            @staticmethod
+            def history(limit=20):
+                return stub.history(key, limit)
+        return _Session()
+
+    def _emit(self, kind, **data):
+        if self.events is None:
+            return
+        try:
+            self.events.emit(kind, agent="runtime", **data)
+        except Exception:
+            pass
+
+
+class _StubPaths:
+    max_file_mb = 16
+    max_members = 4096
+    max_extract_mb = 128
+    max_file_bytes = 16 * 1024 * 1024

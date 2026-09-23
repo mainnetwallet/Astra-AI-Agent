@@ -245,12 +245,23 @@ the **Astra Agent Terminal**.
   environment is built with `env -i` so host secrets cannot leak in.
 * **No host fallback, ever.** If the runtime is unavailable, execution stops
   and the UI says *Agent Runtime unavailable*. Nothing silently runs on your
-  host shell.
-* **A real terminal.** The pane is xterm.js over a genuine PTY
-  (`pty.fork()`), so prompts, arrows, `Tab`, `Ctrl+C/D/L/Z/A/E/W/R`, ANSI
+  host shell. The legacy host `terminal_exec` family is marked
+  `agent_forbidden` and hard-blocked in `ToolRegistry.execute` for every
+  Agent/Provider/workflow call — never advertised to a model, never spawned.
+* **Per-runtime private state by default.** `PIP_USER` / `NPM_CONFIG_PREFIX`
+  / `CARGO_HOME` / `GOPATH` / `GEM_HOME` / `XDG_*` are redirected into each
+  runtime's own `$HOME`, so a package installed in Runtime A is importable
+  from A (and after a restart of A) but invisible to Runtime B — even though
+  the distro rootfs is shared.
+* **A real terminal, not a dashboard.** The pane is xterm.js over a genuine
+  PTY (`pty.fork()`), so prompts, arrows, `Tab`, `Ctrl+C/D/L/Z/A/E/W/R`, ANSI
   colours, full-screen programs, scrollback, selection and real
   `TIOCSWINSZ` resize all work. Tabs are real sessions — new, switch,
-  rename, close, reconnect.
+  rename, close, reconnect. The viewport owns nearly the whole screen: one
+  header line, tabs, one status line and a `⋮` overflow menu for the file
+  drawer and runtime actions. On mobile a compact Termux-style extra-key
+  row (`ESC TAB CTRL ALT / - HOME END ↑ ↓ ← → PGUP PGDN`) appears and the
+  app height follows the software keyboard.
 * **Chat and terminal share one session.** The chat agent and the terminal
   both use `conv-<id>`. Run `git clone` in chat, open the terminal, run
   `ls` — you see the clone, in the same shell, with the same cwd.
@@ -266,6 +277,12 @@ the **Astra Agent Terminal**.
 Full detail — isolation model, lifecycle, security guards, events, the
 tool list and troubleshooting — is in **[docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md)**.
 Configuration keys are in `.env.example` under *Astra Agent Runtime*.
+
+Run the real end-to-end acceptance check on your own machine with
+`python3 scripts/runtime_acceptance.py` (drives the real proot runtime:
+PTY, package install + verification, restart persistence, Runtime A/B
+private state, host isolation, shared chat↔terminal session, and the
+host-`terminal_exec` block).
 
 ## Web3 transaction safety
 

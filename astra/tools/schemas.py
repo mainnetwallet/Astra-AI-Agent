@@ -18,7 +18,8 @@ class Tool:
                  retry_backoff_s: float = 1.0, idempotent: bool = False,
                  supports_async: bool = False, rate_limit_per_min: int = 0,
                  strict: bool = False, plugin: str = "",
-                 confirmation_delegate: str = ""):
+                 confirmation_delegate: str = "",
+                 agent_forbidden: bool = False):
         self.name = name
         self.fn = fn
         self.description = description
@@ -39,6 +40,13 @@ class Tool:
         self.rate_limit_per_min = max(0, int(rate_limit_per_min or 0))
         self.strict = bool(strict)                     # reject unknown args
         self.plugin = plugin
+        # Structural guard: a tool the Agent/Provider tool loop must NEVER
+        # be able to run, whatever a model asks for. Enforced by
+        # ToolRegistry.execute (returns a structured 'blocked' result and
+        # executes nothing) and excluded from the Agent tool catalog.
+        # The legacy HOST terminal tools use this: Agent work belongs in
+        # the isolated Agent Runtime (runtime_command), never on the host.
+        self.agent_forbidden = bool(agent_forbidden)
 
     # -- schema ------------------------------------------------------------
     def satisfies(self, args: dict) -> None:
@@ -105,4 +113,5 @@ class Tool:
                 "idempotent": self.idempotent,
                 "supports_async": self.supports_async,
                 "rate_limit_per_min": self.rate_limit_per_min,
-                "strict": self.strict, "plugin": self.plugin}
+                "strict": self.strict, "plugin": self.plugin,
+                "agent_forbidden": self.agent_forbidden}

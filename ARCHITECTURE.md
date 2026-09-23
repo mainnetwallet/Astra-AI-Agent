@@ -756,7 +756,26 @@ Gateway ── execution decision ──▶ Provider ──▶ AgentToolLoop ─
   `ToolRegistry`; sessions use the existing `conv-<id>` id scheme; large
   output uses the existing `BlobStore`; lifecycle events go to the existing
   `EventBus`/Activity Log. `ToolContext` gained `runtime` /
-  `runtime_session_id` alongside `terminal` / `terminal_session_id`.
+  `runtime_session_id` alongside `terminal` / `terminal_session_id`, plus
+  `agent_execution` (set only by `AgentToolLoop` and workflow steps).
+* **Host terminal is structurally blocked**: the `astra/terminal/` tools are
+  flagged `agent_forbidden` on their `ToolSchema`; `ToolRegistry.execute`
+  refuses them when `ctx.agent_execution` is set (`tool.blocked` event,
+  structured `decision: "blocked"` result, nothing spawned), and
+  `build_tool_catalog` omits them — so nothing about the block depends on a
+  prompt. Coverage: `tests/test_host_terminal_block.py`.
+* **Per-runtime writable state**: `_user_scope_env()` in `engine.py` points
+  `PIP_USER`/`PYTHONUSERBASE`/`NPM_CONFIG_PREFIX`/`CARGO_HOME`/`GOPATH`/
+  `GEM_HOME`/`XDG_*` at the runtime's own `$HOME` (a per-runtime bind) and
+  appends `/root/.local/bin:/root/.npm-global/bin` to `PATH`. Runtime A's
+  user-scope installs are invisible to Runtime B and survive A's restart
+  (`tests/test_runtime.py::TestPerRuntimeIsolation`); `RUNTIME_ROOTFS_MODE=copy`
+  extends privacy to system-level installs.
+* **Terminal UI is terminal-first**: `static/css/terminal.css` +
+  `static/js/terminal.js` render one header line (brand + tabs + `⋮`), a
+  flexed xterm.js stage and one status line; the file drawer and lifecycle
+  actions live behind `⋮`; mobile gets a compact extra-key row and a
+  `visualViewport`-tracked height. No sidebar/card dashboard.
 * **Execution**: `runtime_command` types into the session's live PTY and
   waits for a sentinel; the command's output is redirected to a file inside
   the runtime and read back through the `/tmp` bind, so results are never

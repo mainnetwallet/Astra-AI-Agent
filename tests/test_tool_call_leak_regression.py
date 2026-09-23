@@ -39,10 +39,12 @@ from astra.agent import Agent
 from astra.ai.chat_pipeline import ChatPipeline
 from astra.ai.response_boundary import sanitize_final_response
 from astra.core.permissions import Policy
+from astra.runtime.tools import register_runtime_tools
 from astra.terminal import TerminalManager, register_terminal_tools
 from astra.tools.builtins import register_builtins
 from astra.tools.registry import ToolRegistry
 
+from tests.helpers import LocalRuntimeStub
 from tests.test_chat_pipeline import FakeGateway, FakeRouter
 
 _PROTOCOL_MARKERS = ('"action"', '"tool"', '"args"', '"session_id"',
@@ -50,7 +52,9 @@ _PROTOCOL_MARKERS = ('"action"', '"tool"', '"args"', '"session_id"',
 
 
 def _tool_call(command, **extra):
-    payload = {"action": "tool", "tool": "terminal_exec",
+    # Agent shell work runs in the isolated Agent Runtime; the legacy HOST
+    # terminal tools are structurally blocked for Agent execution.
+    payload = {"action": "tool", "tool": "runtime_command",
               "args": {"command": command}, "thought": "run it",
               "session_id": "sess-abc123"}
     payload.update(extra)
@@ -68,30 +72,32 @@ def _stack():
     register_builtins(reg)
     manager = TerminalManager()
     register_terminal_tools(reg, manager)
-    return reg, manager
+    runtime = LocalRuntimeStub()
+    register_runtime_tools(reg, runtime)
+    return reg, manager, runtime
 
 
-def _pipeline(outputs, reg, manager, **kw):
+def _pipeline(outputs, reg, manager, runtime=None, **kw):
     gw = FakeGateway([], usable=False)   # verification skipped: rr.text is
                                           # the reply, unmodified except by
                                           # the response-boundary guard —
                                           # exactly what we're testing.
     rt = FakeRouter(list(outputs))
     return ChatPipeline(gw, rt, max_tokens=800, registry=reg,
-                        terminal=manager, **kw), gw, rt
+                        terminal=manager, runtime=runtime, **kw), gw, rt
 
 
 class PrefacedToolCallLeakTests(unittest.TestCase):
     """Case 3 from the bug report."""
 
     def test_prefaced_tool_call_is_executed_not_leaked(self):
-        reg, manager = _stack()
+        reg, manager, runtime = _stack()
         outputs = [
             "Sure, I'll clone that repository for you now.\n\n" +
             _tool_call("echo cloned-ok"),
             _final("I cloned the repository successfully."),
         ]
-        pipe, gw, rt = _pipeline(outputs, reg, manager)
+        pipe, gw, rt = _pipeline(outputs, reg, manager, runtime)
         try:
             result = pipe.run(
                 "Here is my GitHub token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
@@ -99,6 +105,7 @@ class PrefacedToolCallLeakTests(unittest.TestCase):
                 conversation_id="c-clone")
         finally:
             manager.close_all()
+            runtime.close_all()
 
         self.assertTrue(result["ok"])
         reply = result["reply"]
@@ -107,7 +114,7 @@ class PrefacedToolCallLeakTests(unittest.TestCase):
         loop_trace = result["data"].get("tool_loop") or {}
         self.assertEqual(loop_trace.get("tool_calls"), 1)
         step0 = loop_trace["steps"][0]
-        self.assertEqual(step0["tool"], "terminal_exec")
+        self.assertEqual(step0["tool"], "runtime_command")
         self.assertTrue(step0["ok"])
 
         # 2) no internal protocol shape reached the user-facing reply.
@@ -119,17 +126,18 @@ class PrefacedToolCallLeakTests(unittest.TestCase):
         self.assertNotIn("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", reply)
 
     def test_multi_step_loop_leaks_nothing(self):
-        reg, manager = _stack()
+        reg, manager, runtime = _stack()
         outputs = [
             "First I'll check the directory.\n" + _tool_call("pwd"),
             "Now cloning.\n" + _tool_call("echo cloned-ok"),
             _final("Done — cloned into the current directory."),
         ]
-        pipe, gw, rt = _pipeline(outputs, reg, manager)
+        pipe, gw, rt = _pipeline(outputs, reg, manager, runtime)
         try:
             result = pipe.run("Clone repo", conversation_id="c-multi")
         finally:
             manager.close_all()
+            runtime.close_all()
 
         self.assertTrue(result["ok"])
         reply = result["reply"]
@@ -141,13 +149,14 @@ class PrefacedToolCallLeakTests(unittest.TestCase):
         """If the model never emits a "final" action before the step
         budget runs out, the boundary guard must still keep the last raw
         (tool-call-shaped) reply out of the user-facing text."""
-        reg, manager = _stack()
+        reg, manager, runtime = _stack()
         outputs = [_tool_call(f"echo step-{i}") for i in range(3)]
         pipe, gw, rt = _pipeline(outputs, reg, manager, max_tool_steps=3)
         try:
             result = pipe.run("Clone repo", conversation_id="c-maxsteps")
         finally:
             manager.close_all()
+            runtime.close_all()
 
         reply = result["reply"]
         for marker in _PROTOCOL_MARKERS:
@@ -157,15 +166,16 @@ class PrefacedToolCallLeakTests(unittest.TestCase):
         """A genuinely truncated/malformed protocol reply (e.g. cut off by
         a max_tokens limit) cannot be recovered as a tool call, but it must
         still never reach the user verbatim."""
-        reg, manager = _stack()
+        reg, manager, runtime = _stack()
         truncated = ('Cloning now.\n\n{"action": "tool", "tool": '
                     '"terminal_exec", "args": {"command": "git clone')
         outputs = [truncated]
-        pipe, gw, rt = _pipeline(outputs, reg, manager)
+        pipe, gw, rt = _pipeline(outputs, reg, manager, runtime)
         try:
             result = pipe.run("Clone repo", conversation_id="c-trunc")
         finally:
             manager.close_all()
+            runtime.close_all()
 
         reply = result["reply"]
         for marker in ('"action"', '"tool"', '"args"'):
@@ -174,14 +184,15 @@ class PrefacedToolCallLeakTests(unittest.TestCase):
 
 class CredentialRedactionTests(unittest.TestCase):
     def test_credential_is_redacted_from_final_reply(self):
-        reg, manager = _stack()
+        reg, manager, runtime = _stack()
         token = "ghp_" + "Z" * 36
         outputs = [_final(f"Cloned using token {token} successfully.")]
-        pipe, gw, rt = _pipeline(outputs, reg, manager)
+        pipe, gw, rt = _pipeline(outputs, reg, manager, runtime)
         try:
             result = pipe.run("Clone repo", conversation_id="c-cred")
         finally:
             manager.close_all()
+            runtime.close_all()
         self.assertNotIn(token, result["reply"])
         self.assertIn("redacted", result["reply"].lower())
 
@@ -233,14 +244,15 @@ class SanitizeFinalResponseUnitTests(unittest.TestCase):
 
 class PlainChatUnaffectedTests(unittest.TestCase):
     def test_plain_chat_without_tools_is_unaffected(self):
-        reg, manager = _stack()
+        reg, manager, runtime = _stack()
         outputs = [_final("Dhaka is the capital of Bangladesh.")]
-        pipe, gw, rt = _pipeline(outputs, reg, manager)
+        pipe, gw, rt = _pipeline(outputs, reg, manager, runtime)
         try:
             result = pipe.run("What is the capital of Bangladesh?",
                               conversation_id="c-plain")
         finally:
             manager.close_all()
+            runtime.close_all()
         self.assertTrue(result["ok"])
         self.assertIn("Dhaka", result["reply"])
 

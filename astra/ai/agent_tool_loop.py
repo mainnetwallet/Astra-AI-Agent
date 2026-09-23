@@ -69,7 +69,7 @@ When the task is done, reply with:
 Rules:
 - Choose the NEXT action yourself; there is no fixed sequence. Inspect before editing, and test after editing.
 - A failed command is not fatal: its structured result (status, exit_code, stdout/stderr) is given back to you — read it, fix the cause, and try again.
-- Prefer the terminal for shell/git/test work and the file tools for reading/editing files.
+- Shell/git/test/package work runs INSIDE the isolated Agent Runtime via `runtime_command` (never a host shell); use the runtime file tools for reading/editing files.
 - Only use a tool when it is genuinely useful. If no tool is needed, answer directly in plain text (no JSON necessary).
 - Never invent tool output. Never mention this JSON action protocol, exact tool names, argument schemas, or other internal machinery in the final answer.
 - If the Gateway's execution decision (in the system prompt or the task context) says this request requires a capability, you MUST actually invoke the tool that performs it and use its real result before answering. Never reply with instructions describing how the user could do it themselves instead of doing it.
@@ -88,6 +88,12 @@ def build_tool_catalog(registry, *, categories=None, max_tools=DEFAULT_MAX_TOOLS
     lines = []
     for t in tools:
         if categories and t.get("category") not in categories:
+            continue
+        # A tool the Agent must never run (the legacy HOST terminal family)
+        # is never advertised to the model in the first place — the block is
+        # also enforced at execution time by ToolRegistry, but a model that
+        # is never told the tool exists cannot waste a step asking for it.
+        if t.get("agent_forbidden"):
             continue
         desc = " ".join(str(t.get("description") or "").split())
         if len(desc) > max_desc:
@@ -147,7 +153,7 @@ def _parse_action(text: str):
 
         I'll clone that repository for you.
 
-        {"action": "tool", "tool": "terminal_exec", "args": {...}, ...}
+        {"action": "tool", "tool": "runtime_command", "args": {...}, ...}
 
     `loads_lenient` (imported above) already knows how to find a JSON
     object embedded anywhere in a string. The previous version of this
@@ -302,12 +308,17 @@ class ToolLoopResult:
 
 
 class AgentToolLoop:
-    def __init__(self, registry, *, terminal=None, events=None,
+    def __init__(self, registry, *, terminal=None, runtime=None, events=None,
                  max_steps: int = DEFAULT_MAX_STEPS,
                  max_tool_result_chars: int | None = DEFAULT_MAX_TOOL_RESULT_CHARS,
                  execution_history: AgentExecutionHistory | None = None):
         self.registry = registry
         self.terminal = terminal
+        # The isolated Agent Runtime the loop's shell work executes in.
+        # Passing it (plus the conversation session id) is what keeps an
+        # Agent's `runtime_command` on the SAME PTY the Astra Agent Terminal
+        # opens — and why the loop never needs the HOST terminal.
+        self.runtime = runtime
         self.events = events
         self.max_steps = max(1, int(max_steps))
         self.max_tool_result_chars = (None if max_tool_result_chars is None
@@ -372,8 +383,16 @@ class AgentToolLoop:
         ctx = ToolContext(registry=self.registry, events=self.events,
                           terminal=self.terminal,
                           terminal_session_id=session_id,
+                          runtime=self.runtime,
+                          runtime_session_id=session_id,
                           execution_history=self.execution_history,
-                          execution_scope=scope)
+                          execution_scope=scope,
+                          # Structural marker: this is Agent execution, so
+                          # ToolRegistry refuses every `agent_forbidden` tool
+                          # (the legacy HOST terminal) no matter what the
+                          # model calls. Agent work runs in the isolated
+                          # runtime only.
+                          agent_execution=True)
         op = new_op_id()
         # The loop's own start, so its terminal event can report a real
         # duration (sub-second accurate) instead of the row inheriting a

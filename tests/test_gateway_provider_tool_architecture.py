@@ -37,7 +37,7 @@ from astra.ai.gateway import AstraAIGateway
 from astra.ai.router import AstraRouter, RoutingRequest, RoutingResult
 from astra.core.exceptions import ProviderError
 from astra.store import Store
-from tests.helpers import ScriptedBrain, make_stack
+from tests.helpers import LocalRuntimeStub, ScriptedBrain, make_stack
 
 # A synthetic, deliberately NON-real credential for the redaction test.
 FAKE_TOKEN = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
@@ -61,7 +61,7 @@ def verdict(v="complete", missing=(), action="fix", instructions=""):
                        "action": action, "instructions": instructions})
 
 
-def tool_call(command, tool="terminal_exec", **args):
+def tool_call(command, tool="runtime_command", **args):
     payload = {"command": command}
     payload.update(args)
     return json.dumps({"action": "tool", "tool": tool, "args": payload,
@@ -79,6 +79,13 @@ class Harness:
                  brain="provider"):
         self.stack = make_stack()
         self.pipeline = self.stack["chat_pipeline"]
+        # The Agent's shell work runs in the isolated Agent Runtime. Point
+        # the pipeline at a LOCAL runtime stub so these architecture tests
+        # exercise the real loop/registry/runtime-tool code without booting
+        # proot for every command; real isolation is covered by
+        # tests/test_runtime.py.
+        self.runtime = LocalRuntimeStub(events=self.stack["events"])
+        self.pipeline.runtime = self.runtime
         # Pin the brain mode so the test is independent of the ambient .env.
         self.pipeline.agent_brain = brain
         self.registry = self.stack["registry"]
@@ -294,7 +301,7 @@ class RealToolExecutionTests(unittest.TestCase):
             [final("nothing to do")])
         h.run("run it")
         system = h.brain.calls[0][0]["content"]
-        self.assertIn("terminal_exec", system)          # exact tool name
+        self.assertIn("runtime_command", system)       # exact tool name
         self.assertIn("args: {", system)                # real arg schema
         self.assertIn("command:string", system)
 
@@ -333,7 +340,7 @@ class VerificationUsesExecutionEvidenceTests(unittest.TestCase):
         self.assertEqual(out["data"]["verification"]["status"], "COMPLETE")
         self.assertGreaterEqual(out["data"]["verification"]["attempts"], 1)
         # the correction round was a real tool loop, not a plain re-prompt
-        self.assertIn("terminal_exec", h.brain.calls[1][0]["content"])
+        self.assertIn("runtime_command", h.brain.calls[1][0]["content"])
 
     def test_execution_task_is_not_complete_without_real_evidence(self):
         h = Harness(
@@ -378,12 +385,12 @@ class FailoverTests(unittest.TestCase):
     def test_execution_intent_and_tool_catalog_survive_provider_failover(self):
         from astra.ai.agent_tool_loop import TOOL_PROTOCOL, build_tool_catalog
         from astra.core.permissions import Policy
-        from astra.terminal import TerminalManager, register_terminal_tools
+        from astra.runtime.tools import register_runtime_tools
         from astra.tools.registry import ToolRegistry
         registry = ToolRegistry(policy=Policy(granted=["system_action"]))
-        manager = TerminalManager()
-        register_terminal_tools(registry, manager)
-        self.addCleanup(manager.close_all)
+        runtime = LocalRuntimeStub()
+        register_runtime_tools(registry, runtime)
+        self.addCleanup(runtime.close_all)
         catalog = build_tool_catalog(registry)
         bad = self._RecordingProvider("gemini", ["model-a"], fail=True)
         good = self._RecordingProvider("groq", ["model-b"])
@@ -406,7 +413,7 @@ class FailoverTests(unittest.TestCase):
         seen = json.dumps(good.messages_seen[0])
         self.assertIn("Gateway execution decision", seen)
         self.assertIn("Required capability: terminal", seen)
-        self.assertIn("terminal_exec", seen)
+        self.assertIn("runtime_command", seen)
 
 
 class BrainModeTests(unittest.TestCase):
@@ -434,7 +441,7 @@ class BrainModeTests(unittest.TestCase):
         # the Gateway drove the loop with the SAME tool protocol catalog
         loop_system = next(m["content"] for m in h.gateway_calls[1]["messages"]
                            if m["role"] == "system")
-        self.assertIn("terminal_exec", loop_system)
+        self.assertIn("runtime_command", loop_system)
         self.assertEqual(h.gateway_calls[1]["category"], "tool_use")
 
 
@@ -449,7 +456,7 @@ class AdapterPayloadTests(unittest.TestCase):
                                               ProviderToolCaller)
         from astra.ai.router import AstraRouter
         from astra.core.permissions import Policy
-        from astra.terminal import TerminalManager, register_terminal_tools
+        from astra.runtime.tools import register_runtime_tools
         from astra.tools.registry import ToolRegistry
 
         class _CaptureAdapter(CompatibleAdapter):
@@ -483,9 +490,9 @@ class AdapterPayloadTests(unittest.TestCase):
                         "usage": {}}
 
         registry = ToolRegistry(policy=Policy(granted=["system_action"]))
-        manager = TerminalManager()
-        register_terminal_tools(registry, manager)
-        self.addCleanup(manager.close_all)
+        runtime = LocalRuntimeStub()
+        register_runtime_tools(registry, runtime)
+        self.addCleanup(runtime.close_all)
 
         adapter = _CaptureAdapter([tool_call("echo adapter-trace"),
                                    final("adapter done")])
@@ -496,7 +503,7 @@ class AdapterPayloadTests(unittest.TestCase):
             "(authoritative — this request REQUIRES real tool execution "
             "before you answer):\n- Required capability: terminal "
             "(available in this runtime).\n- Actually perform the action.")
-        loop = AgentToolLoop(registry, terminal=manager)
+        loop = AgentToolLoop(registry, runtime=runtime)
         res = loop.run("clone the repo", ProviderToolCaller(
             router, task_type="simple_chat"), system_prompt=system_prompt,
             history=[{"role": "user", "content": "earlier turn"}])
@@ -510,7 +517,7 @@ class AdapterPayloadTests(unittest.TestCase):
         self.assertIn("Runtime capability catalog", system)
         self.assertIn("Gateway execution decision", system)
         self.assertIn("Required capability: terminal", system)
-        self.assertIn("terminal_exec", system)
+        self.assertIn("runtime_command", system)
         self.assertIn("command:string", system)
         # conversation history is intact in the actual request body
         self.assertIn({"role": "user", "content": "earlier turn"}, first)

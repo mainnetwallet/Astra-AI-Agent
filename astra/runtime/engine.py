@@ -59,8 +59,43 @@ GUEST_SHELL = "/bin/bash"
 
 # The PATH a guest process sees. Note this is the *guest* path: it resolves
 # inside the rootfs, never to Termux's /data/data/com.termux/files/usr.
+#
+# The two trailing entries are the per-runtime USER-SCOPE install targets
+# (`HOME` is bound to this runtime's own directory), which is what makes a
+# `pip install --user` / `npm install -g` in runtime A invisible to runtime
+# B while the multi-GB distro rootfs stays shared — see `_user_scope_env`.
 GUEST_PATH = ("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:"
-              "/sbin:/bin")
+              "/sbin:/bin:/root/.local/bin:/root/.npm-global/bin")
+
+
+def _user_scope_env() -> dict:
+    """Environment that redirects every user-scope package manager into
+    THIS runtime's private `$HOME`.
+
+    `HOME` (`/root`) is bound to `<runtime_dir>/root`, a directory only this
+    runtime owns. Pointing pip / npm / cargo / go / gem / XDG at paths under
+    it means a package installed inside one runtime lands in that runtime's
+    own writable state and is invisible to every other runtime — even though
+    the read-only-ish distro rootfs is shared. System-level installs
+    (`apt`, `apk`) still write to the shared rootfs; set
+    `RUNTIME_ROOTFS_MODE=copy` for a fully private rootfs.
+    """
+    return {
+        "PIP_USER": "1",
+        "PYTHONUSERBASE": f"{GUEST_HOME}/.local",
+        "PIP_CACHE_DIR": f"{GUEST_HOME}/.cache/pip",
+        "NPM_CONFIG_PREFIX": f"{GUEST_HOME}/.npm-global",
+        "npm_config_prefix": f"{GUEST_HOME}/.npm-global",
+        "NPM_CONFIG_CACHE": f"{GUEST_HOME}/.npm",
+        "npm_config_cache": f"{GUEST_HOME}/.npm",
+        "NODE_PATH": f"{GUEST_HOME}/.npm-global/lib/node_modules",
+        "CARGO_HOME": f"{GUEST_HOME}/.cargo",
+        "GOPATH": f"{GUEST_HOME}/go",
+        "GEM_HOME": f"{GUEST_HOME}/.gem",
+        "XDG_DATA_HOME": f"{GUEST_HOME}/.local/share",
+        "XDG_CONFIG_HOME": f"{GUEST_HOME}/.config",
+        "XDG_CACHE_HOME": f"{GUEST_HOME}/.cache",
+    }
 
 DEFAULT_CONTAINER = "ubuntu"
 
@@ -210,6 +245,8 @@ class RuntimeEngine:
             "LC_ALL": "C.UTF-8",
             "PS1": "\\u@astra:\\w\\$ ",
         }
+        # Per-runtime writable package state (see `_user_scope_env`).
+        child_env.update(_user_scope_env())
         for key, value in (env or {}).items():
             child_env[str(key)] = str(value)
 

@@ -826,20 +826,24 @@ class GatewayIntegrationTests(unittest.TestCase):
     def test_tool_loop_still_executes_tools_when_the_gateway_works(self):
         from astra.ai.agent_tool_loop import AgentToolLoop, GatewayToolCaller
         from astra.core.permissions import Policy
+        from astra.runtime.tools import register_runtime_tools
         from astra.terminal import TerminalManager, register_terminal_tools
         from astra.tools.registry import ToolRegistry
+        from tests.helpers import LocalRuntimeStub
 
         reg = ToolRegistry(policy=Policy(granted=["read", "system_action"]))
         mgr = TerminalManager()
         register_terminal_tools(reg, mgr)
+        runtime = LocalRuntimeStub()
+        register_runtime_tools(reg, runtime)
         conn = _conn(AstraGatewayOpenRouter, _cfg())
         gateway = AstraAIGateway(connections=[conn])
-        loop = AgentToolLoop(reg, terminal=mgr, max_steps=3)
+        loop = AgentToolLoop(reg, terminal=mgr, runtime=runtime, max_steps=3)
         # The Gateway connection IS the loop's brain here, so the mocked
         # upstream must speak the loop's tool protocol.
         side, _seen = _capture([
             _resp(_openai_body(json.dumps({
-                "action": "tool", "tool": "terminal_exec",
+                "action": "tool", "tool": "runtime_command",
                 "args": {"command": "echo loop-ok"}, "thought": "run"}))),
             _resp(_openai_body(json.dumps({"action": "final", "answer": "done"}))),
         ])
@@ -850,6 +854,7 @@ class GatewayIntegrationTests(unittest.TestCase):
         self.assertEqual(res.tool_calls, 1)
         self.assertIn("loop-ok", json.dumps([s.result for s in res.steps], default=str))
         mgr.close_all()
+        runtime.close_all()
 
     def test_gateway_connections_are_not_providers(self):
         from astra.ai.registry import build_providers

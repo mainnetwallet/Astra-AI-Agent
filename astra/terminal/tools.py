@@ -290,6 +290,15 @@ def register_terminal_tools(reg, manager) -> int:
             risk=TERMINAL_RISK,
             requires_confirmation=False,
             idempotent=name in _IDEMPOTENT,
+            # These tools execute on the HOST (Termux/Windows) shell. They
+            # are kept for trusted Astra internals/diagnostics and the web
+            # operator surface, but they are structurally unavailable to
+            # Agent/Provider/workflow execution: astra.tools.registry
+            # refuses them when ctx.agent_execution is set, and
+            # build_tool_catalog never advertises them to a model. Agent
+            # work runs in the isolated Agent Runtime (`runtime_command`)
+            # instead — there is no host fallback.
+            agent_forbidden=True,
             plugin="core"))
     return len(TERMINAL_TOOLS)
 

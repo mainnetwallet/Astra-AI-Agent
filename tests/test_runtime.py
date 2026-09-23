@@ -105,8 +105,16 @@ class TestRuntimeEngine(unittest.TestCase):
         self.assertIn(f"--bind={ws}:{GUEST_WORKSPACE}", argv)
         self.assertIn("--change-id=0:0", argv)
         self.assertIn("--rootfs=" + engine.base_rootfs(), argv)
-        self.assertIn("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:"
-                      "/sbin:/bin", argv)
+        # The guest PATH is the system path plus this runtime's private
+        # user-scope install targets (/root is bound per-runtime), and it
+        # never contains the host Termux prefix.
+        path_arg = next(a for a in argv if a.startswith("PATH="))
+        self.assertTrue(
+            path_arg.startswith("PATH=/usr/local/sbin:/usr/local/bin:"
+                                "/usr/sbin:/usr/bin:/sbin:/bin"),
+            path_arg)
+        self.assertIn("/root/.local/bin", path_arg)
+        self.assertNotIn("/data/data/com.termux", path_arg)
         shutil.rmtree(root, ignore_errors=True)
 
     def test_argv_does_not_inherit_host_environment(self):
@@ -120,6 +128,39 @@ class TestRuntimeEngine(unittest.TestCase):
         finally:
             os.environ.pop("ASTRA_HOST_SECRET_XYZ", None)
         self.assertNotIn("ASTRA_HOST_SECRET_XYZ=leak", argv)
+
+    def test_user_scope_env_keeps_package_state_per_runtime(self):
+        """PIP_USER / NPM_CONFIG_PREFIX / CARGO_HOME … all resolve under the
+        guest HOME, which is bound to THIS runtime's own `<runtime>/root`
+        directory — so a user-scope install lands in private state even
+        though the distro rootfs itself is shared (spec §15)."""
+        from astra.runtime.engine import GUEST_HOME, _user_scope_env
+        env = _user_scope_env()
+        self.assertEqual(env["PIP_USER"], "1")
+        for key in ("PYTHONUSERBASE", "PIP_CACHE_DIR", "NPM_CONFIG_PREFIX",
+                    "NPM_CONFIG_CACHE", "NODE_PATH", "CARGO_HOME", "GOPATH",
+                    "GEM_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+                    "XDG_CACHE_HOME"):
+            self.assertTrue(
+                env[key].startswith(GUEST_HOME + "/"),
+                msg=f"{key} must stay inside the runtime home: {env[key]}")
+        engine = RuntimeEngine()
+        if not engine.available():
+            self.skipTest("runtime unavailable")
+        root = _tmpdir()
+        try:
+            argv = engine.build_argv(binds=[(root, GUEST_WORKSPACE)],
+                                     cwd=GUEST_WORKSPACE)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        # The private package env is on the real child environment…
+        self.assertIn("PIP_USER=1", argv)
+        self.assertIn(f"NPM_CONFIG_PREFIX={GUEST_HOME}/.npm-global", argv)
+        self.assertIn(f"PYTHONUSERBASE={GUEST_HOME}/.local", argv)
+        # …and the private user-scope bin dirs are on the guest PATH.
+        path_arg = next(a for a in argv if a.startswith("PATH="))
+        self.assertIn(f"{GUEST_HOME}/.local/bin", path_arg)
+        self.assertIn(f"{GUEST_HOME}/.npm-global/bin", path_arg)
 
 
 # ── unit: files ─────────────────────────────────────────────────────────────
@@ -480,6 +521,66 @@ class TestRuntimeExecution(unittest.TestCase):
             self.assertIn(expected, bus.kinds, msg=expected)
         rt.close_all()
         shutil.rmtree(base, ignore_errors=True)
+
+
+@needs_runtime
+class TestPerRuntimeIsolation(unittest.TestCase):
+    """Spec §15: every runtime owns private writable state. Runtime A's
+    files and user-scope packages are invisible to runtime B, while a
+    restart of A preserves them."""
+
+    def setUp(self):
+        self.base = _tmpdir()
+        self.mgr = RuntimeManager(base_dir=self.base)
+        self.a = self.mgr.get("A")
+        self.b = self.mgr.get("B")
+        self.a.start()
+        self.b.start()
+
+    def tearDown(self):
+        self.mgr.close_all()
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_workspaces_and_writes_are_private(self):
+        self.a.write_file("/workspace/proj/marker_a.txt", "A")
+        own = self.a.exec_command("cat /workspace/proj/marker_a.txt",
+                                  session_id="a")
+        self.assertIn("A", own["stdout"])
+        seen = self.b.exec_command(
+            "test -e /workspace/proj/marker_a.txt && echo VISIBLE || echo ABSENT",
+            session_id="b")
+        self.assertIn("ABSENT", seen["stdout"])
+        self.b.exec_command(
+            "mkdir -p /workspace/proj && echo B > /workspace/proj/marker_b.txt",
+            session_id="b")
+        back = self.a.exec_command(
+            "test -e /workspace/proj/marker_b.txt && echo LEAK || echo NO_LEAK",
+            session_id="a")
+        self.assertIn("NO_LEAK", back["stdout"])
+
+    def test_user_scope_install_is_private_and_survives_restart(self):
+        managers = self.a.package_managers(refresh=True)
+        if not any(m in managers for m in ("pip", "pip3", "python3")):
+            self.skipTest("pip unavailable in the runtime rootfs")
+        result = self.a.package_install(ecosystem="pip", packages=["cowsay"])
+        if not result.get("installed"):
+            self.skipTest("no network for pip inside the runtime")
+        self.assertTrue(result["verified"], result.get("error"))
+        # It landed in A's PRIVATE home, not the shared distro site-packages.
+        where = self.a.exec_command(
+            "python3 -c 'import cowsay; print(cowsay.__file__)'",
+            session_id="p")
+        self.assertIn("/root/.local", where["stdout"])
+        # A restart of A keeps it…
+        self.a.restart()
+        again = self.a.exec_command(
+            "python3 -c 'import cowsay; print(\"SURVIVED\")'", session_id="p")
+        self.assertIn("SURVIVED", again["stdout"])
+        # …and B, a different runtime, does not see it.
+        other = self.b.exec_command(
+            "python3 -c 'import cowsay' 2>&1 | tail -1", session_id="p")
+        self.assertNotIn("SURVIVED", other["stdout"])
+        self.assertIn("ModuleNotFoundError", other["stdout"])
 
 
 # ── unit: web layer contract ────────────────────────────────────────────────

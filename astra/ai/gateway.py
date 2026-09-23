@@ -1472,7 +1472,8 @@ class AstraAIGateway:
 
     # -- shared agent tool loop (Gateway as the driving brain) ---------------
     def run_tool_loop(self, task, *, registry, system_prompt="", history=None,
-                      context_blocks=None, terminal=None, session_id=None,
+                      context_blocks=None, terminal=None, runtime=None,
+                      session_id=None,
                       scope=None, execution_history=None,
                       max_steps: int = 8, max_tokens: int | None = None,
                       trace: str = ""):
@@ -1483,7 +1484,8 @@ class AstraAIGateway:
 
         Returns an `astra.ai.agent_tool_loop.ToolLoopResult`."""
         from astra.ai.agent_tool_loop import AgentToolLoop, GatewayToolCaller
-        loop = AgentToolLoop(registry, terminal=terminal, events=self.events,
+        loop = AgentToolLoop(registry, terminal=terminal, runtime=runtime,
+                             events=self.events,
                              max_steps=max_steps,
                              execution_history=execution_history)
         return loop.run(task, GatewayToolCaller(self),

@@ -141,7 +141,12 @@ class RealBootstrapCapabilityCatalogTests(unittest.TestCase):
         # invoking a tool is built from the identical registry (never a
         # separate/stale one).
         internal_catalog = build_tool_catalog(stack["registry"])
-        self.assertIn("terminal_exec", internal_catalog)
+        # The Agent's shell surface is the isolated runtime; the legacy HOST
+        # terminal tools are never advertised to a model that drives Agent
+        # execution (and are blocked at execution — see
+        # tests/test_host_terminal_block.py).
+        self.assertIn("runtime_command", internal_catalog)
+        self.assertNotIn("terminal_exec", internal_catalog)
 
     def test_final_reply_never_leaks_the_runtime_catalog_or_protocol(self):
         stack = make_stack()

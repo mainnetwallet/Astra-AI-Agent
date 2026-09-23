@@ -840,6 +840,11 @@
     const apply = () => {
       const root = paneEl();
       const vv = window.visualViewport;
+      if (root) {
+        // distance from the window top to the terminal (site header height)
+        root.style.setProperty("--at-off",
+          Math.round(root.getBoundingClientRect().top + window.scrollY) + "px");
+      }
       if (root && vv && vv.height) {
         // The software keyboard shrinks the visual viewport; pin the
         // terminal to it so no output hides behind the keyboard and xterm

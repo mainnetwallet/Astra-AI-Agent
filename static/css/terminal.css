@@ -302,6 +302,20 @@
 .at-danger { border-color: #4a2327; color: #ffb3b8; }
 .at-hidden { display: none !important; }
 
+/* ------------------------------- desktop --------------------------------
+ * Real desktop only (wide + fine pointer): drop the page padding / 1080px
+ * column, exactly like Agent Workflow does, so the terminal top bar
+ * (>_ Astra Agent Terminal | Terminal 1 x) sits flush under the site header
+ * and the pane uses the whole window. Mobile rules below are untouched. */
+@media (min-width: 821px) and (pointer: fine) {
+  #view:has(#tab-terminal.active) { max-width: none; margin: 0; padding: 0; }
+  #tab-terminal.at-app {
+    height: calc(100vh - var(--at-off, 50px));
+    border-radius: 0;
+    border-width: 0;
+  }
+}
+
 /* -------------------------------- mobile --------------------------------- */
 @media (max-width: 820px), (pointer: coarse) {
   .at-app {

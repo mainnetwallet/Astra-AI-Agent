@@ -17,11 +17,13 @@ package managers, processes and PTY sessions.
 
 Two rules are absolute:
 
-1. **Agent work never runs on the host.** There is no host-shell fallback
-   anywhere in `astra/runtime/`.
+1. **Agent work never *silently* runs on the host.** The runtime is always
+   the first and default execution environment. The only host-execution
+   path is a scoped, user-approved fallback (§8.1) — never a silent
+   downgrade, and never a fallback because the runtime failed.
 2. **If the runtime is unavailable, it fails closed.** `runtime_start` and
    every execution tool raise `AstraRuntimeUnavailable`; the UI shows
-   "Agent Runtime unavailable"; nothing silently downgrades to the host.
+   "Agent Runtime unavailable"; nothing downgrades to the host on its own.
 
 ---
 
@@ -291,6 +293,49 @@ the model can read (`Decision: blocked`), no host process is started, and
 `build_tool_catalog` never advertises a host tool to a model at all.
 Regression coverage: `tests/test_host_terminal_block.py`.
 
+### Host fallback — approval-gated, inside the Assistant Chat
+
+The runtime is the primary environment and needs no permission. A host
+command is possible *only* as an explicit, user-approved fallback:
+
+```
+AgentToolLoop -> HostTerminalFallback -> ApprovalManager
+              -> Assistant-Chat approval -> trusted terminal_exec
+```
+
+There is deliberately **no** `AgentToolLoop -> terminal_exec` edge. The raw
+host tools stay `agent_forbidden`; the Agent's only host surface is the
+`host_terminal_request` tool (`astra/terminal/fallback.py`), which executes
+**nothing** — it records a scoped approval and returns `approval_required`.
+`ApprovalManager` (`astra/terminal/approval.py`) is the ONE place that runs
+a host command, and only after the user selects **Allow**.
+
+* **Scoped, not a global switch.** An approval binds one conversation, one
+  request/operation, the *exact* command and its cwd. `decide()` runs the
+  command stored on the request — a different command or cwd can never ride
+  an existing approval.
+* **Exactly once.** The `pending → approved` transition is the execution
+  claim, taken under a lock, so a double click, a page refresh, an SSE
+  reconnect or a retried request resolves to one execution.
+* **Deny (and expiry) never run.** A denied or expired approval executes
+  nothing; the Agent is told, and continues in the runtime where it can.
+* **The decision lives in the Assistant Chat only.** The card shows the
+  exact command, cwd, reason and a HOST-execution warning with Deny/Allow.
+  The Astra Agent Terminal never shows approval UI — it stays a pure
+  terminal. The final decision is written back into the card so a reloaded
+  chat shows the resolved state.
+* **No blocking thread.** A pending approval pauses the *logical* operation
+  and resumes it (preserving conversation history, runtime session,
+  execution scope and request/trace/op ids) when the user decides.
+
+API (existing auth/session/security): `POST /api/terminal/approval` creates
+a scoped request; `GET /api/terminal/approval/<id>` reads it; `GET
+/api/terminal/approvals` lists pending ones; `POST
+/api/terminal/approval/<id>` with `{"decision":"allow"|"deny"}` resolves it.
+The approval card expires after `HOST_APPROVAL_TTL_S` (default 900s).
+
+Regression coverage: `tests/test_host_fallback_approval.py`.
+
 ---
 
 ## 9. Events
@@ -310,10 +355,16 @@ runtime.archive.extract.started  runtime.archive.extract.completed
 runtime.archive.extract.failed
 terminal.started  terminal.command.started  terminal.completed
 terminal.failed   terminal.stopped
+host_terminal.approval_requested  host_terminal.approval_allowed
+host_terminal.approval_denied     host_terminal.approval_expired
+host_terminal.started  host_terminal.completed  host_terminal.failed
 ```
 
 Large output is never put in an event; the Activity Log stays bounded while
-the full stream lives in the BlobStore.
+the full stream lives in the BlobStore. Runtime execution events carry
+`environment="agent_runtime"`; approved host execution carries
+`environment="host"` plus its `approval_id` — so the two can never be
+confused, and an unapproved host command has no events at all.
 
 ---
 
@@ -380,3 +431,8 @@ contract is `tests/js/terminal_assets.test.js` (`node --test tests/js/`).
   model, and hard-blocked in `ToolRegistry.execute` for any Agent,
   Provider or workflow call (see §8). Agent *work* uses the runtime tools
   (`runtime_command`, `runtime_package_install`, …).
+* **Host-fallback approvals are in-process.** Pending approvals live in
+  memory (bounded, TTL-limited). A server restart drops a still-pending
+  card — which is safe: an approval that is gone can never execute, and the
+  user simply asks again. The *final* decision is persisted into the chat
+  transcript, so a resolved card survives a reload.

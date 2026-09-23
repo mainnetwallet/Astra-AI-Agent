@@ -10,6 +10,11 @@ from astra.terminal.session import (COMPLETED, FAILED, RUNNING, STOPPED,
                                     TIMEOUT, TerminalSession, detect_platform,
                                     detect_shell)
 from astra.terminal.tools import register_terminal_tools
+# The approval-gated HOST fallback: the ONE path an Agent may take to a host
+# command, and only after the user allows it in the Assistant Chat. See
+# astra/terminal/approval.py + astra/terminal/fallback.py. Kept out of this
+# module's import graph on purpose — bootstrap imports them explicitly so
+# `astra.terminal` stays cheap for the host terminal itself.
 
 __all__ = [
     "TerminalManager", "TerminalSession", "register_terminal_tools",
@@ -17,3 +22,4 @@ __all__ = [
     "DEFAULT_SESSION_ID", "RUNNING", "COMPLETED", "FAILED", "STOPPED",
     "TIMEOUT",
 ]
+

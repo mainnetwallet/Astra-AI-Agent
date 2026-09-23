@@ -182,6 +182,67 @@ def collect_runtime_capabilities(registry) -> RuntimeCapabilities:
     return RuntimeCapabilities(tuple(sorted(counts)), "\n".join(lines))
 
 
+# ── execution policy (§10-§13) ──────────────────────────────────────────────
+# The permanent terminal-execution priority, stated as a live block (never
+# baked into the static Core prompt with dynamic data). Both the Gateway's
+# UNDERSTAND call and every Provider call receive it, so neither can be
+# unaware of the policy or of the current state of the fallback.
+EXECUTION_POLICY_HEADER = "Terminal execution policy (authoritative):"
+
+
+def execution_policy_block(*, runtime_available: bool = True,
+                           runtime_status: str = "",
+                           runtime_id: str = "",
+                           session_id: str = "",
+                           cwd: str = "",
+                           host_fallback_available: bool = False,
+                           host_fallback_reason: str = "",
+                           pending_approvals: str = "") -> str:
+    """The PRIMARY / FALLBACK / HOST-FALLBACK policy + its LIVE state.
+
+    Pure and stateless: the caller passes what is actually true right now
+    (never a cached guess), so the block can never claim the Agent Runtime
+    is unavailable while it is available.
+    """
+    lines = [EXECUTION_POLICY_HEADER,
+             "1. PRIMARY — Astra Agent Runtime (isolated environment). Use "
+             "it first for every request it can perform. It requires NO user "
+             "permission."]
+    if runtime_available:
+        state = runtime_status or "available"
+        detail = f" (runtime={runtime_id})" if runtime_id else ""
+        lines.append(f"   - Live: Agent Runtime is AVAILABLE, state={state}"
+                     f"{detail}. Prefer it; never describe it as unavailable.")
+    else:
+        reason = f": {host_fallback_reason}" if host_fallback_reason else ""
+        lines.append("   - Live: the Agent Runtime is NOT available in this "
+                     f"runtime right now{reason}. Tell the user plainly; do "
+                     "not pretend it worked and do not silently move to the "
+                     "host.")
+    if session_id or cwd:
+        lines.append(f"   - This conversation's session={session_id} "
+                     f"cwd={cwd or '(default)'}")
+    # 2. FALLBACK + 3. the approval rule.
+    if host_fallback_available:
+        lines.append("2. FALLBACK — HOST terminal. Available, but ONLY after "
+                     "the user explicitly allows that exact command in the "
+                     "Assistant Chat. A runtime failure never authorises it.")
+    else:
+        lines.append("2. FALLBACK — HOST terminal: not available in this "
+                     "runtime. Do not offer or attempt host execution.")
+    lines.append("3. Approvals: never assume approval, never execute a host "
+                 "command before the user selects Allow, and never execute "
+                 "one they denied. If the Runtime genuinely cannot perform "
+                 "the operation, ask for approval with "
+                 "`host_terminal_request` (exact command + cwd + why), then "
+                 "stop and tell the user the approval is waiting in the chat.")
+    if pending_approvals:
+        lines.append("4. Pending approvals in this conversation:")
+        for line in str(pending_approvals).splitlines():
+            lines.append("   " + line)
+    return "\n".join(lines)
+
+
 def build_capability_context(registry) -> str:
     """A short, deterministic, human-facing block naming the tool
     CATEGORIES actually registered on `registry` right now.

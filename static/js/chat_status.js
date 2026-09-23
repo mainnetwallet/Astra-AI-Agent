@@ -802,7 +802,10 @@
   // introspect other operations, or are pure bookkeeping). Terminal EXECUTION
   // tools (exec/start) are cards; terminal *status* tools are not — the card
   // for the process they name already exists.
-  var CARD_SKIP = /^(recall|remember|search_memory|create_task|list_tasks|update_task|get_health|list_tools|check_health|execution_history_read|terminal_status|terminal_history|terminal_history_read|terminal_sessions|terminal_output_read|terminal_stop|terminal_kill|runtime_status|runtime_package_manager_detect|list_workflows|ai_generate)$/;
+  // `host_terminal_request` executes NOTHING — it only records an approval
+  // request (the Allow/Deny card is rendered by the chat, not a terminal
+  // execution card), so it must not open one.
+  var CARD_SKIP = /^(recall|remember|search_memory|create_task|list_tasks|update_task|get_health|list_tools|check_health|execution_history_read|terminal_status|terminal_history|terminal_history_read|terminal_sessions|terminal_output_read|terminal_stop|terminal_kill|runtime_status|runtime_package_manager_detect|list_workflows|ai_generate|host_terminal_request)$/;
   // Only the tools that really spawn a command open a "pending" card that the
   // following terminal.started attaches to. `runtime_command` is the Agent's
   // shell surface — it runs a real command in the isolated Agent Runtime and

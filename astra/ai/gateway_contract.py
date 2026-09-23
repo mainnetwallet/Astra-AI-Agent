@@ -67,6 +67,15 @@ _CANONICAL_TO_CATEGORY = {
     "tool": TOOL_UNSUPPORTED,
 }
 
+# §10 execution environments. The isolated Agent Runtime is the primary
+# environment and needs no permission; the host terminal is an
+# approval-gated fallback only.
+ENVIRONMENT_RUNTIME = "agent_runtime"
+ENVIRONMENT_HOST_FALLBACK = "host_fallback"
+ENVIRONMENTS = (ENVIRONMENT_RUNTIME, ENVIRONMENT_HOST_FALLBACK)
+# Assistant-Chat decision capability a host-fallback request is gated on.
+APPROVAL_CAPABILITY = "host_terminal_approval"
+
 # Non-retryable §7 categories: never blindly backoff-retried (mirrors
 # classification.NON_RETRYABLE's intent for the recovery-target vocabulary).
 NON_RETRYABLE_CATEGORIES = frozenset({AUTH_FAILURE, INVALID_REQUEST})
@@ -170,7 +179,19 @@ class ProviderExecutionDecision:
     the Provider to re-guess:
 
         {"required": true, "capability": "terminal",
+         "environment": "agent_runtime",
          "intent": "clone the requested repository"}
+
+    Execution priority (§10) is fixed: the isolated **Agent Runtime** is the
+    primary environment and needs NO permission. The **host** terminal is a
+    fallback ONLY, and a host command runs only after the user explicitly
+    allows that exact command in the Assistant Chat — so a fallback decision
+    carries `environment="host_fallback"` + `approval_required=true`, and
+    the Gateway itself never executes a host command:
+
+        {"required": true, "capability": "terminal",
+         "environment": "host_fallback", "approval_required": true,
+         "reason": "Agent Runtime cannot perform this operation"}
 
     Rules enforced by `normalized()` (never trust an unverified model claim):
 
@@ -179,6 +200,11 @@ class ProviderExecutionDecision:
         invented — see `astra.ai.capability_context`.
       - If the runtime has no tool capability at all, `required` is forced
         False: the Gateway may not demand execution that cannot happen.
+      - `environment` is kept ONLY when it is one of the two real values;
+        an unknown/blank value degrades to `agent_runtime` (the primary).
+        `host_fallback` is additionally dropped back to `agent_runtime`
+        when no approval-gated host fallback actually exists in this
+        runtime, so a model cannot demand an environment that is not there.
 
     Backward compatible by design: an older/simpler Gateway reply with no
     `execution` object yields the default (`required=False`), which is
@@ -188,15 +214,25 @@ class ProviderExecutionDecision:
     capability: str = ""
     intent: str = ""
     reason: str = ""
+    # "agent_runtime" (primary, no permission) | "host_fallback" (needs the
+    # user's explicit Allow in the Assistant Chat).
+    environment: str = ENVIRONMENT_RUNTIME
+    approval_required: bool = False
 
-    def normalized(self, available_categories=()) -> "ProviderExecutionDecision":
-        """Return a copy with `capability`/`required` constrained to what the
-        live runtime can actually do. `available_categories` is an iterable
-        of live category ids (e.g. `RuntimeCapabilities.categories`)."""
+    def normalized(self, available_categories=(),
+                   host_fallback_available: bool = False
+                   ) -> "ProviderExecutionDecision":
+        """Return a copy with `capability`/`required`/`environment`
+        constrained to what the live runtime can actually do.
+        `available_categories` is an iterable of live category ids (e.g.
+        `RuntimeCapabilities.categories`); `host_fallback_available` says
+        whether an approval-gated host fallback exists at all right now."""
         live = {str(c).strip().lower() for c in (available_categories or ()) if str(c).strip()}
         cap = (self.capability or "").strip().lower()
         required = bool(self.required)
         reason = (self.reason or "").strip()
+        environ = (self.environment or "").strip().lower()
+        approval_required = bool(self.approval_required)
         if cap and cap not in live:
             # Never claim (or demand) a capability the runtime does not have.
             cap = ""
@@ -205,9 +241,26 @@ class ProviderExecutionDecision:
             reason = (reason + " " if reason else "") + (
                 "No tool capability exists in this runtime, so the Gateway "
                 "must not demand tool execution.")
-        return ProviderExecutionDecision(required=required, capability=cap,
-                                        intent=(self.intent or "").strip(),
-                                        reason=reason.strip())
+        if environ not in ENVIRONMENTS:
+            # An unknown/blank environment degrades to the PRIMARY one.
+            environ = ENVIRONMENT_RUNTIME
+        if environ == ENVIRONMENT_HOST_FALLBACK and not host_fallback_available:
+            # No approval-gated host fallback exists in this runtime: never
+            # demand one, and never execute outside the runtime.
+            environ = ENVIRONMENT_RUNTIME
+            approval_required = False
+            reason = (reason + " " if reason else "") + (
+                "No approval-gated host fallback is available in this "
+                "runtime, so execution must stay in the Agent Runtime.")
+        if environ == ENVIRONMENT_RUNTIME:
+            # The primary environment is never approval-gated.
+            approval_required = False
+        if environ == ENVIRONMENT_HOST_FALLBACK and required:
+            approval_required = True
+        return ProviderExecutionDecision(
+            required=required, capability=cap,
+            intent=(self.intent or "").strip(), reason=reason.strip(),
+            environment=environ, approval_required=approval_required)
 
     @classmethod
     def from_dict(cls, data) -> "ProviderExecutionDecision":
@@ -227,12 +280,20 @@ class ProviderExecutionDecision:
             cap = next((str(c) for c in cap if str(c).strip()), "")
         intent = data.get("intent", "")
         reason = data.get("reason", "")
+        environ = data.get("environment", "")
+        approval = data.get("approval_required", False)
+        if isinstance(approval, str):
+            approval = approval.strip().lower() in ("true", "yes", "1")
         return cls(required=bool(required), capability=str(cap or ""),
-                   intent=str(intent or ""), reason=str(reason or ""))
+                   intent=str(intent or ""), reason=str(reason or ""),
+                   environment=str(environ or ENVIRONMENT_RUNTIME),
+                   approval_required=bool(approval))
 
     def to_dict(self) -> dict:
         return {"required": self.required, "capability": self.capability,
-                "intent": self.intent, "reason": self.reason}
+                "intent": self.intent, "reason": self.reason,
+                "environment": self.environment,
+                "approval_required": self.approval_required}
 
     def context_block(self, available_categories=()) -> str:
         """The authoritative handoff text the Provider/AgentToolLoop is given
@@ -254,6 +315,20 @@ class ProviderExecutionDecision:
                 "available in this runtime.")
         if self.intent:
             lines.append(f"- What the user asked for: {self.intent}")
+        if self.environment == ENVIRONMENT_HOST_FALLBACK:
+            lines.append(
+                "- Execution environment: HOST FALLBACK. The isolated Agent "
+                "Runtime is the primary environment and has already been "
+                "tried or is genuinely unable to perform this operation. A "
+                "host command requires the user's explicit approval: call "
+                "`host_terminal_request` with the exact command (and cwd), "
+                "then STOP and tell the user an approval is waiting in the "
+                "chat. Never run a host command before that approval, and "
+                "never run one the user denied.")
+        else:
+            lines.append(
+                "- Execution environment: the isolated Agent Runtime "
+                "(primary, no permission needed).")
         lines.append(
             "- Actually perform the action with the tool(s) available to "
             "you, then report the real result. Do NOT reply with "

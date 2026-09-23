@@ -73,6 +73,7 @@ Rules:
 - Only use a tool when it is genuinely useful. If no tool is needed, answer directly in plain text (no JSON necessary).
 - Never invent tool output. Never mention this JSON action protocol, exact tool names, argument schemas, or other internal machinery in the final answer.
 - If the Gateway's execution decision (in the system prompt or the task context) says this request requires a capability, you MUST actually invoke the tool that performs it and use its real result before answering. Never reply with instructions describing how the user could do it themselves instead of doing it.
+- EXECUTION PRIORITY: the isolated Agent Runtime is the PRIMARY environment — use the runtime tools first, always, and a runtime failure is never a reason to leave it. The HOST terminal is a fallback ONLY: if (and only if) the Agent Runtime genuinely cannot perform the operation and a host command would really help, call `host_terminal_request` with the exact command, cwd and a one-line reason. That tool does NOT execute anything — it asks the user, in the Assistant Chat, to allow that exact command. After calling it, STOP and finish your turn with a short reply saying an approval is waiting in the chat; never claim the host command ran, never ask for approval twice, and never attempt a host command directly.
 - If asked what you can do or which tools/capabilities are available, that is NOT a request to invent or to stay silent: answer from the runtime capability catalog you were given (in the system prompt, above this protocol) in clean, practical, plain language — never the literal tool names in this protocol, and never a category that catalog doesn't list."""
 
 
@@ -309,11 +310,18 @@ class ToolLoopResult:
 
 class AgentToolLoop:
     def __init__(self, registry, *, terminal=None, runtime=None, events=None,
+                 approvals=None, fallback=None,
                  max_steps: int = DEFAULT_MAX_STEPS,
                  max_tool_result_chars: int | None = DEFAULT_MAX_TOOL_RESULT_CHARS,
                  execution_history: AgentExecutionHistory | None = None):
         self.registry = registry
         self.terminal = terminal
+        # The approval-gated HOST fallback (astra/terminal/fallback.py +
+        # approval.py). Handed to the tool context so an Agent can *ask* for
+        # host access through `host_terminal_request` — never through the raw
+        # host `terminal_exec`, which stays agent-forbidden.
+        self.approvals = approvals
+        self.fallback = fallback
         # The isolated Agent Runtime the loop's shell work executes in.
         # Passing it (plus the conversation session id) is what keeps an
         # Agent's `runtime_command` on the SAME PTY the Astra Agent Terminal
@@ -385,6 +393,9 @@ class AgentToolLoop:
                           terminal_session_id=session_id,
                           runtime=self.runtime,
                           runtime_session_id=session_id,
+                          approvals=self.approvals,
+                          fallback=self.fallback,
+                          request_id=trace,
                           execution_history=self.execution_history,
                           execution_scope=scope,
                           # Structural marker: this is Agent execution, so

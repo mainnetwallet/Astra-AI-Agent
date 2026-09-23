@@ -58,8 +58,11 @@ import tempfile
 
 from astra.ai.artifact_extraction import detect_output_type, extract_artifacts
 from astra.ai.capability_context import (RuntimeCapabilities,
-                                         collect_runtime_capabilities)
-from astra.ai.gateway_contract import (ProviderExecutionDecision,
+                                         collect_runtime_capabilities,
+                                         execution_policy_block)
+from astra.ai.gateway_contract import (ENVIRONMENT_HOST_FALLBACK,
+                                       ENVIRONMENT_RUNTIME,
+                                       ProviderExecutionDecision,
                                        ProviderExecutionPort,
                                        ProviderExecutionResult,
                                        ProviderExecutionTarget)
@@ -94,6 +97,20 @@ _NO_GATEWAY_CONFIGURED_MESSAGE = (
 _NO_PROVIDER_AND_GATEWAY_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI provider ba gateway-er API key set kora nei, tai reply "
     "dite parchi na."
+)
+
+# The two user-facing texts the host-terminal fallback approval card uses.
+# Kept here (not in the static Core prompt) because they describe a LIVE
+# decision, not policy.
+APPROVAL_WAITING_TEXT = (
+    "⚠ Host terminal approval is waiting in this chat.\n\n"
+    "Astra Agent Runtime could not perform this operation, so a host "
+    "command needs your explicit permission. Select **Allow** to run it "
+    "once on the HOST system, or **Deny** to keep it off the host."
+)
+APPROVAL_DENIED_TEXT = (
+    "✕ Denied — the host command was not executed. I'll continue inside "
+    "Astra Agent Runtime if that is possible."
 )
 
 MAX_TARGETS_IN_PROMPT = 60
@@ -161,23 +178,41 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "instructions telling the user how to do the task themselves, and never "
     "a description of what you decided.\n\n"
 
-    "2) DECIDE EXECUTION. Decide whether the request requires real tool "
-    "execution, and if so which capability category, and put it in the "
+    "2) DECIDE EXECUTION + ENVIRONMENT. Decide whether the request requires "
+    "real tool execution, which capability category, and — when it needs the "
+    "terminal — WHERE that execution happens. Put all of it in the "
     "`execution` object:\n"
     "   - Ordinary reasoning, chat, knowledge, explanation, writing or code "
     "generation -> \"execution\": {\"required\": false, \"capability\": "
-    "\"\", \"intent\": \"\"}.\n"
+    "\"\", \"environment\": \"agent_runtime\", \"intent\": \"\"}.\n"
     "   - A request to actually DO something in this environment (run a "
     "shell command, clone/install/build something, run tests, read or write "
     "files, browse a page, prepare a transaction, ...) -> "
     "\"execution\": {\"required\": true, \"capability\": \"<category "
-    "id>\", \"intent\": \"<one short line of what must be done>\"}.\n"
+    "id>\", \"environment\": \"agent_runtime\", \"intent\": \"<one "
+    "short line of what must be done>\"}.\n"
     "   - `capability` MUST be one of the exact category IDs the live "
     "catalog lists (e.g. \"terminal\", \"files\", \"browser\"). If the "
     "task needs a capability the catalog does NOT list, set required false, "
     "leave capability empty, and say honestly in `reason` that this runtime "
     "cannot perform it — never demand a capability this runtime does not "
     "have.\n"
+    "   - EXECUTION PRIORITY (fixed policy, not a preference): the isolated "
+    "Agent Runtime is the PRIMARY environment and requires NO user "
+    "permission. The HOST terminal is a FALLBACK ONLY, and a host command "
+    "runs only if the user explicitly allows that exact command in the "
+    "Assistant Chat. Therefore:\n"
+    "       * Default `environment` to \"agent_runtime\". Runtime failure "
+    "does NOT authorise the host — a failed command is still a runtime "
+    "command until a host-only need is proven.\n"
+    "       * Use \"environment\": \"host_fallback\" together with "
+    "\"approval_required\": true ONLY when the runtime genuinely cannot "
+    "perform the operation (for example the request is about the host "
+    "machine itself) and running it on the host would actually help; put "
+    "the reason in `reason`. Even then you do not execute it — a host "
+    "command needs the user's explicit Allow in the Assistant Chat.\n"
+    "       * Never set host_fallback merely because you are unsure, and "
+    "never as a shortcut for a runtime task.\n"
     "   - When execution is required, the Provider/AgentToolLoop is told to "
     "perform it; you must not turn the task into instructions for the user, "
     "and you must not ask the Provider merely to explain how.\n\n"
@@ -197,7 +232,8 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "\"provider\": \"...\", \"model\": \"...\", "
     "\"criteria\": [\"...\"], \"reason\": \"<one short line>\", "
     "\"execution\": {\"required\": true|false, \"capability\": \"\", "
-    "\"intent\": \"\"}}"
+    "\"environment\": \"agent_runtime\"|\"host_fallback\", "
+    "\"approval_required\": true|false, \"intent\": \"\"}}"
 )
 
 UNDERSTAND_SYSTEM_PROMPT = build_system_prompt(_UNDERSTAND_SPECIALIZED_PROMPT)
@@ -494,6 +530,7 @@ class ChatPipeline:
     def __init__(self, gateway, router, events=None, *,
                  max_tokens: int | None = None, registry=None, terminal=None,
                  runtime=None, execution_history=None, max_tool_steps: int = 8,
+                 approvals=None, fallback=None,
                  agent_brain: str = "provider"):
         self.gateway = gateway
         self.router = router
@@ -514,6 +551,13 @@ class ChatPipeline:
         # runs inside the runtime, on the same PTY the Astra Agent Terminal
         # opens for the conversation. See astra/runtime/.
         self.runtime = runtime
+        # The approval-gated HOST fallback (astra/terminal/approval.py +
+        # fallback.py). `approvals` is the ONE authorisation point for a host
+        # command, `fallback` is the Agent-facing adapter. Neither is the raw
+        # host terminal, which stays agent-forbidden; the runtime above is
+        # always the primary execution environment.
+        self.approvals = approvals
+        self.fallback = fallback
         self.max_tool_steps = max(1, int(max_tool_steps or 8))
         self.execution_history = execution_history or AgentExecutionHistory()
         # Which AI drives the agent tool loop: the Provider system (default)
@@ -686,7 +730,9 @@ class ChatPipeline:
         # hallucinating "browser" on a terminal-only runtime can never make
         # the Provider look for a tool that is not there.
         execution = ProviderExecutionDecision.from_dict(
-            data.get("execution")).normalized(caps.categories)
+            data.get("execution")).normalized(
+                caps.categories,
+                host_fallback_available=self._host_fallback_available())
         return {"final_request": _clean(data["final_request"]) if rewrote
                 else message,
                 "was_incomplete": rewrote,
@@ -771,6 +817,253 @@ class ChatPipeline:
         return verifier
 
     # -- terminal context + agent tool loop ---------------------------------------
+    # -- host fallback: policy, context, approval card, resume ---------------
+    def _runtime_state(self) -> dict:
+        """LIVE state of the isolated Agent Runtime, read cheaply and
+        without creating anything. Never claims "unavailable" for a runtime
+        that is actually available (spec §13)."""
+        out = {"available": False, "state": "", "runtime_id": "",
+               "cwd": "", "reason": ""}
+        mgr = self.runtime
+        if mgr is None:
+            out["reason"] = "no Agent Runtime is wired in this process"
+            return out
+        try:
+            engine = getattr(mgr, "engine", None)
+            probe = engine.probe() if engine is not None else {"available": False,
+                                                               "reason": ""}
+            out["available"] = bool(probe.get("available"))
+            out["reason"] = str(probe.get("reason") or "")
+            if not out["available"]:
+                return out
+            # create=False: never materialise a runtime just to describe it.
+            rt = mgr.get(None, create=False)
+            if rt is None:
+                out["state"] = "not created"
+                return out
+            status = rt.status(refresh_capabilities=False) or {}
+            out["state"] = str(status.get("state") or "")
+            out["runtime_id"] = str(status.get("runtime_id") or "")
+            out["cwd"] = str(status.get("workspace") or "")
+        except Exception as exc:
+            out["available"] = False
+            out["reason"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    def _host_fallback_available(self) -> bool:
+        if self.fallback is None:
+            return False
+        try:
+            return bool(self.fallback.available())
+        except Exception:
+            return False
+
+    def _policy_context(self, session_id, conversation_id=None) -> str:
+        """The PRIMARY/FALLBACK/HOST-FALLBACK policy plus its live state,
+        shown to the Gateway AND the Provider (spec §10-§13)."""
+        state = self._runtime_state()
+        pending = ""
+        if self.fallback is not None:
+            try:
+                pending = self.fallback.context_text(conversation_id) or ""
+            except Exception:
+                pending = ""
+        return execution_policy_block(
+            runtime_available=state["available"],
+            runtime_status=state["state"],
+            runtime_id=state["runtime_id"],
+            session_id=session_id or "",
+            cwd=state["cwd"],
+            host_fallback_available=self._host_fallback_available(),
+            host_fallback_reason=state["reason"],
+            pending_approvals=pending)
+
+    def _pending_approval(self, conversation_id, request_id=None):
+        if self.approvals is None:
+            return None
+        try:
+            if request_id:
+                found = self.approvals.pending_for_request(request_id)
+                if found is not None:
+                    return found
+            return self.approvals.pending_for(conversation_id)
+        except Exception:
+            return None
+
+    def _attach_approval(self, reply: dict, req: str, conversation_id,
+                         session_id, message, hist_turns, criteria) -> dict:
+        """If THIS turn created a pending host-fallback approval, hand the
+        chat an approval card instead of a normal reply (spec §3, §7, §9).
+
+        The turn is NOT blocked and no host thread is held: the approval is
+        pending, the operation is remembered, and it continues only when the
+        user decides."""
+        ap = self._pending_approval(conversation_id, request_id=req)
+        if ap is None:
+            return reply
+        # Remember what to continue (§9): the SAME conversation, request,
+        # runtime session, history and criteria.
+        try:
+            self.approvals.attach_operation(ap.approval_id, {
+                "message": message,
+                "history": hist_turns or [],
+                "scope": (str(conversation_id)
+                          if conversation_id not in (None, "", 0) else req),
+                "session_id": session_id or ap.session_id,
+                "conversation_id": conversation_id,
+                "criteria": list(criteria or []),
+                "request_id": req,
+            })
+        except Exception:
+            pass
+        data = dict(reply.get("data") or {})
+        data["approval"] = ap.to_dict()
+        data["host_execution"] = True
+        text = (reply.get("reply") or "").strip() or APPROVAL_WAITING_TEXT
+        return {"reply": text, "action": "host_approval", "ok": True,
+                "data": data, "artifacts": reply.get("artifacts") or []}
+
+    def resume_host_fallback(self, request, operation, result,
+                             allowed: bool = True) -> dict:
+        """Continue the SAME logical Agent operation after the user decided.
+
+        Registered on the ApprovalManager as its resumer. Preserves the
+        conversation history, runtime session, execution scope, request /
+        trace / op ids and provider context, and never starts a fresh user
+        turn — this is a continuation of the operation the approval belongs
+        to (spec §9)."""
+        op = operation or {}
+        message = _clean(op.get("message") or "")
+        hist_turns = _normalize_history(op.get("history") or [])
+        scope = (str(op.get("scope")) if op.get("scope") not in (None, "", 0)
+                 else str(request.conversation_id or request.request_id or ""))
+        session_id = (str(op.get("session_id") or request.session_id or "")
+                      or None)
+        req = str(op.get("request_id") or request.request_id or "")
+        # A distinct op id for this continuation: the original turn already
+        # closed its own row, and correlation stays explicit via
+        # request/trace == the original request id.
+        trace = {"request": req, "raw": message, "resumed": True,
+                 "approval_id": request.approval_id,
+                 "gateway": "resume"}
+        self._emit("chat.pipeline.started", gateway="resume",
+                   approval_id=request.approval_id, op=f"resume:{req}",
+                   request=req, trace=req, resumed=True)
+        try:
+            reply = self._resume_turn(request, op, message, hist_turns, scope,
+                                      session_id, req, trace, result, allowed)
+        except Exception as exc:
+            self._emit("chat.pipeline.failed", op=f"resume:{req}", request=req,
+                       trace=req, terminal=True,
+                       error=f"{type(exc).__name__}: {exc}")
+            reply = self._reply(
+                self._approval_summary(request, result, allowed) +
+                f"\n\nKintu task ta continue korte giye problem hoyeche — "
+                f"`{type(exc).__name__}: {exc}`", False, trace)
+        self._emit("chat.pipeline.finished", op=f"resume:{req}", request=req,
+                   trace=req, terminal=True, resumed=True,
+                   approval_id=request.approval_id)
+        return reply
+
+    def _resume_turn(self, request, op, message, hist_turns, scope, session_id,
+                     req, trace, result, allowed) -> dict:
+        """The provider/agent continuation itself. Both decisions go back
+        through the SAME tool loop so the Agent can keep working INSIDE the
+        Agent Runtime (§1: on deny, try a runtime alternative)."""
+        summary = self._approval_summary(request, result, allowed)
+        if not self._tools_available():
+            return self._reply(summary, True, trace)
+        task_type = self._task_type(message or "continue", None)
+        base = message or "Continue the task you were working on."
+        # The host execution result (or the denial) is authoritative ground
+        # truth for the continuation — the model may not re-run it.
+        detail = self._host_result_block(request, result, allowed)
+        task_content = (
+            "The user has just RESPONDED to your host terminal approval "
+            f"request ({request.approval_id}).\n\n"
+            f"Original request:\n{base}\n\n{detail}\n\n"
+            "Continue the SAME task from where it stopped. Use the isolated "
+            "Agent Runtime for anything else you need to do. "
+            + ("The host command above already ran — do NOT run it again."
+               if allowed else
+               "The host command was DENIED — do NOT attempt it or any other "
+               "host execution; continue inside the Agent Runtime if you can, "
+               "otherwise explain the limitation honestly."))
+        state = self._runtime_state()
+        policy = execution_policy_block(
+            runtime_available=state["available"],
+            runtime_status=state["state"],
+            runtime_id=state["runtime_id"],
+            session_id=session_id or "",
+            cwd=state["cwd"],
+            host_fallback_available=self._host_fallback_available(),
+            host_fallback_reason=state["reason"],
+            pending_approvals=self.approvals.context_text(
+                request.conversation_id) if self.approvals else "")
+        decision = ProviderExecutionDecision(
+            required=True, capability="terminal",
+            intent=message or "continue the approved operation",
+            environment=(ENVIRONMENT_HOST_FALLBACK if allowed
+                         else ENVIRONMENT_RUNTIME),
+            approval_required=bool(allowed))
+        brief = {"final_request": message or base, "provider": "",
+                 "model": "", "criteria": op.get("criteria") or [],
+                 "execution": decision}
+        terminal_context = self._terminal_context(session_id)
+        exec_context = self.execution_history.context_text(scope)
+        terminal_context = "\n\n".join(
+            b for b in (terminal_context, policy) if b)
+        runtime_ctx = execution_policy_block(
+            runtime_available=state["available"],
+            runtime_status=state["state"], runtime_id=state["runtime_id"],
+            session_id=session_id or "", cwd=state["cwd"],
+            host_fallback_available=self._host_fallback_available(),
+            host_fallback_reason=state["reason"])
+        messages = [{"role": "system", "content": build_system_prompt(
+            _PROVIDER_SPECIALIZED_PROMPT, runtime_context=runtime_ctx)}]
+        messages.extend(hist_turns)
+        messages.append({"role": "user", "content": task_content})
+        rr = self._run_tool_loop(
+            brief, hist_turns, "", task_type, False, scope, session_id,
+            terminal_context, exec_context, req, trace, messages, task_content)
+        if rr is None or not rr.ok:
+            reason = (trace.get("error") or getattr(rr, "error", "")
+                      or "the provider could not continue the task")
+            return self._reply(self._approval_summary(request, result, allowed)
+                               + f"\n\n{reason}", False, trace)
+        return self._reply(rr.text, True, trace)
+
+    @staticmethod
+    def _host_result_block(request, result, allowed) -> str:
+        if not allowed:
+            return ("Host terminal decision: DENIED by the user. The command "
+                    f"`{request.command}` was NOT executed on the host.")
+        res = result or {}
+        parts = [
+            "Host terminal result (approved by the user, executed ONCE on "
+            "the host — this is real output, do not re-run it):",
+            f"$ {request.command}",
+            f"cwd: {request.cwd or '(default)'}",
+            f"exit_code: {res.get('exit_code')} "
+            f"status: {res.get('status') or ''}",
+        ]
+        out = str(res.get("stdout") or "").strip()
+        err = str(res.get("stderr") or "").strip()
+        if out:
+            parts.append("stdout:\n" + out[:4000])
+        if err:
+            parts.append("stderr:\n" + err[:2000])
+        return "\n".join(parts)
+
+    @staticmethod
+    def _approval_summary(request, result, allowed) -> str:
+        if not allowed:
+            return (APPROVAL_DENIED_TEXT + f"\n\nCommand: `{request.command}`")
+        res = result or {}
+        code = res.get("exit_code")
+        return ("✓ Approved by you — the host command was executed "
+                f"(exit code {code}).\n\nCommand: `{request.command}`")
+
     def _terminal_context(self, session_id) -> str:
         """Deterministic, bounded view of the execution session this
         conversation owns. Prefers the ISOLATED AGENT RUNTIME (the surface
@@ -805,6 +1098,8 @@ class ChatPipeline:
         loop = AgentToolLoop(self.registry, terminal=self.terminal,
                              runtime=self.runtime,
                              events=self.events,
+                             approvals=self.approvals,
+                             fallback=self.fallback,
                              max_steps=self.max_tool_steps,
                              execution_history=self.execution_history)
         blocks = []
@@ -994,9 +1289,16 @@ class ChatPipeline:
         # "… running" in the Activity Log forever (reconciliation keys off
         # the correlation ids, it never filters running rows away).
         try:
-            return self._run_turn(raw, context, hist_turns, attachments, req,
-                                  gateway_ok, trace, conversation_id,
-                                  session_id)
+            reply = self._run_turn(raw, context, hist_turns, attachments, req,
+                                   gateway_ok, trace, conversation_id,
+                                   session_id)
+            # A turn that ended by asking for host-terminal approval hands
+            # the chat an approval card (Allow/Deny) instead of a normal
+            # reply — the host command has NOT run and the turn is not
+            # blocked (§3, §7, §9).
+            return self._attach_approval(
+                reply, req, conversation_id, session_id, raw, hist_turns,
+                (trace.get("criteria") or []))
         except Exception as e:
             self._emit("chat.pipeline.failed",
                        error=f"{type(e).__name__}: {e}",
@@ -1048,8 +1350,12 @@ class ChatPipeline:
                                                   fallback=f"req-{req}"))
         terminal_context = self._terminal_context(session_id)
         exec_context = self.execution_history.context_text(scope)
+        # The execution policy (primary runtime / approval-gated host
+        # fallback) AND its live state go to the Gateway and the Provider on
+        # every turn — never baked into the static Core prompt (§10-§13).
+        policy_context = self._policy_context(session_id, conversation_id)
         extra_context = "\n\n".join(
-            b for b in (terminal_context, exec_context) if b)
+            b for b in (policy_context, terminal_context, exec_context) if b)
         trace["terminal_session"] = session_id
         trace["scope"] = scope
 
@@ -1100,6 +1406,8 @@ class ChatPipeline:
         # so they survive provider failover: every retry/replacement model
         # sees the same requirement, not just the first one that was tried.
         runtime_ctx = caps.human_context
+        if policy_context:
+            runtime_ctx = runtime_ctx + "\n\n" + policy_context
         decision_block = execution.context_block()
         if decision_block:
             runtime_ctx = runtime_ctx + "\n\n" + decision_block

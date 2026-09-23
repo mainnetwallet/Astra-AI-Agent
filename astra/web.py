@@ -821,6 +821,33 @@ class WebApp:
 
     def __init__(self, site: AstraSite):
         self.site = site
+        self._bind_approval_meta_writer()
+
+    def _bind_approval_meta_writer(self) -> None:
+        """Let the host-fallback ApprovalManager persist a resolved card.
+
+        The decision (approved / denied / expired / completed / failed) is
+        written back into the chat message that rendered the card, so a
+        reloaded chat shows the resolved state instead of a stale pending
+        one (spec §7). Safe no-op when no approval manager is wired."""
+        try:
+            mgr = self.site._get("approvals")
+            if mgr is not None:
+                mgr.set_meta_writer(self.site.chat_log.update_message_meta)
+        except Exception:
+            pass
+
+    def _bind_approval_message(self, reply, message_id) -> None:
+        """Bind a just-persisted approval card to its chat message id so the
+        later Allow/Deny write-back lands on the right row (spec §8)."""
+        try:
+            approval = (reply or {}).get("data", {}).get("approval") or {}
+            approval_id = approval.get("approval_id")
+            mgr = self.site._get("approvals")
+            if approval_id and mgr is not None:
+                mgr.attach_message(approval_id, message_id)
+        except Exception:
+            pass
 
     # -- gate ----------------------------------------------------------------
     def _authorized(self, req: Request) -> bool:
@@ -1041,6 +1068,111 @@ class WebApp:
             return error_response("terminal output not found", 404,
                                   "not_found", req.rid)
         return json_response({"ok": True, "data": payload}, rid=req.rid)
+
+    # -- HOST terminal fallback approvals ------------------------------------
+    # Allow/Deny lives ONLY in the Assistant Chat. These endpoints are the
+    # chat card's backend: create a scoped request, read its state, resolve
+    # it. Resolution delegates to the ONE authorisation point
+    # (Agent.resume -> ApprovalManager.decide), so a host command can never
+    # run twice and can never run without an approved request.
+    def _approvals(self):
+        return self.site._get("approvals")
+
+    def _terminal_approval_create(self, req) -> Response:
+        approvals = self._approvals()
+        if approvals is None:
+            return error_response("host terminal approval is unavailable", 503,
+                                  "host_fallback_unavailable", req.rid)
+        fallback = self.site._get("fallback")
+        if fallback is not None and not fallback.available():
+            return error_response(
+                "host terminal fallback is not available in this runtime", 503,
+                "host_fallback_unavailable", req.rid)
+        body = req.body or {}
+        command = str(body.get("command") or "").strip()
+        if not command:
+            return error_response("command required", 400, "bad_request",
+                                  req.rid)
+        cid = body.get("conversation_id")
+        if cid in (None, "", 0):
+            cid = self.site.chat_log.current_id
+        else:
+            cid = int_arg(cid, name="conversation_id")
+        approval = approvals.request(
+            command=command, cwd=str(body.get("cwd") or ""),
+            reason=str(body.get("reason") or ""), conversation_id=cid,
+            request_id=str(body.get("request_id") or ""),
+            session_id=str(body.get("session_id") or (f"conv-{cid}" if cid
+                                                      else "")))
+        return json_response(
+            {"ok": True, "data": {"approval": approval.to_dict(),
+                                  "environment": "host"}}, 201, req.rid)
+
+    def _terminal_approval_get(self, req, approval_id) -> Response:
+        approvals = self._approvals()
+        if approvals is None:
+            return error_response("host terminal approval is unavailable", 503,
+                                  "host_fallback_unavailable", req.rid)
+        approval = approvals.get(approval_id)
+        if approval is None:
+            return error_response("approval not found", 404, "not_found",
+                                  req.rid)
+        return json_response({"ok": True,
+                              "data": {"approval": approval.to_dict()}},
+                             rid=req.rid)
+
+    def _terminal_approval_list(self, req) -> Response:
+        approvals = self._approvals()
+        if approvals is None:
+            return json_response({"ok": True, "data": {"approvals": []}},
+                                 rid=req.rid)
+        cid = req.query.get("conversation_id")
+        if cid:
+            rows = [a.to_dict() for a in approvals.pending(
+                int_arg(cid, name="conversation_id"))]
+        else:
+            rows = approvals.all()
+        return json_response({"ok": True, "data": {"approvals": rows}},
+                             rid=req.rid)
+
+    def _terminal_approval_resolve(self, req, approval_id) -> Response:
+        """Allow / Deny the host command.
+
+        Delegates to `Agent.resume`, i.e. the same code path the chat card's
+        legacy endpoint uses — there is ONE authorisation point. Allow runs
+        the stored command exactly once and resumes the same logical
+        operation; Deny runs nothing."""
+        approvals = self._approvals()
+        if approvals is None:
+            return error_response("host terminal approval is unavailable", 503,
+                                  "host_fallback_unavailable", req.rid)
+        body = req.body or {}
+        decision = str(body.get("decision") or body.get("action") or "").strip().lower()
+        if decision not in ("allow", "approve", "deny", "reject"):
+            return error_response("decision must be 'allow' or 'deny'", 400,
+                                  "bad_request", req.rid)
+        approval = approvals.get(approval_id)
+        if approval is None:
+            return error_response("approval not found", 404, "not_found",
+                                  req.rid)
+        allow = decision in ("allow", "approve")
+        # Pin the chat: a switch mid-decision must not send the follow-up
+        # reply into a different conversation (same rule as /api/chat).
+        cid = self.site.chat_log.current_id
+        token = self.site.chat_log.begin(cid)
+        try:
+            reply = self.site.agent.resume(approval_id, allow)
+            rid = self.site.chat_log.add_reply(reply, conversation_id=cid)
+            self._bind_approval_message(reply, rid)
+        finally:
+            self.site.chat_log.end(token)
+        reply = dict(reply)
+        reply["conversation_id"] = cid
+        data = dict(reply.get("data") or {})
+        data.setdefault("approval",
+                        (approvals.get(approval_id) or approval).to_dict())
+        reply["data"] = data
+        return json_response({"ok": True, "data": reply}, rid=req.rid)
 
     # -- Astra Agent Runtime / Astra Agent Terminal --------------------------
     def _runtime_manager(self):
@@ -1377,7 +1509,8 @@ class WebApp:
                     try:
                         reply = site.agent.handle(
                             msg, history=history, attachments=attachments or None)
-                        log.add_reply(reply, conversation_id=cid)
+                        rid = log.add_reply(reply, conversation_id=cid)
+                        self._bind_approval_message(reply, rid)
                     finally:
                         log.end(token)
             else:
@@ -1390,7 +1523,8 @@ class WebApp:
                     token = log.begin(cid)
                     try:
                         reply = site.agent.handle(msg, history=history)
-                        log.add_reply(reply, conversation_id=cid)
+                        rid = log.add_reply(reply, conversation_id=cid)
+                        self._bind_approval_message(reply, rid)
                     finally:
                         log.end(token)
             # The browser may have switched to a different chat (or
@@ -1450,7 +1584,8 @@ class WebApp:
             token = site.chat_log.begin(cid)
             try:
                 reply = site.agent.resume(eid, bool(body.get("allow", True)))
-                site.chat_log.add_reply(reply, conversation_id=cid)
+                rid = site.chat_log.add_reply(reply, conversation_id=cid)
+                self._bind_approval_message(reply, rid)
             finally:
                 site.chat_log.end(token)
             reply = dict(reply)
@@ -1495,6 +1630,19 @@ class WebApp:
                                  rid=req.rid)
         if path == ["api", "terminal", "output"] and method == "GET":
             return self._terminal_output(req)
+
+        # HOST terminal fallback approvals (astra/terminal/approval.py). The
+        # Allow/Deny UI lives in the Assistant Chat; these are its endpoints.
+        if path == ["api", "terminal", "approval"] and method == "POST":
+            return self._terminal_approval_create(req)
+        if path == ["api", "terminal", "approvals"] and method == "GET":
+            return self._terminal_approval_list(req)
+        if (len(path) == 4 and path[:3] == ["api", "terminal", "approval"]
+                and method == "GET"):
+            return self._terminal_approval_get(req, path[3])
+        if (len(path) == 4 and path[:3] == ["api", "terminal", "approval"]
+                and method == "POST"):
+            return self._terminal_approval_resolve(req, path[3])
 
         # Astra Agent Runtime / Astra Agent Terminal (astra/runtime/). These
         # endpoints are the terminal's whole backend: lifecycle, real PTY

@@ -335,7 +335,10 @@ class AgentRuntime:
         with self._lock:
             self._sessions[key] = process
         self._emit("terminal.started", session_id=key, pid=process.pid,
-                   rows=rows, cols=cols, shell="bash")
+                   rows=rows, cols=cols, shell="bash",
+                   # §18: a runtime PTY session is ALWAYS tagged, exactly
+                   # like the command lifecycle below.
+                   environment="agent_runtime")
         return process
 
     def get_terminal(self, session_id: str) -> PtyProcess | None:
@@ -424,7 +427,14 @@ class AgentRuntime:
                    process_id=exec_id, shell_pid=process.pid,
                    command=text[:400],
                    cwd=prior[-1]["cwd"] if prior else GUEST_WORKSPACE,
-                   shell="bash", status="running", runtime=self.runtime_id)
+                   # NOTE: `runtime` is injected by `_emit` itself — passing
+                   # it here too would be a duplicate keyword, raise inside
+                   # `_emit` and silently DROP this event, so the per-command
+                   # `terminal.started` must not repeat it.
+                   shell="bash", status="running",
+                   # §18: runtime execution is ALWAYS tagged, so the
+                   # Activity Log can never confuse it with a host command.
+                   environment="agent_runtime")
         # A brace group runs in the CURRENT shell (so `cd`/`export` persist)
         # while redirecting only the command's own output.
         script = (
@@ -498,14 +508,16 @@ class AgentRuntime:
                        process_id=exec_id, stream="stdout",
                        chars=len(stdout),
                        snippet=(stdout[-500:] if len(stdout) > 500
-                                else stdout), status=status)
+                                else stdout), status=status,
+                       environment="agent_runtime")
         status_event = ("terminal.completed" if exit_code == 0
                         else "terminal.timeout" if status == "timeout"
                         else "terminal.failed")
         self._emit(status_event, session_id=key, op=op, process_id=exec_id,
                    command=text[:200], cwd=result["cwd"], exit_code=exit_code,
                    status=status, terminal=True, duration=duration_ms,
-                   stdout_blob_id=stdout_blob, stderr_blob_id="")
+                   stdout_blob_id=stdout_blob, stderr_blob_id="",
+                   environment="agent_runtime")
         self._remember(key, {"command": text, "status": status,
                              "exit_code": exit_code, "cwd": result["cwd"],
                              "duration_ms": duration_ms,

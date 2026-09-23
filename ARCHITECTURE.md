@@ -764,6 +764,19 @@ Gateway ── execution decision ──▶ Provider ──▶ AgentToolLoop ─
   structured `decision: "blocked"` result, nothing spawned), and
   `build_tool_catalog` omits them — so nothing about the block depends on a
   prompt. Coverage: `tests/test_host_terminal_block.py`.
+* **Host fallback is approval-gated, in the Assistant Chat**: the runtime is
+  PRIMARY and needs no permission; the host is a FALLBACK only. The Agent's
+  one host surface is `host_terminal_request`
+  (`astra/terminal/fallback.py`), which executes *nothing* — it records a
+  scoped request and returns `approval_required`. `ApprovalManager`
+  (`astra/terminal/approval.py`) is the ONE execution point, reached via
+  `HostTerminalFallback → ApprovalManager → Assistant-Chat Allow/Deny →
+  trusted terminal_exec`; there is no `AgentToolLoop → terminal_exec` edge.
+  An approval binds one conversation + request + exact command + cwd, is
+  exactly-once, expires (`HOST_APPROVAL_TTL_S`), never executes on Deny, and
+  its final decision is written back into the chat card. The Allow/Deny UI
+  lives ONLY in the chat; the Astra Agent Terminal stays a pure terminal.
+  Coverage: `tests/test_host_fallback_approval.py`.
 * **Per-runtime writable state**: `_user_scope_env()` in `engine.py` points
   `PIP_USER`/`PYTHONUSERBASE`/`NPM_CONFIG_PREFIX`/`CARGO_HOME`/`GOPATH`/
   `GEM_HOME`/`XDG_*` at the runtime's own `$HOME` (a per-runtime bind) and

@@ -284,6 +284,36 @@ class ChatLog:
         self._touch(cid)
         return rid
 
+    def update_message_meta(self, message_id: int, meta: dict) -> bool:
+        """Replace ONE message's meta JSON in place.
+
+        Used by the host-fallback approval flow to write the final decision
+        (approved / denied / expired / completed / failed) back into the card
+        the user is looking at, so a reloaded chat shows the resolved state
+        instead of a stale "pending" card. Only `approval` is ever touched —
+        the caller cannot rewrite arbitrary stored state."""
+        try:
+            mid = int(message_id)
+        except (TypeError, ValueError):
+            return False
+        incoming = (meta or {}).get("approval")
+        if not isinstance(incoming, dict) or not incoming:
+            return False
+        row = self.store.fetchone(
+            "SELECT meta FROM astra_chat_messages WHERE id = ?", (mid,))
+        if not row:
+            return False
+        try:
+            current = json.loads(row.get("meta") or "{}")
+        except (ValueError, TypeError):
+            current = {}
+        if not isinstance(current, dict):
+            current = {}
+        current["approval"] = incoming
+        self.store.exec("UPDATE astra_chat_messages SET meta = ? WHERE id = ?",
+                        (_cap_json(current, {}), mid))
+        return True
+
     def clear(self) -> int:
         """Hard reset: wipe every chat and every message, back to one empty
         thread. Kept for the full-wipe `/api/chat/history` DELETE route."""

@@ -19,6 +19,7 @@ class ToolContext:
                  terminal=None, terminal_session_id=None,
                  execution_history=None, execution_scope=None,
                  runtime=None, runtime_session_id=None,
+                 approvals=None, fallback=None, request_id: str = "",
                  agent_execution: bool = False):
         self.store = store
         self.config = config
@@ -47,6 +48,16 @@ class ToolContext:
         # astra/runtime/manager.py.
         self.runtime = runtime
         self.runtime_session_id = runtime_session_id
+        # HOST terminal fallback (astra/terminal/approval.py + fallback.py).
+        # `approvals` is the ONLY object that can authorise a host command,
+        # and `fallback` is the approval-aware adapter the Agent calls
+        # (`host_terminal_request`) — never the raw host `terminal_exec`,
+        # which stays agent-forbidden. `request_id` is the id of the logical
+        # operation this tool call belongs to, so a host approval is scoped
+        # to exactly that operation/conversation.
+        self.approvals = approvals
+        self.fallback = fallback
+        self.request_id = str(request_id or "")
         # Structural marker: True only for Agent/Provider tool-loop and
         # workflow step execution. `ToolRegistry.execute` refuses any
         # `agent_forbidden` tool (the legacy HOST terminal family) when

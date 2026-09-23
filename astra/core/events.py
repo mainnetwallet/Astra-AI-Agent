@@ -114,6 +114,16 @@ EVENT_KINDS = (
     # operation that began in a previous run and can therefore never finish,
     # so its start row does not stay "… running" in the Activity Log forever.
     "operation.interrupted",
+    # HOST terminal fallback (astra/terminal/approval.py + fallback.py): the
+    # isolated Agent Runtime is the primary environment; a host command runs
+    # only after the user explicitly allows THAT command in the Assistant
+    # Chat. Every host execution event carries `environment="host"` and its
+    # `approval_id`; execution in the isolated runtime carries
+    # `environment="agent_runtime"` — so the Activity Log can never confuse
+    # the two, and an unapproved host command has no events at all.
+    "host_terminal.approval_requested", "host_terminal.approval_allowed",
+    "host_terminal.approval_denied", "host_terminal.approval_expired",
+    "host_terminal.started", "host_terminal.completed", "host_terminal.failed",
 )
 
 

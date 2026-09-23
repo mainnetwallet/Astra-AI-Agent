@@ -40,6 +40,9 @@ from astra.memory.memory import MemorySystem, ExperienceStore
 from astra.tools.registry import ToolRegistry
 from astra.tools import builtins
 from astra.terminal import TerminalManager, register_terminal_tools
+from astra.terminal.approval import ApprovalManager
+from astra.terminal.fallback import (HostTerminalFallback,
+                                     register_fallback_tools)
 from astra.runtime import RuntimeManager, register_runtime_tools
 from astra.ai.execution_history import AgentExecutionHistory
 from astra.workflows.engine import WorkflowEngine
@@ -127,6 +130,24 @@ def build(store: Store | None = None, config=None,
     runtime_manager = RuntimeManager(events=events, config=config,
                                      store=store)
     register_runtime_tools(registry, runtime_manager)
+
+    # HOST terminal FALLBACK (astra/terminal/approval.py + fallback.py).
+    # The isolated Agent Runtime above is the primary environment and needs
+    # no permission. A host command is allowed ONLY after the user explicitly
+    # approves that exact command in the Assistant Chat — ApprovalManager is
+    # the single authorisation point, and it executes through the trusted
+    # `terminal_exec` tool (a NON-agent ToolContext), never by giving the
+    # model a host tool.
+    approval_manager = ApprovalManager(events=events, config=config)
+    host_fallback = HostTerminalFallback(
+        approval_manager, registry=registry, terminal=terminal_manager,
+        runtime=runtime_manager, events=events, config=config)
+    register_fallback_tools(registry, host_fallback)
+
+    # The executor closure is defined further down (it needs nothing else,
+    # but keeping one definition point next to the rest of the wiring avoids
+    # duplicating the trusted-call shape). Resolved at call time.
+    approval_manager.set_executor(lambda request: _run_host_command(request))
 
     # Web3 transaction manager: deterministic policy + encrypted keystore.
     # The LLM may only *prepare*; authorize/sign/broadcast stay out of the
@@ -249,6 +270,8 @@ def build(store: Store | None = None, config=None,
         max_tokens=_opt_int(config, "CHAT_MAX_TOKENS"),
         registry=registry, terminal=terminal_manager,
         runtime=runtime_manager,
+        approvals=approval_manager,
+        fallback=host_fallback,
         execution_history=execution_history,
         max_tool_steps=config.getint("CHAT_MAX_TOOL_STEPS", 8),
         agent_brain=config.get("CHAT_AGENT_BRAIN", "provider"))
@@ -268,6 +291,8 @@ def build(store: Store | None = None, config=None,
                                terminal=terminal_manager,
                                execution_history=execution_history,
                                runtime=runtime_manager,
+                               approvals=approval_manager,
+                               fallback=host_fallback,
                                agent_execution=True)
     workflows = WorkflowEngine(store, registry, events, context=tool_context)
     scheduler = None
@@ -277,7 +302,37 @@ def build(store: Store | None = None, config=None,
 
     # chat agent (ChatPipeline -> Astra AI Gateway <-> Provider system;
     # no direct/raw LLM path exists)
-    agent = Agent(pipeline=chat_pipeline)
+    agent = Agent(pipeline=chat_pipeline, approvals=approval_manager)
+
+    # The trusted HOST executor: an APPROVED command runs through the SAME
+    # `terminal_exec` tool everything else uses, with a NON-agent context
+    # (`agent_execution=False`) — so it goes through the existing permission
+    # policy, session handling, output capture, history and events. Nothing
+    # about the approval path bypasses the ONE tool surface.
+    def _run_host_command(request):
+        from astra.core.context import ToolContext as _Ctx
+        ctx = _Ctx(store=store, config=config, events=events, registry=registry,
+                   terminal=terminal_manager,
+                   terminal_session_id=(request.session_id or None))
+        args = {"command": request.command}
+        if request.cwd:
+            args["cwd"] = request.cwd
+        if request.session_id:
+            args["session_id"] = request.session_id
+        try:
+            out = registry.execute("terminal_exec", args, ctx=ctx)
+        except Exception as exc:
+            return {"status": "failed", "exit_code": None, "stdout": "",
+                    "stderr": f"{type(exc).__name__}: {exc}"}
+        if not out.get("ok"):
+            return {"status": "failed", "exit_code": None, "stdout": "",
+                    "stderr": str(out.get("reason") or "host command refused "
+                                                      "by the tool registry")}
+        return out.get("result") or {}
+
+    # Continuation: after Allow/Deny the SAME logical Agent operation resumes
+    # through the chat pipeline (never a fresh user turn).
+    approval_manager.set_resumer(chat_pipeline.resume_host_fallback)
 
     return {
         "config": config, "store": store,
@@ -292,6 +347,10 @@ def build(store: Store | None = None, config=None,
         "browser_manager": browser_manager,
         "terminal": terminal_manager,
         "runtime": runtime_manager,
+        # Approval-gated HOST fallback (astra/terminal/approval.py): the
+        # Assistant Chat card + the ONLY host-execution authorisation point.
+        "approvals": approval_manager,
+        "fallback": host_fallback,
         "tx_manager": tx_manager, "keystore": keystore,
         "web3_policy": policy_engine,
         "gateway_intelligence": gateway_intelligence,

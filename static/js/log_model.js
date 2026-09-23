@@ -35,6 +35,11 @@
     if (head === "web3") return "web3";
     if (head === "browser") return "browser";
     if (head === "tool") return "tools";
+    // Host-terminal FALLBACK lifecycle (astra/terminal/approval.py): the
+    // approval request/decision and the one approved host command. Filed
+    // under "tools" so it stays visible; it is deliberately NOT "system"
+    // (which the noise filter drops).
+    if (head === "host_terminal") return "tools";
     if (head === "ai" || head === "astra_gateway" || head === "gateway" ||
         head === "router" || head === "provider" || head === "credential" ||
         head === "supervision") return "ai";
@@ -90,6 +95,12 @@
     if (k === "router.fallback" || k === "router.retry" ||
         k === "credential.rotation" || k === "gateway.target_cooldown") return "warn";
     if (k === "task.cancelled" || k === "task.skipped") return "warn";
+    // Host-terminal fallback: a denied/expired approval is a real warning
+    // (nothing ran); an allowed request is simply ok.
+    if (k === "host_terminal.approval_requested") return "running";
+    if (k === "host_terminal.approval_denied" ||
+        k === "host_terminal.approval_expired") return "warn";
+    if (k === "host_terminal.approval_allowed") return "ok";
     if (k === "astra_gateway.request" || k === "router.request" ||
         k === "chat.pipeline.started") return "running";
     if (/\.(started|running|requested)$/.test(k)) return "running";
@@ -146,6 +157,15 @@
     "browser.navigation": ["🌐", "Browser navigation"],
     "browser.action":     ["🌐", "Browser action"],
     "browser.error":      ["🌐", "Browser error"],
+    // Host-terminal FALLBACK (Assistant-Chat approval + the approved host
+    // command). Allow/Deny lives in the chat card, never in this log.
+    "host_terminal.approval_requested": ["🔐", "Host terminal approval requested"],
+    "host_terminal.approval_allowed":   ["🔓", "Host terminal approved"],
+    "host_terminal.approval_denied":    ["🚫", "Host terminal denied"],
+    "host_terminal.approval_expired":   ["⌛", "Host terminal approval expired"],
+    "host_terminal.started":   ["🖥️", "Host command started"],
+    "host_terminal.completed": ["🖥️", "Host command completed"],
+    "host_terminal.failed":    ["🖥️", "Host command failed"],
     "memory.saved":    ["🧩", "Memory saved"],
     "memory.recalled": ["🧩", "Memory recalled"],
     "experience.learned": ["🧩", "Experience learned"],

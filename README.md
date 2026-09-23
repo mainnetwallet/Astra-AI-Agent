@@ -217,6 +217,7 @@ configured.
 | `ASTRA_TERMINAL_SHELL` | *(auto-detect)* | Override the terminal shell (e.g. `/bin/sh`, `pwsh`); auto-detects bash/sh, PowerShell/cmd and Termux |
 | `TERMINAL_MAX_OUTPUT_CHARS` | 20000 | Resource-safety buffer cap for stdout/stderr held in the terminal session. Not an AI context limit — full output reaches the model while its context window allows. |
 | `TERMINAL_HISTORY_LIMIT` | 50 | Commands retained in each terminal session's history |
+| `HOST_APPROVAL_TTL_S` | 900 | Seconds a host-terminal fallback approval card stays valid before it expires (Allow/Deny only; never runs on expiry) |
 | `DATA_DIR` | ./data | Runtime data directory (SQLite DB + `uploads/`) |
 | `DATABASE` | `<DATA_DIR>/astra.db` | Explicit SQLite file path |
 | `ASTRA_WORKSPACE` | `./workspace` | Root the file tools may read/write (path escapes rejected) |
@@ -243,11 +244,23 @@ the **Astra Agent Terminal**.
   `/tmp` are bound in, plus `/dev`, `/proc` and `/sys`. The host home, the
   Termux prefix and `/sdcard` are invisible inside it, and the guest
   environment is built with `env -i` so host secrets cannot leak in.
-* **No host fallback, ever.** If the runtime is unavailable, execution stops
-  and the UI says *Agent Runtime unavailable*. Nothing silently runs on your
-  host shell. The legacy host `terminal_exec` family is marked
-  `agent_forbidden` and hard-blocked in `ToolRegistry.execute` for every
-  Agent/Provider/workflow call — never advertised to a model, never spawned.
+* **No silent host fallback.** If the runtime is unavailable or genuinely
+  cannot perform an operation, execution stops and the UI says *Agent
+  Runtime unavailable* — nothing silently runs on your host shell. The
+  legacy host `terminal_exec` family is marked `agent_forbidden` and
+  hard-blocked in `ToolRegistry.execute` for every Agent/Provider/workflow
+  call — never advertised to a model, never spawned.
+* **Host fallback needs your explicit Allow — in the Assistant Chat.** The
+  runtime is always tried first and needs no permission. When (and only
+  when) the runtime genuinely cannot do the job and a host command would
+  help, the Agent calls `host_terminal_request`, which executes *nothing*:
+  it posts a scoped approval card into the Assistant Chat (`⚠ Host Terminal
+  Access Required`) showing the exact command, cwd and reason. The host
+  command runs only if you press **Allow** — exactly once; **Deny** (or
+  letting it expire) never runs it. Approval lives *only* in the chat: the
+  Astra Agent Terminal is a pure terminal and never shows Allow/Deny.
+  API: `POST /api/terminal/approval`, `GET /api/terminal/approval/<id>`,
+  `GET /api/terminal/approvals`, `POST /api/terminal/approval/<id>`.
 * **Per-runtime private state by default.** `PIP_USER` / `NPM_CONFIG_PREFIX`
   / `CARGO_HOME` / `GOPATH` / `GEM_HOME` / `XDG_*` are redirected into each
   runtime's own `$HOME`, so a package installed in Runtime A is importable

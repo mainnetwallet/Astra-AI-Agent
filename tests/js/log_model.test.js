@@ -1158,3 +1158,37 @@ test("history replay then live SSE converges with no running rows", () => {
                        "event " + e.id + " must not render twice");
   });
 });
+
+/* ------------------------------------------------- host-terminal fallback --
+ * The Assistant-Chat approval lifecycle must be VISIBLE in the Activity Log
+ * (runtime/terminal lifecycle is logged), while the Allow/Deny UI itself
+ * stays in the chat. This pins the category/status/title mapping, and that
+ * the noise filter never drops a host-terminal row. */
+test("host-terminal approval lifecycle is a visible tools row", () => {
+  const cases = [
+    ["host_terminal.approval_requested", "running", "Host terminal approval requested"],
+    ["host_terminal.approval_allowed", "ok", "Host terminal approved"],
+    ["host_terminal.approval_denied", "warn", "Host terminal denied"],
+    ["host_terminal.approval_expired", "warn", "Host terminal approval expired"],
+    ["host_terminal.started", "running", "Host command started"],
+    ["host_terminal.completed", "ok", "Host command completed"],
+    ["host_terminal.failed", "err", "Host command failed"],
+  ];
+  cases.forEach(([kind, status, title]) => {
+    const e = ev(kind, { approval_id: "ap-1", command: "docker ps",
+                         cwd: "/srv", environment: "host" });
+    assert.strictEqual(Log.isMeaningful(e), true, kind + " must stay visible");
+    const m = Log.normalize(e);
+    assert.strictEqual(m.category, "tools", kind);
+    assert.strictEqual(m.status, status, kind);
+    assert.strictEqual(m.title, title, kind);
+  });
+});
+
+test("host-terminal subject/detail never leak the raw payload", () => {
+  const m = Log.normalize(ev("host_terminal.failed",
+    { approval_id: "ap-1", command: "docker ps", environment: "host",
+      error: "docker: command not found" }));
+  assert.strictEqual(m.status, "err");
+  assert.match(m.detail, /command not found/);
+});

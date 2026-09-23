@@ -347,6 +347,140 @@ $("#chat-history-list")?.addEventListener("click", async (e) => {
   closeChatHistoryMenu();
 });
 
+/* Host-terminal fallback approval card (Assistant Chat only).
+ * Astra Agent Runtime is the PRIMARY execution environment and needs no
+ * permission. A host command is a FALLBACK and is only ever run after the
+ * user selects Allow here. This card is intentionally chat-only — the Astra
+ * Agent Terminal never shows Allow/Deny. */
+function _hoaRow(label, value, mono) {
+  const row = document.createElement("div");
+  row.className = "hoa-row";
+  const l = document.createElement("div");
+  l.className = "hoa-label";
+  l.textContent = label;
+  const v = document.createElement("div");
+  v.className = "hoa-value" + (mono ? " mono" : "");
+  v.textContent = (value === undefined || value === null || value === "")
+    ? "—" : String(value);
+  row.appendChild(l);
+  row.appendChild(v);
+  return row;
+}
+
+function _hoaStatus(ap) {
+  const code = ap && ap.result ? ap.result.exit_code : undefined;
+  switch ((ap && ap.status) || "pending") {
+    case "denied":
+      return ["✕ Denied", "Host command was not executed."];
+    case "expired":
+      return ["⌛ Expired", "Host command was not executed."];
+    case "cancelled":
+      return ["✕ Cancelled", "Host command was not executed."];
+    case "approved":
+    case "completed":
+      return ["✓ Approved by you",
+              "Host command executed" +
+              ((code === undefined || code === null) ? "." : " (exit code " + code + ").")];
+    case "failed":
+      return ["⚠ Approved, but it failed",
+              (ap && ap.error) ? String(ap.error) : "Host command was attempted once."];
+    default:
+      return null;
+  }
+}
+
+function renderHostApproval(content, approval) {
+  let ap = approval || {};
+  const wrap = document.createElement("div");
+  wrap.className = "msg-host-approval";
+  const head = document.createElement("div");
+  head.className = "hoa-head";
+  head.textContent = "⚠ Host Terminal Access Required";
+  wrap.appendChild(head);
+  const sub = document.createElement("div");
+  sub.className = "hoa-sub";
+  sub.textContent = ap.reason
+    ? (ap.reason + " — Astra Agent Runtime cannot perform this operation on its own.")
+    : "Astra Agent Runtime cannot perform this operation.";
+  wrap.appendChild(sub);
+  wrap.appendChild(_hoaRow("Command", "$ " + (ap.command || ""), true));
+  wrap.appendChild(_hoaRow("Working directory", ap.cwd, true));
+  if (ap.reason) wrap.appendChild(_hoaRow("Reason", ap.reason, false));
+  const danger = document.createElement("div");
+  danger.className = "hoa-danger";
+  danger.textContent = "This command will execute on the HOST system, " +
+    "outside Astra Agent Runtime.";
+  wrap.appendChild(danger);
+  const actions = document.createElement("div");
+  actions.className = "hoa-actions";
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "hoa-btn hoa-deny";
+  denyBtn.textContent = "Deny";
+  const allowBtn = document.createElement("button");
+  allowBtn.type = "button";
+  allowBtn.className = "hoa-btn hoa-allow";
+  allowBtn.textContent = "Allow";
+  actions.appendChild(denyBtn);
+  actions.appendChild(allowBtn);
+  wrap.appendChild(actions);
+  const statusEl = document.createElement("div");
+  statusEl.className = "hoa-status";
+  wrap.appendChild(statusEl);
+
+  const paint = (next) => {
+    const info = _hoaStatus(next);
+    if (!info) return;
+    wrap.classList.add("resolved");
+    if (actions.remove) actions.remove();
+    else if (actions.parentElement) actions.parentElement.removeChild(actions);
+    statusEl.textContent = "";
+    const t = document.createElement("div");
+    t.className = "hoa-status-title";
+    t.textContent = info[0];
+    statusEl.appendChild(t);
+    const d = document.createElement("div");
+    d.className = "hoa-status-detail";
+    d.textContent = info[1];
+    statusEl.appendChild(d);
+    if (next && next.approval_id) {
+      const idl = document.createElement("div");
+      idl.className = "hoa-id";
+      idl.textContent = "approval_id: " + next.approval_id;
+      statusEl.appendChild(idl);
+    }
+  };
+  paint(ap);
+
+  const decide = async (allow) => {
+    if (!ap || !ap.approval_id) return;
+    if (ap.status && ap.status !== "pending") return;   // already resolved
+    denyBtn.disabled = true;
+    allowBtn.disabled = true;
+    chatTyping();
+    try {
+      const r = await post("/api/terminal/approval/" + ap.approval_id,
+                           { decision: allow ? "allow" : "deny" });
+      if (!r.ok || !r.data) {
+        chatStatusFail(r.error || "the approval could not be applied");
+        chatBubble("ai", "Server e problem — `" + (r.error || "unknown error") + "`");
+        return;
+      }
+      chatStatusFinish();
+      ap = (r.data.data && r.data.data.approval) || ap;
+      paint(ap);
+      chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts,
+                 r.data.data);
+    } catch (err) {
+      chatStatusFail(String(err));
+      chatBubble("ai", "Server e problem — `" + err + "`");
+    }
+  };
+  denyBtn.addEventListener("click", () => decide(false));
+  allowBtn.addEventListener("click", () => decide(true));
+  content.appendChild(wrap);
+}
+
 function chatBubble(who, text, action, attachedFiles, artifacts, meta) {
   hideChatEmpty();
   const row = document.createElement("div");
@@ -384,7 +518,9 @@ function chatBubble(who, text, action, attachedFiles, artifacts, meta) {
     artifacts.forEach((a) => { artWrap.appendChild(renderArtifact(a)); });
     content.appendChild(artWrap);
   }
-  if (action === "confirm") {
+  if (action === "host_approval") {
+    renderHostApproval(content, meta && meta.approval);
+  } else if (action === "confirm") {
     // inline Approve/Reject — resolved right here in chat, never by
     // sending the user off to a separate tab.
     const eid = meta && meta.execution_id;

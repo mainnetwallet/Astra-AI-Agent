@@ -30,9 +30,13 @@ from astra.ai.response_boundary import sanitize_final_response
 
 
 class Agent:
-    def __init__(self, orchestrator=None, pipeline=None):
+    def __init__(self, orchestrator=None, pipeline=None, approvals=None):
         self.orchestrator = orchestrator   # legacy; no longer used for chat
         self.pipeline = pipeline           # astra.ai.chat_pipeline.ChatPipeline
+        # Approval-gated HOST terminal fallback (astra/terminal/approval.py).
+        # Present so the Assistant Chat's Allow/Deny can resolve a pending
+        # request; a host command runs only through it.
+        self.approvals = approvals
 
     def handle(self, message: str, context: str = "", history=None,
                attachments: list | None = None,
@@ -74,12 +78,69 @@ class Agent:
                 "provider/model ke kaj dey, uttor verify kore tarpor apnake "
                 "dey.")
 
+    def _approvals(self):
+        mgr = self.approvals
+        if mgr is None:
+            mgr = getattr(self.pipeline, "approvals", None)
+        return mgr
+
     def resume(self, execution_id: str, allow: bool) -> dict:
-        """The approve/reject round-trip belonged to the removed
-        orchestrator; there is nothing to resume any more."""
-        return {"reply": "Ei approval step ta ar available na — chat ekhon "
-                         "Gateway pipeline diye cholche.",
-                "action": "none", "data": {}, "ok": False}
+        """Resolve a HOST-terminal approval from the Assistant Chat.
+
+        `execution_id` is the approval id shown on the card
+        (`POST /api/chat/resume` and `POST /api/terminal/approval/<id>` both
+        land here). Allow executes the approved command exactly once and
+        resumes the same logical operation; Deny never executes it. An
+        unknown/already-resolved approval is reported honestly — it is never
+        re-executed."""
+        mgr = self._approvals()
+        if mgr is None:
+            return {"reply": "Host terminal approval is not wired in this "
+                             "process, so nothing was run.",
+                    "action": "none", "data": {}, "ok": False}
+        req, resumed = mgr.decide(execution_id, bool(allow), by="user")
+        if req is None:
+            return {"reply": "Ei approval request ta ar paoa jacche na — hoy "
+                             "expire hoyeche, noy server restart hoyeche. "
+                             "Kichu execute kora hoyni.",
+                    "action": "none", "data": {}, "ok": False}
+        if resumed:
+            data = dict(resumed.get("data") or {})
+            data["approval"] = req.to_dict()
+            resumed = dict(resumed)
+            resumed["data"] = data
+            return resumed
+        return self._approval_only_reply(req)
+
+    @staticmethod
+    def _approval_only_reply(req) -> dict:
+        """The card's final state when there is nothing further to continue
+        (e.g. Deny, expiry, or a resumer that produced no reply)."""
+        from astra.terminal.approval import (STATUS_COMPLETED, STATUS_DENIED,
+                                             STATUS_EXPIRED, STATUS_FAILED)
+        data = {"approval": req.to_dict()}
+        if req.status == STATUS_DENIED:
+            return {"reply": ("✕ Denied — the host command was not executed.\n\n"
+                              f"Command: `{req.command}`"),
+                    "action": "none", "ok": True, "data": data}
+        if req.status == STATUS_EXPIRED:
+            return {"reply": ("⌛ This approval expired, so the host command was "
+                              "not executed.\n\n"
+                              f"Command: `{req.command}`"),
+                    "action": "none", "ok": True, "data": data}
+        if req.status == STATUS_COMPLETED:
+            code = (req.result or {}).get("exit_code")
+            return {"reply": ("✓ Approved by you — the host command executed "
+                              f"(exit code {code}).\n\nCommand: "
+                              f"`{req.command}`"),
+                    "action": "none", "ok": True, "data": data}
+        if req.status == STATUS_FAILED:
+            return {"reply": ("Approved, but the host command failed"
+                              f" — `{req.error or 'unknown error'}`.\n\n"
+                              f"Command: `{req.command}`"),
+                    "action": "none", "ok": False, "data": data}
+        return {"reply": f"Approval status: {req.status}.",
+                "action": "none", "ok": False, "data": data}
 
     def dashboard(self) -> list[dict]:
         """No plugins are registered yet — see plugins/README.md."""

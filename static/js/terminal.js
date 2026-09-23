@@ -108,6 +108,10 @@
         <button role="menuitem" data-act="clear">Clear screen <span class="at-menu-hint">Ctrl+L</span></button>
         <button role="menuitem" data-act="files">Workspace files <span class="at-menu-hint">▤</span></button>
         <hr>
+        <button role="menuitem" data-act="copy">Copy selection <span class="at-menu-hint">long-press</span></button>
+        <button role="menuitem" data-act="paste">Paste</button>
+        <button role="menuitem" data-act="selecttext">Select text…</button>
+        <hr>
         <button role="menuitem" data-act="status">Runtime status</button>
         <button role="menuitem" data-act="runtime-restart">Restart runtime</button>
         <button role="menuitem" data-act="stop" class="at-danger">Stop runtime</button>
@@ -168,7 +172,40 @@
         <textarea id="at-editor-text" spellcheck="false"></textarea>
       </div>`;
     stage.appendChild(side);
+
+    // floating action bar shown after a long-press selection (Termux-style)
+    const selbar = h("div", "at-selbar");
+    selbar.id = "at-selbar";
+    selbar.hidden = true;
+    selbar.innerHTML = `
+      <button class="at-btn at-primary" data-sel="copy">Copy</button>
+      <button class="at-btn" data-sel="paste">Paste</button>
+      <button class="at-btn" data-sel="text">Select text</button>
+      <button class="at-btn" data-sel="close" aria-label="Dismiss">✕</button>`;
+    stage.appendChild(selbar);
     root.appendChild(stage);
+
+    const toastEl = h("div", "at-toast");
+    toastEl.id = "at-toast";
+    toastEl.hidden = true;
+    root.appendChild(toastEl);
+
+    // full-pane sheet: native-selectable terminal text, or manual paste box
+    const sheet = h("div", "at-sheet");
+    sheet.id = "at-sheet";
+    sheet.hidden = true;
+    sheet.innerHTML = `
+      <div class="at-sheet-head">
+        <span class="at-sheet-title" id="at-sheet-title"></span>
+        <span class="at-sheet-actions">
+          <button class="at-btn at-primary" id="at-sheet-ok"></button>
+          <button class="at-btn" id="at-sheet-close">Close</button>
+        </span>
+      </div>
+      <div class="at-sheet-hint" id="at-sheet-hint"></div>
+      <textarea id="at-sheet-text" spellcheck="false" autocapitalize="none"
+        autocomplete="off" autocorrect="off"></textarea>`;
+    root.appendChild(sheet);
 
     // -- mobile extra-key row (Termux-style) --------------------------------
     const keys = h("div", "at-keys");
@@ -307,6 +344,18 @@
       pressKey(b.dataset.key);
     });
 
+    byId("at-selbar").addEventListener("pointerdown", (ev) => {
+      const b = ev.target.closest("button[data-sel]");
+      if (!b) return;
+      ev.preventDefault();                 // keep the keyboard / focus as-is
+      const a = b.dataset.sel;
+      if (a === "copy") copySelection();
+      else if (a === "paste") pasteClipboard();
+      else if (a === "text") openSelectSheet();
+      else hideSelBar(true);
+    });
+    byId("at-sheet-close").onclick = () => closeSheet();
+
     byId("at-up").onclick = () => {
       const p = state.sidebarPath;
       if (p === "/workspace" || p === "/") return;
@@ -334,6 +383,9 @@
       return;
     }
     if (act === "files") return toggleSidebar();
+    if (act === "copy") return copySelection();
+    if (act === "paste") return pasteClipboard();
+    if (act === "selecttext") return openSelectSheet();
     if (act === "status") return showRuntimeStatus();
     if (act === "runtime-restart") return lifecycle("restart");
     if (act === "stop") return lifecycle("stop");
@@ -553,6 +605,7 @@
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(view);
+    hardenInput(term);
 
     const tab = {
       sessionId, name, term, fit, view,
@@ -561,6 +614,8 @@
     };
     state.tabs.set(sessionId, tab);
     state.order.push(sessionId);
+    bindTouchSelect(tab);
+    term.onSelectionChange(() => { if (!term.hasSelection()) hideSelBar(); });
 
     // Keyboard -> PTY. xterm already encodes Enter/Backspace/arrows/Tab/
     // Home/End/PageUp/PageDown and Ctrl+<letter> control bytes; we simply
@@ -834,6 +889,259 @@
     listFiles();
   }
 
+  /* ------------------- phone keyboard + clipboard + selection -------------- */
+
+  /* Gboard/Samsung keyboards compose whole words (and autocorrect them) in the
+   * hidden xterm textarea unless the field says "no suggestions". Chrome maps
+   * autocomplete="off" to Android's NO_SUGGESTIONS input flag, so characters
+   * arrive one by one, un-corrected. xterm only sets the other three attrs. */
+  function hardenInput(term) {
+    const ta = term && term.textarea;
+    if (!ta) return;
+    ta.setAttribute("autocomplete", "off");
+    ta.setAttribute("autocapitalize", "none");
+    ta.setAttribute("autocorrect", "off");
+    ta.setAttribute("spellcheck", "false");
+    ta.setAttribute("inputmode", "text");
+    ta.setAttribute("enterkeyhint", "enter");
+    ta.setAttribute("data-gramm", "false");        // Grammarly & friends
+    ta.setAttribute("data-lpignore", "true");      // password managers
+    // The textarea accumulates typed text; keyboards then try to "fix" old
+    // words in it. Keep it empty whenever no composition is in progress.
+    let composing = false, t = null;
+    const later = (ms) => {
+      clearTimeout(t);
+      t = setTimeout(() => { if (!composing && ta.value) ta.value = ""; }, ms);
+    };
+    ta.addEventListener("compositionstart", () => { composing = true; clearTimeout(t); });
+    ta.addEventListener("compositionend", () => { composing = false; later(80); });
+    ta.addEventListener("input", () => { if (!composing) later(0); });
+  }
+
+  function toast(msg) {
+    const el = byId("at-toast");
+    if (!el) return;
+    el.textContent = msg;
+    el.hidden = false;
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { el.hidden = true; }, 1600);
+  }
+
+  async function copyText(text) {
+    if (!text) return false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through to the execCommand path */ }
+    try {                       // plain-http (LAN IP) / older webviews
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;";
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return !!ok;
+    } catch (_) { return false; }
+  }
+
+  async function copySelection() {
+    const tab = activeTab();
+    if (!tab || !tab.term) return;
+    const text = tab.term.getSelection();
+    if (!text) { toast("Nothing selected — long-press text first"); return; }
+    const ok = await copyText(text);
+    toast(ok ? "Copied" : "Copy blocked — use Select text");
+    if (ok) tab.term.clearSelection();
+    hideSelBar();
+    tab.term.focus();
+  }
+
+  async function pasteClipboard() {
+    const tab = activeTab();
+    if (!tab || !tab.term) return;
+    let text = null;
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        text = await navigator.clipboard.readText();
+      }
+    } catch (_) { text = null; }       // permission denied / insecure context
+    hideSelBar();
+    if (text == null) { openPasteSheet(); return; }
+    if (text) tab.term.paste(text);
+    tab.term.focus();
+  }
+
+  function openSheet(o) {
+    const sheet = byId("at-sheet");
+    if (!sheet) return;
+    byId("at-sheet-title").textContent = o.title;
+    byId("at-sheet-hint").textContent = o.hint || "";
+    const ta = byId("at-sheet-text");
+    ta.readOnly = !!o.readonly;
+    ta.setAttribute("inputmode", o.readonly ? "none" : "text");  // no keyboard while selecting
+    ta.value = o.text || "";
+    const ok = byId("at-sheet-ok");
+    ok.textContent = o.okLabel;
+    ok.onclick = async () => { await o.onOk(ta.value); };
+    sheet.hidden = false;
+    ta.scrollTop = o.readonly ? ta.scrollHeight : 0;
+    if (!o.readonly) ta.focus();
+  }
+
+  function closeSheet() {
+    const sheet = byId("at-sheet");
+    if (sheet) sheet.hidden = true;
+    const tab = activeTab();
+    if (tab && tab.term) tab.term.focus();
+  }
+
+  function bufferText(term, maxLines) {
+    const buf = term.buffer.active;
+    const out = [];
+    for (let i = Math.max(0, buf.length - maxLines); i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      const s = line.translateToString(true);
+      if (line.isWrapped && out.length) out[out.length - 1] += s; else out.push(s);
+    }
+    while (out.length && out[out.length - 1] === "") out.pop();
+    return out.join("\n");
+  }
+
+  /* Native long-press/drag selection + the OS copy handles work inside a real
+   * <textarea>, so this is the fail-safe path on every phone browser. */
+  function openSelectSheet() {
+    const tab = activeTab();
+    if (!tab || !tab.term) return;
+    hideSelBar();
+    openSheet({
+      title: "Select text", readonly: true, okLabel: "Copy all",
+      hint: "Long-press a word, drag the handles, then Copy — or tap Copy all.",
+      text: bufferText(tab.term, 600),
+      onOk: async (txt) => {
+        const ok = await copyText(txt);
+        toast(ok ? "Copied" : "Copy blocked");
+        if (ok) closeSheet();
+      },
+    });
+  }
+
+  function openPasteSheet() {
+    openSheet({
+      title: "Paste", readonly: false, okLabel: "Paste into terminal",
+      hint: "Clipboard access is blocked here — long-press in the box, choose Paste.",
+      text: "",
+      onOk: async (txt) => {
+        const tab = activeTab();
+        closeSheet();
+        if (tab && tab.term && txt) tab.term.paste(txt);
+      },
+    });
+  }
+
+  function showSelBar() {
+    const b = byId("at-selbar");
+    if (!b) return;
+    const tab = activeTab();
+    const has = !!(tab && tab.term && tab.term.hasSelection());
+    b.querySelector('[data-sel="copy"]').disabled = !has;
+    b.hidden = false;
+  }
+  function hideSelBar(clear) {
+    const b = byId("at-selbar");
+    if (b) b.hidden = true;
+    if (clear) { const t = activeTab(); if (t && t.term) t.term.clearSelection(); }
+  }
+
+  /* xterm.js has no touch selection. Long-press (~0.45s) selects the word
+   * under the finger, dragging extends it, lifting shows the Copy/Paste bar. */
+  function wordBounds(term, cell) {
+    const line = term.buffer.active.getLine(cell.row);
+    const s = line ? line.translateToString(false) : "";
+    const sp = (c) => !c || /\s/.test(c);
+    if (sp(s[cell.col])) return null;
+    let a = cell.col, b = cell.col;
+    while (a > 0 && !sp(s[a - 1])) a--;
+    while (b < s.length - 1 && !sp(s[b + 1])) b++;
+    return { start: a, end: b };
+  }
+
+  function applySelection(term, a, b) {
+    const fwd = a.row < b.row || (a.row === b.row && a.col <= b.col);
+    const p = fwd ? a : b, q = fwd ? b : a;
+    term.select(p.col, p.row, (q.row - p.row) * term.cols + (q.col - p.col) + 1);
+  }
+
+  function bindTouchSelect(tab) {
+    const el = tab.view, term = tab.term;
+    let timer = null, active = false, sx = 0, sy = 0, anchorA = null, anchorB = null;
+
+    const cellAt = (pt) => {
+      const screen = term.element && term.element.querySelector(".xterm-screen");
+      if (!screen || !term.cols || !term.rows) return null;
+      const r = screen.getBoundingClientRect();
+      const cw = r.width / term.cols, ch = r.height / term.rows;
+      if (!cw || !ch) return null;
+      const col = Math.max(0, Math.min(term.cols - 1, Math.floor((pt.clientX - r.left) / cw)));
+      const row = Math.max(0, Math.min(term.rows - 1, Math.floor((pt.clientY - r.top) / ch)));
+      return { col, row: row + term.buffer.active.viewportY };
+    };
+    const cancel = () => { clearTimeout(timer); timer = null; };
+
+    el.addEventListener("touchstart", (ev) => {
+      cancel();
+      if (ev.touches.length !== 1) return;
+      const t = ev.touches[0];
+      sx = t.clientX; sy = t.clientY;
+      timer = setTimeout(() => {
+        const c = cellAt({ clientX: sx, clientY: sy });
+        if (!c) return;
+        active = true;
+        const w = wordBounds(term, c);
+        anchorA = w ? { col: w.start, row: c.row } : c;
+        anchorB = w ? { col: w.end, row: c.row } : c;
+        term.clearSelection();
+        if (w) applySelection(term, anchorA, anchorB);
+        if (navigator.vibrate) { try { navigator.vibrate(15); } catch (_) {} }
+        showSelBar();
+      }, 450);
+    }, { passive: true });
+
+    // capture phase: stop xterm's own touchmove (it would scroll) while selecting
+    el.addEventListener("touchmove", (ev) => {
+      const t = ev.touches[0];
+      if (!active) {
+        if (t && Math.hypot(t.clientX - sx, t.clientY - sy) > 10) cancel();
+        return;
+      }
+      ev.preventDefault(); ev.stopPropagation();
+      const c = cellAt(t);
+      if (!c) return;
+      const before = c.row < anchorA.row || (c.row === anchorA.row && c.col < anchorA.col);
+      applySelection(term, before ? anchorB : anchorA, c);
+    }, { passive: false, capture: true });
+
+    const end = () => {
+      cancel();
+      if (active) { active = false; showSelBar(); }
+    };
+    el.addEventListener("touchend", end, { passive: true });
+    el.addEventListener("touchcancel", end, { passive: true });
+
+    // Android fires contextmenu on long-press; xterm's handler would drop its
+    // textarea under the finger and pop the OS paste bubble. We own long-press.
+    el.addEventListener("contextmenu", (ev) => {
+      if (active || timer !== null || !byId("at-selbar").hidden) {
+        ev.preventDefault(); ev.stopPropagation();
+      }
+    }, true);
+  }
+
   /* ------------------------------ viewport ------------------------------- */
 
   function bindViewport() {
@@ -899,6 +1207,7 @@
     refreshStatus,
     pressKey,
     state,
+    _t: { wordBounds, applySelection, bufferText, copyText, hardenInput, bindTouchSelect, showSelBar },
     EXTRA_KEYS,
   };
   // Core-tab loader: astra.js's showTab() calls this the first time the

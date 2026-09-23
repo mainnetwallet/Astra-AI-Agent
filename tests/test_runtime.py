@@ -29,6 +29,7 @@ from astra.runtime import packages as rt_packages
 from astra.runtime.engine import (GUEST_TMP, GUEST_WORKSPACE,
                                   AstraRuntimeUnavailable, RuntimeEngine)
 from astra.runtime.manager import AgentRuntime, RuntimeManager
+from astra.runtime.tools import register_runtime_tools
 
 
 def _tmpdir() -> str:
@@ -540,6 +541,50 @@ class TestTerminalWebContract(unittest.TestCase):
         # Every runtime endpoint resolves through the one guard that reports
         # unavailability — there is no direct host path.
         self.assertIn("def _runtime(self, req)", inspect.getsource(WebApp))
+
+
+class TestGatewayCapabilityAwareness(unittest.TestCase):
+    """The Gateway decides *what a request needs* from the live capability
+    catalog derived from the ONE ToolRegistry. Registering the runtime tools
+    must therefore make `runtime` a first-class `execution.capability` — with
+    no separate, hardcoded capability list to keep in sync."""
+
+    def _registry(self):
+        from astra.core.permissions import Policy
+        from astra.tools.registry import ToolRegistry
+        reg = ToolRegistry(policy=Policy(granted=["read"]))
+        register_runtime_tools(reg, RuntimeManager(base_dir=_tmpdir()))
+        return reg
+
+    def test_runtime_category_reaches_the_gateway_catalog(self):
+        from astra.ai.capability_context import collect_runtime_capabilities
+        caps = collect_runtime_capabilities(self._registry())
+        self.assertTrue(caps.has("runtime"))
+        self.assertIn("runtime", caps.catalog_text())
+        self.assertIn("Agent Runtime", caps.human_context)
+
+    def test_catalog_is_empty_without_tools(self):
+        from astra.ai.capability_context import collect_runtime_capabilities
+        caps = collect_runtime_capabilities(None)
+        self.assertFalse(caps.available)
+
+    def test_runtime_tools_are_risked_correctly(self):
+        from astra.core.permissions import Level
+        reg = self._registry()
+        self.assertEqual(reg.get("runtime_command").risk, Level.SYSTEM_ACTION)
+        self.assertEqual(reg.get("runtime_start").risk, Level.SYSTEM_ACTION)
+        self.assertEqual(reg.get("runtime_directory_list").risk, Level.READ)
+        self.assertEqual(reg.get("runtime_file_write").risk,
+                         Level.LOW_RISK_WRITE)
+
+    def test_policy_denies_runtime_execution_when_not_granted(self):
+        from astra.core.exceptions import PermissionError as ToolPermissionError
+        reg = self._registry()          # granted: read only
+        with self.assertRaises(ToolPermissionError):
+            reg.execute("runtime_command", {"command": "echo hi"})
+        # ...and a read-only runtime tool is still allowed.
+        result = reg.execute("runtime_status", {})
+        self.assertTrue(result["ok"])
 
 
 if __name__ == "__main__":

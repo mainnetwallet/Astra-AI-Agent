@@ -45,6 +45,13 @@ _CATEGORY_INFO: dict[str, tuple[str, str]] = {
     "terminal": ("terminal/shell access",
                 "run shell commands, scripts and tests in a persistent "
                 "session"),
+    # The isolated Agent Runtime (astra/runtime/). Kept distinct from
+    # "terminal" so a Gateway execution decision can name the isolated
+    # environment explicitly instead of the legacy host session.
+    "runtime": ("isolated Agent Runtime",
+                "run commands, install packages (npm/pip/apt/apk/git) and "
+                "manage files inside Astra's own isolated Linux environment, "
+                "plus the Astra Agent Terminal attached to it"),
     "browser": ("web browsing", "open and read live web pages"),
     "web3": ("web3/blockchain tools",
             "check wallets and prepare on-chain transactions"),

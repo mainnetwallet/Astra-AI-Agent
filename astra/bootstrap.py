@@ -40,6 +40,7 @@ from astra.memory.memory import MemorySystem, ExperienceStore
 from astra.tools.registry import ToolRegistry
 from astra.tools import builtins
 from astra.terminal import TerminalManager, register_terminal_tools
+from astra.runtime import RuntimeManager, register_runtime_tools
 from astra.ai.execution_history import AgentExecutionHistory
 from astra.workflows.engine import WorkflowEngine
 from astra.workflows.scheduler import SchedulerManager
@@ -117,6 +118,15 @@ def build(store: Store | None = None, config=None,
     terminal_manager = TerminalManager(events=events, config=config,
                                        store=store)
     register_terminal_tools(registry, terminal_manager)
+
+    # Agent Runtime: the isolated environment Agent work executes in (see
+    # astra/runtime/). ONE manager, ONE set of runtime tools on the ONE
+    # ToolRegistry, shared by the Gateway, every Provider, the agent tool
+    # loop and the Astra Agent Terminal. When the runtime is unavailable the
+    # runtime tools fail closed — there is no host-shell fallback.
+    runtime_manager = RuntimeManager(events=events, config=config,
+                                     store=store)
+    register_runtime_tools(registry, runtime_manager)
 
     # Web3 transaction manager: deterministic policy + encrypted keystore.
     # The LLM may only *prepare*; authorize/sign/broadcast stay out of the
@@ -251,7 +261,8 @@ def build(store: Store | None = None, config=None,
                                memory=memory, tasks=tasks,
                                web3_manager=tx_manager, registry=registry,
                                terminal=terminal_manager,
-                               execution_history=execution_history)
+                               execution_history=execution_history,
+                               runtime=runtime_manager)
     workflows = WorkflowEngine(store, registry, events, context=tool_context)
     scheduler = None
     if with_scheduler:
@@ -274,6 +285,7 @@ def build(store: Store | None = None, config=None,
         "discovery": discovery, "agent_manager": agent_manager,
         "browser_manager": browser_manager,
         "terminal": terminal_manager,
+        "runtime": runtime_manager,
         "tx_manager": tx_manager, "keystore": keystore,
         "web3_policy": policy_engine,
         "gateway_intelligence": gateway_intelligence,

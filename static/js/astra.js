@@ -43,6 +43,12 @@ const TAB_LABELS = {};
 /* Core tab loaders register here too (e.g. the Agent Workflow tab in
  * static/js/workflow.js) — one registry, one showTab path. */
 window.Astra.loaders = loaders;
+/* Current chat conversation id, for the Astra Agent Terminal (static/js/
+ * terminal.js). The terminal derives `conv-<id>` from it so the PTY it
+ * attaches to is the SAME session the chat agent's runtime tools use —
+ * that is what makes "clone in chat, `ls` in the terminal" work. */
+window.Astra.currentConversation = () =>
+  (typeof CHAT !== "undefined" && CHAT ? (CHAT.conversationId || null) : null);
 
 function showTab(name) {
   $$("#nav .tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));

@@ -231,6 +231,42 @@ configured.
 | `ASTRA_FASTAPI_DOCS` | 0 | Expose `/docs` + `/openapi.json` |
 | `ASTRA_ASGI_THREADS` | 0 (Starlette's default of 40) | Worker-thread pool used for blocking route work |
 
+## Astra Agent Runtime & Astra Agent Terminal
+
+Astra runs Agent work inside its own isolated Linux environment — the
+**Astra Agent Runtime** — and gives you a real PC-style terminal onto it,
+the **Astra Agent Terminal**.
+
+* **Real isolation, not a simulation.** The runtime is a separate filesystem
+  and process tree reached through `proot` (the only mechanism Android's
+  kernel allows here). Only the runtime's own `/workspace`, `/root` and
+  `/tmp` are bound in, plus `/dev`, `/proc` and `/sys`. The host home, the
+  Termux prefix and `/sdcard` are invisible inside it, and the guest
+  environment is built with `env -i` so host secrets cannot leak in.
+* **No host fallback, ever.** If the runtime is unavailable, execution stops
+  and the UI says *Agent Runtime unavailable*. Nothing silently runs on your
+  host shell.
+* **A real terminal.** The pane is xterm.js over a genuine PTY
+  (`pty.fork()`), so prompts, arrows, `Tab`, `Ctrl+C/D/L/Z/A/E/W/R`, ANSI
+  colours, full-screen programs, scrollback, selection and real
+  `TIOCSWINSZ` resize all work. Tabs are real sessions — new, switch,
+  rename, close, reconnect.
+* **Chat and terminal share one session.** The chat agent and the terminal
+  both use `conv-<id>`. Run `git clone` in chat, open the terminal, run
+  `ls` — you see the clone, in the same shell, with the same cwd.
+* **Files and packages stay in the runtime.** Upload/import files, extract
+  `.zip`/`.tar.gz`/`.tgz` (traversal, absolute paths and escaping symlinks
+  are rejected), and install with `npm`, `pip`, `apt`, `apk` or `git` —
+  always inside the runtime, and always **verified** (a zero exit code on
+  its own is not treated as proof).
+* **Lifecycle you control.** `runtime_create/start/stop/restart/reset/destroy`
+  as tools and in the UI. Normal chat completion never destroys the runtime:
+  your projects, dependencies and Git repos persist.
+
+Full detail — isolation model, lifecycle, security guards, events, the
+tool list and troubleshooting — is in **[docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md)**.
+Configuration keys are in `.env.example` under *Astra Agent Runtime*.
+
 ## Web3 transaction safety
 
 * **CONFIRM** (default): every transaction parks at `PREPARED` for your review —
@@ -248,6 +284,8 @@ configured.
   API responses or plaintext DB rows.
 
 ## Web UI tabs
+
+The **🖥️ Agent Terminal** tab is a real terminal onto the Agent Runtime (see above); the **📡 Activity Log** tab stays a separate lifecycle/audit timeline.
 
 | Tab | What it shows |
 |-----|-------------|

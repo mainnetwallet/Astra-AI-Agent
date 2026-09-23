@@ -122,7 +122,8 @@ from urllib.parse import urlparse, parse_qs, unquote
 from .agent import Agent
 from .chat_log import ChatLog
 from .ai.conversation_context import ConversationContextBuilder
-from .security import (ApiError, RateLimiter, make_request_id, redact)
+from .security import (REDACTED, ApiError, RateLimiter, make_request_id,
+                     redact)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 
@@ -171,6 +172,10 @@ CONTENT_TYPES = {
 CORE_TABS = [
     {"tab": "dashboard", "label": "\U0001f4ca Dashboard", "core": True},
     {"tab": "assistant", "label": "\U0001f916 Assistant", "core": True},
+    # Astra Agent Terminal: a real PC-style terminal (xterm.js) attached to a
+    # real PTY inside the isolated Agent Runtime. A core tab — see
+    # static/js/terminal.js and astra/runtime/.
+    {"tab": "terminal", "label": "\U0001f5a5\ufe0f Agent Terminal", "core": True},
     # Agent Workflow: the visual editor over the EXISTING WorkflowEngine +
     # SchedulerManager (astra/workflows/) and the ONE ToolRegistry. It is a
     # core tab, not a plugin — the plugin system was removed.
@@ -1037,6 +1042,289 @@ class WebApp:
                                   "not_found", req.rid)
         return json_response({"ok": True, "data": payload}, rid=req.rid)
 
+    # -- Astra Agent Runtime / Astra Agent Terminal --------------------------
+    def _runtime_manager(self):
+        return self.site._get("runtime")
+
+    def _runtime(self, req):
+        """Resolve the runtime, or the reason it cannot be used.
+
+        Returns (runtime, error_response). Every runtime endpoint goes
+        through here, so a missing/unavailable runtime is reported
+        consistently and never silently downgraded to the host."""
+        manager = self._runtime_manager()
+        if manager is None:
+            return None, error_response("Agent Runtime unavailable",
+                                        503, "runtime_unavailable", req.rid)
+        return manager.default(), None
+
+    def _runtime_status(self, req) -> Response:
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        status = runtime.status(refresh_capabilities=False)
+        return json_response({"ok": True, "data": status}, rid=req.rid)
+
+    def _runtime_lifecycle(self, req) -> Response:
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        action = str(req.body.get("action") or "").strip().lower()
+        handlers = {
+            "create": lambda: runtime.create(
+                reset=bool(req.body.get("reset"))),
+            "start": runtime.start,
+            "stop": runtime.stop,
+            "restart": runtime.restart,
+            "reset": runtime.reset,
+            "destroy": runtime.destroy,
+        }
+        if action not in handlers:
+            return error_response(
+                "action must be one of: " + ", ".join(sorted(handlers)),
+                400, "bad_request", req.rid)
+        try:
+            data = handlers[action]()
+        except ApiError:
+            raise
+        except Exception as exc:                      # noqa: BLE001
+            return error_response(str(exc), 503, "runtime_unavailable",
+                                  req.rid)
+        return json_response({"ok": True, "action": action, "data": data},
+                             rid=req.rid)
+
+    def _runtime_terminals(self, req) -> Response:
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        return json_response({"ok": True,
+                              "data": {"terminals": [_session_alias(t) for t
+                                                     in runtime.terminals()],
+                                       "runtime": runtime.runtime_id}},
+                             rid=req.rid)
+
+    def _runtime_terminal_open(self, req) -> Response:
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        body = req.body
+        session_id = str(body.get("session_id") or "").strip()
+        if not session_id:
+            return error_response("session_id required", 400, "bad_request",
+                                  req.rid)
+        try:
+            process = runtime.open_terminal(
+                session_id,
+                rows=int_arg(body.get("rows"), 24, name="rows"),
+                cols=int_arg(body.get("cols"), 80, name="cols"),
+                title=str(body.get("title") or ""))
+        except Exception as exc:                      # noqa: BLE001
+            return error_response(str(exc), 503, "runtime_unavailable",
+                                  req.rid)
+        return json_response({"ok": True, "data": _session_alias(
+            process.snapshot(include_output=False))}, rid=req.rid)
+
+    def _runtime_terminal_input(self, req) -> Response:
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        body = req.body
+        session_id = str(body.get("session_id") or "").strip()
+        if not session_id:
+            return error_response("session_id required", 400, "bad_request",
+                                  req.rid)
+        process = runtime.get_terminal(session_id)
+        if process is None:
+            return error_response("no such terminal session", 404,
+                                  "not_found", req.rid)
+        data = body.get("data")
+        if isinstance(data, list):
+            # A list of key events, each either a literal or {key: "ArrowUp"}.
+            data = "".join(_key_to_bytes(item) for item in data)
+        else:
+            data = str(data or "")
+        written = 0
+        if isinstance(data, str):
+            written = process.write(data.encode("utf-8", "replace"))
+        else:
+            written = process.write(bytes(data))
+        return json_response({"ok": True,
+                              "data": {"written": written,
+                                       "status": process.status}},
+                             rid=req.rid)
+
+    def _runtime_terminal_resize(self, req) -> Response:
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        body = req.body
+        session_id = str(body.get("session_id") or "").strip()
+        process = runtime.get_terminal(session_id) if session_id else None
+        if process is None:
+            return error_response("no such terminal session", 404,
+                                  "not_found", req.rid)
+        rows = int_arg(body.get("rows"), 24, name="rows")
+        cols = int_arg(body.get("cols"), 80, name="cols")
+        applied = process.resize(rows, cols)
+        return json_response({"ok": True,
+                              "data": {"applied": applied, "rows": rows,
+                                       "cols": cols}}, rid=req.rid)
+
+    def _runtime_terminal_close(self, req) -> Response:
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        session_id = str(req.body.get("session_id") or "").strip()
+        if not session_id:
+            return error_response("session_id required", 400, "bad_request",
+                                  req.rid)
+        # Closing a UI tab must not destroy the runtime — it only ends this
+        # session's PTY. destroy_runtime is the explicit, separate action.
+        return json_response({"ok": True,
+                              "data": {"closed": runtime.close_terminal(
+                                  session_id)}}, rid=req.rid)
+
+    def _runtime_terminal_snapshot(self, req) -> Response:
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        session_id = str(req.query.get("session_id") or "").strip()
+        process = runtime.get_terminal(session_id) if session_id else None
+        if process is None:
+            return error_response("no such terminal session", 404,
+                                  "not_found", req.rid)
+        return json_response({"ok": True, "data": _session_alias(
+            process.snapshot())}, rid=req.rid)
+
+    def _runtime_terminal_stream(self, req) -> Response:
+        """SSE feed of one PTY session's live output.
+
+        This is the terminal's stdout: raw bytes as the PTY produced them,
+        including every ANSI escape sequence, so the browser renders a real
+        terminal rather than a list of log lines. `offset` resumes from
+        where a reconnecting client left off."""
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        session_id = str(req.query.get("session_id") or "").strip()
+        process = runtime.get_terminal(session_id) if session_id else None
+        if process is None:
+            return error_response("no such terminal session", 404,
+                                  "not_found", req.rid)
+        offset = int_arg(req.query.get("offset"), 0, name="offset")
+        return Response(
+            200,
+            content_type="text/event-stream; charset=utf-8",
+            stream=runtime_pty_frames(process, offset),
+            cache="no-cache",
+            cors=True,
+            headers=[("Connection", "keep-alive"),
+                     ("X-Accel-Buffering", "no")],
+        )
+
+    def _runtime_files_list(self, req) -> Response:
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        path = str(req.query.get("path") or "/workspace")
+        try:
+            data = runtime.list_directory(
+                path, limit=int_arg(req.query.get("limit"), 500, name="limit"))
+        except Exception as exc:                      # noqa: BLE001
+            return error_response(str(exc), 400, "bad_request", req.rid)
+        return json_response({"ok": True, "data": data}, rid=req.rid)
+
+    def _runtime_files_apply(self, req) -> Response:
+        """File mutations from the workspace sidebar (all runtime-scoped)."""
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        body = req.body
+        action = str(body.get("action") or "").strip().lower()
+        try:
+            if action == "read":
+                data = runtime.read_file(
+                    body.get("path", ""),
+                    max_bytes=int_arg(body.get("max_bytes"), 200000,
+                                      name="max_bytes"))
+            elif action == "write":
+                data = runtime.write_file(body.get("path", ""),
+                                          body.get("content", ""),
+                                          overwrite=bool(
+                                              body.get("overwrite", True)))
+            elif action == "mkdir":
+                data = runtime.make_directory(body.get("path", ""))
+            elif action == "remove":
+                data = runtime.remove(body.get("path", ""),
+                                      recursive=bool(body.get("recursive")))
+            elif action == "copy":
+                data = runtime.copy(body.get("source", ""),
+                                    body.get("destination", ""))
+            elif action == "move":
+                data = runtime.move(body.get("source", ""),
+                                    body.get("destination", ""))
+            elif action == "extract":
+                data = runtime.extract_archive(
+                    body.get("archive", ""), body.get("destination", ""),
+                    strip_components=int_arg(body.get("strip_components"), 0,
+                                             name="strip_components"))
+            else:
+                return error_response(
+                    "action must be one of: read, write, mkdir, remove, "
+                    "copy, move, extract", 400, "bad_request", req.rid)
+        except ApiError:
+            raise
+        except Exception as exc:                      # noqa: BLE001
+            return error_response(str(exc), 400, "bad_request", req.rid)
+        return json_response({"ok": True, "action": action, "data": data},
+                             rid=req.rid)
+
+    def _runtime_upload(self, req) -> Response:
+        """Upload a file into the runtime (bounded, one-directional copy).
+
+        The bytes land in the runtime's own filesystem; nothing is executed
+        on the host, and an archive is extracted with the traversal and
+        symlink guards in astra/runtime/files.py."""
+        runtime, err = self._runtime(req)
+        if err is not None:
+            return err
+        files = req.files or []
+        if not files:
+            return error_response("no file uploaded", 400, "bad_request",
+                                  req.rid)
+        destination = str(req.fields.get("destination") or "")
+        extract = str(req.fields.get("extract") or "").lower() in (
+            "1", "true", "yes", "on")
+        results = []
+        for item in files[:10]:
+            name = str(item.get("filename") or "upload.bin")
+            safe = os.path.basename(name)
+            if not safe or safe.startswith("."):
+                results.append({"name": name, "ok": False,
+                                "error": "invalid file name"})
+                continue
+            data = item.get("data") or b""
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            if len(data) > runtime.paths.max_file_bytes:
+                results.append({"name": safe, "ok": False,
+                                "error": "file exceeds the runtime size limit"})
+                continue
+            staging = os.path.join(runtime.uploads_dir, safe)
+            os.makedirs(runtime.uploads_dir, exist_ok=True)
+            with open(staging, "wb") as fh:
+                fh.write(data)
+            try:
+                if extract:
+                    outcome = runtime.import_and_extract(staging, destination)
+                else:
+                    outcome = runtime.import_file(staging, destination or safe)
+                results.append({"name": safe, "ok": True, "result": outcome})
+            except Exception as exc:                  # noqa: BLE001
+                results.append({"name": safe, "ok": False, "error": str(exc)})
+        return json_response({"ok": True, "data": {"uploads": results}},
+                             rid=req.rid)
+
     # -- main route table ----------------------------------------------------
     def _route(self, req: Request, path: list) -> Response:
         site, q, body = self.site, req.query, req.body
@@ -1207,6 +1495,36 @@ class WebApp:
                                  rid=req.rid)
         if path == ["api", "terminal", "output"] and method == "GET":
             return self._terminal_output(req)
+
+        # Astra Agent Runtime / Astra Agent Terminal (astra/runtime/). These
+        # endpoints are the terminal's whole backend: lifecycle, real PTY
+        # sessions streamed over SSE, raw keyboard input, resize, and the
+        # runtime-scoped file manager. Everything targets the isolated
+        # runtime — no endpoint can address a host path.
+        if path == ["api", "runtime", "status"] and method == "GET":
+            return self._runtime_status(req)
+        if path == ["api", "runtime", "lifecycle"] and method == "POST":
+            return self._runtime_lifecycle(req)
+        if path == ["api", "runtime", "terminals"] and method == "GET":
+            return self._runtime_terminals(req)
+        if path == ["api", "runtime", "terminal", "open"] and method == "POST":
+            return self._runtime_terminal_open(req)
+        if path == ["api", "runtime", "terminal", "input"] and method == "POST":
+            return self._runtime_terminal_input(req)
+        if path == ["api", "runtime", "terminal", "resize"] and method == "POST":
+            return self._runtime_terminal_resize(req)
+        if path == ["api", "runtime", "terminal", "close"] and method == "POST":
+            return self._runtime_terminal_close(req)
+        if path == ["api", "runtime", "terminal", "stream"] and method == "GET":
+            return self._runtime_terminal_stream(req)
+        if path == ["api", "runtime", "terminal", "snapshot"] and method == "GET":
+            return self._runtime_terminal_snapshot(req)
+        if path == ["api", "runtime", "files"] and method == "GET":
+            return self._runtime_files_list(req)
+        if path == ["api", "runtime", "files"] and method == "POST":
+            return self._runtime_files_apply(req)
+        if path == ["api", "runtime", "upload"] and method == "POST":
+            return self._runtime_upload(req)
         if path == ["api", "tasks"] and method == "GET":
             return json_response({"ok": True,
                                   "data": site.tasks().list(
@@ -1946,6 +2264,140 @@ class WebApp:
 
 
 # ── Server-Sent Events ───────────────────────────────────────────────────────
+
+# -- Astra Agent Terminal: PTY streaming + key encoding ---------------------
+
+# How long one SSE connection may live before the client reconnects. Long
+# enough for real work, short enough not to pin a connection forever.
+RUNTIME_SSE_DEADLINE_S = 1800.0
+# Keystroke delivery is latency-sensitive: poll fast.
+RUNTIME_SSE_POLL_S = 0.03
+# Idle keepalive so proxies do not drop a quiet terminal.
+RUNTIME_SSE_KEEPALIVE_S = 15.0
+
+# Named keys the browser sends when it does not use a literal byte, mapped
+# to the exact bytes a real terminal would transmit.
+_KEY_BYTES = {
+    "Enter": b"\r", "Return": b"\r", "Tab": b"\t",
+    "Backspace": b"\x7f", "Delete": b"\x1b[3~",
+    "Escape": b"\x1b", "Space": b" ",
+    "ArrowUp": b"\x1b[A", "ArrowDown": b"\x1b[B",
+    "ArrowRight": b"\x1b[C", "ArrowLeft": b"\x1b[D",
+    "Home": b"\x1b[H", "End": b"\x1b[F",
+    "PageUp": b"\x1b[5~", "PageDown": b"\x1b[6~",
+    "Insert": b"\x1b[2~",
+    "F1": b"\x1bOP", "F2": b"\x1bOQ", "F3": b"\x1bOR", "F4": b"\x1bOS",
+    "F5": b"\x1b[15~", "F6": b"\x1b[17~", "F7": b"\x1b[18~",
+    "F8": b"\x1b[19~", "F9": b"\x1b[20~", "F10": b"\x1b[21~",
+    "F11": b"\x1b[23~", "F12": b"\x1b[24~",
+}
+# Control keys: "ctrl+c" -> 0x03, the byte the line discipline turns into
+# SIGINT for the foreground process group. Nothing simulates the signal.
+def _ctrl_byte(letter: str) -> bytes | None:
+    letter = letter.upper()
+    if len(letter) == 1 and "A" <= letter <= "Z":
+        return bytes([ord(letter) - 64])
+    if letter in ("@", " "):
+        return b"\x00"
+    if letter == "[":
+        return b"\x1b"
+    if letter == "\\":
+        return b"\x1c"
+    if letter == "]":
+        return b"\x1d"
+    if letter == "^":
+        return b"\x1e"
+    if letter == "_":
+        return b"\x1f"
+    if letter == "?":
+        return b"\x7f"
+    return None
+
+
+def _key_to_bytes(item) -> bytes:
+    """Turn one client key event into the bytes a PTY should receive."""
+    if isinstance(item, str):
+        return item.encode("utf-8", "replace")
+    if not isinstance(item, dict):
+        return b""
+    text = item.get("text")
+    if text:
+        return str(text).encode("utf-8", "replace")
+    key = str(item.get("key") or "")
+    ctrl = bool(item.get("ctrl"))
+    alt = bool(item.get("alt"))
+    if ctrl:
+        mapped = _ctrl_byte(key)
+        if mapped is not None:
+            return (b"\x1b" if alt else b"") + mapped
+    base = _KEY_BYTES.get(key)
+    if base is None:
+        if len(key) == 1:
+            base = key.encode("utf-8", "replace")
+        else:
+            return b""
+    return (b"\x1b" if alt else b"") + base
+
+
+def _session_alias(payload):
+    """Mirror `session_id` into `session` on runtime payloads.
+
+    `security.redact` masks any key matching `session[_-]?id` (a real rule —
+    a provider/auth session id IS a secret). The runtime's session id is a
+    conversation-scoped terminal handle, not a credential, and the UI needs
+    to show it, so it is also exposed under a key that rule does not match.
+    """
+    if isinstance(payload, dict):
+        sid = payload.get("session_id")
+        if isinstance(sid, str) and sid and sid != REDACTED:
+            payload.setdefault("session", sid)
+    return payload
+
+
+async def runtime_pty_frames(process, offset: int = 0):
+    """SSE frames carrying a PTY session's raw output.
+
+    `process.text_since(offset)` is polled in a worker thread (the read is
+    cheap and non-blocking) while the async generator itself only sleeps, so
+    an idle terminal costs no worker thread — the same reasoning as
+    `sse_frames` for the Live tab.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = time.time() + RUNTIME_SSE_DEADLINE_S
+    last_beat = time.time()
+    while time.time() < deadline:
+        chunk = await loop.run_in_executor(
+            None, lambda: process.text_since(offset))
+        data = chunk.get("data", "")
+        offset = chunk.get("next_offset", offset)
+        if data:
+            frame = {"offset": chunk.get("offset"), "data": data,
+                     "total": chunk.get("total"),
+                     "truncated": chunk.get("truncated")}
+            yield ("event: output\ndata: "
+                   + json.dumps(frame, ensure_ascii=False) + "\n\n").encode(
+                       "utf-8")
+            last_beat = time.time()
+        elif time.time() - last_beat > RUNTIME_SSE_KEEPALIVE_S:
+            yield b": keepalive\n\n"
+            last_beat = time.time()
+        if process.status != "running":
+            # Drain anything written between the last poll and exit.
+            tail = process.text_since(offset)
+            if tail.get("data"):
+                yield ("event: output\ndata: "
+                       + json.dumps({"offset": tail.get("offset"),
+                                     "data": tail["data"],
+                                     "total": tail.get("total")},
+                                    ensure_ascii=False) + "\n\n").encode("utf-8")
+            payload = process.snapshot(include_output=False)
+            yield ("event: exit\ndata: "
+                   + json.dumps(payload, ensure_ascii=False) + "\n\n").encode(
+                       "utf-8")
+            return
+        await asyncio.sleep(RUNTIME_SSE_POLL_S)
+    yield b"event: timeout\ndata: {}\n\n"
+
 
 def _sse_start_id(site: AstraSite, req: Request) -> int:
     """Where a feed should resume from.

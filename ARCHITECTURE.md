@@ -725,7 +725,53 @@ terminal resolves them), which keeps the reconciliation idempotent.
 
 ---
 
-## 8. Tests
+## 8. Astra Agent Runtime & Astra Agent Terminal
+
+**Modules**: `astra/runtime/` — `engine.py` (isolation backend + argv),
+`pty.py` (real PTY), `manager.py` (`AgentRuntime`/`RuntimeManager`),
+`files.py` (contained file ops + safe extraction), `packages.py`
+(detect/install/verify), `tools.py` (registry integration).
+**Frontend**: `static/js/terminal.js`, `static/css/terminal.css`,
+vendored xterm.js in `static/js/vendor/`.
+
+```
+Gateway ── execution decision ──▶ Provider ──▶ AgentToolLoop ──▶ ToolRegistry
+                                                                    │
+                                                    runtime_* tools ─┤
+                                                                    ▼
+                                                    AgentRuntime (proot, --isolated)
+                                                    workspace · home · tmp · PTY
+                                                                    │
+                                            SSE / input / resize     ▼
+                                                    Astra Agent Terminal (xterm.js)
+```
+
+* **Isolation**: `proot --rootfs=<proot-distro container> --change-id=0:0`
+  with an explicit bind set (`/workspace`, `/root`, `/tmp` from the
+  runtime's own directories; `/dev`, `/proc`, `/sys` from the kernel). The
+  guest environment is `env -i` built by `RuntimeEngine.build_argv`, so no
+  host variable is inherited. Shells are non-login so the container's
+  `termux-profile.sh` cannot put a host path on the guest `PATH`.
+* **No second subsystem**: the runtime registers its tools on the existing
+  `ToolRegistry`; sessions use the existing `conv-<id>` id scheme; large
+  output uses the existing `BlobStore`; lifecycle events go to the existing
+  `EventBus`/Activity Log. `ToolContext` gained `runtime` /
+  `runtime_session_id` alongside `terminal` / `terminal_session_id`.
+* **Execution**: `runtime_command` types into the session's live PTY and
+  waits for a sentinel; the command's output is redirected to a file inside
+  the runtime and read back through the `/tmp` bind, so results are never
+  scraped from the interactive stream (shell echo, prompts and ANSI redraws
+  would corrupt them). cwd and exports persist because it *is* the same
+  shell the terminal shows.
+* **Web layer**: `astra/web.py` adds `/api/runtime/*` (status, lifecycle,
+  terminals, terminal open/input/resize/close/stream/snapshot, files,
+  upload). The stream is SSE (`runtime_pty_frames`), matching the existing
+  Live-tab feed — no WebSocket is required.
+* **Verification**: `tests/test_runtime.py` covers the isolation contract,
+  lifecycle, archive guards, package planning/verification, PTY resize,
+  host unreachability and the shared chat↔terminal session.
+
+## 9. Tests
 
 `tests/` uses the stdlib `unittest` runner plus `pytest` for the live
 server smoke test. Notable files:

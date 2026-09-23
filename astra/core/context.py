@@ -17,7 +17,8 @@ class ToolContext:
     def __init__(self, store=None, config=None, events=None, memory=None,
                  tasks=None, web3_manager=None, registry=None,
                  terminal=None, terminal_session_id=None,
-                 execution_history=None, execution_scope=None):
+                 execution_history=None, execution_scope=None,
+                 runtime=None, runtime_session_id=None):
         self.store = store
         self.config = config
         self.events = events
@@ -38,6 +39,13 @@ class ToolContext:
         # needing the caller to pass a scope explicitly.
         self.execution_history = execution_history
         self.execution_scope = execution_scope
+        # Shared Agent Runtime (astra/runtime/): the isolated environment
+        # Agent work executes in, and the session id this tool call belongs
+        # to. When a conversation's session id matches the one the Astra
+        # Agent Terminal opened, both drive the SAME PTY — see
+        # astra/runtime/manager.py.
+        self.runtime = runtime
+        self.runtime_session_id = runtime_session_id
 
     def emit(self, kind: str, **data):
         if self.events:

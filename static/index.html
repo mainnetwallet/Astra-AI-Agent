@@ -6,6 +6,8 @@
 <title>Astra AI Agent</title>
 <link rel="icon" href="/static/img/favicon.png">
 <link rel="stylesheet" href="/static/css/style.css">
+<link rel="stylesheet" href="/static/css/vendor/xterm.css">
+<link rel="stylesheet" href="/static/css/terminal.css">
 </head>
 <body>
 <header class="topbar">
@@ -27,6 +29,14 @@
   <!-- plugin tabviews are created dynamically by astra.js -->
 
   <!-- ======== ACTIVITY LOG (core) ======== -->
+  <!-- ======== ASTRA AGENT TERMINAL (core) ======== -->
+  <!-- A real PC-style terminal, not a log viewer: xterm.js in the pane,
+       a genuine PTY in the isolated Agent Runtime behind it. Everything
+       (tabs, keyboard, ANSI, resize, live output, file sidebar) is driven
+       by the runtime through static/js/terminal.js; the pane is filled in
+       at runtime so nothing here renders as a log row. -->
+  <section id="tab-terminal" class="tabview"></section>
+
   <section id="tab-logs" class="tabview">
     <div class="panel">
       <div class="panel-head logs-head">
@@ -256,6 +266,9 @@
      Loaded before the core bundle that paints it. -->
 <script src="/static/js/chat_status.js"></script>
 <script src="/static/js/astra.js"></script>
+<script src="/static/js/vendor/xterm.js"></script>
+<script src="/static/js/vendor/xterm-addon-fit.js"></script>
+<script src="/static/js/terminal.js"></script>
 <script src="/static/js/workflow_model.js"></script>
 <script src="/static/js/workflow.js"></script>
 </body>

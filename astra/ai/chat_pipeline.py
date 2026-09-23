@@ -82,6 +82,37 @@ from astra.terminal.manager import default_session_id_for
 _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
                               "summarization", "research", "planning"})
 
+# Friendly, actionable reply shown when routing fails with "no eligible
+# provider/model available" — i.e. no AI provider key is configured yet
+# (fresh install, empty/missing .env). Markdown-formatted since the chat UI
+# renders it.
+_NO_PROVIDER_CONFIGURED_MESSAGE = """\
+### ⚙️ Kono AI Provider set kora nei
+
+Chat chalanor jonno onto ekta AI provider-er API key lagbe. Ekhono kono \
+key set kora hoyni, tai reply generate kora jacche na.
+
+**Thik korte:**
+
+1. Terminal-e giye `.env` file toiri koro (na thakle):
+```
+cp .env.example .env
+```
+2. Onno kono editor diye `.env` file khule onto ekta provider-er key bosao, jemon:
+```
+GEMINI_API_KEYS=your_key_here
+```
+ba
+```
+GROQ_API_KEYS=your_key_here
+```
+3. Save kore server restart koro:
+```
+bash start.sh
+```
+
+Restart howar por chat abar shathik-vabe kaj korbe."""
+
 MAX_TARGETS_IN_PROMPT = 60
 # NOTE: there is deliberately no Astra-imposed output-token cap for the
 # Gateway UNDERSTAND/VERIFY calls or the Provider call. The Gateway picks its
@@ -1106,6 +1137,13 @@ class ChatPipeline:
             trace["error"] = err
             self._emit("chat.pipeline.failed", error=err, op=f"chat:{req}",
                        request=req, trace=req, terminal=True)
+            if "no eligible" in err:
+                # No AI provider is configured at all (empty/missing .env) —
+                # a raw "ProviderError: no eligible provider/model
+                # available" is meaningless to a first-time user, so give a
+                # clear, actionable setup message instead of the raw error.
+                return self._reply(_NO_PROVIDER_CONFIGURED_MESSAGE, False,
+                                   trace)
             return self._reply(
                 "Provider theke kono uttor pawa jayni. Kichukkhon pore abar "
                 f"try korun. (`{err}`)", False, trace)

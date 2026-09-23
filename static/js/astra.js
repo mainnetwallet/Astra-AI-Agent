@@ -350,7 +350,10 @@ function chatBubble(who, text, action, attachedFiles, artifacts, meta) {
   if (who !== "me") {
     const avatar = document.createElement("div");
     avatar.className = "msg-avatar";
-    avatar.textContent = "🚀";
+    const avatarImg = document.createElement("img");
+    avatarImg.src = "/static/img/logo.png";
+    avatarImg.alt = "Astra";
+    avatar.appendChild(avatarImg);
     row.appendChild(avatar);
   }
   if (attachedFiles && attachedFiles.length) {

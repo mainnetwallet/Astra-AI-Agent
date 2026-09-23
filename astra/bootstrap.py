@@ -197,6 +197,13 @@ def build(store: Store | None = None, config=None,
                          preference=config.get("AI_ROUTING_PREFERENCE", "balanced"),
                          registry=model_registry, gateway=gateway)
     router.attach_events(events)
+    # The Agent Workflow "AI / Agent" node needs a tool on the ONE
+    # ToolRegistry, and it can only be registered now that the router
+    # exists. It delegates straight to `router.route_request` — no second
+    # model client, no second provider list (see astra/tools/ai_tools.py).
+    from astra.tools.ai_tools import register_ai_tools
+    register_ai_tools(registry, router,
+                      default_max_tokens=_opt_int(config, "CHAT_MAX_TOKENS"))
     # Gateway Request Intelligence: rewrites a raw/messy goal into a
     # Provider-ready prompt using ONLY the Gateway's own GW_* connections.
     # Always constructed (never None) — it degrades to a no-op

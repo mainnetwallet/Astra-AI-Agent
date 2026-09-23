@@ -55,6 +55,8 @@ _CATEGORY_INFO: dict[str, tuple[str, str]] = {
     "research": ("web research", "search the web and fetch page content"),
     "wallet": ("wallet info", "check wallet balances"),
     "system": ("system diagnostics", "report on Astra's own runtime health"),
+    "ai": ("AI generation",
+           "generate text/answers with an AI model"),
 }
 
 NO_TOOLS_MESSAGE = (

@@ -192,7 +192,12 @@ class TestWorkflowTerminalEvents(unittest.TestCase):
     def test_failing_step_emits_task_failed_with_same_op(self):
         stack = make_stack()
         wf = stack["workflows"]
-        d = wf.define("bad", "daily", [{"tool": "no_such_tool", "name": "b"}])
+        # A *runtime* step failure: `recall` is a registered tool that raises
+        # when its required argument is missing. (An unregistered tool name
+        # is now refused at write time by WorkflowEngine.define — see
+        # tests/test_workflows.py — so this test drives the run-time path
+        # with a real tool that fails while executing.)
+        d = wf.define("bad", "daily", [{"tool": "recall", "name": "b"}])
         wf.run(workflow_id=d["id"])
         rows = stack["store"].fetch(
             "SELECT kind, data FROM events ORDER BY id ASC")

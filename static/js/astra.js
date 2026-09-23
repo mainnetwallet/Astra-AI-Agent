@@ -40,6 +40,9 @@ window.Astra = {
 let MANIFEST = null;
 const loaders = {};
 const TAB_LABELS = {};
+/* Core tab loaders register here too (e.g. the Agent Workflow tab in
+ * static/js/workflow.js) — one registry, one showTab path. */
+window.Astra.loaders = loaders;
 
 function showTab(name) {
   $$("#nav .tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));

@@ -109,6 +109,75 @@
     </div>
   </section>
 
+  <!-- ======== AGENT WORKFLOW (core) ======== -->
+  <!-- Visual editor/runner/monitor over the existing WorkflowEngine +
+       SchedulerManager + ToolRegistry. Everything here is driven by real
+       workflow definitions, real runs and the shared event stream; see
+       static/js/workflow.js. -->
+  <section id="tab-workflow" class="tabview">
+    <div class="wf-shell">
+      <aside class="wf-rail" id="wf-rail">
+        <div class="wf-rail-head">
+          <span class="wf-rail-title">🔀 Workflows</span>
+          <button class="btn primary mini" id="wf-new" title="New workflow">＋ New</button>
+        </div>
+        <input type="search" id="wf-search" placeholder="Search workflows…" autocomplete="off">
+        <div class="wf-list" id="wf-list"><div class="empty">Loading…</div></div>
+      </aside>
+
+      <div class="wf-main">
+        <div class="wf-toolbar">
+          <button class="btn mini wf-mobile-only" id="wf-rail-toggle" aria-label="Workflows">☰</button>
+          <input id="wf-name" class="wf-name-input" placeholder="Workflow name" autocomplete="off">
+          <span id="wf-badge" class="pill">—</span>
+          <span class="grow"></span>
+          <span id="wf-status" class="wf-status"></span>
+          <button class="btn mini" id="wf-save" title="Save workflow">💾 Save</button>
+          <button class="btn mini primary" id="wf-run" title="Run now">▶ Run</button>
+          <button class="btn mini" id="wf-cancel" title="Cancel run" hidden>■</button>
+          <button class="btn mini danger" id="wf-delete" title="Delete workflow">🗑</button>
+          <button class="btn mini wf-mobile-only" id="wf-inspector-toggle" aria-label="Inspector">⚙</button>
+        </div>
+
+        <div class="wf-body">
+          <div class="wf-canvas-wrap" id="wf-canvas-wrap">
+            <button class="btn mini wf-add-btn" id="wf-add">＋ Node</button>
+            <div class="wf-canvas" id="wf-canvas">
+              <svg class="wf-edges" id="wf-edges" aria-hidden="true"></svg>
+              <div class="wf-nodes" id="wf-nodes"></div>
+            </div>
+            <div class="wf-palette" id="wf-palette">
+              <div class="wf-palette-head">
+                <span>Node library</span>
+                <button class="btn mini" id="wf-palette-close" aria-label="Close">✕</button>
+              </div>
+              <div class="wf-palette-list" id="wf-palette-list"></div>
+            </div>
+          </div>
+
+          <aside class="wf-inspector" id="wf-inspector">
+            <div class="wf-inspector-head">
+              <span id="wf-inspector-title">Inspector</span>
+              <button class="btn mini wf-mobile-only" id="wf-inspector-close" aria-label="Close">✕</button>
+            </div>
+            <div class="wf-inspector-body" id="wf-inspector-body"></div>
+          </aside>
+        </div>
+
+        <div class="wf-bottom" id="wf-bottom">
+          <div class="wf-bottom-tabs" id="wf-tabs">
+            <button class="chip active" data-wf-tab="log">Execution log</button>
+            <button class="chip" data-wf-tab="runs">Run history</button>
+            <button class="chip" data-wf-tab="schedule">Schedule</button>
+            <span class="grow"></span>
+            <button class="btn mini" id="wf-bottom-toggle" aria-label="Collapse panel">▾</button>
+          </div>
+          <div class="wf-panel" id="wf-panel"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ======== BACKUP (core) ======== -->
   <section id="tab-backup" class="tabview">
     <div class="panel">
@@ -170,5 +239,7 @@
 
 <script src="/static/js/log_model.js"></script>
 <script src="/static/js/astra.js"></script>
+<script src="/static/js/workflow_model.js"></script>
+<script src="/static/js/workflow.js"></script>
 </body>
 </html>

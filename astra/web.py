@@ -59,7 +59,18 @@ System endpoints:
   GET/POST /api/tasks       generic task engine (task/{id} GET/…)
   GET/POST /api/memory      memory save/list; /api/memory/search
   GET  /api/experiences     experience memory
-  GET/POST /api/workflows   workflow definitions; runs via POST {id}/run
+  GET/POST /api/workflows   workflow definitions (POST always creates a NEW
+                             workflow; a duplicate name is uniquified unless
+                             {"on_duplicate": "error"} asks for a 409)
+  GET  /api/workflows/options          node library: live tools/categories,
+                             AI providers+models, scheduler availability
+  GET/PATCH/DELETE /api/workflows/{id} one definition (404/409/400 as
+                             appropriate); PATCH updates ONLY that workflow
+  GET  /api/workflows/{id}/runs        that workflow's run history
+  POST /api/workflows/{id}/run         execute it (returns the finished run)
+  GET  /api/workflows/runs[?workflow_id=&limit=]   run history
+  GET  /api/workflows/runs/{run_id}    one run (with its per-step results)
+  POST /api/workflows/runs/{run_id}/cancel         cancel a running run
   GET/POST /api/schedules   scheduler CRUD
   GET  /api/providers       AI provider health/latency/cost
   GET  /api/gateway/health  Astra AI Gateway status (connections + fallback)
@@ -154,6 +165,10 @@ CONTENT_TYPES = {
 CORE_TABS = [
     {"tab": "dashboard", "label": "\U0001f4ca Dashboard", "core": True},
     {"tab": "assistant", "label": "\U0001f916 Assistant", "core": True},
+    # Agent Workflow: the visual editor over the EXISTING WorkflowEngine +
+    # SchedulerManager (astra/workflows/) and the ONE ToolRegistry. It is a
+    # core tab, not a plugin — the plugin system was removed.
+    {"tab": "workflow", "label": "\U0001f500 Agent Workflow", "core": True},
     {"tab": "providers", "label": "\U0001f50c AI Providers health", "core": True},
     {"tab": "router", "label": "\U0001f9e0 Router", "core": True},
     {"tab": "web3", "label": "\u26d3\ufe0f Wallet", "core": True},
@@ -1042,26 +1057,10 @@ class WebApp:
                                  rid=req.rid)
 
         # workflows + scheduler
-        if path == ["api", "workflows"] and method == "GET":
-            return json_response({"ok": True,
-                                  "data": site.workflows().list_definitions()},
-                                 rid=req.rid)
-        if path == ["api", "workflows"] and method == "POST":
-            steps = body.get("steps") or []
-            if not isinstance(steps, list):
-                return error_response("steps must be a list", 400, "bad_request",
-                                      req.rid)
-            wf = site.workflows().define(body.get("name", ""),
-                                         body.get("description", ""), steps)
-            return json_response({"ok": True, "data": wf}, 201, req.rid)
-        if len(path) == 4 and path[:2] == ["api", "workflows"] and path[3] == "run" and method == "POST":
-            run = site.workflows().run(workflow_id=int_arg(
-                                           path[2], name="workflow_id"),
-                                       params=body.get("params") or {})
-            return json_response({"ok": True, "data": run}, rid=req.rid)
-        if path == ["api", "workflows", "runs"] and method == "GET":
-            return json_response({"ok": True, "data": site.workflows().list_runs()},
-                                 rid=req.rid)
+        if path[:2] == ["api", "workflows"]:
+            handled = self._workflows(req, path)
+            if handled is not None:
+                return handled
         if path == ["api", "schedules"] and method == "GET":
             sched = site.scheduler()
             return json_response({"ok": True,
@@ -1184,6 +1183,252 @@ class WebApp:
         # per-plugin route dispatch removed along with the plugin system.
         # plugins/ is an empty placeholder — see plugins/README.md.
         return error_response("unknown route", 404, "bad_request", req.rid)
+
+    # -- Agent Workflow API --------------------------------------------------
+    def _workflows(self, req: Request, path: list):
+        """The Agent Workflow API — every route under /api/workflows.
+
+        One place maps the engine's named errors onto HTTP, so the frontend
+        always gets a structured, actionable answer:
+
+          WorkflowNotFound   -> 404 not_found
+          DuplicateNameError -> 409 duplicate_name
+          InvalidDefinition  -> 400 invalid_definition
+          (bad query ints are ApiError -> 400, handled in handle())
+
+        Returns None for a path that is not a workflow route, so the caller
+        falls through to the normal 404.
+        """
+        from .workflows.engine import (DuplicateNameError, InvalidDefinition,
+                                       WorkflowNotFound)
+        try:
+            return self._workflows_route(req, path)
+        except WorkflowNotFound as e:
+            return error_response(str(e) or "workflow not found", 404,
+                                  "not_found", req.rid)
+        except DuplicateNameError as e:
+            return error_response(str(e), 409, "duplicate_name", req.rid)
+        except InvalidDefinition as e:
+            return error_response(str(e), 400, "invalid_definition", req.rid)
+
+    def _workflows_route(self, req: Request, path: list):
+        site, method, body, q = self.site, req.method, req.body, req.query
+        wf = site.workflows()
+        if wf is None:
+            return error_response("workflows unavailable", 400,
+                                  "workflow_unavailable", req.rid)
+
+        # collection: /api/workflows
+        if path == ["api", "workflows"]:
+            if method == "GET":
+                if q.get("stats") in ("1", "true", "yes"):
+                    data = wf.list_definitions_with_stats()
+                else:
+                    data = wf.list_definitions()
+                return json_response({"ok": True, "data": data}, rid=req.rid)
+            if method == "POST":
+                return self._workflow_create(req, wf)
+            return None
+
+        # node library metadata: /api/workflows/options
+        if path == ["api", "workflows", "options"] and method == "GET":
+            return json_response({"ok": True,
+                                  "data": self._workflow_options()}, rid=req.rid)
+
+        # run history: /api/workflows/runs
+        if path == ["api", "workflows", "runs"] and method == "GET":
+            wid = q.get("workflow_id")
+            limit = min(int_arg(q.get("limit"), 50, name="limit"), 500)
+            data = wf.list_runs(
+                limit=limit,
+                workflow_id=(int_arg(wid, name="workflow_id") if wid else None))
+            return json_response({"ok": True, "data": data}, rid=req.rid)
+
+        # one run: /api/workflows/runs/{run_id}[/cancel]
+        if len(path) == 4 and path[2] == "runs":
+            if method == "GET":
+                run = wf.get_run(int_arg(path[3], name="run_id"))
+                if run is None:
+                    return error_response("run not found", 404, "not_found",
+                                          req.rid)
+                return json_response({"ok": True, "data": run}, rid=req.rid)
+            return None
+        if (len(path) == 5 and path[2] == "runs" and path[4] == "cancel"
+                and method == "POST"):
+            run = wf.cancel_run(int_arg(path[3], name="run_id"))
+            return json_response({"ok": True, "data": run}, rid=req.rid)
+
+        # one workflow: /api/workflows/{id}[/runs | /run]
+        if (len(path) in (3, 4) and path[0] == "api" and path[1] == "workflows"
+                and path[2] not in ("runs", "options")):
+            wf_id = int_arg(path[2], name="workflow_id")
+            if len(path) == 3:
+                if method == "GET":
+                    found = wf.get_definition(wf_id)
+                    if found is None:
+                        return error_response(f"workflow {wf_id} not found",
+                                              404, "not_found", req.rid)
+                    return json_response({"ok": True, "data": found}, rid=req.rid)
+                if method == "PATCH":
+                    return self._workflow_update(req, wf, wf_id)
+                if method == "DELETE":
+                    wf.delete_definition(wf_id)
+                    return json_response({"ok": True, "data": {
+                        "id": wf_id, "deleted": True}}, rid=req.rid)
+                return None
+            if path[3] == "runs" and method == "GET":
+                if wf.get_definition(wf_id) is None:
+                    return error_response(f"workflow {wf_id} not found", 404,
+                                          "not_found", req.rid)
+                limit = min(int_arg(q.get("limit"), 50, name="limit"), 500)
+                return json_response({"ok": True, "data": wf.list_runs(
+                    limit=limit, workflow_id=wf_id)}, rid=req.rid)
+            if path[3] == "run" and method == "POST":
+                params = body.get("params")
+                if params is None:
+                    params = {}
+                if not isinstance(params, dict):
+                    return error_response("params must be an object", 400,
+                                          "bad_request", req.rid)
+                # Synchronous by design: WorkflowEngine.run() executes the
+                # steps through the ToolRegistry and returns the finished
+                # run. Progress is observable meanwhile on /api/events.
+                run = wf.run(workflow_id=wf_id, params=params)
+                return json_response({"ok": True, "data": run}, rid=req.rid)
+            return None
+        return None
+
+    def _workflow_create(self, req: Request, wf):
+        """POST /api/workflows — ALWAYS creates a new workflow.
+
+        A duplicate name is uniquified deterministically ("Untitled Workflow"
+        -> "Untitled Workflow 2"); pass on_duplicate="error" to get a 409
+        instead. This is a create in every path — it never falls back to
+        updating an existing workflow.
+        """
+        body = req.body
+        steps = body.get("steps")
+        if steps is None:
+            steps = []
+        if not isinstance(steps, list):
+            return error_response("steps must be a list", 400, "bad_request",
+                                  req.rid)
+        layout = body.get("layout")
+        if layout is None:
+            layout = {}
+        if not isinstance(layout, dict):
+            return error_response("layout must be an object", 400, "bad_request",
+                                  req.rid)
+        on_dup = str(body.get("on_duplicate") or "uniquify").lower()
+        if on_dup not in ("uniquify", "error"):
+            return error_response("on_duplicate must be 'uniquify' or 'error'",
+                                  400, "bad_request", req.rid)
+        name = body.get("name")
+        if name is None:
+            name = "Untitled Workflow"
+        if not isinstance(name, str):
+            return error_response("name must be a string", 400, "bad_request",
+                                  req.rid)
+        description = body.get("description") or ""
+        if not isinstance(description, str):
+            return error_response("description must be a string", 400,
+                                  "bad_request", req.rid)
+        created = wf.define(name, description, steps, layout=layout,
+                            uniquify=(on_dup == "uniquify"))
+        return json_response({"ok": True, "data": created}, 201, req.rid)
+
+    def _workflow_update(self, req: Request, wf, wf_id: int):
+        """PATCH /api/workflows/{id} — updates ONLY that workflow."""
+        body = req.body
+        fields: dict = {}
+        if "name" in body:
+            if not isinstance(body["name"], str) or not body["name"].strip():
+                return error_response("name must be a non-empty string", 400,
+                                      "bad_request", req.rid)
+            fields["name"] = body["name"]
+        if "description" in body:
+            desc = body["description"] if body["description"] is not None else ""
+            if not isinstance(desc, str):
+                return error_response("description must be a string", 400,
+                                      "bad_request", req.rid)
+            fields["description"] = desc
+        if "steps" in body:
+            if not isinstance(body["steps"], list):
+                return error_response("steps must be a list", 400, "bad_request",
+                                      req.rid)
+            fields["steps"] = body["steps"]
+        if "layout" in body:
+            if not isinstance(body["layout"], dict):
+                return error_response("layout must be an object", 400,
+                                      "bad_request", req.rid)
+            fields["layout"] = body["layout"]
+        if "enabled" in body:
+            fields["enabled"] = bool(body["enabled"])
+        if not fields:
+            return error_response("nothing to update", 400, "bad_request",
+                                  req.rid)
+        on_dup = str(body.get("on_duplicate") or "error").lower()
+        if on_dup not in ("uniquify", "error"):
+            return error_response("on_duplicate must be 'uniquify' or 'error'",
+                                  400, "bad_request", req.rid)
+        updated = wf.update_definition(wf_id,
+                                       uniquify=(on_dup == "uniquify"),
+                                       **fields)
+        return json_response({"ok": True, "data": updated}, rid=req.rid)
+
+    def _workflow_options(self) -> dict:
+        """Everything the visual editor needs to build its node library,
+        taken live from the ONE ToolRegistry and the router — never a
+        hardcoded tool list."""
+        from .core.state import SCHEDULE_KINDS, WORKFLOW_STATUSES
+        site = self.site
+        reg = site.registry()
+        tools = []
+        if reg is not None:
+            try:
+                tools = reg.list()
+            except Exception:
+                tools = []
+        categories: dict[str, list[str]] = {}
+        for t in tools:
+            categories.setdefault(t.get("category") or "other", []).append(
+                t.get("name") or "")
+        router = site.router()
+        models: list[dict] = []
+        providers: dict[str, dict] = {}
+        if router is not None:
+            try:
+                models = router.available_targets()
+            except Exception:
+                models = []
+            try:
+                health = router.health() or {}
+            except Exception:
+                health = {}
+            for name, info in health.items():
+                providers[name] = {
+                    "name": name,
+                    "state": info.get("state"),
+                    "healthy": info.get("healthy"),
+                    "models": [],
+                }
+            for m in models:
+                entry = providers.setdefault(
+                    m.get("provider", "?"),
+                    {"name": m.get("provider", "?"), "models": []})
+                entry["models"].append({
+                    "id": m.get("model"),
+                    "capabilities": m.get("capabilities") or [],
+                })
+        return {
+            "tools": tools,
+            "categories": categories,
+            "providers": sorted(providers.values(), key=lambda p: p["name"]),
+            "models": models,
+            "scheduler": site.scheduler() is not None,
+            "statuses": list(WORKFLOW_STATUSES),
+            "schedule_kinds": list(SCHEDULE_KINDS),
+        }
 
     # -- /api/v1 endpoints --------------------------------------------------
     def _handle_v1(self, req: Request, path: list):

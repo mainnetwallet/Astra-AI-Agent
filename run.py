@@ -35,7 +35,24 @@ from astra.bootstrap import build
 from astra.web import AGENT_NAME
 
 
+def _use_utf8_output() -> None:
+    """Make the launcher's own output survive a legacy Windows console.
+
+    Windows consoles default to a non-UTF-8 codec (cp1252), and the
+    startup banner below contains emoji, so `print` would raise
+    UnicodeEncodeError and abort startup before the server ever binds.
+    Reconfigure the streams: a modern console renders the banner, an old
+    one degrades to "?" instead of killing the process.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main() -> int:
+    _use_utf8_output()
     try:
         import uvicorn
     except ImportError:

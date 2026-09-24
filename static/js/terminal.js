@@ -173,13 +173,6 @@
       </div>`;
     stage.appendChild(side);
 
-    const more = h("button", "at-btn at-more");
-    more.id = "at-more";
-    more.type = "button";
-    more.hidden = true;
-    more.textContent = "Select more ⤢";
-    more.setAttribute("aria-label", "Select more text, including scrollback");
-    stage.appendChild(more);
     root.appendChild(stage);
 
     const toastEl = h("div", "at-toast");
@@ -341,10 +334,6 @@
       pressKey(b.dataset.key);
     });
 
-    byId("at-more").addEventListener("pointerdown", (ev) => {
-      ev.preventDefault();                       // don't collapse the selection before we read it
-      openSelectSheet(true);
-    });
     byId("at-sheet-close").onclick = () => closeSheet();
 
     byId("at-up").onclick = () => {
@@ -376,7 +365,7 @@
     if (act === "files") return toggleSidebar();
     if (act === "copy") return copySelection();
     if (act === "paste") return pasteClipboard();
-    if (act === "selecttext") return openSelectSheet(false);
+    if (act === "selecttext") return openSelectSheet();
     if (act === "status") return showRuntimeStatus();
     if (act === "runtime-restart") return lifecycle("restart");
     if (act === "stop") return lifecycle("stop");
@@ -1071,47 +1060,16 @@
   }
   function bufferText(term, maxLines) { return historyText(term, maxLines).text; }
 
-  /* Map the OS text selection (visible rows only) to a [start,end) range in
-   * historyText(), so the sheet can open with the same text already selected. */
-  function selectionToHistoryRange(term) {
-    const sel = document.getSelection && document.getSelection();
-    if (!sel || !sel.rangeCount || sel.isCollapsed || !term.element) return null;
-    const rowsEl = term.element.querySelector(".xterm-rows");
-    if (!rowsEl || !rowsEl.contains(sel.anchorNode)) return null;
-    const rg = sel.getRangeAt(0);
-    const rowOf = (node) => {
-      let el = node.nodeType === 3 ? node.parentNode : node;
-      while (el && el.parentNode !== rowsEl) el = el.parentNode;
-      return el;
-    };
-    const pos = (node, off) => {
-      const row = rowOf(node);
-      if (!row) return null;
-      const idx = Array.prototype.indexOf.call(rowsEl.children, row);
-      const pre = document.createRange();
-      pre.selectNodeContents(row);
-      pre.setEnd(node, off);
-      return { line: term.buffer.active.viewportY + idx, col: pre.toString().length };
-    };
-    const s0 = pos(rg.startContainer, rg.startOffset), e0 = pos(rg.endContainer, rg.endOffset);
-    if (!s0 || !e0) return null;
-    const h = historyText(term);
-    if (h.starts[s0.line] < 0 || h.starts[e0.line] < 0) return null;
-    return { text: h.text, a: h.starts[s0.line] + s0.col, b: h.starts[e0.line] + e0.col };
-  }
-
   /* The OS handles + Copy popup work (and auto-scroll when dragged to an edge)
    * inside a real <textarea>, over the WHOLE scrollback — the live terminal
    * only has its visible rows in the DOM, so it can't scroll a selection. */
-  function openSelectSheet(fromSelection) {
+  function openSelectSheet() {
     const tab = activeTab();
     if (!tab || !tab.term) return;
-    const r = fromSelection ? selectionToHistoryRange(tab.term) : null;
-    const text = r ? r.text : historyText(tab.term).text;
     openSheet({
       title: "Select text", readonly: true, okLabel: "Copy all",
       hint: "Whole history. Long-press to select, drag a handle to the edge to scroll, then Copy.",
-      text,
+      text: historyText(tab.term).text,
       onOk: async (txt) => {
         const ok = await copyText(txt);
         toast(ok ? "Copied" : "Copy blocked");
@@ -1119,14 +1077,7 @@
       },
     });
     const ta = byId("at-sheet-text");
-    if (r) {                                   // reopen exactly where the user was selecting
-      const lh = parseFloat(getComputedStyle(ta).lineHeight) || 17;
-      const line = r.text.slice(0, r.a).split("\n").length - 1;
-      ta.scrollTop = Math.max(0, line * lh - ta.clientHeight / 3);
-      try { ta.focus({ preventScroll: true }); ta.setSelectionRange(r.a, r.b); } catch (_) {}
-    } else {
-      ta.scrollTop = ta.scrollHeight;
-    }
+    ta.scrollTop = ta.scrollHeight;
   }
 
   function openPasteSheet() {
@@ -1142,52 +1093,143 @@
     });
   }
 
-  /* Native (OS) text selection on phones: long-press a word, drag the handles,
-   * tap Copy in Android's own popup. xterm fights this in three ways:
-   *  1. its `contextmenu` handler drops the hidden textarea under the finger and
-   *     focuses it (= the selection is replaced by an empty textarea caret);
-   *  2. on blur it re-renders every row, replacing the DOM nodes that are selected;
-   *  3. CSS `user-select: none`.
-   * (3) is fixed in terminal.css. Here: stop (1), and hold renders while a native
-   * selection exists inside the terminal (re-render once it is cleared). */
-  function nativeSelectionText(term) {
+  /* Native (OS) text selection on phones — over the WHOLE scrollback.
+   *
+   * xterm's DOM only holds the visible rows, so a selection can't scroll into
+   * history. Its `.xterm-viewport`, however, is a real native scroll container
+   * (xterm already syncs it with the terminal). We put a transparent text layer
+   * with EVERY buffer line inside it. Long-press selects natively; dragging a
+   * handle to the top/bottom edge makes the browser scroll that container by
+   * itself (until the finger lifts and the Copy popup shows) and xterm follows.
+   * Rows in `.xterm-screen` are drawn above it and (on touch) let touches pass
+   * through to the layer. */
+  function hasLayerSelection(layer) {
+    const s = document.getSelection && document.getSelection();
+    return !!(s && s.rangeCount && !s.isCollapsed && layer.contains(s.anchorNode));
+  }
+
+  // Text of the OS selection inside the layer. Wrapped rows are joined without a
+  // newline (a long command copies as ONE line), other rows are newline-separated.
+  function layerSelectionText(layer) {
     const sel = document.getSelection && document.getSelection();
-    if (!sel || !sel.rangeCount || sel.isCollapsed) return "";
-    if (!term.element || !term.element.contains(sel.anchorNode)) return "";
-    return sel.toString().replace(/\u00a0/g, " ").replace(/[ \t]+$/gm, "");
+    if (!layer || !sel || !sel.rangeCount || sel.isCollapsed) return "";
+    const rg = sel.getRangeAt(0);
+    if (!layer.contains(rg.commonAncestorContainer)) return "";
+    const at = (node, off, isEnd) => {
+      if (node === layer) {
+        const el = layer.children[isEnd ? off - 1 : off];
+        return el ? { el, off: isEnd ? el.textContent.length : 0 } : null;
+      }
+      let el = node.nodeType === 3 ? node.parentNode : node;
+      while (el && el.parentNode !== layer) el = el.parentNode;
+      if (!el) return null;
+      return { el, off: node.nodeType === 3 ? off : (off > 0 ? el.textContent.length : 0) };
+    };
+    const a = at(rg.startContainer, rg.startOffset, false);
+    const b = at(rg.endContainer, rg.endOffset, true);
+    if (!a || !b) return "";
+    let out = "", el = a.el;
+    for (;;) {
+      const t = el.textContent;
+      out += t.slice(el === a.el ? a.off : 0, el === b.el ? b.off : t.length);
+      if (el === b.el) break;
+      const nx = el.nextElementSibling;
+      if (!nx) break;
+      if (!nx.classList.contains("w")) out += "\n";
+      el = nx;
+    }
+    return out.replace(/\u00a0/g, " ").replace(/[ \t]+$/gm, "");
+  }
+
+  function nativeSelectionText(term) {
+    return term && term._astraLayer ? layerSelectionText(term._astraLayer) : "";
   }
 
   function enableNativeSelection(tab) {
     const term = tab.term, view = tab.view;
-    const active = () => nativeSelectionText(term) !== "";
+    const vp = term.element && term.element.querySelector(".xterm-viewport");
+    if (!vp) return;
+    const layer = document.createElement("div");
+    layer.className = "at-textlayer";
+    layer.setAttribute("aria-hidden", "true");
+    vp.appendChild(layer);
+    term._astraLayer = layer;
 
-    // (1) let the browser handle long-press; xterm's right-click handler must not run
+    let dirty = false, full = true, raf = 0, unTrim = null;
+
+    // match xterm's row metrics so the (invisible) glyphs sit exactly under the drawn ones
+    const metrics = () => {
+      const rowsEl = term.element.querySelector(".xterm-rows");
+      if (!rowsEl) return;
+      const cs = getComputedStyle(rowsEl), row = rowsEl.firstElementChild;
+      if (cs.fontFamily) layer.style.fontFamily = cs.fontFamily;
+      if (cs.fontSize) layer.style.fontSize = cs.fontSize;
+      const ls = rowsEl.style.letterSpacing || cs.letterSpacing;
+      if (ls && ls !== "normal") layer.style.letterSpacing = ls;
+      if (row && row.style.height) layer.style.setProperty("--tl-h", row.style.height);
+      if (row && row.style.width) layer.style.width = row.style.width;
+    };
+
+    const sync = () => {
+      raf = 0;
+      if (hasLayerSelection(layer)) { dirty = true; return; }   // never touch nodes under a selection
+      metrics();
+      const buf = term.buffer.active, n = buf.length, kids = layer.children;
+      while (kids.length > n) layer.lastElementChild.remove();
+      while (kids.length < n) layer.appendChild(document.createElement("div"));
+      const from = full ? 0 : Math.max(0, n - term.rows - 3);   // only the live area changes
+      full = false; dirty = false;
+      for (let i = from; i < n; i++) {
+        const line = buf.getLine(i), el = kids[i];
+        if (!line) continue;
+        const nx = buf.getLine(i + 1);
+        const t = line.translateToString(!(nx && nx.isWrapped));
+        if (el.textContent !== t) el.textContent = t;
+        if (line.isWrapped !== el.classList.contains("w")) el.classList.toggle("w", line.isWrapped);
+      }
+    };
+    const schedule = (needFull) => {
+      if (needFull) full = true;
+      if (!raf) raf = requestAnimationFrame(sync);
+    };
+
+    // scrollback is capped: each new line drops the oldest one -> drop it here too
+    const bindTrim = () => {
+      try {
+        if (unTrim) unTrim.dispose();
+        unTrim = term._core.buffer.lines.onTrim((k) => {
+          if (hasLayerSelection(layer)) { full = true; dirty = true; return; }
+          for (let j = 0; j < k && layer.firstElementChild; j++) layer.firstElementChild.remove();
+        });
+      } catch (_) { unTrim = null; }      // internals changed: falls back to a full re-sync
+    };
+    bindTrim();
+    term.onWriteParsed(() => schedule(false));
+    term.onResize(() => schedule(true));                     // reflow rewraps every line
+    if (term.buffer.onBufferChange) term.buffer.onBufferChange(() => { bindTrim(); schedule(true); });
+    document.addEventListener("selectionchange", () => {
+      if (dirty && !hasLayerSelection(layer)) schedule(true);   // selection released: catch up
+    });
+    schedule(true);
+
+    // xterm's own touch handlers scroll by JS and cancel the gesture; let the
+    // browser scroll the viewport natively (momentum, and handle-drag autoscroll)
+    const stop = (ev) => { if (term.buffer.active.type === "normal") ev.stopPropagation(); };
+    view.addEventListener("touchstart", stop, { capture: true, passive: true });
+    view.addEventListener("touchmove", stop, { capture: true, passive: true });
+
+    // long-press must reach the browser, not xterm's right-click handler
     view.addEventListener("contextmenu", (ev) => { ev.stopPropagation(); }, true);
 
-    // (2) hold row re-renders while a native selection is inside the terminal
-    let held = false;
-    try {
-      const rs = term._core && term._core._renderService;
-      const r = rs && rs._renderer && rs._renderer.value;
-      if (r && typeof r.renderRows === "function") {
-        const orig = r.renderRows.bind(r);
-        r.renderRows = (a, b) => { if (active()) { held = true; return; } orig(a, b); };
-      }
-    } catch (_) { /* xterm internals changed: selection still works, may flicker */ }
-    document.addEventListener("selectionchange", () => {
-      const more = byId("at-more");
-      if (more) more.hidden = !active();
-      if (held && !active()) { held = false; term.refresh(0, term.rows - 1); }
-    });
-    // typing (or Paste) ends selection mode so the screen can update again
+    // typing / paste ends selection mode
     term.onData(() => {
-      if (active()) { const s = document.getSelection(); if (s) s.removeAllRanges(); }
+      if (hasLayerSelection(layer)) { const s = document.getSelection(); if (s) s.removeAllRanges(); }
     });
 
-    // Android's Copy popup: hand the clipboard clean text (no NBSP / trailing pad)
+    // Android's Copy popup: give it clean text (wrapped lines joined, no padding)
     view.addEventListener("copy", (ev) => {
-      if (term.hasSelection()) return;                 // xterm's own selection: default
-      const t = nativeSelectionText(term);
+      if (term.hasSelection()) return;
+      const t = layerSelectionText(layer);
       if (!t || !ev.clipboardData) return;
       ev.clipboardData.setData("text/plain", t);
       ev.preventDefault(); ev.stopPropagation();
@@ -1259,7 +1301,7 @@
     refreshStatus,
     pressKey,
     state,
-    _t: { historyText, selectionToHistoryRange, bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText },
+    _t: { historyText, layerSelectionText, bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText },
     EXTRA_KEYS,
   };
   // Core-tab loader: astra.js's showTab() calls this the first time the

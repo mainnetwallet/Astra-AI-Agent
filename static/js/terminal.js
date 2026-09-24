@@ -1195,6 +1195,9 @@
     // element used to anchor the start handle outside the terminal. Without
     // shadow-DOM support it falls back to a plain child of the viewport.
     try {
+      // Escape hatch for comparing behaviour on a device: open the page with ?sel=light
+      // to keep the layer in the plain DOM (no shadow root).
+      if (/[?&]sel=light(&|$)/.test(location.search)) throw new Error("sel=light");
       const host = document.createElement("div");
       host.className = "at-textlayer-host";
       host.style.display = "contents";

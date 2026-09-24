@@ -359,13 +359,8 @@
     else if (d.status) detail = clip(scrub(d.status), 60);
     else detail = "";
 
-    // Input/output are shown in a scrollable <pre> block (see .tl-block pre
-    // in style.css: max-height + overflow:auto), so these are clipped much
-    // more generously than the other compact fields above — the point of
-    // logging them is to see the FULL prompt/response that went into the
-    // call, not a one-line teaser.
-    var input = typeof d.input === "string" && d.input ? clip(scrub(d.input), 8000) : "";
-    var output = typeof d.output === "string" && d.output ? clip(scrub(d.output), 8000) : "";
+    var input = typeof d.input === "string" && d.input ? clip(scrub(d.input), 280) : "";
+    var output = typeof d.output === "string" && d.output ? clip(scrub(d.output), 280) : "";
 
     var out = {
       id: e.id,

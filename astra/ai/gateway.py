@@ -93,39 +93,27 @@ def _is_timeout(exc) -> bool:
 
 # ── Activity Log input/output preview (astra_gateway.* events only) ─────────
 # `static/js/log_model.js` already renders any event's `data.input`/
-# `data.output` string fields as a scrollable "Input"/"Output" block in the
-# expanded log row (with its own secret-scrubbing + clip) — this just needs
-# to actually be sent. The FULL prompt is logged (every message, including
-# the system prompt) — not just the last user turn — since the point is to
-# see exactly what went into the call; capped well above what a person will
-# actually scroll through so a huge catalogue/context block can't bloat the
-# events DB unbounded.
-GW_LOG_PREVIEW_CHARS = 8000
+# `data.output` string fields as an "Input"/"Output" block in the expanded
+# log row (with its own secret-scrubbing + 280-char clip) — this just needs
+# to actually be sent. Only the last user-turn is logged (never the system
+# prompt, which is large, static and would just add noise/DB bloat), capped
+# well above the frontend's display clip so nothing meaningful is lost.
+GW_LOG_PREVIEW_CHARS = 1000
 
 
 def _gw_log_input(messages) -> str:
-    """Best-effort full-prompt preview of `messages` for the Activity Log:
-    every message (system, user, ...), each labeled by role, in order —
-    never raises, never touches credentials (messages never carry any)."""
+    """Best-effort preview of the last user-role message in `messages`,
+    for the Activity Log only — never raises, never touches the system
+    prompt or any credential."""
     try:
-        parts = []
-        for m in messages or []:
-            if not isinstance(m, dict):
-                continue
-            role = str(m.get("role") or "?")
-            content = m.get("content")
-            if isinstance(content, list):
-                # multimodal content blocks (text + image/document parts) —
-                # only the text parts are loggable as a string preview.
-                texts = [str(b.get("text") or "") for b in content
-                        if isinstance(b, dict) and b.get("type") == "text"]
-                content = "\n".join(t for t in texts if t)
-            text = str(content or "").strip()
-            if text:
-                parts.append(f"[{role}]\n{text}")
-        return "\n\n".join(parts)[:GW_LOG_PREVIEW_CHARS]
+        for m in reversed(messages or []):
+            if isinstance(m, dict) and m.get("role") == "user":
+                text = str(m.get("content") or "").strip()
+                if text:
+                    return text[:GW_LOG_PREVIEW_CHARS]
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def _gw_log_output(text) -> str:

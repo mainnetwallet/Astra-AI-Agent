@@ -1280,6 +1280,34 @@
     document.addEventListener("selectionchange", () => {
       if (dirty && !hasLayerSelection(layer)) schedule(true);   // selection released: catch up
     });
+
+    // Keep the selection (and its OS handles/popup) inside the terminal text.
+    // The OS "Select all" spans the whole document, so its start anchor lands on
+    // the first thing in <body> (the header's menu button) and the drag handle is
+    // drawn up there, outside the terminal. Any selection end that falls outside
+    // the layer is pulled back to the layer's first/last line (direction kept).
+    const clampPoint = (node, off) => {
+      if (layer.contains(node)) return [node, off];
+      if (node.contains(layer)) {                 // boundary sits in an ancestor of the layer
+        let child = layer;
+        while (child.parentNode !== node) child = child.parentNode;
+        const idx = Array.prototype.indexOf.call(node.childNodes, child);
+        return off <= idx ? [layer, 0] : [layer, layer.childNodes.length];
+      }
+      return (layer.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING)
+        ? [layer, 0] : [layer, layer.childNodes.length];
+    };
+    document.addEventListener("selectionchange", () => {
+      if (!layer.isConnected) return;
+      const s = document.getSelection();
+      if (!s || !s.rangeCount || s.isCollapsed || !s.anchorNode || !s.focusNode) return;
+      if (layer.contains(s.anchorNode) && layer.contains(s.focusNode)) return;   // already inside
+      let rg;
+      try { rg = s.getRangeAt(0); if (!rg.intersectsNode(layer)) return; } catch (_) { return; }
+      const a = clampPoint(s.anchorNode, s.anchorOffset);
+      const f = clampPoint(s.focusNode, s.focusOffset);
+      s.setBaseAndExtent(a[0], a[1], f[0], f[1]);
+    });
     schedule(true);
 
     // xterm's own touch handlers scroll by JS and cancel the gesture; let the

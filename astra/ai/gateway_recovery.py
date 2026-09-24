@@ -53,6 +53,20 @@ CATEGORY_COOLDOWN_S = {
 }
 
 
+# The last-successful nudge (§12) is only a tie-break. When the caller ranked
+# its candidates and attached a `metadata["score"]` (AstraRouter does), the
+# last-successful target is moved to the front ONLY if its score is within
+# this margin of the best eligible candidate — otherwise a slow model that
+# happened to succeed on an earlier, unrelated request (vision, coding, ...)
+# would override the router's "fastest healthy first" ordering.
+STICKY_SCORE_MARGIN = 0.25
+
+
+def _target_score(target: ProviderExecutionTarget) -> float | None:
+    v = (target.metadata or {}).get("score")
+    return float(v) if isinstance(v, (int, float)) else None
+
+
 def _ns(provider_id: str) -> str:
     return f"{EXISTING_PROVIDER_NS}::{provider_id}"
 
@@ -106,7 +120,8 @@ class GatewayExecutionRecovery:
         among equally-healthy targets; the *last successful* target for its
         own (namespaced) provider/model, if present among the candidates,
         is nudged to the front — a soft preference, never a lock (§12) —
-        unless a healthier-ranked candidate already leads.
+        only when it is (near-)tied with the best-ranked eligible candidate
+        (see STICKY_SCORE_MARGIN); a clearly better-ranked candidate leads.
         """
         exclude = exclude or set()
         need = set(required_capabilities)
@@ -124,9 +139,16 @@ class GatewayExecutionRecovery:
         last = self.routing_state.last_successful()
         if last and last.get("provider", "").startswith(f"{EXISTING_PROVIDER_NS}::"):
             last_provider = last["provider"][len(EXISTING_PROVIDER_NS) + 2:]
+            top = _target_score(eligible[0])
             for i, t in enumerate(eligible):
                 if t.provider_id == last_provider and t.model_id == last.get("model"):
-                    if i:
+                    cand = _target_score(t)
+                    # No scores attached (plain candidate list): keep the
+                    # historical soft nudge. Scores attached: only nudge
+                    # when it is (near-)tied with the best-ranked target.
+                    near_top = (top is None or cand is None
+                                or top - cand <= STICKY_SCORE_MARGIN)
+                    if i and near_top:
                         eligible.insert(0, eligible.pop(i))
                     break
         return eligible[0]

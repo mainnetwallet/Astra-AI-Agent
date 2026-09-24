@@ -393,3 +393,6 @@
   .at-side { width: 86%; }
   .at-menu { min-width: 200px; }
 }
+
+/* right-click Copy / Paste / Select all menu (positioned inline, fixed) */
+.at-menu.at-ctx { min-width: 190px; z-index: 60; }

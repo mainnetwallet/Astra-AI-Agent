@@ -617,6 +617,20 @@
       // isolated runtime's PTY stdin. Focus first, so the chord still lands
       // if focus had drifted off the terminal.
       if (isPasteChord(ev)) { term.focus(); return false; }
+      // Ctrl+C copies when text is selected (Windows Terminal / VS Code
+      // convention); with nothing selected it stays SIGINT (^C) for the shell.
+      if (isCopyChord(ev, term)) {
+        ev.preventDefault();
+        if (hasAnySelection(tab)) copySelection(tab);
+        return false;
+      }
+      // Ctrl+A selects the whole terminal text (scrollback included), so a
+      // follow-up Ctrl+C copies it all. Home still jumps to line start.
+      if (isSelectAllChord(ev)) {
+        ev.preventDefault();
+        term.selectAll();
+        return false;
+      }
       // Let the browser do copy/select-all/new-tab (paste is handled above).
       if (ev.ctrlKey && ev.shiftKey
           && ["C", "A", "T"].includes(ev.key.toUpperCase())) {
@@ -1020,8 +1034,8 @@
     } catch (_) { return false; }
   }
 
-  async function copySelection() {
-    const tab = activeTab();
+  async function copySelection(target) {
+    const tab = (target && target.term) ? target : activeTab();
     if (!tab || !tab.term) return;
     const text = tab.term.getSelection() || nativeSelectionText(tab.term);
     if (!text) { toast("Nothing selected — long-press text first"); return; }
@@ -1086,6 +1100,75 @@
 
   async function pasteClipboard() { return pasteInto(activeTab()); }
 
+  function hasAnySelection(tab) {
+    const t = tab && tab.term;
+    if (!t) return false;
+    if (typeof t.hasSelection === "function" && t.hasSelection()) return true;
+    return !!nativeSelectionText(t);
+  }
+
+  /* Ctrl+C / Ctrl+Shift+C copy. Plain Ctrl+C is only a copy while text is
+   * selected - otherwise it must stay ^C (SIGINT) so Ctrl+C still stops a
+   * running program. Ctrl+Shift+C always belongs to copy (Chrome would open
+   * DevTools' element picker otherwise). */
+  function isCopyChord(ev, term) {
+    if (!ev || ev.type !== "keydown" || !ev.ctrlKey || ev.altKey || ev.metaKey) return false;
+    if (String(ev.key || "").toUpperCase() !== "C") return false;
+    if (ev.shiftKey) return true;
+    return !!(term && typeof term.hasSelection === "function" && term.hasSelection());
+  }
+
+  /* Plain Ctrl+A selects all terminal text. (The shell's "go to line start"
+   * is still on Home / Ctrl+E-side keys; Ctrl+Shift+A is left to the browser.) */
+  function isSelectAllChord(ev) {
+    if (!ev || ev.type !== "keydown" || !ev.ctrlKey) return false;
+    if (ev.shiftKey || ev.altKey || ev.metaKey) return false;
+    return String(ev.key || "").toUpperCase() === "A";
+  }
+
+  /* Small right-click menu (Copy / Paste / Select all) shown at the cursor,
+   * only when there is a selection to copy. */
+  function closeContextMenu() {
+    const old = document.getElementById("at-ctx");
+    if (old) old.remove();
+  }
+
+  function showContextMenu(tab, x, y) {
+    closeContextMenu();
+    const host = document.querySelector(".at-app") || paneEl() || document.body;
+    const m = h("div", "at-menu at-ctx");
+    m.id = "at-ctx";
+    m.setAttribute("role", "menu");
+    m.innerHTML =
+      '<button role="menuitem" data-act="copy">Copy <span class="at-menu-hint">Ctrl+C</span></button>' +
+      '<button role="menuitem" data-act="paste">Paste <span class="at-menu-hint">Ctrl+Shift+V</span></button>' +
+      '<hr>' +
+      '<button role="menuitem" data-act="all">Select all <span class="at-menu-hint">Ctrl+A</span></button>';
+    m.style.position = "fixed";
+    m.style.top = Math.max(4, Math.min(y, window.innerHeight - 120)) + "px";
+    m.style.left = Math.max(4, Math.min(x, window.innerWidth - 230)) + "px";
+    m.style.right = "auto";
+    m.addEventListener("mousedown", (e) => e.stopPropagation());
+    m.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-act]");
+      if (!b) return;
+      const act = b.dataset.act;
+      closeContextMenu();
+      if (act === "copy") copySelection(tab);
+      else if (act === "paste") pasteInto(tab);
+      else if (act === "all") { tab.term.selectAll(); tab.term.focus(); }
+    });
+    host.appendChild(m);
+    const off = (e) => {
+      if (e && e.type === "keydown" && e.key !== "Escape") return;
+      closeContextMenu();
+      document.removeEventListener("mousedown", off, true);
+      document.removeEventListener("keydown", off, true);
+    };
+    document.addEventListener("mousedown", off, true);
+    document.addEventListener("keydown", off, true);
+  }
+
   /* Mouse paste, the PC terminal convention (Windows Terminal, PuTTY and
    * VS Code all paste on right-click). Without this the browser's own menu
    * could not do the job here: the click target is xterm's canvas, which is
@@ -1104,6 +1187,10 @@
       if (isTouchGenerated(ev)) return;   // Android long-press popup
       ev.preventDefault();
       ev.stopPropagation();
+      if (hasAnySelection(tab) && typeof document !== "undefined" && document.body) {
+        showContextMenu(tab, ev.clientX || 0, ev.clientY || 0);   // Copy / Paste / Select all
+        return;
+      }
       pasteInto(tab);
     }, true);
   }
@@ -1556,7 +1643,7 @@
     refreshStatus,
     pressKey,
     state,
-    _t: { historyText, layerSelectionText, bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText, isPasteChord, isTouchGenerated, bindPasteGestures, pasteInto },
+    _t: { historyText, layerSelectionText, bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText, isPasteChord, isCopyChord, isSelectAllChord, isTouchGenerated, bindPasteGestures, pasteInto },
     EXTRA_KEYS,
   };
   // Core-tab loader: astra.js's showTab() calls this the first time the

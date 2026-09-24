@@ -403,3 +403,25 @@ test("the runtime-unavailable state is compact and never covers a ready runtime"
   assert.ok(/\.at-unavailable-card\s*\{[^}]*max-width:\s*4\d\dpx/.test(CSS),
             "the notice must stay compact");
 });
+
+test("Ctrl+C copies only while text is selected; otherwise stays ^C", () => {
+  const { sandbox } = loadTerminal();
+  const { isCopyChord } = sandbox.window.AstraTerminal._t;
+  const key = (k, mods) => Object.assign({ type: "keydown", key: k }, mods);
+  const sel = { hasSelection: () => true };
+  const none = { hasSelection: () => false };
+  assert.equal(isCopyChord(key("c", { ctrlKey: true }), sel), true);
+  assert.equal(isCopyChord(key("c", { ctrlKey: true }), none), false,
+               "no selection: Ctrl+C must still reach the PTY as SIGINT");
+  assert.equal(isCopyChord(key("C", { ctrlKey: true, shiftKey: true }), none), true);
+  assert.equal(isCopyChord(key("c", {}), sel), false);
+});
+
+test("Ctrl+A selects all terminal text", () => {
+  const { sandbox } = loadTerminal();
+  const { isSelectAllChord } = sandbox.window.AstraTerminal._t;
+  const key = (k, mods) => Object.assign({ type: "keydown", key: k }, mods);
+  assert.equal(isSelectAllChord(key("a", { ctrlKey: true })), true);
+  assert.equal(isSelectAllChord(key("a", {})), false);
+  assert.equal(isSelectAllChord(key("a", { ctrlKey: true, shiftKey: true })), false);
+});

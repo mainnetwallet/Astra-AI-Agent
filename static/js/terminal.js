@@ -1183,6 +1183,7 @@
      * to the invisible layer (and its highlight) at every scroll position. */
     const core = term._core;
     const screen = term.element.querySelector(".xterm-screen");
+    let dragging = false;   // true while a touch (selection drag) is in progress
     const rowPx = () => {
       try { return core._renderService.dimensions.css.cell.height || 0; } catch (_) { return 0; }
     };
@@ -1192,6 +1193,18 @@
         configurable: true,
         get() { return proto.get.call(this); },
         set(v) {
+          // While the user is actively dragging a selection handle (long-press
+          // + drag), never fight the gesture with a programmatic correction.
+          // Once scrollback is full, xterm issues one of these on every
+          // incoming PTY line to keep the visible rows glued in place as old
+          // ones get trimmed off the top -- a single line is a small (sub-row)
+          // nudge, but a steady stream of output turns into a steady stream of
+          // full-row corrections, which look like the browser's own smooth
+          // autoscroll getting repeatedly cancelled and re-jumped instead of
+          // scrolling gradually. Drop all of them during the drag; the normal
+          // snap-to-row logic below resumes and silently catches up the
+          // instant the drag ends.
+          if (dragging) return;
           const h = rowPx();
           if (h && Math.abs(v - proto.get.call(this)) < h * 0.99) {   // sub-row snap: skip it
             try { core.viewport._ignoreNextScrollEvent = false; } catch (_) {}
@@ -1272,8 +1285,10 @@
     // xterm's own touch handlers scroll by JS and cancel the gesture; let the
     // browser scroll the viewport natively (momentum, and handle-drag autoscroll)
     const stop = (ev) => { if (term.buffer.active.type === "normal") ev.stopPropagation(); };
-    view.addEventListener("touchstart", stop, { capture: true, passive: true });
+    view.addEventListener("touchstart", (ev) => { dragging = true; stop(ev); }, { capture: true, passive: true });
     view.addEventListener("touchmove", stop, { capture: true, passive: true });
+    view.addEventListener("touchend", () => { dragging = false; }, { capture: true, passive: true });
+    view.addEventListener("touchcancel", () => { dragging = false; }, { capture: true, passive: true });
 
     // long-press must reach the browser, not xterm's right-click handler
     view.addEventListener("contextmenu", (ev) => { ev.stopPropagation(); }, true);

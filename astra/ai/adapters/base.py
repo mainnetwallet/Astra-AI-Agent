@@ -69,6 +69,16 @@ class CompatibleAdapter(AIProvider):
     def _pick(self, model: str | None = None):
         return self.pool.pick(model)
 
+    def _no_credential_error(self) -> ProviderError:
+        """No usable key right now (none configured, or every key is cooling
+        down for 30s+). Retrying the same provider within the router's 1-2s
+        backoff cannot change that, so it is marked NON-retryable: the router
+        moves straight to the next candidate instead of sleeping through
+        pointless retries (the Gateway's own connections already do this)."""
+        err = ProviderError(f"{self.name}: no healthy credential configured")
+        err.retryable = False
+        return err
+
     def _done(self, cred=None, errored=False, reason="", *, rate_limited=False,
               auth_failure=False, cooldown_s: float = 30.0) -> None:
         if cred is None:
@@ -151,7 +161,7 @@ class CompatibleAdapter(AIProvider):
               response_format: str | None = None) -> str:
         cred = self._pick(model or (self.models[0] if self.models else ""))
         if cred is None:
-            raise ProviderError(f"{self.name}: no healthy credential configured")
+            raise self._no_credential_error()
         body = {"model": model or (self.models[0] if self.models else ""),
                 "messages": messages}
         # OpenAI-compatible APIs treat the output limit as optional: omitting
@@ -186,7 +196,7 @@ class CompatibleAdapter(AIProvider):
         used_model = model or (self.models[0] if self.models else "")
         cred = self._pick(used_model)
         if cred is None:
-            raise ProviderError(f"{self.name}: no healthy credential configured")
+            raise self._no_credential_error()
         if self.events:
             self.events.emit("ai.started", agent="provider", provider=self.name,
                              model=used_model)
@@ -232,7 +242,7 @@ class CompatibleAdapter(AIProvider):
         """Generate an image via /v1/images/generations (OpenAI-compatible)."""
         cred = self._pick()
         if cred is None:
-            raise ProviderError(f"{self.name}: no healthy credential configured")
+            raise self._no_credential_error()
         body = {
             "model": model or (self.models[0] if self.models else "dall-e-3"),
             "prompt": prompt,
@@ -256,7 +266,7 @@ class CompatibleAdapter(AIProvider):
         import base64 as b64mod
         cred = self._pick()
         if cred is None:
-            raise ProviderError(f"{self.name}: no healthy credential configured")
+            raise self._no_credential_error()
         body = {
             "model": model or "tts-1",
             "input": text,

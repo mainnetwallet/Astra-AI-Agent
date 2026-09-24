@@ -1164,11 +1164,17 @@ class AstraRouter:
                            trace=req.trace, terminal=not retry, retrying=retry)
                 if self._pinned(adapter):
                     break
+                # A NON-retryable error (e.g. "no healthy credential
+                # configured": no key to try, and cooldowns outlast our 1-2s
+                # backoff) or the last allowed attempt ends this candidate
+                # now — falling through would re-call it for nothing and let
+                # the router move on to the next provider immediately.
+                if not retry:
+                    break
                 # the adapter's credential pool has already cooled the bad key;
                 # a fresh key on the same model may succeed, so keep retrying up
                 # to max_retries, respecting backoff only for transient errors.
-                if retry:
-                    time.sleep(min(self.backoff_s * attempt, 8))
+                time.sleep(min(self.backoff_s * attempt, 8))
             except Exception as e:           # never let a provider kill routing
                 last_error = f"{type(e).__name__}: {e}"
                 self._errors[name] = self._errors.get(name, 0) + 1

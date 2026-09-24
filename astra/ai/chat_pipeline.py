@@ -220,8 +220,14 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "3) ASSIGN. From the provider/model list you are given, pick the single "
     "best provider+model for this job (coding -> a coding-capable model, "
     "hard reasoning -> a high-quality model, simple chat -> a fast one, "
-    "images -> a vision model). Copy provider and model EXACTLY from the "
-    "list. If nothing in the list is a clear fit, use \"\" for both.\n\n"
+    "images -> a vision model). Each entry shows a `health` value "
+    "('ok'/'unknown'/'failed') from real recent traffic — treat it as a "
+    "real signal: prefer a health=ok (or unknown) model over a health="
+    "failed one whenever both fit the job equally; only pick a failed "
+    "model when it is the sole match for a required capability, since "
+    "routing will still attempt healthier alternatives first if it fails. "
+    "Copy provider and model EXACTLY from the list. If nothing in the "
+    "list is a clear fit, use \"\" for both.\n\n"
 
     "4) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
     "answer must satisfy (for an execution task, the criteria must require "
@@ -672,12 +678,25 @@ class ChatPipeline:
             targets = self.router.available_targets()
         except Exception:
             pass
+        # `health` is 'ok' | 'failed' | 'unknown' from the SAME per-key
+        # health data the "🔌 AI Providers health" page's test buttons and
+        # live traffic both write (see `available_targets()`), sorted
+        # healthy-first — so a truncated list never hides a healthy model
+        # behind a known-bad one, and the Gateway can see, in plain text,
+        # which of these it should actually trust for the ASSIGN step.
+        shown = targets[:MAX_TARGETS_IN_PROMPT]
+        healthy_count = sum(1 for t in targets if t.get("health") != "failed")
         catalogue = "\n".join(
             f"- provider={t['provider']} model={t['model']} "
             f"caps={','.join(t.get('capabilities') or []) or 'chat'} "
-            f"quality={t.get('quality') or '?'} ctx={t.get('context_window') or '?'}"
-            for t in targets[:MAX_TARGETS_IN_PROMPT]) or "(none listed)"
-        parts = ["Available providers/models:\n" + catalogue]
+            f"quality={t.get('quality') or '?'} ctx={t.get('context_window') or '?'} "
+            f"health={t.get('health') or 'unknown'}"
+            for t in shown) or "(none listed)"
+        parts = [
+            f"Available providers/models ({healthy_count} of {len(targets)} "
+            "currently healthy — prefer health=ok, avoid health=failed unless "
+            "nothing else fits this request's required capability):\n"
+            + catalogue]
         # LIVE runtime capability context — the same authoritative
         # representation the Provider is given, so the Gateway plans against
         # what actually exists instead of guessing. Human-facing block first

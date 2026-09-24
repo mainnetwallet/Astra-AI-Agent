@@ -1228,6 +1228,19 @@ class AstraRouter:
         the Gateway what it may choose from without touching provider
         internals. Same eligibility as routing itself (`_candidates`):
         provider has healthy credentials and the model is not disabled.
+
+        Each entry also carries `health` — 'ok' | 'failed' | 'unknown' from
+        `_model_status()`, the SAME per-(provider, key, model) data the
+        "🔌 AI Providers health" page's test buttons and live traffic both
+        write into (`key_model_health` / `_record_key_model`), and the
+        SAME signal `route_request()`'s own ranking already demotes
+        known-failed models with. Surfacing it here means the Gateway's
+        "assign" pick (Call #1) is no longer blind to real-time health —
+        it sees exactly what routing will actually honor, instead of only
+        capability/quality/context. Entries are sorted health-first
+        ('ok' > 'unknown' > 'failed') so a truncated prompt (see
+        `MAX_TARGETS_IN_PROMPT`) never drops a healthy model in favor of a
+        known-bad one.
         """
         out = []
         try:
@@ -1241,7 +1254,10 @@ class AstraRouter:
                 "capabilities": list(getattr(model, "capabilities", []) or []),
                 "quality": getattr(model, "quality_class", ""),
                 "context_window": int(getattr(model, "context_window", 0) or 0),
+                "health": self._model_status(adapter, model.model_id),
             })
+        _health_rank = {"ok": 0, "unknown": 1, "failed": 2}
+        out.sort(key=lambda t: _health_rank.get(t["health"], 1))
         return out
 
     # -- shared agent tool loop (Provider as the driving brain) --------------

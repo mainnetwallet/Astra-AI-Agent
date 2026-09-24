@@ -190,7 +190,8 @@ def _pip_verifier(packages: list[str], base: str = "") -> str:
     imports = "; ".join(f"import {m}" for m in mods)
     # Verify with the INTERPRETER, not pip: `python3 -m pip -c ...` is not a
     # thing, and the real question is "can this Python import the module?".
-    return f"python3 -c {shlex.quote(imports + '; print(\"verify-ok\")')}"
+    verify_ok = '; print("verify-ok")'
+    return f"python3 -c {shlex.quote(imports + verify_ok)}"
 
 
 def _dpkg_verifier(packages: list[str]) -> str:

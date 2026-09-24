@@ -108,7 +108,7 @@
         <button role="menuitem" data-act="clear">Clear screen <span class="at-menu-hint">Ctrl+L</span></button>
         <button role="menuitem" data-act="files">Workspace files <span class="at-menu-hint">▤</span></button>
         <hr>
-        <button role="menuitem" data-act="copy">Copy selection <span class="at-menu-hint">long-press</span></button>
+        <button role="menuitem" data-act="copy">Copy selection</button>
         <button role="menuitem" data-act="paste">Paste</button>
         <button role="menuitem" data-act="selecttext">Select text…</button>
         <hr>
@@ -173,16 +173,6 @@
       </div>`;
     stage.appendChild(side);
 
-    // floating action bar shown after a long-press selection (Termux-style)
-    const selbar = h("div", "at-selbar");
-    selbar.id = "at-selbar";
-    selbar.hidden = true;
-    selbar.innerHTML = `
-      <button class="at-btn at-primary" data-sel="copy">Copy</button>
-      <button class="at-btn" data-sel="paste">Paste</button>
-      <button class="at-btn" data-sel="text">Select text</button>
-      <button class="at-btn" data-sel="close" aria-label="Dismiss">✕</button>`;
-    stage.appendChild(selbar);
     root.appendChild(stage);
 
     const toastEl = h("div", "at-toast");
@@ -344,16 +334,6 @@
       pressKey(b.dataset.key);
     });
 
-    byId("at-selbar").addEventListener("pointerdown", (ev) => {
-      const b = ev.target.closest("button[data-sel]");
-      if (!b) return;
-      ev.preventDefault();                 // keep the keyboard / focus as-is
-      const a = b.dataset.sel;
-      if (a === "copy") copySelection();
-      else if (a === "paste") pasteClipboard();
-      else if (a === "text") openSelectSheet();
-      else hideSelBar(true);
-    });
     byId("at-sheet-close").onclick = () => closeSheet();
 
     byId("at-up").onclick = () => {
@@ -615,9 +595,8 @@
     };
     state.tabs.set(sessionId, tab);
     state.order.push(sessionId);
-    bindTouchSelect(tab);
+    enableNativeSelection(tab);
     if (live) bindLiveInput(tab);
-    term.onSelectionChange(() => { if (!term.hasSelection()) hideSelBar(); });
 
     // Keyboard -> PTY. xterm already encodes Enter/Backspace/arrows/Tab/
     // Home/End/PageUp/PageDown and Ctrl+<letter> control bytes; we simply
@@ -1013,12 +992,14 @@
   async function copySelection() {
     const tab = activeTab();
     if (!tab || !tab.term) return;
-    const text = tab.term.getSelection();
+    const text = tab.term.getSelection() || nativeSelectionText(tab.term);
     if (!text) { toast("Nothing selected — long-press text first"); return; }
     const ok = await copyText(text);
     toast(ok ? "Copied" : "Copy blocked — use Select text");
-    if (ok) tab.term.clearSelection();
-    hideSelBar();
+    if (ok) {
+      tab.term.clearSelection();
+      const s = document.getSelection(); if (s) s.removeAllRanges();
+    }
     tab.term.focus();
   }
 
@@ -1031,7 +1012,6 @@
         text = await navigator.clipboard.readText();
       }
     } catch (_) { text = null; }       // permission denied / insecure context
-    hideSelBar();
     if (text == null) { openPasteSheet(); return; }
     if (text) tab.term.paste(text);
     tab.term.focus();
@@ -1079,7 +1059,6 @@
   function openSelectSheet() {
     const tab = activeTab();
     if (!tab || !tab.term) return;
-    hideSelBar();
     openSheet({
       title: "Select text", readonly: true, okLabel: "Copy all",
       hint: "Long-press a word, drag the handles, then Copy — or tap Copy all.",
@@ -1105,101 +1084,53 @@
     });
   }
 
-  function showSelBar() {
-    const b = byId("at-selbar");
-    if (!b) return;
-    const tab = activeTab();
-    const has = !!(tab && tab.term && tab.term.hasSelection());
-    b.querySelector('[data-sel="copy"]').disabled = !has;
-    b.hidden = false;
-  }
-  function hideSelBar(clear) {
-    const b = byId("at-selbar");
-    if (b) b.hidden = true;
-    if (clear) { const t = activeTab(); if (t && t.term) t.term.clearSelection(); }
-  }
-
-  /* xterm.js has no touch selection. Long-press (~0.45s) selects the word
-   * under the finger, dragging extends it, lifting shows the Copy/Paste bar. */
-  function wordBounds(term, cell) {
-    const line = term.buffer.active.getLine(cell.row);
-    const s = line ? line.translateToString(false) : "";
-    const sp = (c) => !c || /\s/.test(c);
-    if (sp(s[cell.col])) return null;
-    let a = cell.col, b = cell.col;
-    while (a > 0 && !sp(s[a - 1])) a--;
-    while (b < s.length - 1 && !sp(s[b + 1])) b++;
-    return { start: a, end: b };
+  /* Native (OS) text selection on phones: long-press a word, drag the handles,
+   * tap Copy in Android's own popup. xterm fights this in three ways:
+   *  1. its `contextmenu` handler drops the hidden textarea under the finger and
+   *     focuses it (= the selection is replaced by an empty textarea caret);
+   *  2. on blur it re-renders every row, replacing the DOM nodes that are selected;
+   *  3. CSS `user-select: none`.
+   * (3) is fixed in terminal.css. Here: stop (1), and hold renders while a native
+   * selection exists inside the terminal (re-render once it is cleared). */
+  function nativeSelectionText(term) {
+    const sel = document.getSelection && document.getSelection();
+    if (!sel || !sel.rangeCount || sel.isCollapsed) return "";
+    if (!term.element || !term.element.contains(sel.anchorNode)) return "";
+    return sel.toString().replace(/\u00a0/g, " ").replace(/[ \t]+$/gm, "");
   }
 
-  function applySelection(term, a, b) {
-    const fwd = a.row < b.row || (a.row === b.row && a.col <= b.col);
-    const p = fwd ? a : b, q = fwd ? b : a;
-    term.select(p.col, p.row, (q.row - p.row) * term.cols + (q.col - p.col) + 1);
-  }
+  function enableNativeSelection(tab) {
+    const term = tab.term, view = tab.view;
+    const active = () => nativeSelectionText(term) !== "";
 
-  function bindTouchSelect(tab) {
-    const el = tab.view, term = tab.term;
-    let timer = null, active = false, sx = 0, sy = 0, anchorA = null, anchorB = null;
+    // (1) let the browser handle long-press; xterm's right-click handler must not run
+    view.addEventListener("contextmenu", (ev) => { ev.stopPropagation(); }, true);
 
-    const cellAt = (pt) => {
-      const screen = term.element && term.element.querySelector(".xterm-screen");
-      if (!screen || !term.cols || !term.rows) return null;
-      const r = screen.getBoundingClientRect();
-      const cw = r.width / term.cols, ch = r.height / term.rows;
-      if (!cw || !ch) return null;
-      const col = Math.max(0, Math.min(term.cols - 1, Math.floor((pt.clientX - r.left) / cw)));
-      const row = Math.max(0, Math.min(term.rows - 1, Math.floor((pt.clientY - r.top) / ch)));
-      return { col, row: row + term.buffer.active.viewportY };
-    };
-    const cancel = () => { clearTimeout(timer); timer = null; };
-
-    el.addEventListener("touchstart", (ev) => {
-      cancel();
-      if (ev.touches.length !== 1) return;
-      const t = ev.touches[0];
-      sx = t.clientX; sy = t.clientY;
-      timer = setTimeout(() => {
-        const c = cellAt({ clientX: sx, clientY: sy });
-        if (!c) return;
-        active = true;
-        const w = wordBounds(term, c);
-        anchorA = w ? { col: w.start, row: c.row } : c;
-        anchorB = w ? { col: w.end, row: c.row } : c;
-        term.clearSelection();
-        if (w) applySelection(term, anchorA, anchorB);
-        if (navigator.vibrate) { try { navigator.vibrate(15); } catch (_) {} }
-        showSelBar();
-      }, 450);
-    }, { passive: true });
-
-    // capture phase: stop xterm's own touchmove (it would scroll) while selecting
-    el.addEventListener("touchmove", (ev) => {
-      const t = ev.touches[0];
-      if (!active) {
-        if (t && Math.hypot(t.clientX - sx, t.clientY - sy) > 10) cancel();
-        return;
+    // (2) hold row re-renders while a native selection is inside the terminal
+    let held = false;
+    try {
+      const rs = term._core && term._core._renderService;
+      const r = rs && rs._renderer && rs._renderer.value;
+      if (r && typeof r.renderRows === "function") {
+        const orig = r.renderRows.bind(r);
+        r.renderRows = (a, b) => { if (active()) { held = true; return; } orig(a, b); };
       }
+    } catch (_) { /* xterm internals changed: selection still works, may flicker */ }
+    document.addEventListener("selectionchange", () => {
+      if (held && !active()) { held = false; term.refresh(0, term.rows - 1); }
+    });
+    // typing (or Paste) ends selection mode so the screen can update again
+    term.onData(() => {
+      if (active()) { const s = document.getSelection(); if (s) s.removeAllRanges(); }
+    });
+
+    // Android's Copy popup: hand the clipboard clean text (no NBSP / trailing pad)
+    view.addEventListener("copy", (ev) => {
+      if (term.hasSelection()) return;                 // xterm's own selection: default
+      const t = nativeSelectionText(term);
+      if (!t || !ev.clipboardData) return;
+      ev.clipboardData.setData("text/plain", t);
       ev.preventDefault(); ev.stopPropagation();
-      const c = cellAt(t);
-      if (!c) return;
-      const before = c.row < anchorA.row || (c.row === anchorA.row && c.col < anchorA.col);
-      applySelection(term, before ? anchorB : anchorA, c);
-    }, { passive: false, capture: true });
-
-    const end = () => {
-      cancel();
-      if (active) { active = false; showSelBar(); }
-    };
-    el.addEventListener("touchend", end, { passive: true });
-    el.addEventListener("touchcancel", end, { passive: true });
-
-    // Android fires contextmenu on long-press; xterm's handler would drop its
-    // textarea under the finger and pop the OS paste bubble. We own long-press.
-    el.addEventListener("contextmenu", (ev) => {
-      if (active || timer !== null || !byId("at-selbar").hidden) {
-        ev.preventDefault(); ev.stopPropagation();
-      }
     }, true);
   }
 
@@ -1268,7 +1199,7 @@
     refreshStatus,
     pressKey,
     state,
-    _t: { wordBounds, applySelection, bufferText, copyText, hardenInput, bindTouchSelect, showSelBar, bindLiveInput, isTouchInput },
+    _t: { bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText },
     EXTRA_KEYS,
   };
   // Core-tab loader: astra.js's showTab() calls this the first time the

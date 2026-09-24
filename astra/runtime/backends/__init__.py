@@ -57,8 +57,16 @@ class InvalidBackend(RuntimeBackend):
         return dict(self._probe)
 
 
-def select_backend(config=None, *, prefix=None, name=None) -> RuntimeBackend:
-    """Pick the runtime backend for this host (see the module docstring)."""
+def select_backend(config=None, *, prefix=None, name=None,
+                   runner=None) -> RuntimeBackend:
+    """Pick the runtime backend for this host (see the module docstring).
+
+    `runner` is handed to the WSL2 backend as its `wsl.exe` adapter. The
+    probe, the launch and one-shot execution all go through that single seam,
+    so a test can drive the whole backend without a real WSL - and in
+    production it is None, so the only thing that ever spawns `wsl.exe` is the
+    one adapter that is supposed to.
+    """
     platform = detect_platform()
     if name is not None:
         requested = str(name)
@@ -75,9 +83,9 @@ def select_backend(config=None, *, prefix=None, name=None) -> RuntimeBackend:
     if key == BACKEND_PROOT:
         return ProotRuntimeBackend(config, prefix=prefix)
     if key == BACKEND_WSL2:
-        return WslRuntimeBackend(config)
+        return WslRuntimeBackend(config, runner=runner)
     if platform == "windows":
-        return WslRuntimeBackend(config)
+        return WslRuntimeBackend(config, runner=runner)
     return ProotRuntimeBackend(config, prefix=prefix)
 
 

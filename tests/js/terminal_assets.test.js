@@ -105,6 +105,9 @@ function loadTerminal(overrides) {
     addEventListener() {},
   };
   sandbox.Astra = sandbox.window.Astra;
+  // A browser global the paste tests need; never present in the sandbox by
+  // default, so `navigator` stays undefined unless a test asks for it.
+  if (overrides && overrides.navigator) sandbox.navigator = overrides.navigator;
   vm.createContext(sandbox);
   vm.runInContext(JS, sandbox);
   return { sandbox, calls, loaders };
@@ -209,10 +212,11 @@ test("a compact Termux-style extra-key row exists for mobile", () => {
   }
   assert.ok(/\.at-keys\s*\{[^}]*display:\s*none/.test(CSS),
             "extra keys hidden on desktop");
-  assert.ok(/@media[^{]*\{\s*\.at-keys\s*\{[^}]*display:\s*flex/.test(
-              CSS.replace(/\n/g, " ")) ||
-            /\.at-keys\s*\{\s*display:\s*flex/.test(
-              CSS.split("@media")[1] || ""),
+  // Inside the MOBILE media block specifically - the stylesheet has more
+  // than one @media, so the block must be selected by its query, not by
+  // position.
+  const mobile = CSS.split(/@media[^{]*max-width:\s*820px[^{]*\{/)[1] || "";
+  assert.ok(/\.at-keys\s*\{[^}]*display:\s*flex/.test(mobile),
             "extra keys shown on mobile");
   // compact, terminal-oriented buttons (never huge rounded cards)
   assert.ok(/\.at-key\s*\{[^}]*border-radius:\s*5px/.test(CSS));
@@ -253,6 +257,140 @@ test("runtime lifecycle + files live in a compact ⋮ menu, not big cards", () =
   // the menu (and the drawer) start hidden; the terminal area stays visible
   assert.ok(/menu\.hidden = true/.test(JS) || /hidden>/.test(JS));
   assert.ok(/side\.hidden = true/.test(JS));
+});
+
+/* ----------------------- PC clipboard paste (mouse + keys) ------------- */
+
+/* Paste is the one thing a terminal can quietly get wrong in a dangerous way:
+ * paste that landed in a host shell would be the silent host fallback the
+ * spec forbids. These tests drive the real handlers and pin that
+ *   * a PC right-click pastes the clipboard (the browser's own menu cannot:
+ *     its Paste item is greyed out over xterm's non-editable canvas),
+ *   * the bytes go through xterm's paste() - i.e. onData -> the runtime's
+ *     terminal/input route - and never a host-shell endpoint,
+ *   * Android's touch long-press popup and the extra keys are untouched. */
+
+function fakeTab() {
+  const listeners = {};
+  const pasted = [];
+  const tab = {
+    pasted,
+    term: {
+      paste: (text) => pasted.push(text),
+      focusCount: 0,
+      focus() { this.focusCount += 1; },
+    },
+    view: {
+      addEventListener(type, fn) {
+        (listeners[type] = listeners[type] || []).push(fn);
+      },
+    },
+    fire(type, ev) {
+      for (const fn of listeners[type] || []) fn(ev);
+    },
+  };
+  return tab;
+}
+
+function mouseEvent(extra) {
+  const ev = {
+    shiftKey: false,
+    prevented: 0,
+    stopped: 0,
+    preventDefault() { this.prevented += 1; },
+    stopPropagation() { this.stopped += 1; },
+  };
+  return Object.assign(ev, extra || {});
+}
+
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+const clipboardOf = (text) => ({ navigator:
+  { clipboard: { readText: async () => text } } });
+
+test("right-click pastes the clipboard into the terminal", async () => {
+  const { sandbox } = loadTerminal(clipboardOf("PASTED-TEXT"));
+  const bind = sandbox.window.AstraTerminal._t.bindPasteGestures;
+  assert.equal(typeof bind, "function", "bindPasteGestures must be exported");
+
+  const tab = fakeTab();
+  bind(tab);
+  const ev = mouseEvent({ sourceCapabilities: { firesTouchEvents: false } });
+  tab.fire("contextmenu", ev);
+  await tick();
+
+  assert.equal(ev.prevented, 1,
+               "the browser menu must be suppressed and the paste done here");
+  assert.deepEqual(tab.pasted, ["PASTED-TEXT"],
+                   "the clipboard must reach xterm paste() -> PTY stdin");
+});
+
+test("a touch long-press keeps the browser's Copy popup (Android)", async () => {
+  const { sandbox } = loadTerminal(clipboardOf("SHOULD-NOT-PASTE"));
+  const { bindPasteGestures, isTouchGenerated } =
+    sandbox.window.AstraTerminal._t;
+  const tab = fakeTab();
+  bindPasteGestures(tab);
+  const ev = mouseEvent({ sourceCapabilities: { firesTouchEvents: true } });
+  tab.fire("contextmenu", ev);
+  await tick();
+
+  assert.equal(ev.prevented, 0, "the native long-press menu must still open");
+  assert.deepEqual(tab.pasted, [], "a long-press must never paste");
+  assert.equal(isTouchGenerated({ sourceCapabilities:
+    { firesTouchEvents: true } }), true);
+  assert.equal(isTouchGenerated({ sourceCapabilities:
+    { firesTouchEvents: false } }), false);
+});
+
+test("Shift+right-click still opens the browser's real menu", async () => {
+  const { sandbox } = loadTerminal(clipboardOf("NOPE"));
+  const tab = fakeTab();
+  sandbox.window.AstraTerminal._t.bindPasteGestures(tab);
+  const ev = mouseEvent({ shiftKey: true,
+                          sourceCapabilities: { firesTouchEvents: false } });
+  tab.fire("contextmenu", ev);
+  await tick();
+  assert.equal(ev.prevented, 0, "the escape hatch must stay native");
+  assert.deepEqual(tab.pasted, []);
+});
+
+test("keyboard paste fallbacks: Ctrl+Shift+V and Shift+Insert", () => {
+  const { sandbox } = loadTerminal();
+  const chord = sandbox.window.AstraTerminal._t.isPasteChord;
+  const key = (k, mods) => Object.assign({ type: "keydown", key: k }, mods);
+  assert.equal(chord(key("v", { ctrlKey: true, shiftKey: true })), true,
+               "Ctrl+Shift+V is paste");
+  assert.equal(chord(key("V", { ctrlKey: true, shiftKey: true })), true);
+  assert.equal(chord(key("Insert", { shiftKey: true })), true,
+               "Shift+Insert is paste");
+  // A bare Ctrl+V is quoted-insert and must still reach the PTY as a byte,
+  // and Shift+Insert alone (no shift) is the plain Insert escape.
+  assert.equal(chord(key("v", { ctrlKey: true })), false);
+  assert.equal(chord(key("v", { shiftKey: true })), false);
+  assert.equal(chord(key("Insert", {})), false);
+  assert.equal(chord({ type: "keyup", key: "Insert", shiftKey: true }), false);
+});
+
+test("paste is wired to the runtime PTY, never to a host shell", () => {
+  // Every tab gets the mouse gesture...
+  assert.ok(/bindPasteGestures\(tab\)/.test(JS),
+            "createTab must bind the mouse-paste gesture");
+  // ...the browser menu is suppressed on the terminal view...
+  assert.ok(/addEventListener\("contextmenu"/.test(JS));
+  assert.ok(/if \(isPasteChord\(ev\)\) \{ term\.focus\(\); return false; \}/
+              .test(JS),
+            "the paste chords must be handed to the browser, not encoded");
+  // ...the long-press suppression is gated to touch devices, so it can never
+  // eat a PC's right-click again...
+  assert.ok(/if \(isTouchInput\(\)\)[\s\S]{0,60}?contextmenu/.test(JS),
+            "the long-press suppression must be touch-only");
+  // ...and paste goes out through the runtime's own route.
+  assert.ok([...JS.matchAll(/\.paste\(/g)].length >= 2,
+            "paste must use xterm's paste()");
+  assert.ok(JS.includes("/api/runtime/terminal/input"),
+            "paste bytes must reach the PTY stdin route");
+  assert.ok(!/\/api\/(terminal|shell|exec)\b/.test(JS),
+            "no host-shell paste route may exist");
 });
 
 test("the runtime-unavailable state is compact and never covers a ready runtime", () => {

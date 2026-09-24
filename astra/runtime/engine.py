@@ -55,14 +55,17 @@ class RuntimeEngine:
     `RuntimeEngine(config)` selects the backend for this host automatically
     (`RUNTIME_BACKEND=auto`); `backend=` overrides it explicitly and
     `prefix=` selects the proot backend with a non-default Termux prefix
-    (diagnostics and tests).
+    (diagnostics and tests). `runner=` passes a `wsl.exe` adapter to the WSL2
+    backend for the same reason - tests drive it with a fake so the suite
+    never needs a real WSL.
     """
 
     def __init__(self, config=None, *, prefix: str | None = None,
-                 backend=None):
+                 backend=None, runner=None):
         self.config = config
         self.prefix = prefix or _termux_prefix()
-        self.backend = select_backend(config, prefix=prefix, name=backend)
+        self.backend = select_backend(config, prefix=prefix, name=backend,
+                                      runner=runner)
         self._proot_view: ProotRuntimeBackend | None = None
 
     # -- identity -----------------------------------------------------------

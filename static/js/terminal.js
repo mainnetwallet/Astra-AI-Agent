@@ -602,6 +602,7 @@
     state.tabs.set(sessionId, tab);
     state.order.push(sessionId);
     enableNativeSelection(tab);
+    bindPasteGestures(tab);          // PC right-click paste (touch untouched)
     if (live) bindLiveInput(tab);
 
     // Keyboard -> PTY. xterm already encodes Enter/Backspace/arrows/Tab/
@@ -610,9 +611,15 @@
     term.attachCustomKeyEventHandler((ev) => {
       if (tab.live && tab.live.keyGate(ev) === false) return false;
       if (ev.type !== "keydown") return true;
-      // Let the browser do copy/paste/select-all/new-tab.
+      // Paste chords belong to the BROWSER, never to the byte stream: it
+      // fires `paste` on xterm's helper textarea and xterm turns that into
+      // term.paste() -> onData -> POST /api/runtime/terminal/input - the
+      // isolated runtime's PTY stdin. Focus first, so the chord still lands
+      // if focus had drifted off the terminal.
+      if (isPasteChord(ev)) { term.focus(); return false; }
+      // Let the browser do copy/select-all/new-tab (paste is handled above).
       if (ev.ctrlKey && ev.shiftKey
-          && ["C", "V", "A", "T"].includes(ev.key.toUpperCase())) {
+          && ["C", "A", "T"].includes(ev.key.toUpperCase())) {
         return false;
       }
       if (ev.metaKey) return false;
@@ -1027,18 +1034,78 @@
     tab.term.focus();
   }
 
-  async function pasteClipboard() {
-    const tab = activeTab();
-    if (!tab || !tab.term) return;
+  /* Ctrl+Shift+V (xterm's own paste) and Shift+Insert (the PC convention)
+   * are keyboard PASTE, not control bytes. xterm would otherwise encode
+   * Shift+Insert as a bare Insert escape, so they are claimed here and left
+   * to the browser - which pastes into xterm's helper textarea, and xterm
+   * forwards that to the PTY. A plain Ctrl+V is deliberately NOT intercepted:
+   * a terminal sends it as 0x16 (quoted-insert), exactly as before. */
+  function isPasteChord(ev) {
+    if (!ev || ev.type !== "keydown") return false;
+    const key = String(ev.key || "").toUpperCase();
+    if (ev.shiftKey && ev.ctrlKey && !ev.altKey && key === "V") return true;
+    // A strict boolean: callers branch on it, and `undefined` is a poor
+    // thing for a predicate to hand back.
+    return !!(ev.shiftKey && !ev.ctrlKey && !ev.altKey
+              && key === "INSERT");
+  }
+
+  /* Did the browser tell us this event came from a touch rather than a mouse?
+   * Android's long-press popup (Copy / Select all) is driven by contextmenu,
+   * so a touch must keep the native menu and only a real mouse may paste.
+   * Browsers without `sourceCapabilities` fall back to the device question. */
+  function isTouchGenerated(ev) {
+    const caps = ev && ev.sourceCapabilities;
+    if (caps && typeof caps.firesTouchEvents === "boolean") {
+      return caps.firesTouchEvents;
+    }
+    return isTouchInput();
+  }
+
+  /* Read the OS clipboard and feed it to the runtime's PTY as stdin. This is
+   * the ONE paste path: clipboard -> term.paste() -> onData -> sendInput ->
+   * POST /api/runtime/terminal/input -> the isolated runtime's PTY. It never
+   * touches the host shell (no CMD, no PowerShell), and the bytes are
+   * indistinguishable from typing them, so bracketed paste and the shell's
+   * own line editing behave exactly like a real terminal. Falls back to the
+   * manual paste sheet when the clipboard is unreadable (plain http on a LAN
+   * IP, or a denied permission). */
+  async function pasteInto(tab) {
+    if (!tab || !tab.term) return false;
     let text = null;
     try {
       if (navigator.clipboard && navigator.clipboard.readText) {
         text = await navigator.clipboard.readText();
       }
     } catch (_) { text = null; }       // permission denied / insecure context
-    if (text == null) { openPasteSheet(); return; }
+    if (text == null) { openPasteSheet(); return false; }
     if (text) tab.term.paste(text);
     tab.term.focus();
+    return true;
+  }
+
+  async function pasteClipboard() { return pasteInto(activeTab()); }
+
+  /* Mouse paste, the PC terminal convention (Windows Terminal, PuTTY and
+   * VS Code all paste on right-click). Without this the browser's own menu
+   * could not do the job here: the click target is xterm's canvas, which is
+   * not editable, so Chrome/Edge greys their Paste item out and the click
+   * inserted nothing.
+   *
+   * Right-click is therefore ours: suppress the browser menu and paste
+   * through the shared PTY path above. Normal selection/copy is untouched -
+   * this is the right button only, and Ctrl+Shift+C still copies. A touch
+   * long-press is left completely alone (Android keeps its Copy popup), and
+   * Shift+right-click keeps the browser's real menu as an escape hatch. */
+  function bindPasteGestures(tab) {
+    if (!tab || !tab.view) return;
+    tab.view.addEventListener("contextmenu", (ev) => {
+      if (ev.shiftKey) return;            // escape hatch: the native menu
+      if (isTouchGenerated(ev)) return;   // Android long-press popup
+      ev.preventDefault();
+      ev.stopPropagation();
+      pasteInto(tab);
+    }, true);
   }
 
   function openSheet(o) {
@@ -1397,8 +1464,17 @@
       } catch (_) { /* extend() can throw across an unrelated node; ignore and retry next tick */ }
     }, { passive: true });
 
-    // long-press must reach the browser, not xterm's right-click handler
-    view.addEventListener("contextmenu", (ev) => { ev.stopPropagation(); }, true);
+    // Long-press must reach the browser, not xterm's right-click handler -
+    // but ONLY on a touch device. On a PC this very suppression is what made
+    // right-click paste dead: xterm never ran its own right-click handler
+    // (the one that parks its textarea under the cursor), so the browser's
+    // Paste item stayed greyed out and nothing ever reached the terminal.
+    // The desktop gesture is bindPasteGestures() instead.
+    if (isTouchInput()) {
+      view.addEventListener("contextmenu", (ev) => {
+        ev.stopPropagation();
+      }, true);
+    }
 
     // typing / paste ends selection mode
     term.onData(() => {
@@ -1480,7 +1556,7 @@
     refreshStatus,
     pressKey,
     state,
-    _t: { historyText, layerSelectionText, bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText },
+    _t: { historyText, layerSelectionText, bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText, isPasteChord, isTouchGenerated, bindPasteGestures, pasteInto },
     EXTRA_KEYS,
   };
   // Core-tab loader: astra.js's showTab() calls this the first time the

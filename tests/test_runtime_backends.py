@@ -305,7 +305,10 @@ class TestWslDetection(unittest.TestCase):
 
 class TestBackendSelection(unittest.TestCase):
     def test_auto_picks_the_backend_for_this_host(self):
-        engine = RuntimeEngine(_Cfg())
+        # The fake wsl.exe adapter is injected so the probe stays hermetic:
+        # without it this test would spawn the real wsl.exe on a PC, making
+        # the result depend on the machine rather than on the selection logic.
+        engine = RuntimeEngine(_Cfg(), runner=FakeWsl())
         expected = BACKEND_WSL2 if detect_platform() == "windows" else (
             BACKEND_PROOT)
         self.assertEqual(engine.name, expected)
@@ -347,7 +350,9 @@ class TestBackendSelection(unittest.TestCase):
 
 class TestRuntimeEngineFacade(unittest.TestCase):
     def test_the_engine_reports_the_selected_backend(self):
-        engine = RuntimeEngine(_Cfg({"RUNTIME_BACKEND": "wsl2"}))
+        # Injected adapter: the engine's probe must be drivable without WSL.
+        engine = RuntimeEngine(_Cfg({"RUNTIME_BACKEND": "wsl2"}),
+                               runner=FakeWsl())
         self.assertEqual(engine.name, "wsl2")
         self.assertEqual(engine.container, "Ubuntu")
         self.assertEqual(engine.platform, detect_platform())
@@ -673,7 +678,15 @@ class TestProotBackendIsUnchanged(unittest.TestCase):
         finally:
             shutil.rmtree(prefix, ignore_errors=True)
             shutil.rmtree(base, ignore_errors=True)
-        self.assertEqual(argv[0], "env")
+        # The launcher is exactly what the pre-backend-split proot engine
+        # used: `env` resolved through PATH (so Termux's own $PREFIX/bin/env
+        # is found) with a bare-name fallback, then `-i`. It is deliberately
+        # NOT `/usr/bin/env` - that is the path inside a WSL2 distribution and
+        # does not exist on Android, where the runtime lives under the Termux
+        # prefix. Changing it would be a silent contract break.
+        self.assertEqual(argv[0], shutil.which("env") or "env")
+        self.assertEqual(argv[1], "-i")
+        self.assertNotIn("/usr/bin/env", argv)
         self.assertIn("--kill-on-exit", argv)
         self.assertIn("--change-id=0:0", argv)
         self.assertIn("--rootfs=" + info["rootfs"], argv)

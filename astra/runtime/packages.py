@@ -77,6 +77,15 @@ def _pip_command(managers: list[str]) -> str:
     return "pip"
 
 
+# `--user` is passed EXPLICITLY rather than through the ambient environment:
+# `PIP_USER=1` would make every pip call a user install, and pip refuses
+# `--user` inside a virtualenv, which would break `python3 -m venv` +
+# `pip install` (spec 7). `PYTHONUSERBASE` (see backends/base.py) sends this
+# `--user` install into the runtime's own `$HOME`, so the per-runtime
+# privacy property is unchanged.
+_PIP_SCOPE = "--user"
+
+
 def plan_install(*, ecosystem: str, packages: list[str], managers: list[str],
                  global_scope: bool = False) -> dict:
     """Choose the command for an install request, or explain why it can't.
@@ -130,13 +139,14 @@ def plan_install(*, ecosystem: str, packages: list[str], managers: list[str],
             return {"supported": True, "ecosystem": "pip", "packages": pkgs,
                     "bootstrap": bootstrap,
                     "bootstrap_label": "installing pip into the runtime",
-                    "command": f"{base} install --break-system-packages {names}",
+                    "command": f"{base} install {_PIP_SCOPE} "
+                               f"--break-system-packages {names}",
                     "verifier": _pip_verifier(pkgs, base),
                     "verifier_label": "module imports"}
         base = _pip_command(managers)
         break_flag = " --break-system-packages" if "pip3" in managers else ""
         return {"supported": True, "ecosystem": "pip", "packages": pkgs,
-                "command": f"{base} install{break_flag} {names}",
+                "command": f"{base} install {_PIP_SCOPE}{break_flag} {names}",
                 "verifier": _pip_verifier(pkgs, base),
                 "verifier_label": "module imports"}
     if eco in ("apt", "apt-get"):

@@ -193,12 +193,22 @@ EXECUTION_POLICY_HEADER = "Terminal execution policy (authoritative):"
 def execution_policy_block(*, runtime_available: bool = True,
                            runtime_status: str = "",
                            runtime_id: str = "",
+                           runtime_backend: str = "",
+                           runtime_platform: str = "",
+                           runtime_distro: str = "",
                            session_id: str = "",
                            cwd: str = "",
                            host_fallback_available: bool = False,
                            host_fallback_reason: str = "",
                            pending_approvals: str = "") -> str:
     """The PRIMARY / FALLBACK / HOST-FALLBACK policy + its LIVE state.
+
+    `runtime_backend`/`runtime_platform`/`runtime_distro` describe WHICH
+    isolated runtime is providing execution on this host (`proot` on
+    Android/Termux, `wsl2` + Ubuntu on Windows). They are part of the block
+    so the Gateway and every Provider know the execution environment is
+    `agent_runtime` with that backend - and never a Windows CMD/PowerShell
+    or host shell.
 
     Pure and stateless: the caller passes what is actually true right now
     (never a cached guess), so the block can never claim the Agent Runtime
@@ -222,6 +232,16 @@ def execution_policy_block(*, runtime_available: bool = True,
     if session_id or cwd:
         lines.append(f"   - This conversation's session={session_id} "
                      f"cwd={cwd or '(default)'}")
+    if runtime_backend:
+        identity = (f"environment=agent_runtime backend={runtime_backend}")
+        if runtime_distro:
+            identity += f" distro={runtime_distro}"
+        if runtime_platform:
+            identity += f" platform={runtime_platform}"
+        lines.append(f"   - Runtime identity: {identity}. Commands run "
+                     "inside that isolated Linux runtime and nowhere else; "
+                     "the host shell (cmd.exe/PowerShell) is never the "
+                     "runtime.")
     # 2. FALLBACK + 3. the approval rule.
     if host_fallback_available:
         lines.append("2. FALLBACK — HOST terminal. Available, but ONLY after "

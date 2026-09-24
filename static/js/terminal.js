@@ -436,9 +436,15 @@
     const runtimeItem = byId("at-bar-runtime");
     if (led) led.className = "at-led " + (ok ? "at-led-on" : "at-led-off");
     if (sub) {
-      sub.textContent = ok
-        ? ((rt.backend || "runtime") + " · " + (rt.state || "ready"))
-        : "unavailable";
+      /* WHICH runtime is providing execution here - "Ubuntu · WSL2"
+       * on a Windows PC, "ubuntu · proot" on Android/Termux - so the
+       * terminal header says what the Agent Runtime actually is. The
+       * lifecycle state stays in the status bar below. */
+      const backend = rt.backend === "wsl2" ? "WSL2"
+        : (rt.backend || "runtime");
+      const where = rt.distro ? (rt.distro + " · " + backend)
+        : backend;
+      sub.textContent = ok ? where : "unavailable";
     }
     if (runtimeItem) {
       runtimeItem.textContent = ok

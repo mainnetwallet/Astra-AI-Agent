@@ -29,6 +29,34 @@ Two rules are absolute:
 
 ## 2. Isolation model (what is actually used)
 
+**Two backends, one runtime.** Which mechanism provides the isolated Linux
+userland depends on the host. Everything above the backend is shared:
+
+```
+    Astra Terminal                                              (UI)
+          |
+          v
+    Astra Runtime  --------------------+                     RuntimeEngine
+          |                            |
+          v                            +--> ProotRuntimeBackend   Android/Termux
+    wsl.exe (transport, Windows only)  |        -> proot + proot-distro
+                                       |
+                                       +--> WslRuntimeBackend     Windows PC
+                                                -> WSL2 + Ubuntu
+```
+
+`RUNTIME_BACKEND=auto` (the default) selects **WSL2 on Windows** and
+**proot everywhere else**. The choice is made once, in
+`astra/runtime/backends/select_backend()`, and nothing above it - sessions,
+the workspace, file operations, package management, the PTY, the BlobStore,
+execution history, SSE, reconnect, the Gateway and the Providers - needs to
+know which one is in use. An unknown or incompatible `RUNTIME_BACKEND`
+produces a backend that reports itself UNAVAILABLE with a clear reason; it
+never picks something else and never runs on the host shell.
+
+## 2.1 Android / Termux - proot
+
+
 **Backend: proot** — a userspace `chroot` + `mount --bind` + process
 isolation implementation that works without root on Android/Termux. The
 kernel does not allow `unshare`/user namespaces here, so proot is the
@@ -65,6 +93,76 @@ and gives each runtime its own `/workspace`, `/root` and `/tmp`;
 `copy` clones the rootfs per runtime when globally installed packages must
 also be per-runtime.
 
+## 2.2 Windows PC - WSL2 + Ubuntu
+
+The Astra process runs on Windows. Agent work does **not**: every command
+executes inside WSL2 Ubuntu, and the shell behind the Astra Agent Terminal
+is Ubuntu's `bash`.
+
+```
+Windows host                 |  Ubuntu (WSL2)
+                             |
+python -m astra              |
+  Astra Runtime -- wsl.exe --+--> unshare -m (private mount ns)
+                              |      |
+                              |      +-> session bootstrap (host isolation,
+                              |      |   and this runtime's dirs -> /workspace,
+                              |      |   /root, /tmp)
+                              |      |
+                              |      +-> bash  (interactive)  or  command
+                              |
+   file tools <-- \\wsl.localhost\<distro>\var\lib\astra\runtime\<id>\...
+```
+
+* **`wsl.exe` is transport only.** Every invocation uses `-e` so the
+  distribution's own shell never parses (and never expands) the command
+  line. `wsl.exe` is never exposed to the Agent as a capability, and
+  **`cmd.exe` and PowerShell are NOT runtime backends** - nothing in the
+  Agent execution path invokes them.
+* **Host isolation.** Each session runs in a PRIVATE mount namespace
+  (`unshare -m --propagation private`) in which every host-provided mount
+  (`fstype` `9p`/`drvfs`/`virtiofs`/`v9fs`: `/mnt/c`, `C:\`, `/mnt/wsl`,
+  `/mnt/wslg`, `/usr/lib/wsl/drivers`, ...) is unmounted. The Windows
+  filesystem, the Windows user profile, the Windows PATH and any Windows
+  credential are therefore unreachable. The namespace is private, so the
+  user's own `wsl` shell keeps its mounts untouched.
+* **Layout.** The runtime's own tree lives inside Ubuntu
+  (`RUNTIME_WSL_ROOT`, default `/var/lib/astra/runtime/<runtime-id>`) and is
+  bind-mounted onto `/workspace`, `/root` and `/tmp`. The Astra process
+  reaches the same files through `\\wsl.localhost\<distro>\...` for the
+  file tools. Directories are created `0777` and sessions run `umask 000`,
+  so files the (root) guest creates stay writable through the share. A
+  host-side runtime root that is not the default one gets a tagged
+  `<RUNTIME_WSL_ROOT>/h-<hash>` directory, so a test run or a second Astra
+  installation can never collide with (or destroy) the real one.
+* **Same environment as Android.** The session environment is built by the
+  shared `env -i` builder in `backends/base.py`, so PATH, `HOME`, the Astra
+  prompt and the per-runtime user-scope package redirection are identical
+  on both platforms and cannot drift.
+* **A real PTY, inside Ubuntu.** `astra/runtime/wsl_bridge.py` runs in the
+  guest, allocates the pseudo-terminal with `pty.fork()`, applies
+  `TIOCSWINSZ` for resize and delivers signals with `killpg`. The host side
+  (`astra/runtime/pty_wsl.py`) is only a framed transport over `wsl.exe`'s
+  pipes. `Ctrl+C` (raw `0x03` into the line discipline), `Ctrl+D`, `Ctrl+Z`,
+  job control, ANSI colour, full-screen programs, long-running processes and
+  reconnect therefore behave exactly as they do on Android.
+* **Isolation is verified, not assumed.** `probe()` starts a real session
+  and checks `uid=0`, both binds, a Linux-only PATH, and the absence of
+  `powershell.exe`, `cmd.exe` and `/mnt/c`; any failure makes the runtime
+  report itself unavailable with the reason.
+* **Prerequisite, documented not automated:** WSL2 plus an Ubuntu
+  distribution (`wsl --install -d Ubuntu`). Astra never installs WSL, never
+  auto-invokes host execution, and if Ubuntu is missing the runtime reports
+  *"Agent Runtime unavailable: WSL2 Ubuntu is not installed"* together with
+  that hint.
+
+Configuration (all in `.env.example`): `RUNTIME_BACKEND=auto|proot|wsl2`,
+`RUNTIME_WSL_DISTRO` (default `Ubuntu`), `RUNTIME_WSL_ROOT`
+(default `/var/lib/astra/runtime`), `RUNTIME_WSL_WORKSPACE`,
+`RUNTIME_WSL_ISOLATE` (default `1`), `RUNTIME_WSL_UMASK` (default `000`) and
+`RUNTIME_WSL_EXE`.
+
+
 ### Per-runtime private package state (default)
 
 Private writable state is the **default**, not an option. Even with the
@@ -74,13 +172,20 @@ the runtime's own `$HOME` — and `$HOME` (`/root`) is a per-runtime bind:
 
 | Variable | Points at |
 | --- | --- |
-| `PIP_USER=1`, `PYTHONUSERBASE`, `PIP_CACHE_DIR` | `/root/.local`, `/root/.cache/pip` |
+| `PYTHONUSERBASE`, `PIP_CACHE_DIR` | `/root/.local`, `/root/.cache/pip` |
 | `NPM_CONFIG_PREFIX`, `NPM_CONFIG_CACHE`, `NODE_PATH` | `/root/.npm-global`, `/root/.npm` |
 | `CARGO_HOME`, `GOPATH`, `GEM_HOME` | `/root/.cargo`, `/root/go`, `/root/.gem` |
 | `XDG_DATA_HOME` / `XDG_CONFIG_HOME` / `XDG_CACHE_HOME` | `/root/.local/share` / `/root/.config` / `/root/.cache` |
 
 `PATH` ends with `/root/.local/bin:/root/.npm-global/bin`, so a tool
 installed by one runtime is both private to it *and* runnable inside it.
+`PIP_USER` is deliberately NOT exported: it would force `--user` on
+every pip call, and pip REFUSES that inside a virtualenv, which would
+break `python3 -m venv` + `pip install`. The runtime's own installer
+passes `--user` explicitly (`packages.py::plan_install`), and
+`PYTHONUSERBASE` decides where that lands, so the privacy property is
+unchanged while venvs keep working.
+
 Consequence: `pip install <pkg>` in runtime A is importable from A and
 importable in A after A is restarted, and is **not** importable in
 runtime B. Verified by `tests/test_runtime.py::TestPerRuntimeIsolation`.
@@ -135,6 +240,14 @@ Output is fanned out three ways: a capped in-memory replay buffer (what a
 reconnecting browser re-draws), the shared **BlobStore** (the complete
 stream, so a 500 MB build log never lands in RAM or the browser), and the
 SSE feed.
+
+The PTY OBJECT is the same class on both platforms, so nothing above it
+changes. On Windows the pseudo-terminal is allocated INSIDE Ubuntu by
+`astra/runtime/wsl_bridge.py` (also `pty.fork()`, `TIOCSWINSZ`, `killpg`)
+and `astra/runtime/pty_wsl.py` is only the byte transport over `wsl.exe`'s
+pipes: a small frame header for input, resize and signals, the raw terminal
+stream for output. `Ctrl+C`/`Ctrl+D` are real bytes into the guest's line
+discipline, not simulated signals.
 
 ### Frontend
 
@@ -372,7 +485,12 @@ confused, and an unapproved host command has no events at all.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| "Agent Runtime unavailable" | `proot` missing, or no proot-distro container | install `proot-distro` and a container (`proot-distro install ubuntu`), or set `RUNTIME_CONTAINER` |
+| "Agent Runtime unavailable" (Android/Termux) | `proot` missing, or no proot-distro container | install `proot-distro` and a container (`proot-distro install ubuntu`), or set `RUNTIME_CONTAINER` |
+| "Agent Runtime unavailable: WSL2 Ubuntu is not installed" (Windows) | WSL2 or the Ubuntu distribution is missing | run `wsl --install -d Ubuntu` once (elevated), then reopen Astra. Astra never installs WSL for you and never falls back to CMD/PowerShell |
+| "distribution 'X' is WSL1; the Astra runtime requires WSL2" (Windows) | the distribution is a WSL1 distro | `wsl --set-version <distro> 2` |
+| "RUNTIME_BACKEND=<x> is not a known runtime backend" | a typo in the backend selection | use `auto`, `proot` or `wsl2` (or unset it) |
+| "could not be isolated from the Windows filesystem" (Windows) | `unshare -m`/`umount` are unavailable inside the distribution | install `util-linux` inside Ubuntu, or set `RUNTIME_WSL_ISOLATE=0` only if you accept a weaker boundary |
+| "powershell.exe is reachable from the runtime" (Windows) | the guest PATH picked up Windows entries | do not pass a Windows PATH in; the session environment is built from scratch - report it, since this is a security failure |
 | Terminal opens then exits immediately | the rootfs has no `/bin/bash` | `RUNTIME_CONTAINER` points at a container without bash |
 | Package install reports `verified: false` | the verifier failed (often no network inside the runtime) | check the returned `verification` block; the runtime is the only place network is used |
 | Install says "not installed in the runtime" | the manager genuinely is absent and cannot be bootstrapped | install it in the runtime rootfs |
@@ -385,14 +503,23 @@ confused, and an unapproved host command has no events at all.
 
 `scripts/runtime_acceptance.py` is the operator-runnable end-to-end
 acceptance test for everything this document claims. It drives the REAL
-proot runtime (no mocks) and exits non-zero if any check fails:
+runtime on whichever backend the host provides (proot on Android/Termux,
+WSL2 Ubuntu on Windows) - no mocks - and exits non-zero if any check fails:
 
 ```sh
 python3 scripts/runtime_acceptance.py
 RUNTIME_CONTAINER=alpine python3 scripts/runtime_acceptance.py
 ASTRA_ACCEPTANCE_DIR=~/.astra/accept ASTRA_ACCEPTANCE_KEEP=1 \
     python3 scripts/runtime_acceptance.py
+# Windows: pin the backend explicitly while diagnosing
+RUNTIME_BACKEND=wsl2 python3 scripts/runtime_acceptance.py
+RUNTIME_WSL_DISTRO=Ubuntu python3 scripts/runtime_acceptance.py
 ```
+
+On Windows the same script additionally reproduces the isolation checks
+that matter there: `/mnt/c` and `C:\` unreachable, `powershell.exe` and
+`cmd.exe` not on the guest PATH, `which python3|node|npm|git` resolving
+inside Ubuntu, and `pwd` reporting `/workspace`.
 
 It checks, in order: the real toolchain inside the guest; a live PTY with
 `echo` and a `TIOCSWINSZ` resize the guest observes via `tput`; package
@@ -404,8 +531,10 @@ clean); Chat ↔ Terminal sharing ONE PTY; and that the legacy host
 trusted internals.
 
 The hermetic suite that runs on every `pytest tests/` is
-`tests/test_runtime.py` + `tests/test_host_terminal_block.py`; the frontend
-contract is `tests/js/terminal_assets.test.js` (`node --test tests/js/`).
+`tests/test_runtime.py` + `tests/test_runtime_backends.py` (backend
+detection/layout/launch, driven through the `WslRunner` seam so no WSL is
+needed) + `tests/test_host_terminal_block.py`; the frontend contract is
+`tests/js/terminal_assets.test.js` (`node --test tests/js/`).
 
 ## 12. Known limitations
 
@@ -417,6 +546,18 @@ contract is `tests/js/terminal_assets.test.js` (`node --test tests/js/`).
   `unshare`/user namespaces, so proot is the strongest available
   mechanism. It is real filesystem/process isolation, but it is not a
   hypervisor and not a hardened container runtime.
+* **WSL interop cannot be unregistered from inside the namespace
+  (Windows).** WSL provisions a global `binfmt_misc` handler (`WSLInterop`)
+  plus `/init`, and a private mount namespace cannot unregister it. The
+  measured impact is nil - nothing on Windows is bind-mounted into the
+  session (every `9p`/`drvfs` mount is unmounted), no Windows directory is
+  reachable, the guest PATH is Linux-only, and a Windows PE copied into the
+  distribution fails to execute inside the session - but it is a shared
+  kernel surface, not a hypervisor boundary. Treat the Windows runtime as
+  strong process/filesystem isolation, not as a VM.
+* **WSL2 + Ubuntu is a prerequisite on Windows.** Astra does not install
+  it (`wsl --install -d Ubuntu` is a one-time, user-run step), and it does
+  not silently substitute a host shell when it is missing.
 * **No CPU/memory cgroup limits.** The kernel does not expose cgroups to
   apps here; the runtime enforces timeouts, output caps and
   archive/file/member limits instead (and the BlobStore keeps large output

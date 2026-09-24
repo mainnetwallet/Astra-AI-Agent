@@ -728,9 +728,12 @@ terminal resolves them), which keeps the reconciliation idempotent.
 ## 8. Astra Agent Runtime & Astra Agent Terminal
 
 **Modules**: `astra/runtime/` — `engine.py` (isolation backend + argv),
-`pty.py` (real PTY), `manager.py` (`AgentRuntime`/`RuntimeManager`),
-`files.py` (contained file ops + safe extraction), `packages.py`
-(detect/install/verify), `tools.py` (registry integration).
+`backends/` (`base.py` shared guest contract, `proot.py` Android/Termux,
+`wsl.py` Windows/WSL2, `select_backend()`), `pty.py` (real PTY; plus
+`pty_wsl.py` + `wsl_bridge.py` for the Windows PTY transport), `manager.py`
+(`AgentRuntime`/`RuntimeManager`), `files.py` (contained file ops + safe
+extraction), `packages.py` (detect/install/verify), `tools.py` (registry
+integration).
 **Frontend**: `static/js/terminal.js`, `static/css/terminal.css`,
 vendored xterm.js in `static/js/vendor/`.
 
@@ -739,7 +742,7 @@ Gateway ── execution decision ──▶ Provider ──▶ AgentToolLoop ─
                                                                     │
                                                     runtime_* tools ─┤
                                                                     ▼
-                                                    AgentRuntime (proot, --isolated)
+                                                    AgentRuntime (isolated backend)
                                                     workspace · home · tmp · PTY
                                                                     │
                                             SSE / input / resize     ▼
@@ -752,6 +755,34 @@ Gateway ── execution decision ──▶ Provider ──▶ AgentToolLoop ─
   guest environment is `env -i` built by `RuntimeEngine.build_argv`, so no
   host variable is inherited. Shells are non-login so the container's
   `termux-profile.sh` cannot put a host path on the guest `PATH`.
+* **Two backends, one runtime**: `RuntimeEngine` selects a
+  `RuntimeBackend` for the host (`RUNTIME_BACKEND=auto`):
+
+      RuntimeEngine
+         +-- ProotRuntimeBackend   Android/Termux  ->  proot + proot-distro
+         +-- WslRuntimeBackend     Windows         ->  WSL2 + Ubuntu
+
+  Only discovery/probe, process bootstrap and directory layout differ;
+  sessions, the workspace, file ops, package management, the PTY object,
+  BlobStore, execution history, SSE, reconnect and the AgentToolLoop wiring
+  are shared. An incompatible or unknown `RUNTIME_BACKEND` produces a
+  backend that reports itself UNAVAILABLE with a reason - never a host
+  fallback.
+* **Windows runs the Agent inside Ubuntu, never in CMD/PowerShell**: the
+  chain is `Astra Terminal -> Astra Runtime -> WSL2 -> Ubuntu -> bash`, and
+  `wsl.exe` is used purely as transport (always with `-e`, so no extra
+  shell pass rewrites the arguments). Each session starts inside a private
+  mount namespace (`unshare -m --propagation private`) in which every
+  Windows-provided mount (`9p`/`drvfs`/`virtiofs`: `/mnt/c`, `C:\`, the WSL
+  system mounts, `/usr/lib/wsl/drivers`) is unmounted, so no Windows path,
+  credential or user profile is reachable. `/workspace`, `/root` and `/tmp`
+  are bound from the runtime's own tree inside Ubuntu
+  (`RUNTIME_WSL_ROOT`, default `/var/lib/astra/runtime/<runtime-id>`), which
+  the Astra process reaches through `\\wsl.localhost\<distro>\...` for the
+  file tools. The PTY is REAL and lives inside Ubuntu
+  (`wsl_bridge.py` runs `pty.fork()` there); the host side (`pty_wsl.py`)
+  only frames stdin/stdout, so `Ctrl+C`, `Ctrl+D`, resize, ANSI, job control
+  and long-running processes behave exactly as on Android.
 * **No second subsystem**: the runtime registers its tools on the existing
   `ToolRegistry`; sessions use the existing `conv-<id>` id scheme; large
   output uses the existing `BlobStore`; lifecycle events go to the existing
@@ -777,13 +808,15 @@ Gateway ── execution decision ──▶ Provider ──▶ AgentToolLoop ─
   its final decision is written back into the chat card. The Allow/Deny UI
   lives ONLY in the chat; the Astra Agent Terminal stays a pure terminal.
   Coverage: `tests/test_host_fallback_approval.py`.
-* **Per-runtime writable state**: `_user_scope_env()` in `engine.py` points
-  `PIP_USER`/`PYTHONUSERBASE`/`NPM_CONFIG_PREFIX`/`CARGO_HOME`/`GOPATH`/
+* **Per-runtime writable state**: `_user_scope_env()` in `backends/base.py` points
+  `PYTHONUSERBASE`/`NPM_CONFIG_PREFIX`/`CARGO_HOME`/`GOPATH`/
   `GEM_HOME`/`XDG_*` at the runtime's own `$HOME` (a per-runtime bind) and
   appends `/root/.local/bin:/root/.npm-global/bin` to `PATH`. Runtime A's
   user-scope installs are invisible to Runtime B and survive A's restart
   (`tests/test_runtime.py::TestPerRuntimeIsolation`); `RUNTIME_ROOTFS_MODE=copy`
-  extends privacy to system-level installs.
+  extends privacy to system-level installs. `PIP_USER` is deliberately not
+  exported - it would break `pip install` inside a virtualenv - so the
+  runtime's own pip plan passes `--user` explicitly instead.
 * **Terminal UI is terminal-first**: `static/css/terminal.css` +
   `static/js/terminal.js` render one header line (brand + tabs + `⋮`), a
   flexed xterm.js stage and one status line; the file drawer and lifecycle

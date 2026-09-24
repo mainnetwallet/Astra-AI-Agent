@@ -823,7 +823,8 @@ class ChatPipeline:
         without creating anything. Never claims "unavailable" for a runtime
         that is actually available (spec §13)."""
         out = {"available": False, "state": "", "runtime_id": "",
-               "cwd": "", "reason": ""}
+               "cwd": "", "reason": "", "backend": "", "platform": "",
+               "distro": ""}
         mgr = self.runtime
         if mgr is None:
             out["reason"] = "no Agent Runtime is wired in this process"
@@ -834,6 +835,13 @@ class ChatPipeline:
                                                                "reason": ""}
             out["available"] = bool(probe.get("available"))
             out["reason"] = str(probe.get("reason") or "")
+            # WHICH runtime is providing execution here: `proot` on
+            # Android/Termux, `wsl2` (Ubuntu) on Windows. Reported even when
+            # unavailable, so the model can explain the environment.
+            out["backend"] = str(probe.get("backend") or "")
+            out["platform"] = str(probe.get("platform") or "")
+            out["distro"] = str(probe.get("distro")
+                                or probe.get("container") or "")
             if not out["available"]:
                 return out
             # create=False: never materialise a runtime just to describe it.
@@ -872,6 +880,9 @@ class ChatPipeline:
             runtime_available=state["available"],
             runtime_status=state["state"],
             runtime_id=state["runtime_id"],
+            runtime_backend=state.get("backend", ""),
+            runtime_platform=state.get("platform", ""),
+            runtime_distro=state.get("distro", ""),
             session_id=session_id or "",
             cwd=state["cwd"],
             host_fallback_available=self._host_fallback_available(),
@@ -994,6 +1005,9 @@ class ChatPipeline:
             runtime_available=state["available"],
             runtime_status=state["state"],
             runtime_id=state["runtime_id"],
+            runtime_backend=state.get("backend", ""),
+            runtime_platform=state.get("platform", ""),
+            runtime_distro=state.get("distro", ""),
             session_id=session_id or "",
             cwd=state["cwd"],
             host_fallback_available=self._host_fallback_available(),
@@ -1016,6 +1030,9 @@ class ChatPipeline:
         runtime_ctx = execution_policy_block(
             runtime_available=state["available"],
             runtime_status=state["state"], runtime_id=state["runtime_id"],
+            runtime_backend=state.get("backend", ""),
+            runtime_platform=state.get("platform", ""),
+            runtime_distro=state.get("distro", ""),
             session_id=session_id or "", cwd=state["cwd"],
             host_fallback_available=self._host_fallback_available(),
             host_fallback_reason=state["reason"])

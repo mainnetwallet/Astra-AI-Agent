@@ -94,8 +94,17 @@ class RuntimePaths:
         self.max_file_bytes = max(1, int(max_file_mb)) * 1024 * 1024
         self.max_members = max(1, int(max_members))
         self.max_extract_bytes = max(1, int(max_extract_mb)) * 1024 * 1024
+        # Best effort, exactly like `AgentRuntime._makedirs`: on Windows the
+        # runtime's directories live inside the WSL2 distribution and are
+        # reached through its UNC path, which can be unavailable when the
+        # distribution is not installed or not running. The backend reports
+        # that condition; an unpaved path must not crash bootstrapping, and
+        # the individual operations below surface a normal error instead.
         for path in self.host.values():
-            os.makedirs(path, exist_ok=True)
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError:
+                pass
 
     # -- mapping ------------------------------------------------------------
     def split(self, guest_path: str) -> tuple[str, str]:

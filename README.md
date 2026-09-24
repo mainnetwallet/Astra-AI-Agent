@@ -136,6 +136,12 @@ database setup. Python 3.9+.
 Windows: double-click `setup.bat` then `start.bat` (or `setup.ps1`/`start.ps1`).
 Linux / macOS / Termux: the same `setup.sh` + `start.sh` flow.
 
+> Windows prerequisite: Astra itself runs on Windows, but **Agent work runs
+> inside WSL2 Ubuntu** (see *Astra Agent Runtime* below). Install it once
+> with `wsl --install -d Ubuntu` and Astra will use it. Astra never installs
+> WSL for you, and Windows CMD/PowerShell are never used for Agent
+> execution.
+
 > Termux/Android: pydantic 2 has no Android wheel. `setup.sh` detects Termux
 > and installs the pure-Python path
 > (`pip install "fastapi<0.119" "uvicorn>=0.27" "pydantic<2"`).
@@ -238,12 +244,24 @@ Astra runs Agent work inside its own isolated Linux environment — the
 **Astra Agent Runtime** — and gives you a real PC-style terminal onto it,
 the **Astra Agent Terminal**.
 
-* **Real isolation, not a simulation.** The runtime is a separate filesystem
-  and process tree reached through `proot` (the only mechanism Android's
-  kernel allows here). Only the runtime's own `/workspace`, `/root` and
-  `/tmp` are bound in, plus `/dev`, `/proc` and `/sys`. The host home, the
-  Termux prefix and `/sdcard` are invisible inside it, and the guest
-  environment is built with `env -i` so host secrets cannot leak in.
+* **Real isolation, not a simulation.** The runtime is a separate Linux
+  filesystem and process tree provided by a per-platform backend:
+  **proot + proot-distro** on Android/Termux and **WSL2 + Ubuntu** on
+  Windows. On Android only the runtime's own `/workspace`, `/root` and
+  `/tmp` are bound in, plus `/dev`, `/proc` and `/sys` - the host home, the
+  Termux prefix and `/sdcard` are invisible. On Windows the session runs in
+  a private mount namespace in which every Windows-provided mount (`/mnt/c`,
+  `C:\`, the WSL system mounts) is unmounted, so the Windows filesystem is
+  not reachable from a command. On both platforms the guest environment is
+  built from scratch (`env -i`) so host PATH, credentials and profile cannot
+  leak in.
+* **`cmd.exe` and PowerShell are NOT the Agent Runtime.** On Windows the
+  chain is Astra Terminal -> Astra Runtime -> WSL2 -> Ubuntu -> `bash`.
+  The Agent runs `bash` *inside Ubuntu* and only ever sees
+  `astra:/workspace$`; `wsl.exe` is used purely as transport and is never
+  exposed to the Agent as a capability. If WSL2/Ubuntu is missing the
+  runtime reports itself **unavailable** with a one-time install hint
+  (`wsl --install -d Ubuntu`) - it never falls back to a Windows shell.
 * **No silent host fallback.** If the runtime is unavailable or genuinely
   cannot perform an operation, execution stops and the UI says *Agent
   Runtime unavailable* — nothing silently runs on your host shell. The
@@ -261,7 +279,7 @@ the **Astra Agent Terminal**.
   Astra Agent Terminal is a pure terminal and never shows Allow/Deny.
   API: `POST /api/terminal/approval`, `GET /api/terminal/approval/<id>`,
   `GET /api/terminal/approvals`, `POST /api/terminal/approval/<id>`.
-* **Per-runtime private state by default.** `PIP_USER` / `NPM_CONFIG_PREFIX`
+* **Per-runtime private state by default.** `PYTHONUSERBASE` / `NPM_CONFIG_PREFIX`
   / `CARGO_HOME` / `GOPATH` / `GEM_HOME` / `XDG_*` are redirected into each
   runtime's own `$HOME`, so a package installed in Runtime A is importable
   from A (and after a restart of A) but invisible to Runtime B — even though
@@ -292,7 +310,8 @@ tool list and troubleshooting — is in **[docs/AGENT_RUNTIME.md](docs/AGENT_RUN
 Configuration keys are in `.env.example` under *Astra Agent Runtime*.
 
 Run the real end-to-end acceptance check on your own machine with
-`python3 scripts/runtime_acceptance.py` (drives the real proot runtime:
+`python3 scripts/runtime_acceptance.py` (drives the real runtime - proot on
+Android/Termux, WSL2 Ubuntu on Windows:
 PTY, package install + verification, restart persistence, Runtime A/B
 private state, host isolation, shared chat↔terminal session, and the
 host-`terminal_exec` block).

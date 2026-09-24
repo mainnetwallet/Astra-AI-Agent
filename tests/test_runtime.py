@@ -50,11 +50,20 @@ needs_runtime = unittest.skipUnless(
 
 class TestRuntimeEngine(unittest.TestCase):
     def test_probe_reports_backend_and_reason(self):
-        info = RuntimeEngine().probe()
+        engine = RuntimeEngine()
+        info = engine.probe()
+        # The backend is chosen FOR THE HOST and `proot` is not hardcoded as
+        # the only one: Android/Termux -> proot, Windows -> wsl2 (WSL2
+        # Ubuntu). Neither is ever the host shell.
+        self.assertIn(info["backend"], ("proot", "wsl2"))
+        self.assertEqual(info["platform"], engine.platform)
+        self.assertEqual(info["workspace"], GUEST_WORKSPACE)
+        self.assertNotIn("cmd", info["backend"].lower())
+        self.assertNotIn("powershell", info["backend"].lower())
         if info["available"]:
-            self.assertEqual(info["backend"], "proot")
             self.assertTrue(os.path.isdir(info["rootfs"]))
             self.assertEqual(info["reason"], "")
+            self.assertTrue(info["host_isolation"])
         else:
             # Unavailable is a first-class state with a human-readable why.
             self.assertTrue(info["reason"])
@@ -68,6 +77,9 @@ class TestRuntimeEngine(unittest.TestCase):
         engine = RuntimeEngine()
         if not engine.available():
             self.skipTest("runtime unavailable")
+        if engine.name != "proot":
+            self._assert_wsl_argv_is_isolated(engine)
+            return
         root = _tmpdir()
         ws = os.path.join(root, "workspace")
         home = os.path.join(root, "root")
@@ -136,7 +148,16 @@ class TestRuntimeEngine(unittest.TestCase):
         though the distro rootfs itself is shared (spec §15)."""
         from astra.runtime.engine import GUEST_HOME, _user_scope_env
         env = _user_scope_env()
-        self.assertEqual(env["PIP_USER"], "1")
+        # PIP_USER is deliberately NOT exported: pip REFUSES a `--user`
+        # install inside a virtualenv, which would break `python3 -m venv`
+        # + `pip install` (spec 7). The runtime's own installer passes
+        # `--user` explicitly instead, so privacy is unchanged but venvs
+        # keep working.
+        self.assertNotIn("PIP_USER", env)
+        plan = rt_packages.plan_install(ecosystem="pip",
+                                        packages=["requests"],
+                                        managers=["python3", "pip3"])
+        self.assertIn("--user", plan["command"])
         for key in ("PYTHONUSERBASE", "PIP_CACHE_DIR", "NPM_CONFIG_PREFIX",
                     "NPM_CONFIG_CACHE", "NODE_PATH", "CARGO_HOME", "GOPATH",
                     "GEM_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
@@ -154,13 +175,70 @@ class TestRuntimeEngine(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
         # The private package env is on the real child environment…
-        self.assertIn("PIP_USER=1", argv)
+        self.assertNotIn("PIP_USER=1", argv)
         self.assertIn(f"NPM_CONFIG_PREFIX={GUEST_HOME}/.npm-global", argv)
         self.assertIn(f"PYTHONUSERBASE={GUEST_HOME}/.local", argv)
         # …and the private user-scope bin dirs are on the guest PATH.
         path_arg = next(a for a in argv if a.startswith("PATH="))
         self.assertIn(f"{GUEST_HOME}/.local/bin", path_arg)
         self.assertIn(f"{GUEST_HOME}/.npm-global/bin", path_arg)
+
+    def _assert_wsl_argv_is_isolated(self, engine):
+        """The Windows equivalent of the proot bind contract.
+
+        proot answers "which host paths are bound in?" with `--bind=`; the
+        WSL2 backend answers it with the isolation bootstrap it runs first:
+        a private mount namespace, an environment built from scratch, and
+        exactly the runtime's own tree mounted onto /workspace, /root, /tmp.
+        """
+        base = _tmpdir()
+        try:
+            ws, home, tmp = engine.host_dirs("default", base)
+            guest_ws, guest_home, guest_tmp = engine.guest_source_dirs(
+                "default", base)
+            argv = engine.build_argv(
+                binds=[(ws, GUEST_WORKSPACE), (home, "/root"),
+                       (tmp, "/tmp")],
+                cwd=GUEST_WORKSPACE)
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+        # wsl.exe is only the transport: the command runs as root, exec'd
+        # directly (`-e`, so no extra shell pass rewrites the arguments).
+        self.assertIn("-d", argv)
+        self.assertIn(engine.container, argv)
+        self.assertIn("-e", argv)
+        # ...inside a PRIVATE mount namespace, which is what unmounts
+        # C:\, /mnt/c and every other Windows-provided mount.
+        self.assertTrue(any(str(a).endswith("unshare") for a in argv), argv)
+        self.assertIn("-m", argv)
+        self.assertIn("--propagation", argv)
+        self.assertIn("private", argv)
+        # The environment is constructed, never inherited (`env -i`).
+        self.assertIn("/usr/bin/env", argv)
+        self.assertIn("-i", argv)
+        # The runtime's OWN tree becomes /workspace, /root and /tmp.
+        for path in (guest_ws, guest_home, guest_tmp):
+            self.assertIn(path, argv)
+        path_arg = next(a for a in argv if a.startswith("PATH="))
+        self.assertNotIn("/mnt/", path_arg)
+        self.assertNotIn("com.termux", path_arg)
+        # Nothing Windows-shaped reaches the guest: no host home, no C:\
+        # path, no Windows binary, no host environment variable. argv[0] is
+        # wsl.exe itself - Astra's own transport, never passed TO the guest.
+        blob = "\n".join(str(a) for a in argv[1:])
+        self.assertNotIn(os.path.expanduser("~"), blob)
+        self.assertNotIn("cmd.exe", blob)
+        self.assertNotIn("powershell", blob.lower())
+        self.assertNotIn("ASTRA_HOST_SECRET_XYZ", blob)
+        # ...and no individual argument is a Windows path or a Windows
+        # executable. (The bootstrap script itself is one argv element and
+        # mentions C:\ only in the comment that explains what it unmounts.)
+        for arg in argv[1:]:
+            text = str(arg)
+            self.assertNotIn(os.path.expanduser("~"), text)
+            self.assertNotIn("System32", text)
+            self.assertFalse(text.endswith(".exe"), text)
+            self.assertFalse(text.startswith("/mnt/"), text)
 
 
 # ── unit: files ─────────────────────────────────────────────────────────────

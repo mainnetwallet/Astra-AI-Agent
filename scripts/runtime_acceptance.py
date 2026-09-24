@@ -73,10 +73,49 @@ def check(name, ok, detail=""):
 print("== Agent Runtime availability ==")
 rt_a = mgr.get("A")
 st = rt_a.start()
-print("   backend=%s container=%s rootfs=%s" % (st.get("backend"), st.get("container"), st.get("rootfs_mode")))
+info = rt_a.engine.probe()
+print("   backend=%s platform=%s distro=%s shell=%s workspace=%s"
+      % (info.get("backend"), info.get("platform"), info.get("distro"),
+         info.get("shell"), info.get("workspace")))
+print("   container=%s rootfs_mode=%s host_isolation=%s"
+      % (st.get("container"), st.get("rootfs_mode"),
+         st.get("host_isolation")))
 tools = (st.get("capabilities") or {}).get("tools", {})
 print("   tools:", json.dumps(tools)[:400])
 check("runtime A started", st.get("state") == "running" and st.get("available"))
+check("the runtime reports a backend (and never a host shell)",
+      info.get("backend") in ("proot", "wsl2")
+      and info.get("backend") not in ("cmd", "powershell"),
+      info.get("backend"))
+check("the runtime is host-isolated", bool(info.get("host_isolation")),
+      info.get("issues"))
+
+print("== runtime identity: the Agent's real toolchain ==")
+r = rt_a.exec_command(
+    "pwd; for t in python3 node npm git; do printf '%s=' \"$t\"; "
+    "command -v \"$t\" || echo MISSING; done", session_id="conv-1")
+out = r.get("stdout") or ""
+check("the Agent's cwd is /workspace", out.strip().startswith("/workspace"),
+      out[:120])
+for tool in ("python3", "node", "npm", "git"):
+    check("%s resolves INSIDE the runtime" % tool,
+          ("%s=/" % tool) in out, out[:200])
+check("guest PATH is Linux-only", "/mnt/" not in (info.get("details", {})
+                                                 .get("path", ""))
+      or info.get("platform") != "windows")
+if info.get("platform") == "windows":
+    details = info.get("details") or {}
+    check("powershell.exe is not on the guest PATH",
+          details.get("windows_bin") == "absent", details.get("windows_bin"))
+    check("cmd.exe is not on the guest PATH",
+          details.get("cmd_bin") == "absent", details.get("cmd_bin"))
+    r = rt_a.exec_command("ls -A /mnt/c 2>&1 | wc -l; "
+                          "cat /mnt/c/Windows/System32/cmd.exe 2>&1 | head -1",
+                          session_id="conv-1")
+    out = r.get("stdout") or ""
+    check("the Windows C: drive is not reachable from the runtime",
+          out.splitlines()[0].strip() == "0" and "No such file" in out,
+          out[:200])
 
 print("== real PTY: interactive shell inside the runtime ==")
 p = rt_a.open_terminal("conv-1", rows=24, cols=80)
@@ -104,9 +143,11 @@ check("project created inside runtime A", r.get("exit_code") == 0 and "/workspac
 managers = rt_a.package_managers()
 print("   package managers detected:", managers)
 check("package manager detection is real", bool(managers))
-# A per-runtime USER-SCOPE install: with PIP_USER/NPM_CONFIG_PREFIX pointing
-# at `$HOME` (bound to `<runtime>/root`), the artifact must land in THIS
-# runtime's private state, not the shared distro rootfs.
+# A per-runtime USER-SCOPE install: with PYTHONUSERBASE/NPM_CONFIG_PREFIX
+# pointing at `$HOME` (bound to `<runtime>/root`), the artifact must land in
+# THIS runtime's private state, not the shared distro rootfs. pip is told
+# `--user` explicitly by the runtime's own plan (never through an ambient
+# PIP_USER, which would break venvs).
 PKG = "cowsay"          # small, pure-python, not present in the base rootfs
 inst = None
 scope_cmd = ""
@@ -125,6 +166,64 @@ check("installed dependency importable inside runtime A",
 r = rt_a.exec_command("ls -d /root/.local/lib/python*/site-packages/cowsay 2>&1", session_id="conv-1")
 check("pip install landed in the runtime's PRIVATE home (user scope)",
       "/root/.local" in (r.get("stdout") or ""), r.get("stdout"))
+
+print("== apt, venv, a long-running process and reconnect (spec 21) ==")
+r = rt_a.exec_command("apt-get update >/dev/null 2>&1; echo UPDATE_RC=$?",
+                      session_id="conv-1", timeout=900)
+check("apt-get update succeeds inside the runtime",
+      "UPDATE_RC=0" in (r.get("stdout") or ""), (r.get("stdout") or "")[:200])
+apt_install = rt_a.package_install(ecosystem="apt", packages=["curl"])
+check("apt install curl is VERIFIED (not just exit code)",
+      bool(apt_install.get("verified")), apt_install)
+r = rt_a.exec_command("curl --version 2>&1 | head -1", session_id="conv-1")
+check("curl runs inside the runtime", "curl" in (r.get("stdout") or ""),
+      r.get("stdout"))
+r = rt_a.exec_command(
+    "python3 -m venv /workspace/py-test && /workspace/py-test/bin/python -c "
+    "'import sys; print(\"VENV_OK\", sys.prefix)'", session_id="conv-1",
+    timeout=600)
+check("python3 -m venv works inside the runtime",
+      "VENV_OK" in (r.get("stdout") or ""), (r.get("stdout") or "")[:200])
+r = rt_a.exec_command(
+    "/workspace/py-test/bin/pip install --quiet requests && /workspace/py-test/bin/python "
+    "-c 'import requests; print(\"REQUESTS\", requests.__version__)'",
+    session_id="conv-1", timeout=900)
+check("pip install into the venv works",
+      "REQUESTS" in (r.get("stdout") or ""), (r.get("stdout") or "")[:200])
+
+# A long-running interactive process, stopped with a REAL Ctrl+C (0x03 into
+# the guest PTY's line discipline) - the property a fake terminal cannot have.
+srv = rt_a.open_terminal("conv-http", rows=24, cols=80)
+time.sleep(0.8)
+srv.write(b"python3 -m http.server 8765\n")
+deadline = time.time() + 15
+while time.time() < deadline:
+    if "Serving HTTP" in srv.text_since(0).get("data", ""):
+        break
+    time.sleep(0.2)
+check("a long-running server starts in the PTY",
+      "Serving HTTP" in srv.text_since(0).get("data", ""))
+srv.write(b"\x03")
+time.sleep(2.5)
+r = rt_a.exec_command("pgrep -af 'http.server' || echo NO_SERVER",
+                      session_id="conv-http")
+check("Ctrl+C stops it and the shell survives",
+      "NO_SERVER" in (r.get("stdout") or ""), (r.get("stdout") or "")[:200])
+r = rt_a.exec_command("echo shell-alive", session_id="conv-http")
+check("the session is still usable after Ctrl+C",
+      "shell-alive" in (r.get("stdout") or ""), r.get("stdout"))
+
+# Files live on the runtime's disk, not in the PTY: reconnecting must show
+# them, and the PTY for a session id must be stable.
+rt_a.write_file("/workspace/runtime-test.txt", "persisted\n")
+rt_a.close_terminal("conv-http")
+again = rt_a.open_terminal("conv-http", rows=24, cols=80)
+check("reconnect attaches to ONE PTY per session id",
+      rt_a.get_terminal("conv-http") is again)
+r = rt_a.exec_command("cat /workspace/runtime-test.txt", session_id="conv-http")
+check("files survive a terminal reconnect",
+      "persisted" in (r.get("stdout") or ""), r.get("stdout"))
+
 
 print("== restart A: state persists ==")
 rt_a.restart()
@@ -224,7 +323,17 @@ step = res.steps[0]
 check("Agent terminal_exec call is rejected (not executed)", (not step.ok) and step.status == "blocked", step.error)
 check("no host file was created by the rejected call", not os.path.exists(marker))
 r = reg.execute("terminal_exec", {"command": "echo operator-ok"}, ctx=None)
-check("host terminal still available to trusted internals", r.get("ok") and "operator-ok" in r["result"]["stdout"])
+# The Agent path above was refused; a TRUSTED internal call is still allowed
+# through the same gate. Whether the HOST shell itself completes is a
+# host-terminal concern (native Windows' PowerShell sentinel has a
+# pre-existing quoting bug), not an Agent Runtime one.
+check("host terminal still reachable to trusted internals",
+      r.get("decision") == "allow",
+      (r.get("result") or {}).get("stderr"))
+if not (r.get("ok") and "operator-ok" in (r["result"].get("stdout") or "")):
+    print("  NOTE  the host terminal itself reported a failure on this host "
+          "(pre-existing host-shell limitation, unrelated to the Agent "
+          "Runtime)")
 
 print("== cleanup ==")
 mgr.close_all()

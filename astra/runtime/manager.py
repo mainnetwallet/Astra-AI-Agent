@@ -2,7 +2,8 @@
 
 One `AgentRuntime` is one isolated development environment: its own
 workspace, home, temp, package state and process tree, reached through the
-proot engine in `astra.runtime.engine`. `RuntimeManager` owns the runtime
+selected backend in `astra.runtime.engine` (proot on Android/Termux, WSL2
+Ubuntu on Windows). `RuntimeManager` owns the runtime
 instances and is created once by `astra.bootstrap.build`, exactly like
 `TerminalManager`/`BrowserManager`, so the Gateway, every Provider, the
 agent tool loop and the HTTP API all drive the SAME runtime.
@@ -87,9 +88,12 @@ class AgentRuntime:
         self._capabilities: dict | None = None
         self._capabilities_at = 0.0
 
-        self.workspace_dir = os.path.join(self.base_dir, "workspace")
-        self.home_dir = os.path.join(self.base_dir, "root")
-        self.tmp_dir = os.path.join(self.base_dir, "tmp")
+        # Where /workspace, /root and /tmp live FROM THE HOST side. The
+        # backend decides: on Android they are directories under this
+        # runtime's base_dir (proot binds them in); on Windows they live
+        # inside the WSL2 distribution and are reached through its UNC path.
+        (self.workspace_dir, self.home_dir,
+         self.tmp_dir) = engine.host_dirs(runtime_id, self.base_dir)
         self.uploads_dir = os.path.join(self.base_dir, "uploads")
         self.state_path = os.path.join(self.base_dir, "runtime.json")
 
@@ -125,6 +129,25 @@ class AgentRuntime:
         except (TypeError, ValueError):
             return default
 
+    def _makedirs(self, path: str) -> bool:
+        """Create one of this runtime's host-side directories, best effort.
+
+        On Android/Termux these are ordinary directories beside
+        `runtime.json`. On Windows they live INSIDE the WSL2 distribution
+        and are reached through its UNC path, so creating them can fail for
+        reasons Astra does not control (the distribution is missing, the
+        share is not up yet, the distribution is restarting). A failure is
+        recorded rather than raised: the backend reports the same condition
+        properly (with an actionable reason) through `prepare` and `probe`,
+        and nothing here may crash Astra's bootstrap.
+        """
+        try:
+            os.makedirs(path, exist_ok=True)
+            return True
+        except OSError as exc:
+            self._last_error = "could not create %s: %s" % (path, exc)
+            return False
+
     # -- events --------------------------------------------------------------
     def _emit(self, kind: str, **data) -> None:
         if self.events is None:
@@ -138,9 +161,18 @@ class AgentRuntime:
     # -- binds ---------------------------------------------------------------
     @property
     def binds(self) -> list[tuple[str, str]]:
-        return [(self.workspace_dir, GUEST_WORKSPACE),
-                (self.home_dir, GUEST_HOME),
-                (self.tmp_dir, GUEST_TMP)]
+        """(host_path, guest_path) pairs for this runtime's own directories.
+
+        The guest side is always `/workspace`, `/root` and `/tmp` - that is
+        the contract the Agent sees - while the host side is wherever this
+        backend keeps them (a bind source under proot, a UNC path under
+        WSL2).
+        """
+        guest_ws, guest_home, guest_tmp = self.engine.guest_dirs(
+            self.runtime_id, self.base_dir)
+        return [(self.workspace_dir, guest_ws),
+                (self.home_dir, guest_home),
+                (self.tmp_dir, guest_tmp)]
 
     # -- persistence ---------------------------------------------------------
     def _persist(self) -> None:
@@ -180,13 +212,26 @@ class AgentRuntime:
                 existed = False
             for path in (self.workspace_dir, self.home_dir, self.tmp_dir,
                          self.uploads_dir):
-                os.makedirs(path, exist_ok=True)
+                self._makedirs(path)
             if not os.path.exists(self.state_path):
                 self._created_at = time.time()
             if not existed:
                 self._state = STATE_CREATED
                 self._persist()
                 self._emit("runtime.created", path=self.base_dir)
+            # The backend may also need to materialise its own directories
+            # INSIDE the guest: the WSL2 backend creates this runtime's
+            # workspace, home and tmp inside Ubuntu and installs the
+            # in-guest PTY bridge. A backend that cannot be reached reports
+            # itself UNAVAILABLE here - it never falls back to running the
+            # command on the host.
+            try:
+                self.engine.prepare(self.runtime_id, self.base_dir)
+            except AstraRuntimeUnavailable as exc:
+                self._state = STATE_FAILED
+                self._last_error = str(exc)
+                self._persist()
+                self._emit("runtime.failed", reason=str(exc))
             return self.status(refresh_capabilities=False)
 
     def start(self) -> dict:
@@ -269,6 +314,12 @@ class AgentRuntime:
             "available": bool(info["available"]),
             "reason": info.get("reason", ""),
             "backend": info.get("backend", ""),
+            "platform": info.get("platform", self.engine.platform),
+            "distro": info.get("distro", ""),
+            "shell": info.get("shell", ""),
+            "guest_os": info.get("guest_os", ""),
+            "host_isolation": bool(info.get("host_isolation", False)),
+            "hint": info.get("hint", ""),
             "container": info.get("container", ""),
             "rootfs": info.get("rootfs", ""),
             "rootfs_mode": info.get("rootfs_mode", "shared"),
@@ -322,10 +373,17 @@ class AgentRuntime:
             if existing is not None:
                 self._sessions.pop(key, None)
 
-        argv = self.engine.build_argv(
+        # The backend builds the host command line for an INTERACTIVE
+        # session. On Android/Termux that is the proot command line, and the
+        # host owns the real PTY. On Windows the PTY lives inside Ubuntu, so
+        # the WSL2 backend inserts its in-guest PTY bridge and hands back
+        # the transport command line instead (`pty_class()` is then the
+        # transport object, not a POSIX `pty.fork()` wrapper).
+        argv = self.engine.pty_argv(
             binds=self.binds, cwd=cwd,
-            argv=([shell, "-l"] if shell else self.engine.shell_argv()))
-        process = PtyProcess(
+            argv=([shell, "-l"] if shell else self.engine.shell_argv()),
+            rows=rows, cols=cols)
+        process = self.engine.pty_class()(
             argv, process_id=key, cwd=cwd, rows=rows, cols=cols,
             on_output=on_output, blobs=self.blobs, blob_prefix="runtime_pty",
             title=title or key, command="interactive shell",

@@ -912,22 +912,39 @@
     catch (_) { return false; }
   }
 
+  // A single invisible filler character kept in the live-input textarea
+  // whenever nothing is being composed. Without it, once a composed word is
+  // cleared (or right after a paste, which never touches this field at all)
+  // the textarea is truly empty -- and Android keyboards don't fire any more
+  // backspace/input events on an empty field, so deleting stops dead after
+  // about one word. The filler always gives the field something real to
+  // backspace over; we translate that delete into an actual \x7f to the PTY
+  // and immediately put the filler back.
+  const LIVE_FILLER = "\u200b";
+
   function bindLiveInput(tab) {
     const term = tab.term, ta = term.textarea, view = tab.view;
     const st = { composing: false, sent: "", lastKey: 0, lastCode: 0, clearT: null };
     tab.live = st;
     const send = (s) => { if (s) term.input(s, true); };   // -> onData -> sticky Ctrl/Alt -> PTY
+    const setFiller = () => {
+      ta.value = LIVE_FILLER;
+      try { ta.setSelectionRange(1, 1); } catch (_) {}
+    };
     const clearLater = (ms) => {
       clearTimeout(st.clearT);
-      st.clearT = setTimeout(() => { if (!st.composing && ta.value) ta.value = ""; }, ms);
+      st.clearT = setTimeout(() => { if (!st.composing) setFiller(); }, ms);
     };
+    setFiller();
     // Make the shell's line match `next` (the current composition text).
     const reconcile = (next) => {
-      const a = Array.from(st.sent), b = Array.from(next || "");
+      let n = next || "";
+      if (n[0] === LIVE_FILLER) n = n.slice(1);   // in case it got swept into composition
+      const a = Array.from(st.sent), b = Array.from(n);
       let p = 0;
       while (p < a.length && p < b.length && a[p] === b[p]) p++;
       send("\x7f".repeat(a.length - p) + b.slice(p).join(""));
-      st.sent = next || "";
+      st.sent = n;
     };
     // xterm's keydown path must not ALSO forward IME (keyCode 229) input.
     st.keyGate = (ev) => {
@@ -956,6 +973,7 @@
                && !(recent && st.lastCode === 13)) send("\r");
       clearLater(0);
     }), true);
+    view.addEventListener("focusin", own(() => { if (!st.composing) setFiller(); }), true);
   }
 
   function toast(msg) {

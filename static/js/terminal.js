@@ -1121,18 +1121,37 @@
    * itself (until the finger lifts and the Copy popup shows) and xterm follows.
    * Rows in `.xterm-screen` are drawn above it and (on touch) let touches pass
    * through to the layer. */
+  // Styles for the text layer's shadow tree (page stylesheets don't reach into it).
+  const TEXTLAYER_CSS = [
+    ".at-textlayer{position:absolute;left:0;top:0;color:transparent;white-space:pre;",
+    "pointer-events:auto;-webkit-user-select:text;user-select:text}",
+    ".at-textlayer>div{height:var(--tl-h,1.25em);line-height:var(--tl-h,1.25em);white-space:pre}",
+    ".at-textlayer ::selection,.at-textlayer::selection{background:rgba(124,196,255,.38);color:transparent}",
+  ].join("");
+
+  // document.getSelection() reports a selection inside a shadow tree as sitting on
+  // the shadow HOST; the shadow root's own getSelection() returns the real nodes.
+  function layerSelection(layer) {
+    const root = layer && layer.getRootNode && layer.getRootNode();
+    if (root && root !== document && typeof root.getSelection === "function") return root.getSelection();
+    return document.getSelection && document.getSelection();
+  }
+
+  // (Selection.isCollapsed is unreliable on a shadow root's selection -- it can
+  // report true for a real range -- so emptiness is judged from the Range itself.)
   function hasLayerSelection(layer) {
-    const s = document.getSelection && document.getSelection();
-    return !!(s && s.rangeCount && !s.isCollapsed && layer.contains(s.anchorNode));
+    const s = layerSelection(layer);
+    if (!s || !s.rangeCount || s.getRangeAt(0).collapsed) return false;
+    return layer.contains(s.anchorNode) || layer.contains(s.focusNode);
   }
 
   // Text of the OS selection inside the layer. Wrapped rows are joined without a
   // newline (a long command copies as ONE line), other rows are newline-separated.
   function layerSelectionText(layer) {
-    const sel = document.getSelection && document.getSelection();
-    if (!layer || !sel || !sel.rangeCount || sel.isCollapsed) return "";
+    const sel = layerSelection(layer);
+    if (!layer || !sel || !sel.rangeCount) return "";
     const rg = sel.getRangeAt(0);
-    if (!layer.contains(rg.commonAncestorContainer)) return "";
+    if (rg.collapsed || !layer.contains(rg.commonAncestorContainer)) return "";
     const at = (node, off, isEnd) => {
       if (node === layer) {
         const el = layer.children[isEnd ? off - 1 : off];
@@ -1170,7 +1189,24 @@
     const layer = document.createElement("div");
     layer.className = "at-textlayer";
     layer.setAttribute("aria-hidden", "true");
-    vp.appendChild(layer);
+    // The layer lives in its own shadow tree. The OS "Select all" (and handle
+    // dragging) is scoped by the browser to the tree the selection started in, so
+    // it can only ever cover terminal text -- not the page header, whose first
+    // element used to anchor the start handle outside the terminal. Without
+    // shadow-DOM support it falls back to a plain child of the viewport.
+    try {
+      const host = document.createElement("div");
+      host.className = "at-textlayer-host";
+      host.style.display = "contents";
+      const root = host.attachShadow({ mode: "open" });
+      const st = document.createElement("style");
+      st.textContent = TEXTLAYER_CSS;
+      root.appendChild(st);
+      root.appendChild(layer);
+      vp.appendChild(host);
+    } catch (_) {
+      vp.appendChild(layer);
+    }
     term._astraLayer = layer;
 
     /* --- smooth scrolling ------------------------------------------------
@@ -1279,34 +1315,6 @@
     if (term.buffer.onBufferChange) term.buffer.onBufferChange(() => { bindTrim(); schedule(true); });
     document.addEventListener("selectionchange", () => {
       if (dirty && !hasLayerSelection(layer)) schedule(true);   // selection released: catch up
-    });
-
-    // Keep the selection (and its OS handles/popup) inside the terminal text.
-    // The OS "Select all" spans the whole document, so its start anchor lands on
-    // the first thing in <body> (the header's menu button) and the drag handle is
-    // drawn up there, outside the terminal. Any selection end that falls outside
-    // the layer is pulled back to the layer's first/last line (direction kept).
-    const clampPoint = (node, off) => {
-      if (layer.contains(node)) return [node, off];
-      if (node.contains(layer)) {                 // boundary sits in an ancestor of the layer
-        let child = layer;
-        while (child.parentNode !== node) child = child.parentNode;
-        const idx = Array.prototype.indexOf.call(node.childNodes, child);
-        return off <= idx ? [layer, 0] : [layer, layer.childNodes.length];
-      }
-      return (layer.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING)
-        ? [layer, 0] : [layer, layer.childNodes.length];
-    };
-    document.addEventListener("selectionchange", () => {
-      if (!layer.isConnected) return;
-      const s = document.getSelection();
-      if (!s || !s.rangeCount || s.isCollapsed || !s.anchorNode || !s.focusNode) return;
-      if (layer.contains(s.anchorNode) && layer.contains(s.focusNode)) return;   // already inside
-      let rg;
-      try { rg = s.getRangeAt(0); if (!rg.intersectsNode(layer)) return; } catch (_) { return; }
-      const a = clampPoint(s.anchorNode, s.anchorOffset);
-      const f = clampPoint(s.focusNode, s.focusOffset);
-      s.setBaseAndExtent(a[0], a[1], f[0], f[1]);
     });
     schedule(true);
 

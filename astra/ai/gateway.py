@@ -91,6 +91,39 @@ def _is_timeout(exc) -> bool:
     return isinstance(exc, socket.timeout) or "timed out" in str(exc).lower()
 
 
+# ── Activity Log input/output preview (astra_gateway.* events only) ─────────
+# `static/js/log_model.js` already renders any event's `data.input`/
+# `data.output` string fields as an "Input"/"Output" block in the expanded
+# log row (with its own secret-scrubbing + 280-char clip) — this just needs
+# to actually be sent. Only the last user-turn is logged (never the system
+# prompt, which is large, static and would just add noise/DB bloat), capped
+# well above the frontend's display clip so nothing meaningful is lost.
+GW_LOG_PREVIEW_CHARS = 1000
+
+
+def _gw_log_input(messages) -> str:
+    """Best-effort preview of the last user-role message in `messages`,
+    for the Activity Log only — never raises, never touches the system
+    prompt or any credential."""
+    try:
+        for m in reversed(messages or []):
+            if isinstance(m, dict) and m.get("role") == "user":
+                text = str(m.get("content") or "").strip()
+                if text:
+                    return text[:GW_LOG_PREVIEW_CHARS]
+    except Exception:
+        pass
+    return ""
+
+
+def _gw_log_output(text) -> str:
+    """Best-effort preview of a call's output text, for the Activity Log."""
+    try:
+        return str(text or "").strip()[:GW_LOG_PREVIEW_CHARS]
+    except Exception:
+        return ""
+
+
 # ── shared OpenAI-compatible plumbing (Gateway-only; not the Provider base) ──
 # Gemini, Groq and Cloudflare all speak the same `{model, messages, max_tokens}`
 # → `choices[].message.content` dialect. This base is private to the Gateway
@@ -929,7 +962,8 @@ class AstraAIGateway:
         last_error = ""
         attempts = 0
         self._emit("astra_gateway.request", category="explicit_model",
-                   model=model or "", op=op, trace=trace)
+                   model=model or "", op=op, trace=trace,
+                   input=_gw_log_input(messages))
         for conn in self.connections:
             attempts += 1
             self.last_attempts = attempts
@@ -965,7 +999,8 @@ class AstraAIGateway:
             self.last_model = used_model
             self._emit("astra_gateway.success", provider=short,
                        model=used_model, latency_ms=round(latency_ms, 1),
-                       op=op, trace=trace, terminal=True)
+                       op=op, trace=trace, terminal=True,
+                       output=_gw_log_output(result))
             return result
         self.last_connection = ""
         self.last_model = ""
@@ -1097,7 +1132,8 @@ class AstraAIGateway:
 
         category, ranked = self._select_order(messages, max_tokens, category)
         self._emit("astra_gateway.request", category=category,
-                   candidates=len(ranked), op=op, trace=trace)
+                   candidates=len(ranked), op=op, trace=trace,
+                   input=_gw_log_input(messages))
         if not ranked:
             self.last_connection = ""
             self.last_model = ""
@@ -1142,7 +1178,8 @@ class AstraAIGateway:
             self.last_model = target_model.model_id
             self._emit("astra_gateway.success", provider=target_model.provider,
                       model=target_model.model_id, latency_ms=round(latency_ms, 1),
-                      op=op, trace=trace, terminal=True)
+                      op=op, trace=trace, terminal=True,
+                      output=_gw_log_output(result))
             return result
         self.last_connection = ""
         self.last_model = ""
@@ -1158,7 +1195,8 @@ class AstraAIGateway:
             # Generator fallback: first connection's stream that starts wins
             # (unchanged explicit-model path — §17).
             self._emit("astra_gateway.request", category="explicit_model",
-                       model=model or "", op=op, trace=trace)
+                       model=model or "", op=op, trace=trace,
+                       input=_gw_log_input(messages))
             for conn in self.connections:
                 call_model = model
                 if call_model and not conn.models:
@@ -1170,12 +1208,14 @@ class AstraAIGateway:
                 short = _short_provider(conn)
                 used_model = call_model or (conn.models[0] if conn.models else "")
                 start = time.perf_counter()
+                full = []
                 try:
                     fit = self._fit_messages(messages,
                                              self._catalog_model(call_model),
                                              max_tokens)
                     for chunk in conn.stream(fit, model=call_model,
                                              max_tokens=max_tokens):
+                        full.append(chunk)
                         yield chunk
                 except (ProviderError, TimeoutError) as e:
                     self._emit("astra_gateway.error", provider=short,
@@ -1192,7 +1232,8 @@ class AstraAIGateway:
                 self._emit("astra_gateway.success", provider=short,
                            model=used_model,
                            latency_ms=round((time.perf_counter() - start) * 1000.0, 1),
-                           op=op, trace=trace, terminal=True)
+                           op=op, trace=trace, terminal=True,
+                           output=_gw_log_output("".join(full)))
                 return
             self._emit("astra_gateway.error", provider="", model=model or "",
                        reason="no connection served the requested model",
@@ -1201,7 +1242,8 @@ class AstraAIGateway:
 
         category, ranked = self._select_order(messages, max_tokens)
         self._emit("astra_gateway.request", category=category,
-                   candidates=len(ranked), op=op, trace=trace)
+                   candidates=len(ranked), op=op, trace=trace,
+                   input=_gw_log_input(messages))
         # §23 streaming recovery: once ANY chunk has reached the caller for
         # this call, we must never silently start a second, independent
         # stream on the next connection — that would concatenate an
@@ -1212,11 +1254,13 @@ class AstraAIGateway:
         emitted_any = False
         for conn, target_model, health in ranked:
             start = time.perf_counter()
+            full = []
             try:
                 for chunk in conn.stream(
                         self._fit_messages(messages, target_model, max_tokens),
                         model=target_model.model_id, max_tokens=max_tokens):
                     emitted_any = True
+                    full.append(chunk)
                     yield chunk
             except (ProviderError, TimeoutError) as e:
                 self.routing_state.record_failure(target_model.provider,
@@ -1230,7 +1274,7 @@ class AstraAIGateway:
                               provider=target_model.provider,
                               model=target_model.model_id, reason=reason,
                               partial_content_sent=True, op=op, trace=trace,
-                              terminal=True)
+                              terminal=True, output=_gw_log_output("".join(full)))
                     return
                 continue
             except Exception as e:
@@ -1245,7 +1289,7 @@ class AstraAIGateway:
                               provider=target_model.provider,
                               model=target_model.model_id, reason=reason,
                               partial_content_sent=True, op=op, trace=trace,
-                              terminal=True)
+                              terminal=True, output=_gw_log_output("".join(full)))
                     return
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
@@ -1255,7 +1299,8 @@ class AstraAIGateway:
             self.last_model = target_model.model_id
             self._emit("astra_gateway.success", provider=target_model.provider,
                       model=target_model.model_id, latency_ms=round(latency_ms, 1),
-                      op=op, trace=trace, terminal=True)
+                      op=op, trace=trace, terminal=True,
+                      output=_gw_log_output("".join(full)))
             return
         self.last_connection = ""
         self.last_model = ""

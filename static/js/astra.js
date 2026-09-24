@@ -1616,43 +1616,29 @@ function initLogsToolbar() {
 }
 
 // Copies the currently-visible (i.e. filter/search-matched) rows as plain
-// text, top-to-bottom, in the same chronological order shown on screen.
+// text, top-to-bottom, in the same chronological order shown on screen. Each
+// row includes its FULL details (fields, complete Input and Output) whether or
+// not it is expanded on screen — built from the row models, not the DOM text.
 async function copyLogsToClipboard(btn) {
   const feed = $("#live-feed");
-  const lines = $$(".tl-row", feed)
+  const models = $$(".tl-row", feed)
     .filter((el) => !el.classList.contains("hidden"))
-    .map((el) => {
-      const part = (sel) => { const n = $(sel, el); return n ? n.textContent.trim() : ""; };
-      return [part(".tl-time"), part(".tl-title"), part(".tl-sub"), part(".tl-meta")]
-        .filter(Boolean).join("  ");
-    });
-  const out = lines.join("\n");
+    .map((el) => el._astraModel)
+    .filter(Boolean);
+  const out = AstraLog.rowsToText(models, metaText);
   const flash = (label) => {
     if (!btn) return;
-    const prev = btn.textContent;
+    const prev = btn.dataset.label || btn.textContent;
+    btn.dataset.label = prev;
     btn.textContent = label;
     setTimeout(() => { btn.textContent = prev; }, 1400);
   };
   if (!out) { flash("Nothing to copy"); return; }
   try {
-    await navigator.clipboard.writeText(out);
+    await copyText(out);
     flash("✅ Copied");
   } catch (_) {
-    // clipboard API unavailable/blocked (e.g. non-https localhost webview) —
-    // fall back to a hidden textarea + execCommand.
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = out;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      flash("✅ Copied");
-    } catch (_e) {
-      flash("⚠️ Copy failed");
-    }
+    flash("⚠️ Copy failed");
   }
 }
 

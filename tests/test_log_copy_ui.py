@@ -35,6 +35,13 @@ class TestLogCopy(unittest.TestCase):
         self.assertIn("navigator.clipboard", fn)
         self.assertIn('execCommand("copy")', fn)
 
+    def test_toolbar_copy_all_uses_full_row_models_not_header_text(self):
+        fn = JS[JS.index("async function copyLogsToClipboard"):JS.index("function applyLogsFilter")]
+        self.assertIn("_astraModel", fn)
+        self.assertIn("AstraLog.rowsToText(models, metaText)", fn)
+        self.assertIn("copyText(out)", fn)
+        self.assertNotIn('part(".tl-time")', fn)
+
 
 if __name__ == "__main__":
     unittest.main()

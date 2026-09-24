@@ -1210,3 +1210,25 @@ test("mergeLifecycle: request Input survives the success row, Output is added", 
   assert.strictEqual(merged.input, "[user]\nhello");
   assert.strictEqual(merged.output, "world");
 });
+
+test("rowToText: copy text carries header, detail fields, full Input and Output", () => {
+  const req = Log.normalize(ev("astra_gateway.request",
+    { op: "o1", input: "[system]\nS\n\n[user]\nhello" }));
+  const ok = Log.normalize(ev("astra_gateway.success",
+    { op: "o1", provider: "groq", model: "m", latency_ms: 1200,
+      terminal: true, output: "line1\nline2" }));
+  const text = Log.rowToText(Log.mergeLifecycle(req, ok), (m) => "✓ COMPLETE");
+  assert.match(text, /^21:42:18\s+Gateway call\s+groq · m\s+✓ COMPLETE/);
+  assert.match(text, /\n    Provider: groq/);
+  assert.match(text, /\n    Input:\n      \[system\]\n      S/);
+  assert.match(text, /\n      \[user\]\n      hello/);
+  assert.match(text, /\n    Output:\n      line1\n      line2/);
+});
+
+test("rowsToText: rows are separated by a blank line and gaps are skipped", () => {
+  const a = Log.normalize(ev("tool.completed", { tool: "t1", output: "A" }));
+  const b = Log.normalize(ev("tool.completed", { tool: "t2", output: "B" }));
+  const text = Log.rowsToText([a, null, b]);
+  assert.strictEqual(text.split("\n\n").length, 2);
+  assert.match(text, /t1[\s\S]*Output:\n      A[\s\S]*\n\nt?[\s\S]*t2/);
+});

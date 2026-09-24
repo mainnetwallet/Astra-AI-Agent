@@ -629,6 +629,51 @@
     return String(mm.status || "").toUpperCase();
   }
 
+  // The rows of the expanded "details" grid for a normalized model, in the
+  // order they are shown: [[label, value], ...]. Shared by the on-screen
+  // details and the "Copy" text so they can never disagree.
+  function detailFields(m) {
+    var mm = m || {};
+    var fields = [];
+    if (mm.time) fields.push(["Started", mm.time]);
+    if (mm.endTime && mm.endTime !== mm.time) fields.push(["Completed", mm.endTime]);
+    if (mm.duration) fields.push(["Duration", mm.duration]);
+    fields.push(["Status", statusLabel(mm)]);
+    var extra = mm.fields || [];
+    for (var i = 0; i < extra.length; i++) fields.push(extra[i]);
+    return fields;
+  }
+
+  function indentLines(text, pad) {
+    return String(text).split("\n").map(function (l) { return pad + l; }).join("\n");
+  }
+
+  // One row as plain text: the header line, then everything the expanded row
+  // shows (detail fields, full Input, full Output), whether or not the row is
+  // currently expanded on screen.
+  // `metaFn(model)` (optional) supplies the header's status text exactly as
+  // the screen shows it; without it the row's plain `detail` is used.
+  function rowToText(m, metaFn) {
+    var mm = m || {};
+    var t = timeRangeOf(mm);
+    var head = [t.end ? t.start + " → " + t.end : t.start,
+                mm.title, mm.subject, metaFn ? metaFn(mm) : mm.detail]
+      .filter(Boolean).join("  ");
+    var lines = [head];
+    detailFields(mm).forEach(function (f) {
+      lines.push("    " + f[0] + ": " + f[1]);
+    });
+    if (mm.input) lines.push("    Input:", indentLines(mm.input, "      "));
+    if (mm.output) lines.push("    Output:", indentLines(mm.output, "      "));
+    return lines.join("\n");
+  }
+
+  // Many rows (already in display order), separated by a blank line.
+  function rowsToText(models, metaFn) {
+    return (models || []).filter(Boolean)
+      .map(function (m) { return rowToText(m, metaFn); }).join("\n\n");
+  }
+
   // Canonical reason shared with astra.js, so the DOM and the tests can never
   // disagree about why a child row was resolved.
   var INTERRUPTED_REASON = "interrupted when the request ended";
@@ -708,6 +753,9 @@
 
   return {
     NEAR_BOTTOM_PX: NEAR_BOTTOM_PX,
+    detailFields: detailFields,
+    rowToText: rowToText,
+    rowsToText: rowsToText,
     categoryOf: categoryOf,
     isMeaningful: isMeaningful,
     statusOf: statusOf,

@@ -236,7 +236,17 @@ class RoutingDecisionPolicy:
         return round(score, 3)
 
     def rank(self, candidates: list, request) -> list:
-        """Sort candidates (provider_adapter, model) by score, descending."""
+        """Sort candidates (provider_adapter, model) by score, descending.
+
+        A per-request `user_preference` (e.g. "fastest") always wins over
+        the router's own construction-time default so a caller that asks
+        for a specific preference actually gets it, not just whatever the
+        router was built with.
+        """
+        req_pref = getattr(request, "user_preference", None)
+        original_pref = self.preference
+        if req_pref:
+            self.preference = req_pref
         scored = []
         for adapter, model in candidates:
             info = getattr(adapter, "health_info", None) or {}
@@ -247,4 +257,5 @@ class RoutingDecisionPolicy:
                 continue
             scored.append((s, adapter, model))
         scored.sort(key=lambda t: -t[0])
+        self.preference = original_pref
         return scored

@@ -225,7 +225,7 @@ def build(store: Store | None = None, config=None,
     # "ai.*" events (see astra/core/events.py).
     gateway = build_astra_ai_gateway(config, store=store, events=events)
     router = AstraRouter(providers=providers, config=config, store=store,
-                         preference=config.get("AI_ROUTING_PREFERENCE", "balanced"),
+                         preference=config.get("AI_ROUTING_PREFERENCE", "fastest"),
                          registry=model_registry, gateway=gateway)
     router.attach_events(events)
     # The Agent Workflow "AI / Agent" node needs a tool on the ONE

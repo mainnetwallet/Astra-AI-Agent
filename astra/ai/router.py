@@ -135,7 +135,7 @@ class RoutingRequest:
         self.streaming = streaming
         self.vision = vision
         self.reasoning_level = reasoning_level
-        self.user_preference = user_preference or "balanced"
+        self.user_preference = user_preference or "fastest"
         # None => let the provider/model decide (no Astra-imposed cap).
         self.max_tokens = max_tokens
         self.no_fallback = bool(no_fallback)
@@ -304,7 +304,7 @@ class AstraRouter:
 
     def __init__(self, providers: list | None = None, config=None,
                  max_retries: int = 2, backoff_s: float = 1.0,
-                 registry=None, preference: str = "balanced", store=None,
+                 registry=None, preference: str = "fastest", store=None,
                  gateway=None):
         self.config = config
         self.max_retries = max(0, int((config and config.get("AI_MAX_RETRIES")) or max_retries))
@@ -312,7 +312,7 @@ class AstraRouter:
         self.providers = list(providers or [])
         self.registry = registry
         self.store = store
-        self.preference = preference or "balanced"
+        self.preference = preference or "fastest"
         # optional Astra AI Gateway — deliberately NOT part of
         # self.providers / ProviderRegistry (see module docstring).
         self.gateway = gateway

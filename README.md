@@ -210,7 +210,7 @@ configured.
 | `ASTRA_CORS_ORIGINS` | *(reflect in dev)* | Allowlisted origins (space-separated) |
 | `ASTRA_ALLOW_PRIVATE_URLS` | 0 | SSRF guard override for URL research |
 | `AI_PROVIDER` | *(auto)* | Force/opt-in a provider order (`AI_PROVIDER=gemini groq`) |
-| `AI_ROUTING_PREFERENCE` | balanced | AstraRouter scoring preference |
+| `AI_ROUTING_PREFERENCE` | fastest | AstraRouter scoring preference — fastest healthy model is tried first, unhealthy/rate-limited providers are skipped, with instant fallback to the next-fastest on failure |
 | `AI_MAX_RETRIES` | 2 | Retries per provider before failing over to the next |
 | `AI_BACKOFF` | 1.0 | Base seconds for exponential retry backoff |
 | `CHAT_MAX_TOKENS` | *(unset)* | Optional explicit output budget per chat turn. Unset = provider/model decides (no Astra-imposed cap). |

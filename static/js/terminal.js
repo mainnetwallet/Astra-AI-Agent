@@ -110,7 +110,7 @@
         <hr>
         <button role="menuitem" data-act="copy">Copy selection</button>
         <button role="menuitem" data-act="paste">Paste</button>
-        <button role="menuitem" data-act="selecttext">Select text…</button>
+        <button role="menuitem" data-act="selecttext">Select text (all history)</button>
         <hr>
         <button role="menuitem" data-act="status">Runtime status</button>
         <button role="menuitem" data-act="runtime-restart">Restart runtime</button>
@@ -173,6 +173,13 @@
       </div>`;
     stage.appendChild(side);
 
+    const more = h("button", "at-btn at-more");
+    more.id = "at-more";
+    more.type = "button";
+    more.hidden = true;
+    more.textContent = "Select more ⤢";
+    more.setAttribute("aria-label", "Select more text, including scrollback");
+    stage.appendChild(more);
     root.appendChild(stage);
 
     const toastEl = h("div", "at-toast");
@@ -334,6 +341,10 @@
       pressKey(b.dataset.key);
     });
 
+    byId("at-more").addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();                       // don't collapse the selection before we read it
+      openSelectSheet(true);
+    });
     byId("at-sheet-close").onclick = () => closeSheet();
 
     byId("at-up").onclick = () => {
@@ -365,7 +376,7 @@
     if (act === "files") return toggleSidebar();
     if (act === "copy") return copySelection();
     if (act === "paste") return pasteClipboard();
-    if (act === "selecttext") return openSelectSheet();
+    if (act === "selecttext") return openSelectSheet(false);
     if (act === "status") return showRuntimeStatus();
     if (act === "runtime-restart") return lifecycle("restart");
     if (act === "stop") return lifecycle("stop");
@@ -1041,34 +1052,81 @@
     if (tab && tab.term) tab.term.focus();
   }
 
-  function bufferText(term, maxLines) {
-    const buf = term.buffer.active;
-    const out = [];
-    for (let i = Math.max(0, buf.length - maxLines); i < buf.length; i++) {
+  /* Whole scrollback as text, plus where each buffer line starts in that text
+   * (wrapped rows are joined, exactly like a real copy would). */
+  function historyText(term, maxLines) {
+    const buf = term.buffer.active, n = buf.length;
+    const from = Math.max(0, n - (maxLines || 20000));
+    const starts = new Array(n).fill(-1);
+    let text = "";
+    for (let i = from; i < n; i++) {
       const line = buf.getLine(i);
       if (!line) continue;
-      const s = line.translateToString(true);
-      if (line.isWrapped && out.length) out[out.length - 1] += s; else out.push(s);
+      const next = buf.getLine(i + 1);
+      const str = line.translateToString(!(next && next.isWrapped));
+      if (line.isWrapped && i > from) { starts[i] = text.length; text += str; }
+      else { if (i > from) text += "\n"; starts[i] = text.length; text += str; }
     }
-    while (out.length && out[out.length - 1] === "") out.pop();
-    return out.join("\n");
+    return { text: text.replace(/\n+$/, ""), starts };
+  }
+  function bufferText(term, maxLines) { return historyText(term, maxLines).text; }
+
+  /* Map the OS text selection (visible rows only) to a [start,end) range in
+   * historyText(), so the sheet can open with the same text already selected. */
+  function selectionToHistoryRange(term) {
+    const sel = document.getSelection && document.getSelection();
+    if (!sel || !sel.rangeCount || sel.isCollapsed || !term.element) return null;
+    const rowsEl = term.element.querySelector(".xterm-rows");
+    if (!rowsEl || !rowsEl.contains(sel.anchorNode)) return null;
+    const rg = sel.getRangeAt(0);
+    const rowOf = (node) => {
+      let el = node.nodeType === 3 ? node.parentNode : node;
+      while (el && el.parentNode !== rowsEl) el = el.parentNode;
+      return el;
+    };
+    const pos = (node, off) => {
+      const row = rowOf(node);
+      if (!row) return null;
+      const idx = Array.prototype.indexOf.call(rowsEl.children, row);
+      const pre = document.createRange();
+      pre.selectNodeContents(row);
+      pre.setEnd(node, off);
+      return { line: term.buffer.active.viewportY + idx, col: pre.toString().length };
+    };
+    const s0 = pos(rg.startContainer, rg.startOffset), e0 = pos(rg.endContainer, rg.endOffset);
+    if (!s0 || !e0) return null;
+    const h = historyText(term);
+    if (h.starts[s0.line] < 0 || h.starts[e0.line] < 0) return null;
+    return { text: h.text, a: h.starts[s0.line] + s0.col, b: h.starts[e0.line] + e0.col };
   }
 
-  /* Native long-press/drag selection + the OS copy handles work inside a real
-   * <textarea>, so this is the fail-safe path on every phone browser. */
-  function openSelectSheet() {
+  /* The OS handles + Copy popup work (and auto-scroll when dragged to an edge)
+   * inside a real <textarea>, over the WHOLE scrollback — the live terminal
+   * only has its visible rows in the DOM, so it can't scroll a selection. */
+  function openSelectSheet(fromSelection) {
     const tab = activeTab();
     if (!tab || !tab.term) return;
+    const r = fromSelection ? selectionToHistoryRange(tab.term) : null;
+    const text = r ? r.text : historyText(tab.term).text;
     openSheet({
       title: "Select text", readonly: true, okLabel: "Copy all",
-      hint: "Long-press a word, drag the handles, then Copy — or tap Copy all.",
-      text: bufferText(tab.term, 600),
+      hint: "Whole history. Long-press to select, drag a handle to the edge to scroll, then Copy.",
+      text,
       onOk: async (txt) => {
         const ok = await copyText(txt);
         toast(ok ? "Copied" : "Copy blocked");
         if (ok) closeSheet();
       },
     });
+    const ta = byId("at-sheet-text");
+    if (r) {                                   // reopen exactly where the user was selecting
+      const lh = parseFloat(getComputedStyle(ta).lineHeight) || 17;
+      const line = r.text.slice(0, r.a).split("\n").length - 1;
+      ta.scrollTop = Math.max(0, line * lh - ta.clientHeight / 3);
+      try { ta.focus({ preventScroll: true }); ta.setSelectionRange(r.a, r.b); } catch (_) {}
+    } else {
+      ta.scrollTop = ta.scrollHeight;
+    }
   }
 
   function openPasteSheet() {
@@ -1117,6 +1175,8 @@
       }
     } catch (_) { /* xterm internals changed: selection still works, may flicker */ }
     document.addEventListener("selectionchange", () => {
+      const more = byId("at-more");
+      if (more) more.hidden = !active();
       if (held && !active()) { held = false; term.refresh(0, term.rows - 1); }
     });
     // typing (or Paste) ends selection mode so the screen can update again
@@ -1199,7 +1259,7 @@
     refreshStatus,
     pressKey,
     state,
-    _t: { bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText },
+    _t: { historyText, selectionToHistoryRange, bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText },
     EXTRA_KEYS,
   };
   // Core-tab loader: astra.js's showTab() calls this the first time the

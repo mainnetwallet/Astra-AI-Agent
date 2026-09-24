@@ -327,6 +327,13 @@
   -webkit-touch-callout: default;
 }
 .at-view .xterm-helper-textarea { -webkit-user-select: text; user-select: text; }
+.at-more {
+  position: absolute; top: 8px; right: 10px; z-index: 26;
+  padding: 8px 12px; font-size: 13px; border-radius: 18px;
+  background: var(--at-chrome); border: 1px solid var(--at-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+}
+.at-more[hidden] { display: none; }
 .at-toast {
   position: absolute; left: 50%; bottom: 74px; transform: translateX(-50%);
   z-index: 50; padding: 7px 14px; border-radius: 16px;

@@ -1155,6 +1155,45 @@
     vp.appendChild(layer);
     term._astraLayer = layer;
 
+    /* --- smooth scrolling ------------------------------------------------
+     * Native scrolling (swipe momentum, and the browser's own autoscroll while a
+     * selection handle is dragged to an edge) moves in pixels. xterm, after each
+     * scroll, snaps scrollTop to a whole number of rows. Assigning scrollTop from
+     * script cancels an ongoing fling, and re-rounding undoes small autoscroll
+     * steps (so a slow drag never advances). So: (1) ignore xterm's sub-row snaps,
+     * (2) instead shift the drawn rows by the leftover pixels so they stay glued
+     * to the invisible layer (and its highlight) at every scroll position. */
+    const core = term._core;
+    const screen = term.element.querySelector(".xterm-screen");
+    const rowPx = () => {
+      try { return core._renderService.dimensions.css.cell.height || 0; } catch (_) { return 0; }
+    };
+    try {
+      const proto = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
+      Object.defineProperty(vp, "scrollTop", {
+        configurable: true,
+        get() { return proto.get.call(this); },
+        set(v) {
+          const h = rowPx();
+          if (h && Math.abs(v - proto.get.call(this)) < h * 0.99) {   // sub-row snap: skip it
+            try { core.viewport._ignoreNextScrollEvent = false; } catch (_) {}
+            return;
+          }
+          proto.set.call(this, v);                                    // real jump (new output etc.)
+        },
+      });
+    } catch (_) { /* unusual engine: fall back to xterm's stepped scrolling */ }
+    let renderedY = term.buffer.active.viewportY;       // which buffer row the DOM rows show
+    const align = () => {
+      if (!screen) return;
+      const h = rowPx();
+      const f = (h && term.buffer.active.type === "normal") ? vp.scrollTop - renderedY * h : 0;
+      const v = Math.abs(f) > 0.05 ? "translateY(" + (-f).toFixed(2) + "px)" : "";
+      if (screen.style.transform !== v) screen.style.transform = v;
+    };
+    term.onRender(() => { renderedY = term.buffer.active.viewportY; align(); });
+    vp.addEventListener("scroll", align, { passive: true });
+
     let dirty = false, full = true, raf = 0, unTrim = null;
 
     // match xterm's row metrics so the (invisible) glyphs sit exactly under the drawn ones

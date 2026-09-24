@@ -333,7 +333,7 @@
 .at-view .xterm-helper-textarea { -webkit-user-select: text; user-select: text; }
 @media (pointer: coarse) {
   /* touches fall through the drawn rows to the layer; rows themselves aren't selectable */
-  .at-view .xterm-screen { pointer-events: none; }
+  .at-view .xterm-screen { pointer-events: none; will-change: transform; }
   .at-view .xterm-rows, .at-view .xterm-rows * { -webkit-user-select: none; user-select: none; }
   .at-view .xterm-viewport { overscroll-behavior: contain; }
   /* "Select all" in the OS popup should mean "all terminal text", not the page */

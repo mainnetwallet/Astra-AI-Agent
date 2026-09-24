@@ -1370,22 +1370,13 @@
     // so no new touchmove fires to tell the browser to keep extending the
     // selection into the content the scroll just revealed, and the selection
     // stalls at whatever was on screen when the drag reached the edge. On every
-    // scroll tick during an active drag, re-extend the selection's focus to a
-    // point near the still-pinned finger, now that new text sits there.
-    const EDGE_ZONE = 60;    // how close to the top/bottom counts as "at the edge"
-    const EDGE_INSET = 28;   // how far off the physical edge to sample, clear of
-                              // the OS handle knob / magnifier bubble drawn right
-                              // at the touch point -- hit-testing exactly under
-                              // that graphic returns nothing, so extend() never
-                              // fires and the selection looks stuck.
+    // scroll tick during an active drag, re-extend the selection's focus to the
+    // point under the still-pinned finger, now that new text sits there.
     vp.addEventListener("scroll", () => {
       if (!dragging || !hasLayerSelection(layer)) return;
       const rect = vp.getBoundingClientRect();
       if (touchX < rect.left || touchX > rect.right || touchY < rect.top || touchY > rect.bottom) return;
-      let y = touchY;
-      if (touchY <= rect.top + EDGE_ZONE) y = rect.top + EDGE_INSET;         // top-edge drag: sample just below the top
-      else if (touchY >= rect.bottom - EDGE_ZONE) y = rect.bottom - EDGE_INSET; // bottom-edge drag: sample just above the bottom
-      y = Math.min(Math.max(y, rect.top + 1), rect.bottom - 1);
+      const y = Math.min(Math.max(touchY, rect.top + 1), rect.bottom - 1);
       const x = Math.min(Math.max(touchX, rect.left + 1), rect.right - 1);
       const sel = layerSelection(layer);
       if (!sel) return;

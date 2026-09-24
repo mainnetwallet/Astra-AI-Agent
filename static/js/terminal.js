@@ -1275,6 +1275,11 @@
       if (!hasLayerSelection(layer)) return;
       clearTimeout(selRefreshT);
       selRefreshT = setTimeout(() => {
+        // Never touch the Selection object while a finger is still down --
+        // that could be an in-progress handle drag (extending/starting a
+        // selection), and forcibly resetting the Range mid-gesture is what
+        // was breaking the *next* long-press after the first one.
+        if (dragging) return;
         const sel = layerSelection(layer);
         if (!sel || !sel.rangeCount) return;
         const rg = sel.getRangeAt(0);

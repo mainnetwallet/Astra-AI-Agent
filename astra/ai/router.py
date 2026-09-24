@@ -102,10 +102,6 @@ TASK_HARD_CAPABILITIES = {
     "tool_selection": ("tools",),
 }
 
-# Weight of the newest successful call in the per-model latency average.
-LATENCY_EMA_ALPHA = 0.3
-
-
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -139,9 +135,7 @@ class RoutingRequest:
         self.streaming = streaming
         self.vision = vision
         self.reasoning_level = reasoning_level
-        # None => the router's configured preference (AI_ROUTING_PREFERENCE)
-        # applies; only an explicit per-request value overrides it.
-        self.user_preference = user_preference or None
+        self.user_preference = user_preference or "fastest"
         # None => let the provider/model decide (no Astra-imposed cap).
         self.max_tokens = max_tokens
         self.no_fallback = bool(no_fallback)
@@ -234,14 +228,10 @@ def classify(text: str) -> str:
         return "video"
     if re.search(r"\[.*file.*attached\]|\[.*attachment", low):
         return "multimodal"
-    # Coding is checked BEFORE research: "debug my code about login" is a
-    # coding task, not research. Both use whole-word matches — a bare
-    # substring test made "already"/"thread" match "read" and "about" hit
-    # almost anything, silently dropping the hard "coding" capability.
-    if re.search(r"\b(code|coding|fix|test|debug|refactor|github|repo|bug)\b", low):
-        return "coding"
-    if re.search(r"\b(read|analyse|analyze|research|compare|report|what is|about)\b", low):
+    if re.search(r"read|analyse|analyze|research|compare|report|what is|about", low):
         return "research"
+    if re.search(r"\b(code|fix|test|debug|refactor|github|repo)\b", low):
+        return "coding"
     if re.search(r"open .*website|navigate|click|browser|visit ", low):
         return "browser"
     if re.search(r"wallet|token|stake|send .*eth|contract|transaction|balance", low):
@@ -549,7 +539,7 @@ class AstraRouter:
                 rr.route_reason = {
                     "task_type": req.task_type,
                     "score": score,
-                    "preference": (self.policy.effective_preference(req) if not fallback else "fallback"),
+                    "preference": req.user_preference if not fallback else "fallback",
                     "reason": getattr(rr, "_reason", ""),
                     "candidates_considered": considered,
                 }
@@ -693,7 +683,7 @@ class AstraRouter:
                 rr.route_reason = {
                     "task_type": req.task_type,
                     "score": score,
-                    "preference": (self.policy.effective_preference(req) if not fallback else "fallback"),
+                    "preference": req.user_preference if not fallback else "fallback",
                     "reason": getattr(rr, "_reason", ""),
                     "candidates_considered": considered,
                 }
@@ -769,8 +759,7 @@ class AstraRouter:
             out.append(ProviderExecutionTarget(
                 provider_id=getattr(adapter, "name", ""),
                 model_id=model.model_id,
-                capabilities=tuple(getattr(model, "capabilities", []) or []),
-                metadata={"score": _score}))
+                capabilities=tuple(getattr(model, "capabilities", []) or [])))
         return out
 
     def _report_gateway_recovery(self, target, *, success: bool,
@@ -1327,15 +1316,8 @@ class AstraRouter:
                 row["errors"] = row.get("errors", 0) + 1
             calls = row["calls"]
             row["success_rate"] = round(row["successes"] / calls, 2)
-            if rr.ok and rr.latency_ms:
-                # Exponential moving average over SUCCESSFUL calls only: a
-                # slow period a week ago decays away, and a timeout/failed
-                # call's latency never drags a healthy model's "speed" down
-                # (failures are already penalised via success_rate / cooldown).
-                prev = row.get("avg_latency_ms") or 0.0
-                row["avg_latency_ms"] = round(
-                    rr.latency_ms if not prev
-                    else prev * (1 - LATENCY_EMA_ALPHA) + rr.latency_ms * LATENCY_EMA_ALPHA, 1)
+            row["avg_latency_ms"] = round(
+                ((row.get("avg_latency_ms") or 0) * (calls - 1) + rr.latency_ms) / calls, 1)
             key_by_task = f"{req.task_type}:{rr.provider}"
             trow = agg.setdefault("task:" + key_by_task,
                                   {"calls": 0, "successes": 0, "errors": 0})
@@ -1360,7 +1342,7 @@ class AstraRouter:
         try:
             rows = self.store.fetch(
                 "SELECT provider, model, COUNT(*) n, SUM(success) s, "
-                "AVG(CASE WHEN success = 1 THEN latency_ms END) lat FROM routing_stats "
+                "AVG(latency_ms) lat FROM routing_stats "
                 "GROUP BY provider, model")
             agg = {}
             for r in rows:

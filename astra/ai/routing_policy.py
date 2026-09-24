@@ -134,18 +134,11 @@ class RoutingDecisionPolicy:
         self.preference = preference
 
     # -- scoring --------------------------------------------------------------
-    def effective_preference(self, request=None) -> str:
-        """The preference actually used for `request`: an explicit
-        per-request `user_preference` wins, otherwise the router's own
-        configured preference (AI_ROUTING_PREFERENCE)."""
-        return (getattr(request, "user_preference", None)
-                or self.preference or "balanced")
-
     def score(self, model: Model, request, provider_info: dict | None = None,
-              stat: dict | None = None, preference: str | None = None) -> float:
+              stat: dict | None = None) -> float:
         if not meets_hard_requirements(model, request):
             return -1.0e6
-        w = preference_weights(preference or self.effective_preference(request))
+        w = preference_weights(self.preference)
         score = 0.0
         provider_info = provider_info or {}
 
@@ -245,23 +238,24 @@ class RoutingDecisionPolicy:
     def rank(self, candidates: list, request) -> list:
         """Sort candidates (provider_adapter, model) by score, descending.
 
-        A per-request `user_preference` (e.g. "fastest") wins over the
-        router's configured default; when the request does not set one, the
-        router's own preference (AI_ROUTING_PREFERENCE) applies. The
-        preference is passed down as an argument — no shared state is
-        mutated, so concurrent requests cannot see each other's preference
-        and an exception cannot leave the policy in a changed state.
+        A per-request `user_preference` (e.g. "fastest") always wins over
+        the router's own construction-time default so a caller that asks
+        for a specific preference actually gets it, not just whatever the
+        router was built with.
         """
-        pref = self.effective_preference(request)
+        req_pref = getattr(request, "user_preference", None)
+        original_pref = self.preference
+        if req_pref:
+            self.preference = req_pref
         scored = []
         for adapter, model in candidates:
             info = getattr(adapter, "health_info", None) or {}
             stat = self.stats.get(f"{model.provider}:{model.model_id}") or \
                 self.stats.get(model.provider) or {}
-            s = self.score(model, request, provider_info=info, stat=stat,
-                           preference=pref)
+            s = self.score(model, request, provider_info=info, stat=stat)
             if s == -1.0e6:
                 continue
             scored.append((s, adapter, model))
         scored.sort(key=lambda t: -t[0])
+        self.preference = original_pref
         return scored

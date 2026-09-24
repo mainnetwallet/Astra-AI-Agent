@@ -1350,10 +1350,46 @@
     // xterm's own touch handlers scroll by JS and cancel the gesture; let the
     // browser scroll the viewport natively (momentum, and handle-drag autoscroll)
     const stop = (ev) => { if (term.buffer.active.type === "normal") ev.stopPropagation(); };
-    view.addEventListener("touchstart", (ev) => { dragging = true; stop(ev); }, { capture: true, passive: true });
-    view.addEventListener("touchmove", stop, { capture: true, passive: true });
+    let touchX = 0, touchY = 0;
+    view.addEventListener("touchstart", (ev) => {
+      dragging = true;
+      const t = ev.touches && ev.touches[0];
+      if (t) { touchX = t.clientX; touchY = t.clientY; }
+      stop(ev);
+    }, { capture: true, passive: true });
+    view.addEventListener("touchmove", (ev) => {
+      const t = ev.touches && ev.touches[0];
+      if (t) { touchX = t.clientX; touchY = t.clientY; }
+      stop(ev);
+    }, { capture: true, passive: true });
     view.addEventListener("touchend", () => { dragging = false; }, { capture: true, passive: true });
     view.addEventListener("touchcancel", () => { dragging = false; }, { capture: true, passive: true });
+
+    // Dragging a handle to the top/bottom edge makes the browser auto-scroll the
+    // viewport, but the finger itself hasn't moved (it's pinned at the edge) --
+    // so no new touchmove fires to tell the browser to keep extending the
+    // selection into the content the scroll just revealed, and the selection
+    // stalls at whatever was on screen when the drag reached the edge. On every
+    // scroll tick during an active drag, re-extend the selection's focus to the
+    // point under the still-pinned finger, now that new text sits there.
+    vp.addEventListener("scroll", () => {
+      if (!dragging || !hasLayerSelection(layer)) return;
+      const rect = vp.getBoundingClientRect();
+      if (touchX < rect.left || touchX > rect.right || touchY < rect.top || touchY > rect.bottom) return;
+      const y = Math.min(Math.max(touchY, rect.top + 1), rect.bottom - 1);
+      const x = Math.min(Math.max(touchX, rect.left + 1), rect.right - 1);
+      const sel = layerSelection(layer);
+      if (!sel) return;
+      try {
+        if (document.caretPositionFromPoint) {
+          const pos = document.caretPositionFromPoint(x, y);
+          if (pos && layer.contains(pos.offsetNode)) sel.extend(pos.offsetNode, pos.offset);
+        } else if (document.caretRangeFromPoint) {
+          const r = document.caretRangeFromPoint(x, y);
+          if (r && layer.contains(r.startContainer)) sel.extend(r.startContainer, r.startOffset);
+        }
+      } catch (_) { /* extend() can throw across an unrelated node; ignore and retry next tick */ }
+    }, { passive: true });
 
     // long-press must reach the browser, not xterm's right-click handler
     view.addEventListener("contextmenu", (ev) => { ev.stopPropagation(); }, true);

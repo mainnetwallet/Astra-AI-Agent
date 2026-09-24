@@ -592,10 +592,25 @@ a[class*="hl-"] { pointer-events: none; }
   font-size: 11.5px;
 }
 .tl-block { margin-top: 8px; }
+.tl-block-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin: 0 0 3px;
+}
 .tl-block h5 {
-  margin: 0 0 3px; font-size: 10.5px; color: var(--muted);
+  margin: 0; font-size: 10.5px; color: var(--muted);
   text-transform: uppercase; letter-spacing: .4px; font-weight: 600;
 }
+.tl-copy {
+  background: transparent; color: var(--muted); cursor: pointer;
+  border: 1px solid var(--line); border-radius: 5px;
+  padding: 1px 8px; font-size: 10.5px; line-height: 1.6;
+}
+.tl-copy:hover { color: var(--text); border-color: var(--accent); }
+/* The row itself is not text-selectable (it is a click-to-expand button),
+   but its expanded details must be: Input/Output are meant to be copied. */
+.tl-detail, .tl-detail * { user-select: text; -webkit-user-select: text; }
+.tl-detail { cursor: auto; }
+.tl-copy { user-select: none; -webkit-user-select: none; cursor: pointer; }
 .tl-block pre {
   margin: 0; padding: 6px 8px; background: var(--panel2);
   border: 1px solid var(--line); border-radius: 6px;

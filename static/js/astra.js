@@ -1227,14 +1227,52 @@ function metaText(m) {
   return "• " + (m.detail || "event");
 }
 
+// Copy text to the clipboard. Uses the async Clipboard API when available and
+// falls back to a hidden textarea + execCommand (older browsers / non-secure
+// origins). Resolves on success, rejects on failure.
+function copyText(text) {
+  const fallback = () => new Promise((resolve, reject) => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok) resolve(); else reject(new Error("copy failed"));
+    } catch (e) { reject(e); }
+  });
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(fallback);
+  }
+  return fallback();
+}
+
 function buildBlock(title, text) {
   const wrap = document.createElement("div");
   wrap.className = "tl-block";
+  const head = document.createElement("div");
+  head.className = "tl-block-head";
   const h = document.createElement("h5");
   h.textContent = title;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "tl-copy";
+  btn.textContent = "Copy";
+  btn.title = "Copy " + title.toLowerCase();
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();          // never toggles the row
+    copyText(text).then(() => "Copied ✓", () => "Copy failed").then((label) => {
+      btn.textContent = label;
+      setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+    });
+  });
+  head.append(h, btn);
   const pre = document.createElement("pre");
   pre.textContent = text;         // textContent => no HTML injection
-  wrap.append(h, pre);
+  wrap.append(head, pre);
   return wrap;
 }
 
@@ -1344,8 +1382,18 @@ function buildRow(m) {
     if (detail) detail.hidden = !open;
     row.setAttribute("aria-expanded", open ? "true" : "false");
   };
-  row.addEventListener("click", toggle);
+  // Clicks inside the expanded details (Input/Output text, Copy buttons)
+  // must never collapse the row — otherwise text can't be selected or
+  // copied. Only the header line toggles, and a click that ends a text
+  // selection is not a toggle either.
+  row.addEventListener("click", (ev) => {
+    if (ev.target.closest && ev.target.closest(".tl-detail")) return;
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && row.contains(sel.anchorNode)) return;
+    toggle();
+  });
   row.addEventListener("keydown", (ev) => {
+    if (ev.target !== row) return;   // Enter/Space on an inner button is its own
     if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); }
   });
   fillRow(row, m);

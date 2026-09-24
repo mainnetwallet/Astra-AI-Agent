@@ -1264,6 +1264,27 @@
     term.onRender(() => { renderedY = term.buffer.active.viewportY; align(); });
     vp.addEventListener("scroll", align, { passive: true });
 
+    // After a scroll (manual swipe, or xterm's own row-snap correction), Android's
+    // selection-handle hit areas can go stale relative to where the handles are now
+    // drawn on screen -- a subsequent drag from a handle then reads as a brand new
+    // selection gesture instead of extending the old one, and the old selection
+    // collapses. Re-applying the same Range once scrolling settles makes Chrome
+    // recompute the handles against the current scroll position.
+    let selRefreshT = 0;
+    vp.addEventListener("scroll", () => {
+      if (!hasLayerSelection(layer)) return;
+      clearTimeout(selRefreshT);
+      selRefreshT = setTimeout(() => {
+        const sel = layerSelection(layer);
+        if (!sel || !sel.rangeCount) return;
+        const rg = sel.getRangeAt(0);
+        if (rg.collapsed) return;
+        const clone = rg.cloneRange();
+        sel.removeAllRanges();
+        sel.addRange(clone);
+      }, 120);
+    }, { passive: true });
+
     let dirty = false, full = true, raf = 0, unTrim = null;
 
     // match xterm's row metrics so the (invisible) glyphs sit exactly under the drawn ones

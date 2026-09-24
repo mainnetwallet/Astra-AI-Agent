@@ -24,6 +24,8 @@ Requires:  pip install -r requirements.txt
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import sys
 import threading
@@ -33,6 +35,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from astra.bootstrap import build
 from astra.web import AGENT_NAME
+
+
+class _QuietShutdown(logging.Filter):
+    """Drop the Ctrl+C shutdown noise from uvicorn.
+
+    When the server is stopped while a browser tab still holds a streaming
+    connection open, uvicorn logs "Exception in ASGI application" with a
+    CancelledError/KeyboardInterrupt traceback. It is harmless, so hide
+    exactly those records and keep every real error visible.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc = record.exc_info[1] if record.exc_info else None
+        return not isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt))
 
 
 def _use_utf8_output() -> None:
@@ -105,9 +121,12 @@ def main() -> int:
         except Exception:
             pass
 
+    logging.getLogger("uvicorn.error").addFilter(_QuietShutdown())
     try:
-        uvicorn.run(app, host=bind, port=port, log_level="warning")
-    except KeyboardInterrupt:
+        # close lingering streaming connections quickly on Ctrl+C
+        uvicorn.run(app, host=bind, port=port, log_level="warning",
+                    timeout_graceful_shutdown=3)
+    except (KeyboardInterrupt, asyncio.CancelledError):
         print("\nBye boss! 👋")
     finally:
         # The app owns this via its lifespan; these calls are idempotent

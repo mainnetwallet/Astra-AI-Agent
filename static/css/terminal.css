@@ -336,8 +336,11 @@
   .at-view .xterm-screen { pointer-events: none; will-change: transform; }
   .at-view .xterm-rows, .at-view .xterm-rows * { -webkit-user-select: none; user-select: none; }
   .at-view .xterm-viewport { overscroll-behavior: contain; }
-  /* "Select all" in the OS popup should mean "all terminal text", not the page */
-  .at-app { -webkit-user-select: none; user-select: none; }
+  /* "Select all" in the OS popup should mean "all terminal text", not the page.
+   * The site header (.topbar) lives OUTSIDE .at-app, so lock the whole page while
+   * the Terminal tab is open and re-enable selection only for the text layer. */
+  body:has(#tab-terminal.active), .at-app { -webkit-user-select: none; user-select: none; }
+  body:has(#tab-terminal.active) .at-textlayer, body:has(#tab-terminal.active) .at-textlayer *,
   .at-app .at-textlayer, .at-app .at-textlayer *,
   .at-app .at-sheet textarea, .at-app .xterm-helper-textarea { -webkit-user-select: text; user-select: text; }
 }

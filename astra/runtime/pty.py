@@ -23,15 +23,32 @@ is what the PTY's line discipline sees.
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
-import pty
 import select
 import signal
 import struct
-import termios
 import threading
 import time
+
+# fcntl/pty/termios are POSIX-only (Linux/macOS/Termux). On Windows there is
+# no real PTY support here, so we import them lazily/optionally: the module
+# still loads (chat/AI/memory/etc. keep working), and only actually starting
+# a terminal session raises a clear error instead of crashing at import time.
+try:
+    import fcntl
+    import pty
+    import termios
+    PTY_SUPPORTED = True
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+    pty = None
+    termios = None
+    PTY_SUPPORTED = False
+
+
+class PtyUnsupportedError(RuntimeError):
+    """Raised when a real PTY session is requested on a platform without
+    POSIX PTY support (e.g. native Windows, outside WSL)."""
 
 # Hot replay buffer per stream. Only this much is kept in RAM; the full
 # stream always lives in the BlobStore.
@@ -88,6 +105,12 @@ class PtyProcess:
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> "PtyProcess":
+        if not PTY_SUPPORTED:
+            raise PtyUnsupportedError(
+                "Real PTY sessions need fcntl/pty/termios, which only exist "
+                "on Linux/macOS/Termux. Run Astra under WSL to use the "
+                "Agent Runtime terminal on Windows; chat/AI features do not "
+                "need this and work normally.")
         env = dict(os.environ)
         env.update({str(k): str(v) for k, v in self.env.items()})
         pid, fd = pty.fork()

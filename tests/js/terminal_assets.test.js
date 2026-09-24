@@ -354,7 +354,7 @@ test("Shift+right-click still opens the browser's real menu", async () => {
   assert.deepEqual(tab.pasted, []);
 });
 
-test("keyboard paste fallbacks: Ctrl+Shift+V and Shift+Insert", () => {
+test("keyboard paste: Ctrl+V, Ctrl+Shift+V and Shift+Insert", () => {
   const { sandbox } = loadTerminal();
   const chord = sandbox.window.AstraTerminal._t.isPasteChord;
   const key = (k, mods) => Object.assign({ type: "keydown", key: k }, mods);
@@ -363,9 +363,8 @@ test("keyboard paste fallbacks: Ctrl+Shift+V and Shift+Insert", () => {
   assert.equal(chord(key("V", { ctrlKey: true, shiftKey: true })), true);
   assert.equal(chord(key("Insert", { shiftKey: true })), true,
                "Shift+Insert is paste");
-  // A bare Ctrl+V is quoted-insert and must still reach the PTY as a byte,
-  // and Shift+Insert alone (no shift) is the plain Insert escape.
-  assert.equal(chord(key("v", { ctrlKey: true })), false);
+  // Plain Ctrl+V is paste on a PC; Shift alone / plain Insert are not.
+  assert.equal(chord(key("v", { ctrlKey: true })), true, "Ctrl+V is paste");
   assert.equal(chord(key("v", { shiftKey: true })), false);
   assert.equal(chord(key("Insert", {})), false);
   assert.equal(chord({ type: "keyup", key: "Insert", shiftKey: true }), false);
@@ -424,4 +423,23 @@ test("Ctrl+A selects all terminal text", () => {
   assert.equal(isSelectAllChord(key("a", { ctrlKey: true })), true);
   assert.equal(isSelectAllChord(key("a", {})), false);
   assert.equal(isSelectAllChord(key("a", { ctrlKey: true, shiftKey: true })), false);
+});
+
+test("Ctrl+A selects only the text, not the blank rows below it", () => {
+  const { sandbox } = loadTerminal();
+  const { selectAllText } = sandbox.window.AstraTerminal._t;
+  const rows = ["$ ls", "file.txt", "$ ", "", "", ""];
+  const mkLine = (txt) => ({
+    length: 10,
+    getCell: (x) => ({ getChars: () => txt[x] || "", getWidth: () => 1 }),
+  });
+  let picked = null;
+  const term = {
+    cols: 10,
+    buffer: { active: { length: rows.length, getLine: (i) => mkLine(rows[i]) } },
+    select: (c, r, n) => { picked = [c, r, n]; },
+    clearSelection() {}, selectAll() { picked = "ALL"; },
+  };
+  selectAllText(term);
+  assert.deepEqual(picked, [0, 0, 22]);   // rows 0..2, last row "$ " = 2 cells
 });

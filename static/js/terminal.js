@@ -628,7 +628,7 @@
       // follow-up Ctrl+C copies it all. Home still jumps to line start.
       if (isSelectAllChord(ev)) {
         ev.preventDefault();
-        term.selectAll();
+        selectAllText(term);
         return false;
       }
       // Let the browser do copy/select-all/new-tab (paste is handled above).
@@ -1052,12 +1052,12 @@
    * are keyboard PASTE, not control bytes. xterm would otherwise encode
    * Shift+Insert as a bare Insert escape, so they are claimed here and left
    * to the browser - which pastes into xterm's helper textarea, and xterm
-   * forwards that to the PTY. A plain Ctrl+V is deliberately NOT intercepted:
-   * a terminal sends it as 0x16 (quoted-insert), exactly as before. */
+   * forwards that to the PTY. Plain Ctrl+V is paste too (PC
+   * convention) - it no longer sends 0x16 quoted-insert to the shell. */
   function isPasteChord(ev) {
     if (!ev || ev.type !== "keydown") return false;
     const key = String(ev.key || "").toUpperCase();
-    if (ev.shiftKey && ev.ctrlKey && !ev.altKey && key === "V") return true;
+    if (ev.ctrlKey && !ev.altKey && !ev.metaKey && key === "V") return true;  // Ctrl+V / Ctrl+Shift+V
     // A strict boolean: callers branch on it, and `undefined` is a poor
     // thing for a predicate to hand back.
     return !!(ev.shiftKey && !ev.ctrlKey && !ev.altKey
@@ -1099,6 +1099,28 @@
   }
 
   async function pasteClipboard() { return pasteInto(activeTab()); }
+
+  /* Select only the real text: from the first non-empty line to the end of
+   * the last non-empty line. term.selectAll() also highlights all the blank
+   * rows below the prompt, which is what looked wrong. */
+  function selectAllText(term) {
+    if (!term) return;
+    const buf = term.buffer && term.buffer.active;
+    if (!buf || typeof term.select !== "function") { if (term.selectAll) term.selectAll(); return; }
+    let first = -1, last = -1, lastLen = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      let end = 0;                                   // used cells, wide chars = 2
+      for (let x = line.length - 1; x >= 0; x--) {
+        const c = line.getCell(x);
+        if (c && c.getChars() !== "") { end = x + Math.max(1, c.getWidth()); break; }
+      }
+      if (end > 0) { if (first < 0) first = i; last = i; lastLen = end; }
+    }
+    if (first < 0) { term.clearSelection(); return; }
+    term.select(0, first, (last - first) * term.cols + lastLen);
+  }
 
   function hasAnySelection(tab) {
     const t = tab && tab.term;
@@ -1156,7 +1178,7 @@
       closeContextMenu();
       if (act === "copy") copySelection(tab);
       else if (act === "paste") pasteInto(tab);
-      else if (act === "all") { tab.term.selectAll(); tab.term.focus(); }
+      else if (act === "all") { selectAllText(tab.term); tab.term.focus(); }
     });
     host.appendChild(m);
     const off = (e) => {
@@ -1643,7 +1665,7 @@
     refreshStatus,
     pressKey,
     state,
-    _t: { historyText, layerSelectionText, bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText, isPasteChord, isCopyChord, isSelectAllChord, isTouchGenerated, bindPasteGestures, pasteInto },
+    _t: { historyText, layerSelectionText, bufferText, copyText, hardenInput, bindLiveInput, isTouchInput, enableNativeSelection, nativeSelectionText, isPasteChord, isCopyChord, isSelectAllChord, selectAllText, isTouchGenerated, bindPasteGestures, pasteInto },
     EXTRA_KEYS,
   };
   // Core-tab loader: astra.js's showTab() calls this the first time the

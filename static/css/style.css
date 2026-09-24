@@ -601,7 +601,7 @@ a[class*="hl-"] { pointer-events: none; }
   border: 1px solid var(--line); border-radius: 6px;
   font: 11.5px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
   color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
-  max-height: 160px; overflow: auto;
+  max-height: 360px; overflow: auto;
 }
 
 /* "↓ New logs" jump-to-latest pill */

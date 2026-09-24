@@ -43,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import socket
 import threading
 import time
@@ -91,35 +92,76 @@ def _is_timeout(exc) -> bool:
     return isinstance(exc, socket.timeout) or "timed out" in str(exc).lower()
 
 
-# ── Activity Log input/output preview (astra_gateway.* events only) ─────────
-# `static/js/log_model.js` already renders any event's `data.input`/
-# `data.output` string fields as an "Input"/"Output" block in the expanded
-# log row (with its own secret-scrubbing + 280-char clip) — this just needs
-# to actually be sent. Only the last user-turn is logged (never the system
-# prompt, which is large, static and would just add noise/DB bloat), capped
-# well above the frontend's display clip so nothing meaningful is lost.
-GW_LOG_PREVIEW_CHARS = 1000
+# ── Activity Log input/output (astra_gateway.* events only) ─────────────────
+# `static/js/log_model.js` renders any event's `data.input`/`data.output`
+# string fields as an "Input"/"Output" block in the expanded log row. The
+# Gateway sends the COMPLETE request (every message, each labelled with its
+# role) and the COMPLETE response so the Activity Log shows exactly what went
+# into and came out of an API call. The only cap is a large safety limit
+# (per field, env-overridable) that keeps a pathological payload from
+# bloating the events table / SSE stream; a truncated field says so.
+try:
+    GW_LOG_MAX_CHARS = max(1000, int(os.environ.get("ASTRA_LOG_MAX_CHARS", "200000")))
+except ValueError:
+    GW_LOG_MAX_CHARS = 200000
+
+
+def _gw_log_cap(text: str) -> str:
+    if len(text) <= GW_LOG_MAX_CHARS:
+        return text
+    return (text[:GW_LOG_MAX_CHARS]
+            + f"\n… [truncated {len(text) - GW_LOG_MAX_CHARS} more characters]")
+
+
+def _gw_log_content(content) -> str:
+    """Flatten one message's content to text. Multimodal parts keep their
+    text; binary parts (images/audio/files, often base64) are replaced by a
+    short placeholder so the log never carries raw media."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+                else:
+                    parts.append(f"[{part.get('type') or 'non-text'} content omitted]")
+            else:
+                parts.append(str(part))
+        return "\n".join(parts)
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except Exception:
+        return str(content)
 
 
 def _gw_log_input(messages) -> str:
-    """Best-effort preview of the last user-role message in `messages`,
-    for the Activity Log only — never raises, never touches the system
-    prompt or any credential."""
+    """The complete input of a Gateway call for the Activity Log: every
+    message in order, each prefixed with its role. Never raises."""
     try:
-        for m in reversed(messages or []):
-            if isinstance(m, dict) and m.get("role") == "user":
-                text = str(m.get("content") or "").strip()
-                if text:
-                    return text[:GW_LOG_PREVIEW_CHARS]
+        blocks = []
+        for m in messages or []:
+            if isinstance(m, dict):
+                role = str(m.get("role") or "message")
+                text = _gw_log_content(m.get("content")).strip()
+            else:
+                role, text = "message", str(m).strip()
+            if text:
+                blocks.append(f"[{role}]\n{text}")
+        return _gw_log_cap("\n\n".join(blocks))
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _gw_log_output(text) -> str:
-    """Best-effort preview of a call's output text, for the Activity Log."""
+    """The complete output text of a call, for the Activity Log."""
     try:
-        return str(text or "").strip()[:GW_LOG_PREVIEW_CHARS]
+        return _gw_log_cap(str(text or "").strip())
     except Exception:
         return ""
 

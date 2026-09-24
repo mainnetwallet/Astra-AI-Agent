@@ -12,6 +12,7 @@
   "use strict";
 
   var NEAR_BOTTOM_PX = 48;
+  var IO_MAX_CHARS = 250000;   // display safety cap for Input/Output blocks
 
   /* ---------------------------------------------------------------- secrets */
   var SECRET_KEY = /(^|[_\-\s.])(api[_-]?key|apikey|secret|passwd|password|pwd|token|authorization|auth[_-]?header|private[_-]?key|seed|seed[_-]?phrase|mnemonic|cookie|session[_-]?id|master[_-]?secret|keyfile|credential|access[_-]?key|secret[_-]?key)(?=$|[_\-\s.]|\d)/i;
@@ -359,8 +360,11 @@
     else if (d.status) detail = clip(scrub(d.status), 60);
     else detail = "";
 
-    var input = typeof d.input === "string" && d.input ? clip(scrub(d.input), 280) : "";
-    var output = typeof d.output === "string" && d.output ? clip(scrub(d.output), 280) : "";
+    // Full input/output: only secrets are scrubbed; the size limit is a very
+    // large safety cap (the backend already caps what it sends), so the
+    // expanded row shows the whole API call, not a preview.
+    var input = typeof d.input === "string" && d.input ? clip(scrub(d.input), IO_MAX_CHARS) : "";
+    var output = typeof d.output === "string" && d.output ? clip(scrub(d.output), IO_MAX_CHARS) : "";
 
     var out = {
       id: e.id,
@@ -576,6 +580,10 @@
   function mergeLifecycle(oldModel, newModel) {
     var merged = Object.assign({}, newModel);
     if (oldModel) {
+      // The request row carries the Input, the terminal row carries the
+      // Output: whichever side is empty keeps what the other one had.
+      if (!merged.input && oldModel.input) merged.input = oldModel.input;
+      if (!merged.output && oldModel.output) merged.output = oldModel.output;
       merged.id = oldModel.id;
       merged.time = oldModel.time;
       merged.startTs = oldModel.startTs || oldModel.sortTs;

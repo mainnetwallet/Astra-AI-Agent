@@ -96,6 +96,58 @@ class TestGatewayCallEvents(unittest.TestCase):
         self.assertEqual(terminal[0]["data"]["model"], "q-model")
 
 
+class TestGatewayFullInputOutput(unittest.TestCase):
+    """The Activity Log must show the COMPLETE input sent and output received."""
+
+    def test_input_contains_every_message_with_roles(self):
+        from astra.ai.gateway import _gw_log_input
+        msgs = [{"role": "system", "content": "You are Astra."},
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "first answer"},
+                {"role": "user", "content": "second question"}]
+        text = _gw_log_input(msgs)
+        for part in ("[system]", "You are Astra.", "[user]", "first question",
+                     "[assistant]", "first answer", "second question"):
+            self.assertIn(part, text)
+
+    def test_long_input_and_output_are_not_cut_at_1000_chars(self):
+        from astra.ai.gateway import _gw_log_input, _gw_log_output
+        big = "x" * 5000
+        self.assertGreaterEqual(len(_gw_log_input([{"role": "user", "content": big}])), 5000)
+        self.assertEqual(len(_gw_log_output(big)), 5000)
+
+    def test_multimodal_media_is_replaced_by_placeholder(self):
+        from astra.ai.gateway import _gw_log_input
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]
+        text = _gw_log_input(msgs)
+        self.assertIn("what is this?", text)
+        self.assertNotIn("base64", text)
+
+    def test_huge_payload_is_capped_and_says_so(self):
+        import astra.ai.gateway as g
+        old = g.GW_LOG_MAX_CHARS
+        g.GW_LOG_MAX_CHARS = 1000
+        try:
+            out = g._gw_log_output("y" * 3000)
+        finally:
+            g.GW_LOG_MAX_CHARS = old
+        self.assertIn("truncated 2000 more characters", out)
+
+    def test_request_event_has_input_and_success_event_has_full_output(self):
+        gw = AstraAIGateway(connections=[_Conn("astra-gw-groq", ["q-model"])],
+                            events=_Bus())
+        bus = gw.events
+        gw.chat([{"role": "system", "content": "sys"},
+                 {"role": "user", "content": "hi"}], model="q-model")
+        req = bus.kinds("astra_gateway.request")[0]["data"]["input"]
+        ok = bus.kinds("astra_gateway.success")[0]["data"]["output"]
+        self.assertIn("[system]", req)
+        self.assertIn("hi", req)
+        self.assertEqual(ok, "ok-astra-gw-groq-q-model")
+
+
 if __name__ == "__main__":
     unittest.main()
 

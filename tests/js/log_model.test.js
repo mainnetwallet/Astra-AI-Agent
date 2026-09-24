@@ -1192,3 +1192,21 @@ test("host-terminal subject/detail never leak the raw payload", () => {
   assert.strictEqual(m.status, "err");
   assert.match(m.detail, /command not found/);
 });
+
+test("normalize: long input/output are shown in full (no 280-char clip)", () => {
+  const big = "a".repeat(5000);
+  const m = Log.normalize(ev("astra_gateway.success",
+    { provider: "groq", model: "m", input: big, output: big }));
+  assert.strictEqual(m.input.length, 5000);
+  assert.strictEqual(m.output.length, 5000);
+});
+
+test("mergeLifecycle: request Input survives the success row, Output is added", () => {
+  const req = Log.normalize(ev("astra_gateway.request",
+    { op: "o1", input: "[user]\nhello" }));
+  const ok = Log.normalize(ev("astra_gateway.success",
+    { op: "o1", provider: "groq", model: "m", terminal: true, output: "world" }));
+  const merged = Log.mergeLifecycle(req, ok);
+  assert.strictEqual(merged.input, "[user]\nhello");
+  assert.strictEqual(merged.output, "world");
+});

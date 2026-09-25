@@ -365,8 +365,15 @@ An image request is the one non-text output Astra executes end to end:
   answering with prose. An explicit provider/model preference is still
   honoured, but only if it passes that gate.
 - **Execution.** `AstraRouter._attempt` dispatches to
-  `adapter.generate_image()` (the existing Bedrock Titan/Stability adapter
-  implementation; nothing new was added).
+  `adapter.generate_image()`. Two adapters really implement it against their
+  own image API: `BedrockAdapter` (Titan / Stability via InvokeModel) and
+  `CloudflareAdapter` (Workers AI `/accounts/<id>/ai/run/<model>`). A model id
+  is only routable for images when its adapter does, so the real image models
+  are declared once in `astra.ai.models.PROVIDER_IMAGE_MODELS`, exposed by each
+  adapter as `image_models` (merged into its configured `models`), and seeded
+  into `ModelRegistry` for any provider that is actually configured. An
+  unconfigured provider gains no phantom image catalog, and `vision` (image
+  *understanding*) is never treated as image generation.
 - **Result.** The provider returns the image as a base64 data URI. The
   pipeline turns it into a stored artifact through the existing artifact
   pipeline (`astra.core.artifacts.store_artifact` into the same
@@ -941,6 +948,13 @@ server smoke test. Notable files:
   Gateway is unavailable or returns an unknown task, the provider receiving
   the original request + canonical history unchanged, and the
   execution-required tool-loop branch.
+- `test_image_generation_providers.py` — real image-generation providers,
+  end to end: the image model catalog/metadata, the adapter capability gate,
+  the Cloudflare Workers AI `/ai/run` API (binary and JSON responses) over a
+  stub server, the router selecting only a genuine image model for
+  `image_generation` (and never a text/vision one), the precise
+  "No image-generation provider configured" reply when nothing qualifies, and
+  the generated image served from the `/api/v1/artifacts/...` route.
 - `test_image_generation_flow.py` — the whole image chain (§1.5): intent
   detection for English/Banglish/Bengali, the router's model **and** adapter
   modality gate, `generate_image()` dispatch, the stored artifact, the chat

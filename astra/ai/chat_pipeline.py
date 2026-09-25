@@ -117,9 +117,12 @@ _NO_PROVIDER_AND_GATEWAY_CONFIGURED_MESSAGE = (
 # healthy credential). Never downgraded to a text answer — that would
 # misrepresent a failed image request as a successful chat reply.
 _NO_IMAGE_MODEL_MESSAGE = (
-    "⚠️ Ei image request serve korar moto kono image-generation capable "
-    "provider/model configure kora nei. Ekta image model (e.g. Bedrock "
-    "Titan/Stability) add kore abar try korun."
+    "⚠️ No image-generation provider configured: none of the configured "
+    "providers exposes a real image API with usable credentials, so this "
+    "image request cannot be served. Add an image-capable provider/model "
+    "(e.g. Bedrock Titan Image or Stability, or Cloudflare Workers AI "
+    "Stable Diffusion/FLUX) with its API key, then try again. Text and "
+    "vision models cannot generate images."
 )
 
 

@@ -125,14 +125,19 @@ _VIDEO_INPUT_MODELS = (
 # adapter-side half of the gate: a provider not listed for a modality is
 # never selected for it, whatever its model metadata claims.
 #
-# `bedrock` is the only adapter with a real provider-specific implementation
-# (BedrockAdapter.generate_image -> Titan / Stability InvokeModel). The
-# OpenAI-compatible `CompatibleAdapter.generate_image` targets
-# `/images/generations`, which none of the configured OpenAI-compatible
+# Two adapters have a real, provider-specific image implementation:
+#   - `bedrock`    -> BedrockAdapter.generate_image (Titan / Stability
+#                     InvokeModel).
+#   - `cloudflare` -> CloudflareAdapter.generate_image (Workers AI
+#                     `/accounts/<id>/ai/run/<model>`).
+# The inherited OpenAI-compatible `CompatibleAdapter.generate_image` targets
+# `/images/generations`, which none of the other configured OpenAI-compatible
 # providers (groq, gemini, mistral, ...) actually expose, so they are
-# deliberately not listed here.
+# deliberately not listed here: claiming one would select a model whose image
+# call can only fail.
 ADAPTER_OUTPUT_MODALITIES: dict[str, frozenset[str]] = {
     "bedrock": frozenset({"image"}),
+    "cloudflare": frozenset({"image"}),
 }
 
 # output modality -> the adapter method that must exist to execute it

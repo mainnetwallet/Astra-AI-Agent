@@ -1723,6 +1723,7 @@ class AstraAIGateway:
         Only models the evidence registry recognizes are included."""
         from astra.ai.gateway_routing import GATEWAY_PROVIDER_SHORT
         from astra.ai.image_models import (FREE_TRUE, PROTOCOL_OPENAI_IMAGES,
+                                           documented_image_models,
                                            image_spec, make_image_spec)
         from astra.ai.models import Model, metadata_for
         out = []
@@ -1738,6 +1739,13 @@ class AstraAIGateway:
                     mids = []
             if not mids:
                 mids = list(getattr(conn, "image_models", None) or [])
+            if not mids:
+                # No explicit env list for this connection: fall back to the
+                # registry's documented FREE image models for this provider,
+                # so the configured pool is used out of the box. A non-empty
+                # env list always wins (requirement: configurable without
+                # source edits).
+                mids = list(documented_image_models(short))
             # A provider's LIVE discovery response is authoritative for the
             # exact image model ids it returns, even when the static registry
             # has no entry yet (spec section 11: OpenRouter).

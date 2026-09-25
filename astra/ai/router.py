@@ -406,6 +406,7 @@ class AstraRouter:
         # list; only ones the evidence registry recognizes are ever added, so
         # a stray id can never become an image candidate.
         from astra.ai.image_models import (FREE_TRUE, PROTOCOL_OPENAI_IMAGES,
+                                           documented_image_models,
                                            is_image_model, is_free_image_model,
                                            make_image_spec)
         image_ids = []
@@ -420,6 +421,11 @@ class AstraRouter:
                 image_ids = []
         if not image_ids:
             image_ids = list(getattr(adapter, "image_models", None) or [])
+        if not image_ids and discover_images:
+            # Only an actual image request defaults to the registry, so a
+            # registry image model can never become a chat/vision/coding
+            # candidate. A non-empty env list always wins.
+            image_ids = list(documented_image_models(name))
         live = set()
         live_fn = getattr(adapter, "live_image_models", None)
         if discover_images and callable(live_fn):

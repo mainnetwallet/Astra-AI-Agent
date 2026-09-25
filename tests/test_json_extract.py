@@ -25,6 +25,28 @@ CODE_ANSWER = ('{"action": "final", "answer": "```python\n'
                '        return a + b\n'
                '```"}')
 
+TRIPLE_QUOTED_ANSWER = '''{
+  "action": "final",
+  "answer": """
+Here is the Python calculator class with the requested methods:
+
+```python
+class Calculator:
+    def add(self, a, b):
+        """Add two numbers."""
+        return a + b
+
+    def divide(self, a, b):
+        """Divide two numbers."""
+        if b == 0:
+            return 0.0
+        return a / b
+```
+
+Save this as `calculator.py`.
+"""
+}'''
+
 TOOL_CALL_WITH_RAW_NEWLINE = (
     '{"action": "tool", "tool": "runtime_command", '
     '"args": {"command": "pwd"}, "session_id": "s1", '
@@ -69,6 +91,50 @@ class TestLoadsLenientRawControlChars(unittest.TestCase):
     def test_empty_text_raises(self):
         with self.assertRaises(ValueError):
             loads_lenient("")
+
+
+class TestLoadsLenientPythonTripleQuotedValue(unittest.TestCase):
+    """Regression: a model sometimes wraps the "answer" value in Python-style
+    triple quotes (\"\"\"...\"\"\") instead of a properly escaped JSON string,
+    and that value's own fenced code routinely contains ITS OWN triple-quoted
+    docstrings. The fix must pair the outer opening \"\"\" with the LAST \"\"\"
+    in the text (not the next one, which would just be the first docstring's
+    opening marker and truncate the answer after a few words)."""
+
+    def test_triple_quoted_answer_with_nested_docstrings_is_unwrapped(self):
+        data = loads_lenient(TRIPLE_QUOTED_ANSWER)
+        self.assertEqual(data["action"], "final")
+        answer = data["answer"]
+        self.assertNotIn('"action"', answer)          # no wrapper text leaks
+        self.assertIn("class Calculator", answer)
+        self.assertIn('"""Add two numbers."""', answer)  # inner docstring intact
+        self.assertIn("Save this as `calculator.py`.", answer)
+
+    def test_end_to_end_via_parse_action_no_wrapper_leak(self):
+        from astra.ai.agent_tool_loop import _parse_action
+        action = _parse_action(TRIPLE_QUOTED_ANSWER)
+        self.assertIsNotNone(action)
+        self.assertEqual(action["action"], "final")
+        self.assertNotIn('"action"', action["answer"])
+        self.assertIn("class Calculator", action["answer"])
+
+    def test_triple_quoted_value_inside_a_json_fence_also_works(self):
+        raw = '```json\n' + TRIPLE_QUOTED_ANSWER + '\n```'
+        data = loads_lenient(raw)
+        self.assertEqual(data["action"], "final")
+        self.assertIn("class Calculator", data["answer"])
+
+    def test_triple_quoted_value_with_surrounding_prose_also_works(self):
+        raw = 'Sure, here you go:\n' + TRIPLE_QUOTED_ANSWER + '\nHope that helps!'
+        data = loads_lenient(raw)
+        self.assertEqual(data["action"], "final")
+        self.assertIn("class Calculator", data["answer"])
+
+    def test_ordinary_well_formed_json_with_a_stray_triple_quote_substring_unaffected(self):
+        # """ appearing legitimately inside an already-valid JSON string
+        # (properly escaped) must not be mistaken for the broken pattern.
+        raw = json.dumps({"a": 'contains \\"\\"\\" three quotes, still fine'})
+        self.assertEqual(loads_lenient(raw), json.loads(raw))
 
 
 class TestEndToEndUnwrap(unittest.TestCase):

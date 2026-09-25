@@ -77,6 +77,76 @@ def _escape_raw_control_chars(text: str) -> str:
     return "".join(out)
 
 
+def _escape_control_chars_plain(s: str) -> str:
+    """Same control-char -> JSON-escape mapping as `_escape_raw_control_chars`,
+    but applied to a string we already KNOW is entirely string content (no
+    quote-state tracking needed, because the caller has already sliced out
+    exactly the text that belongs inside the JSON string literal)."""
+    out = []
+    for ch in s:
+        if ch in _CONTROL_ESCAPES:
+            out.append(_CONTROL_ESCAPES[ch])
+        elif ord(ch) < 0x20:
+            out.append("\\u%04x" % ord(ch))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+_BEFORE_TRIPLE_QUOTE_VALUE_RE = re.compile(r':\s*$')
+_AFTER_TRIPLE_QUOTE_VALUE_RE = re.compile(r'\s*[},]')
+
+
+def _convert_python_triple_quoted_value(text: str) -> str | None:
+    """Rewrite a Python-style triple-quoted (`\"\"\"...\"\"\"`) string VALUE
+    that a model emitted instead of a properly escaped JSON string, e.g.:
+
+        {"action": "final", "answer": \"\"\"
+        ...multi-line answer, itself containing fenced ```python code```
+        with its own \"\"\"docstrings\"\"\"...
+        \"\"\"}
+
+    This is invalid JSON — `\"\"\"` is parsed as an empty string `""`
+    immediately followed by a new (unterminated) string — so both the fast
+    path and `_escape_raw_control_chars` (which only toggles on single `"`
+    and therefore trips over the exact same triple-quote three times) fail
+    on it, and the raw wrapper leaks to the user.
+
+    We do NOT pair the opening `\"\"\"` with the *next* one in the text:
+    that would just be the first inner docstring's opening marker, cutting
+    the value off after a few words. A `{"action": ..., "answer": ...}`
+    style object's `\"\"\"`-wrapped value is virtually always its LAST
+    field, so its true closing marker is reliably the LAST `\"\"\"` in the
+    text, immediately followed (after whitespace) by `}` or `,`. We pair
+    the first opening marker with that last one, and convert everything
+    between into one correctly escaped JSON string. Returns None (no
+    triple-quoted value found/confidently paired) if the shape doesn't
+    match, so the caller can fall back to its other strategies untouched.
+    """
+    first = text.find('"""')
+    if first == -1:
+        return None
+    last = text.rfind('"""')
+    if last <= first:
+        return None
+    if not _BEFORE_TRIPLE_QUOTE_VALUE_RE.search(text[:first]):
+        return None
+    after = text[last + 3:]
+    if not _AFTER_TRIPLE_QUOTE_VALUE_RE.match(after):
+        return None
+
+    inner = text[first + 3:last]
+    if inner.startswith('\n'):
+        inner = inner[1:]
+    if inner.endswith('\n'):
+        inner = inner[:-1]
+
+    escaped = inner.replace('\\', '\\\\').replace('"', '\\"')
+    escaped = _escape_control_chars_plain(escaped)
+
+    return text[:first] + '"' + escaped + '"' + text[last + 3:]
+
+
 def _find_balanced(text: str, open_ch: str, close_ch: str) -> str | None:
     start = text.find(open_ch)
     if start == -1:
@@ -129,12 +199,29 @@ def loads_lenient(text: str):
         except ValueError:
             pass
 
+    # 1c) a Python-style """-wrapped value in place of a proper JSON string
+    #     (see _convert_python_triple_quoted_value) — tried before the
+    #     fence/balanced-brace steps for the same reason as 1b: it can
+    #     rescue an object that is otherwise already bare.
+    converted = _convert_python_triple_quoted_value(raw)
+    if converted is not None:
+        for candidate in (converted, _escape_raw_control_chars(converted)):
+            try:
+                return json.loads(candidate)
+            except ValueError:
+                continue
+
     # 2) a ```json ... ``` (or bare ``` ... ```) fence around the whole
     #    response.
     m = _FENCE_RE.match(raw)
     if m:
         body = m.group(1).strip()
-        for candidate in (body, _escape_raw_control_chars(body)):
+        candidates = [body, _escape_raw_control_chars(body)]
+        converted_body = _convert_python_triple_quoted_value(body)
+        if converted_body is not None:
+            candidates.append(converted_body)
+            candidates.append(_escape_raw_control_chars(converted_body))
+        for candidate in candidates:
             try:
                 return json.loads(candidate)
             except ValueError:
@@ -147,7 +234,12 @@ def loads_lenient(text: str):
     for open_ch, close_ch in (("{", "}"), ("[", "]")):
         candidate = _find_balanced(raw, open_ch, close_ch)
         if candidate is not None:
-            for c in (candidate, _escape_raw_control_chars(candidate)):
+            variants = [candidate, _escape_raw_control_chars(candidate)]
+            converted_candidate = _convert_python_triple_quoted_value(candidate)
+            if converted_candidate is not None:
+                variants.append(converted_candidate)
+                variants.append(_escape_raw_control_chars(converted_candidate))
+            for c in variants:
                 try:
                     return json.loads(c)
                 except ValueError:

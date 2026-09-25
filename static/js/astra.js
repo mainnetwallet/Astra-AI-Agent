@@ -514,8 +514,12 @@ function chatBubble(who, text, action, attachedFiles, artifacts, meta) {
   }
   const textEl = document.createElement("div");
   textEl.className = "msg-text";
-  textEl.innerHTML = String(text || "").replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
-    .replace(/`(.+?)`/g, "<code>$1</code>").replace(/\n/g, "<br>");
+  // Safe formatting (static/js/chat_format.js): text is HTML-escaped first,
+  // ``` fences become a code block with a Copy button.
+  textEl.innerHTML = (typeof AstraChatFormat !== "undefined")
+    ? AstraChatFormat.toHtml(text)
+    : esc(text).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+        .replace(/`(.+?)`/g, "<code>$1</code>").replace(/\n/g, "<br>");
   content.appendChild(textEl);
   if (artifacts && artifacts.length) {
     const artWrap = document.createElement("div");
@@ -1249,6 +1253,21 @@ function copyText(text) {
   }
   return fallback();
 }
+
+// Copy button on a chat code block (blocks are rendered by chat_format.js).
+// One delegated listener: message HTML is rebuilt on every restore/switch.
+document.addEventListener("click", (ev) => {
+  const btn = ev.target && ev.target.closest && ev.target.closest(".code-copy");
+  if (!btn) return;
+  const block = btn.closest(".code-block");
+  const code = block && block.querySelector("pre");
+  if (!code) return;
+  copyText(code.textContent || "").then(() => "Copied ✓", () => "Copy failed")
+    .then((label) => {
+      btn.textContent = label;
+      setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+    });
+});
 
 function buildBlock(title, text) {
   const wrap = document.createElement("div");

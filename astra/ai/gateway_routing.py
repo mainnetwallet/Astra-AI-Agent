@@ -57,6 +57,11 @@ GATEWAY_PROVIDER_SHORT = {
 REQUEST_CATEGORIES = (
     "simple", "general", "reasoning", "coding", "long_context",
     "structured_output", "tool_use", "vision",
+    # The Gateway's OWN control calls (chat pipeline: understand+assign and
+    # verify). They must answer with one strict JSON object and sit on the
+    # critical path of every chat turn, so they need a JSON-capable model and
+    # the lowest latency — not the best prose model. See `score_target`.
+    "control",
 )
 
 # Category → capability the model MUST declare (hard filter). Left out on
@@ -68,6 +73,7 @@ CATEGORY_HARD_CAPS: dict[str, tuple[str, ...]] = {
     "structured_output": ("json",),
     "tool_use": ("tools",),
     "vision": ("vision",),
+    "control": ("json",),
 }
 
 # Baseline latency estimate (ms), used only until a target has real
@@ -468,7 +474,15 @@ def score_target(model: Model, health: GatewayModelHealth, *, category: str,
     # latency — lower is better; use measured average once we have one
     est_latency_ms = (health.average_latency_ms if health.average_latency_ms
                       else GATEWAY_SPEED_ESTIMATE_MS.get(model.quality_class, 900.0))
-    score += max(0.0, 2.0 - est_latency_ms / 1000.0)
+    if category == "control":
+        # Control calls are two extra sequential round-trips around every
+        # chat answer, so latency dominates: double weight and a wider
+        # window (a 5s model no longer ties with a 2s one at score 0), plus
+        # a mild quality tilt so a tiny model is not picked on speed alone.
+        score += 2.0 * max(0.0, 3.0 - est_latency_ms / 1000.0)
+        score += {"high": 1.0, "mid": 0.5}.get(model.quality_class, 0.0)
+    else:
+        score += max(0.0, 2.0 - est_latency_ms / 1000.0)
 
     # baseline quality so higher-tier models aren't starved outside their
     # special-cased categories above

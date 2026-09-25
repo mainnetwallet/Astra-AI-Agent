@@ -1145,8 +1145,21 @@ class AstraAIGateway:
             # provider-aware fitting shrink the prompt to the chosen model.
             targets = eligible_targets(self._catalog, self.routing_state,
                                        category=category, context_tokens=0)
+        if not targets and category == "control":
+            # No configured model declares JSON support: control calls must
+            # still work, so fall back to the ordinary soft "general" ranking.
+            category = "general"
+            self.last_category = category
+            targets = eligible_targets(self._catalog, self.routing_state,
+                                       category=category,
+                                       context_tokens=context_tokens)
         ranked = rank_targets(targets, category=category)
-        ranked = prefer_last_successful(ranked, self.routing_state.last_successful())
+        if category != "control":
+            # "Stick to the last successful target" would pin a control call
+            # to whatever model last served ANY request (often a slow one);
+            # control calls rank purely on measured latency + health.
+            ranked = prefer_last_successful(
+                ranked, self.routing_state.last_successful())
         return category, ranked
 
     def _emit(self, kind: str, **data) -> None:

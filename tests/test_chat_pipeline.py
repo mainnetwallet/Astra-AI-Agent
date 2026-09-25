@@ -146,7 +146,7 @@ class TestGatewayCategoryOverride(unittest.TestCase):
     def test_pipeline_states_its_own_category_for_both_gateway_calls(self):
         pipe, gw, rt = make([understand(), verdict("complete")], ["ok"])
         pipe.run("hello")
-        self.assertEqual(gw.categories, ["general", "reasoning"])
+        self.assertEqual(gw.categories, ["control", "control"])
 
     def test_real_gateway_honours_category_over_keyword_sniffing(self):
         """A prompt that merely mentions 'vision' must not hard-filter out a

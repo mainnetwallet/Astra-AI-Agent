@@ -726,7 +726,7 @@ class ChatPipeline:
             raw = self.gateway.chat(
                 [{"role": "system", "content": UNDERSTAND_SYSTEM_PROMPT},
                  {"role": "user", "content": "\n\n".join(parts)}],
-                max_tokens=None, category="general", trace=req)
+                max_tokens=None, category="control", trace=req)
         except Exception as e:
             self._emit("chat.pipeline.understand_failed", error=str(e),
                        request=req, trace=req)
@@ -814,7 +814,7 @@ class ChatPipeline:
                 raw = self.gateway.chat(
                     [{"role": "system", "content": VERIFY_SYSTEM_PROMPT},
                      {"role": "user", "content": prompt}],
-                    max_tokens=None, category="reasoning",
+                    max_tokens=None, category="control",
                     trace=req)
             except Exception as e:
                 state["unavailable"] = str(e)

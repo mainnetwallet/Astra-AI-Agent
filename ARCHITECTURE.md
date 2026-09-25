@@ -213,10 +213,6 @@ User
       - inspects the LIVE runtime capability catalog (derived from the
         actual ToolRegistry on this turn, never hardcoded)
       - preserves the user's exact intent (final_request)
-      - decides the TASK TYPE + OUTPUT MODALITY from the actual request and
-        the live system context, and emits a structured routing decision:
-        {"routing": {"task_type": "image_generation",
-                     "output_modalities": ["image"], "intent": "..."}}
       - decides whether real tool execution is required, and which
         capability category performs it
       - emits a structured execution handoff:
@@ -267,28 +263,6 @@ dropped; no tool capability at all forces `required=false`). The decision
 travels to the Provider in the system-prompt runtime context *and* as the
 first context block of the tool loop, so it survives provider failover — a
 fallback model sees the identical requirement, tools and tool protocol.
-
-**Structured routing decision.** The same UNDERSTAND reply also carries a
-`routing` object; `astra.ai.gateway_contract.ProviderRoutingDecision` parses
-it, and `normalized()` keeps `task_type` only when it is one of `TASK_TYPES`,
-dropping an invented task to "no decision". It also reconciles the two halves
-of the decision: an image output — or the `image_generation` task — always
-resolves to `task_type="image_generation"` with
-`required_output_modalities=["image"]`.
-`ChatPipeline._resolve_task_type()` therefore treats the AI's decision as
-authoritative and uses the regex `classify()` ONLY as a fallback when the
-Gateway is unavailable or returns no usable decision — the classifier may
-never override an AI-understood intent. The resolved task type selects the
-execution path (plain chat/reasoning, the Agent Runtime tool loop, or the
-image-generation API), and the required modalities are handed to
-`RoutingRequest` so `AstraRouter` hard-filters to an adapter that really
-implements the API. The Gateway's UNDERSTAND prompt
-(`UNDERSTAND_SYSTEM_PROMPT`) defines Astra's capabilities, execution paths,
-output modalities and the exact task-type vocabulary, so the decision comes
-from the actual request and the live system context rather than from keyword
-matching. The original user request and the canonical conversation history
-are passed to the Gateway and the Provider unchanged; no artificial task hint
-is appended to the user's own words.
 
 **Verification uses execution evidence.** For an execution-required task,
 `ChatPipeline` builds the completion contract with
@@ -933,14 +907,6 @@ server smoke test. Notable files:
 - `test_security.py`, `test_per_key_health.py`,
   `test_provider_error_isolation.py` — redaction, credential health,
   and failure-isolation guarantees.
-- `test_ai_routing_decision.py` — the AI-driven routing decision (§1.3):
-  `ProviderRoutingDecision` shape/`normalized()` guarantees, the routing
-  vocabulary in `UNDERSTAND_SYSTEM_PROMPT`, English/Banglish/Bengali requests
-  across chat/coding/image routing on the Gateway's decision, the AI decision
-  overriding a misfiring regex (both directions), the regex fallback when the
-  Gateway is unavailable or returns an unknown task, the provider receiving
-  the original request + canonical history unchanged, and the
-  execution-required tool-loop branch.
 - `test_image_generation_flow.py` — the whole image chain (§1.5): intent
   detection for English/Banglish/Bengali, the router's model **and** adapter
   modality gate, `generate_image()` dispatch, the stored artifact, the chat

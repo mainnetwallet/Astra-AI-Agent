@@ -740,11 +740,21 @@ class TestRealImageGeneration(unittest.TestCase):
         meta = metadata_for("dall-e-3", "openai")
         self.assertNotIn("image", meta.get("output_modalities", ["text"]))
 
-    def test_stable_diffusion_model_has_image_output(self):
-        # The real Bedrock model id carries the provider prefix; capabilities
-        # come from the evidence registry, not from substring guessing.
-        meta = metadata_for("stability.stable-diffusion-xl-v1", "bedrock")
+    def test_paid_bedrock_image_model_has_no_image_output(self):
+        # Bedrock Nova Canvas / Titan / Stability are real image models but
+        # paid-only, so they are NOT in Astra's FREE image pool: no image
+        # output modality is advertised for them.
+        for mid in ("stability.stable-diffusion-xl-v1",
+                    "amazon.nova-canvas-v1:0",
+                    "amazon.titan-image-generator-v2:0"):
+            meta = metadata_for(mid, "bedrock")
+            self.assertNotIn("image", meta.get("output_modalities", []), mid)
+
+    def test_free_cloudflare_image_model_has_image_output(self):
+        meta = metadata_for("@cf/black-forest-labs/flux-1-schnell",
+                            "cloudflare")
         self.assertIn("image", meta.get("output_modalities", []))
+        self.assertIn("image_generation", meta.get("capabilities", []))
 
     def test_no_openai_adapter_so_tts_has_no_audio_output(self):
         meta = metadata_for("tts-1", "openai")
@@ -1029,8 +1039,10 @@ class TestImageGenerationEndToEndDispatch(unittest.TestCase):
             return "Here is a description of what you asked for."
 
     class _ImageAdapter:
-        name = "bedrock"
-        models = ["stability.stable-diffusion-xl-v1"]
+        # Cloudflare Workers AI is the repo's only verified FREE
+        # image-generation provider (see astra.ai.image_models).
+        name = "cloudflare"
+        models = ["@cf/black-forest-labs/flux-1-schnell"]
         pool = True
 
         def __init__(self):
@@ -1066,7 +1078,7 @@ class TestImageGenerationEndToEndDispatch(unittest.TestCase):
                       "content": "generate an image of a sunset over mountains"}])
         rr = router.route_request(req)
         self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "bedrock")
+        self.assertEqual(rr.provider, "cloudflare")
         self.assertTrue(rr.text.startswith("data:image/png;base64,"))
         self.assertEqual(text_adapter.chat_calls, 0)
         self.assertEqual(len(image_adapter.generate_calls), 1)
@@ -1081,7 +1093,7 @@ class TestImageGenerationEndToEndDispatch(unittest.TestCase):
                              messages=[{"role": "user", "content": text}])
         rr = router.route_request(req)
         self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "bedrock")
+        self.assertEqual(rr.provider, "cloudflare")
         self.assertEqual(text_adapter.chat_calls, 0)
 
     def test_bangla_script_image_request_routes_the_same_way(self):
@@ -1094,7 +1106,7 @@ class TestImageGenerationEndToEndDispatch(unittest.TestCase):
                              messages=[{"role": "user", "content": text}])
         rr = router.route_request(req)
         self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "bedrock")
+        self.assertEqual(rr.provider, "cloudflare")
         self.assertEqual(text_adapter.chat_calls, 0)
         self.assertEqual(len(image_adapter.generate_calls), 1)
         self.assertEqual(len(image_adapter.generate_calls), 1)
@@ -1108,7 +1120,7 @@ class TestImageGenerationEndToEndDispatch(unittest.TestCase):
                              messages=[{"role": "user", "content": text}])
         rr = router.route_request(req)
         self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "bedrock")
+        self.assertEqual(rr.provider, "cloudflare")
         self.assertEqual(text_adapter.chat_calls, 0)
 
     def test_explicit_text_provider_preference_is_soft_not_hard(self):
@@ -1125,7 +1137,7 @@ class TestImageGenerationEndToEndDispatch(unittest.TestCase):
                              messages=[{"role": "user", "content": "draw a cat"}])
         rr = router.route_request(req)
         self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "bedrock")
+        self.assertEqual(rr.provider, "cloudflare")
         self.assertEqual(text_adapter.chat_calls, 0)
 
     def test_normal_text_chat_is_unaffected(self):

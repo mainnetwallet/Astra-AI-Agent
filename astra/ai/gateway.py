@@ -702,8 +702,14 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
         if not self._accounts:
             raise ProviderError(
                 f"{self.name}: no account ids configured ({self.account_ids_env})")
+        # Only send parameters the model's published schema accepts, so a
+        # model like flux-1-schnell (prompt/steps only) never gets a 400 for
+        # an unsupported width/height.
+        from astra.ai.image_models import image_spec
+        spec = image_spec("cloudflare", model)
+        allowed = set(spec.params) if spec else {"prompt"}
         body = {"prompt": prompt}
-        if "flux-1-schnell" in model.lower() or "flux-2" in model.lower():
+        if "width" in allowed and "height" in allowed:
             try:
                 w, h = (int(x) for x in str(size).lower().split("x"))
             except (ValueError, AttributeError):
@@ -787,7 +793,12 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
                         continue
                     arch = item.get("architecture") or {}
                     outs = arch.get("output_modalities") or []
-                    if outs and "image" not in outs:
+                    if not outs or "image" not in outs:
+                        continue
+                    # OpenRouter marks its free variants with a ":free"
+                    # suffix; anything else is paid and must not enter the
+                    # FREE image pool.
+                    if not mid.endswith(":free"):
                         continue
                     found.append(mid)
             except Exception:
@@ -1704,8 +1715,8 @@ class AstraAIGateway:
         discovery API; every other connection uses its configured list.
         Only models the evidence registry recognizes are included."""
         from astra.ai.gateway_routing import GATEWAY_PROVIDER_SHORT
-        from astra.ai.image_models import (PROTOCOL_OPENAI_IMAGES, image_spec,
-                                           make_image_spec)
+        from astra.ai.image_models import (FREE_TRUE, PROTOCOL_OPENAI_IMAGES,
+                                           image_spec, make_image_spec)
         from astra.ai.models import Model, metadata_for
         out = []
         for conn in self.connections:
@@ -1731,13 +1742,21 @@ class AstraAIGateway:
                 except Exception:
                     live = set()
             for mid in mids:
-                override = None
-                if image_spec(short, mid) is None and mid in live:
-                    override = make_image_spec(
+                spec = image_spec(short, mid)
+                if spec is None and mid in live:
+                    # Live-discovered ids are only ever accepted when the
+                    # provider's own API reported them as FREE image models
+                    # (OpenRouter's ":free" variants); otherwise a paid model
+                    # could sneak into the free pool.
+                    spec = make_image_spec(
                         short, mid, PROTOCOL_OPENAI_IMAGES,
                         capabilities=("image_generation",),
-                        input_modalities=("text", "image"))
-                meta = metadata_for(mid, short, image_spec_override=override)
+                        input_modalities=("text", "image"),
+                        free_tier=FREE_TRUE,
+                        free_evidence="provider live catalog: free image output")
+                if spec is None or not spec.is_free:
+                    continue
+                meta = metadata_for(mid, short, image_spec_override=spec)
                 meta.pop("provider", None)
                 if "image" not in (meta.get("output_modalities") or []):
                     continue

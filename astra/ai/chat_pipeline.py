@@ -111,11 +111,11 @@ _NO_PROVIDER_CONFIGURED_MESSAGE = (
 # NEVER downgraded to a text model -- a text model cannot make an image,
 # and a written description would be a false answer.
 _NO_IMAGE_MODEL_MESSAGE = (
-    "✕ No image-generation model is currently configured or available.\n\n"
-    "Image toiri korar jonno kono image-capable model (Gemini image, "
-    "Cloudflare FLUX, OpenRouter image, Bedrock Nova Canvas/Titan) "
-    "configured ba healthy nei. API key + image model list set kore "
-    "abar chesta korun."
+    "✕ No currently available FREE image-generation model is available.\n\n"
+    "Astra shudhu free/free-tier image model diye chobi banay (ekhon: "
+    "Cloudflare Workers AI text-to-image). Kono free image model configured, "
+    "healthy ba free allocation-er moddhe nei. CLOUDFLARE_API_KEYS + "
+    "CLOUDFLARE_ACCOUNT_IDS set kore abar chesta korun."
 )
 _NO_GATEWAY_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI gateway-er API key set kora nei."

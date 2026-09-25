@@ -77,9 +77,15 @@ class CloudflareAdapter(CompatibleAdapter):
         with self._aidx_lock:
             account = self._accounts[self._aidx % len(self._accounts)]
             self._aidx += 1
+        # Build the request body ONLY from parameters the model's published
+        # schema accepts (astra.ai.image_models records them per model), so we
+        # never send an unsupported field (e.g. flux-1-schnell takes no
+        # width/height) and get a needless 400.
+        from astra.ai.image_models import image_spec
+        spec = image_spec("cloudflare", model)
+        allowed = set(spec.params) if spec else {"prompt"}
         body = {"prompt": prompt}
-        low = model.lower()
-        if "flux-1-schnell" in low or "flux-2" in low:
+        if "width" in allowed and "height" in allowed:
             try:
                 w, h = (int(x) for x in str(size).lower().split("x"))
             except (ValueError, AttributeError):

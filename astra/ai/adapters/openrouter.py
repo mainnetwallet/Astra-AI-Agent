@@ -50,7 +50,11 @@ class OpenRouterAdapter(CompatibleAdapter):
                         continue
                     arch = item.get("architecture") or {}
                     outs = arch.get("output_modalities") or []
-                    if outs and "image" not in outs:
+                    if not outs or "image" not in outs:
+                        continue
+                    # ":free" is OpenRouter's marker for the free variant;
+                    # a paid image model must never enter the free pool.
+                    if not mid.endswith(":free"):
                         continue
                     found.append(mid)
             except Exception:

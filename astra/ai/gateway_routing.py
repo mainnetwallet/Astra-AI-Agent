@@ -496,6 +496,13 @@ def meets_gateway_requirements(model: Model, *, category: str,
     need_mod = CATEGORY_REQUIRED_OUTPUT_MODALITY.get(category)
     if need_mod and need_mod not in (model.output_modalities or ["text"]):
         return False
+    if category in ("image_generation", "image_editing"):
+        # Free-only image pool: capability alone is not enough -- the model
+        # must be verified FREE/free-tier eligible (a paid image model must
+        # never be selected for a free request).
+        from astra.ai.image_models import is_free_image_model
+        if not is_free_image_model(model.provider, model.model_id):
+            return False
     if context_tokens and model.context_window < context_tokens:
         return False
     return True

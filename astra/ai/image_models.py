@@ -20,17 +20,27 @@ every kept model is recorded on its spec (`free_evidence`), and every
 removed model is listed in `REJECTED_IMAGE_MODELS` with the reason, so the
 audit is reproducible instead of being a claim in a commit message.
 
-Audited 2026-09-25 against the providers' CURRENT official sources:
+Audited 2026-09-25, RE-AUDITED 2026-09-26 against the providers' CURRENT
+official sources:
 
 * Cloudflare Workers AI -- https://developers.cloudflare.com/workers-ai/models/
   The free allocation is documented on
-  https://developers.cloudflare.com/workers-ai/platform/pricing/ :
-  "Our free allocation allows anyone to use a total of 10,000 Neurons per
-  day at no charge." Image models bill in Neurons and are NOT on the
-  paid-billing exception list, so text-to-image models are free-tier usable.
-  Kept models are the ones whose published input schema accepts a JSON
-  ``{"prompt": ...}`` body (schema-input.json), i.e. the ones Astra's
-  Workers AI adapter can actually invoke.
+  https://developers.cloudflare.com/workers-ai/platform/pricing/ . As of the
+  2026-09-26 re-audit, Cloudflare replaced the old blanket "10,000
+  Neurons/day" figure with a per-task-type table:
+  "Images -- Sum of 250 steps, up to 1024x1024 resolution" (LLM text and
+  embeddings get their own separate 10,000-tokens/day allocations; this
+  does not shrink the image allocation, it just states it directly in
+  steps instead of via the Neurons conversion). flux-1-schnell's low
+  default step count means this covers dozens of free images/day; an
+  SDXL-class model at ~20-50 steps covers roughly 5-12/day. Image models
+  are not on any paid-only exception list, so text-to-image stays
+  free-tier usable. Kept models are the ones whose published input schema
+  accepts a JSON ``{"prompt": ...}`` body (schema-input.json), i.e. the
+  ones Astra's Workers AI adapter can actually invoke. Spot-checked live on
+  2026-09-26: flux-1-schnell, stable-diffusion-xl-base-1.0 and
+  dreamshaper-8-lcm are still current in Cloudflare's own model-catalog
+  examples.
 
 * Google Gemini -- https://ai.google.dev/gemini-api/docs/pricing
   Every Gemini image model (``gemini-3.1-flash-image``,
@@ -57,6 +67,55 @@ Audited 2026-09-25 against the providers' CURRENT official sources:
 
 * Groq, Cerebras, SambaNova, Cohere, Mistral -- no image-generation API path
   in this repository at all -> never image-capable.
+
+2026-09-26 re-audit -- additional candidates investigated per the brief.
+None cleared the strict FREE bar (evidence recorded on each REJECTED_IMAGE_MODELS
+entry below); every one is either paid-only or offers a one-time/negligible
+promotional allowance rather than a recurring, genuinely usable free tier:
+
+* Together AI -- https://www.together.ai/models/flux-1-schnell (the "FLUX.1
+  [schnell] Free" listing) states in its own UI "This model is not available
+  on Together's Serverless API" / "Launching soon -- We'll email you when the
+  endpoint goes live." The live serverless image-pricing table
+  (https://www.together.ai/pricing) lists ONLY paid image models (SD XL
+  $0.0019/mp, FLUX.2 family, Qwen Image, etc.) -- zero free rows. Rejected as
+  not-yet-live, not "free but no adapter".
+
+* Hugging Face Inference Providers --
+  https://huggingface.co/docs/inference-providers/pricing : Free-tier users
+  get **$0.10/month** in credits, spendable on Inference Providers, and that
+  is the entirety of the free allocation (not a per-call free tier). The one
+  provider that used to be free-of-charge, "hf-inference", "focuses mostly on
+  CPU inference (e.g. embedding, text-ranking, text-classification, ...) --
+  not image generation" per the same docs; every text-to-image call
+  (https://huggingface.co/docs/inference-providers/tasks/text-to-image) is
+  routed to and billed by a paid partner (fal, Together, Replicate, Nscale,
+  Novita, WaveSpeedAI, ...) against that $0.10, which a single image can
+  exhaust. Rejected as not a genuinely usable free image-generation path.
+
+* Fal AI -- https://fal.ai/docs/documentation/model-apis/pricing : prepaid
+  credit billing per image/megapixel, "no standing free tier" (promotional
+  signup credits only, time-limited). Rejected: paid-only.
+
+* Replicate -- billed per second of compute / per image with no published
+  standing free tier for image models. Rejected: paid-only.
+
+* Fireworks AI -- https://fireworks.ai/blog/flux-launch : FLUX.1 [schnell]
+  and [dev] are billed per diffusion step ($0.0014 / $0.014 per default
+  image); only a one-time signup credit exists, not a recurring free tier.
+  Rejected: paid-only.
+
+* Nscale -- OpenAI-compatible image-generation API
+  (https://docs.nscale.com/docs/use-cases/image-generation) is priced
+  per-request with no documented free allocation. Rejected: paid-only.
+
+* Novita AI -- https://novita.ai/get-started : "We give each logged-in user
+  10 free chances to generate a picture" -- a one-time, non-renewing signup
+  allowance, then strictly pay-as-you-go (from $0.0015/image). Rejected: not
+  a recurring free tier, so not selectable for ongoing FREE-pool service.
+
+* WaveSpeedAI -- pay-as-you-go from ~$0.005/image with a one-time $1 signup
+  credit; no recurring free tier. Rejected: paid-only.
 
 Image requests are served by a SIMPLE SERIAL FALLBACK over this FREE pool: the
 eligible models are tried one after another in a deterministic, configurable
@@ -183,7 +242,11 @@ def _normalize(model_id: str) -> str:
 # Only models that passed the strict audit. `variants` are exact documented
 # family tokens, never generic words like "image".
 _CF_FREE = ("https://developers.cloudflare.com/workers-ai/platform/pricing/ "
-            "\u2014 10,000 free Neurons/day; image models not paid-only")
+            "\u2014 free allocation table (re-confirmed live 2026-09-26): "
+            "Images = sum of 250 free steps/day (up to 1024x1024); this "
+            "superseded the old blanket 10,000 Neurons/day description but "
+            "Images still bill in Neurons and are not on any paid-only "
+            "exception list")
 _CF_SCHEMA = ("https://developers.cloudflare.com/workers-ai/models/{}/"
               "schema-input.json")
 
@@ -288,6 +351,24 @@ _REJECT_PAID_ZAI = ("paid-only: Z.AI prices GLM-Image $0.015/image and "
                     "CogView-4 $0.01/image; no free tier")
 _REJECT_OR_PAID = ("no free model: OpenRouter's live catalog has zero "
                    "':free' image-output models and every image model is paid")
+_REJECT_TOGETHER_NOT_LIVE = (
+    "not currently free: Together's own model page marks FLUX.1 [schnell] "
+    "Free \"not available on Together's Serverless API\" / \"Launching "
+    "soon\"; the live serverless image pricing table has zero free rows")
+_REJECT_TOGETHER_PAID = "paid: listed on Together's live serverless image pricing table"
+_REJECT_HF_CREDITS = (
+    "not a genuine free tier: Free-tier HF users get $0.10/month total "
+    "credit for Inference Providers, and text-to-image is routed to a paid "
+    "partner provider billed against that $0.10 -- a single image can "
+    "exhaust it; hf-inference itself no longer serves image generation")
+_REJECT_FAL_PAID = "paid-only: prepaid per-image/megapixel credits, no standing free tier (signup promo credits only)"
+_REJECT_REPLICATE_PAID = "paid-only: billed per second/image, no published standing free tier"
+_REJECT_FIREWORKS_PAID = "paid-only: billed per diffusion step ($0.0014-$0.014/image); only a one-time signup credit"
+_REJECT_NSCALE_PAID = "paid-only OpenAI-compatible image API; no documented free allocation"
+_REJECT_NOVITA_ONE_TIME = (
+    "not a recurring free tier: 10 free image \"chances\" once per signup, "
+    "then strictly pay-as-you-go from $0.0015/image")
+_REJECT_WAVESPEED_PAID = "paid-only, pay-as-you-go from ~$0.005/image; only a one-time $1 signup credit"
 
 REJECTED_IMAGE_MODELS: dict = {
     # Gemini — capable, but paid-only (and 2.5-flash-image deprecated).
@@ -336,6 +417,24 @@ REJECTED_IMAGE_MODELS: dict = {
         "adapter mismatch: current input schema requires multipart/form-data"),
     ("cloudflare", "@cf/black-forest-labs/flux-2-klein-9b"): (
         "adapter mismatch: current input schema requires multipart/form-data"),
+
+    # ── 2026-09-26 re-audit: additional candidates investigated, none free ──
+    ("together", "black-forest-labs/FLUX.1-schnell-Free"): _REJECT_TOGETHER_NOT_LIVE,
+    ("together", "black-forest-labs/FLUX.1-schnell"): _REJECT_TOGETHER_PAID,
+    ("together", "black-forest-labs/FLUX.1.1-pro"): _REJECT_TOGETHER_PAID,
+    ("together", "stabilityai/stable-diffusion-xl-base-1.0"): _REJECT_TOGETHER_PAID,
+    ("huggingface", "black-forest-labs/FLUX.1-schnell"): _REJECT_HF_CREDITS,
+    ("huggingface", "black-forest-labs/FLUX.1-dev"): _REJECT_HF_CREDITS,
+    ("huggingface", "Qwen/Qwen-Image"): _REJECT_HF_CREDITS,
+    ("fal", "fal-ai/flux/schnell"): _REJECT_FAL_PAID,
+    ("fal", "fal-ai/flux/dev"): _REJECT_FAL_PAID,
+    ("replicate", "black-forest-labs/flux-schnell"): _REJECT_REPLICATE_PAID,
+    ("replicate", "stability-ai/sdxl"): _REJECT_REPLICATE_PAID,
+    ("fireworks", "accounts/fireworks/models/flux-1-schnell-fp8"): _REJECT_FIREWORKS_PAID,
+    ("fireworks", "accounts/fireworks/models/flux-1-dev-fp8"): _REJECT_FIREWORKS_PAID,
+    ("nscale", "black-forest-labs/FLUX.1-schnell"): _REJECT_NSCALE_PAID,
+    ("novita", "flux-1-schnell"): _REJECT_NOVITA_ONE_TIME,
+    ("wavespeed", "wavespeed-ai/flux-schnell"): _REJECT_WAVESPEED_PAID,
 }
 
 

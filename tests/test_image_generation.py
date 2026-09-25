@@ -304,6 +304,110 @@ class TestFreeImagePool(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 1b. 2026-09-26 re-audit — newly investigated FREE image-provider candidates
+# ═══════════════════════════════════════════════════════════════════════════
+class TestReauditedProviderCandidates(unittest.TestCase):
+    """None of the additionally-investigated providers cleared the strict
+    FREE bar; each rejection must be recorded with real evidence rather than
+    silently absent from the registry."""
+
+    def test_together_ai_flux_schnell_free_is_not_yet_live(self):
+        self.assertFalse(is_image_model(
+            "together", "black-forest-labs/FLUX.1-schnell-Free"))
+        reason = rejected_image_reason(
+            "together", "black-forest-labs/FLUX.1-schnell-Free")
+        self.assertIn("not currently free", reason)
+        self.assertIn("Launching soon", reason)
+
+    def test_together_ai_paid_image_models_are_rejected(self):
+        for mid in ("black-forest-labs/FLUX.1-schnell",
+                    "black-forest-labs/FLUX.1.1-pro",
+                    "stabilityai/stable-diffusion-xl-base-1.0"):
+            self.assertFalse(is_image_model("together", mid), mid)
+            self.assertIn("paid",
+                          rejected_image_reason("together", mid).lower())
+
+    def test_huggingface_inference_providers_rejected_for_negligible_credit(self):
+        for mid in ("black-forest-labs/FLUX.1-schnell",
+                    "black-forest-labs/FLUX.1-dev", "Qwen/Qwen-Image"):
+            self.assertFalse(is_image_model("huggingface", mid), mid)
+            reason = rejected_image_reason("huggingface", mid)
+            self.assertIn("not a genuine free tier", reason)
+            self.assertIn("$0.10/month", reason)
+
+    def test_fal_ai_is_paid_only_no_standing_free_tier(self):
+        for mid in ("fal-ai/flux/schnell", "fal-ai/flux/dev"):
+            self.assertFalse(is_image_model("fal", mid), mid)
+            self.assertIn("no standing free tier",
+                          rejected_image_reason("fal", mid))
+
+    def test_replicate_is_paid_only(self):
+        for mid in ("black-forest-labs/flux-schnell", "stability-ai/sdxl"):
+            self.assertFalse(is_image_model("replicate", mid), mid)
+            self.assertIn("paid-only",
+                          rejected_image_reason("replicate", mid))
+
+    def test_fireworks_ai_is_billed_per_step_not_free(self):
+        for mid in ("accounts/fireworks/models/flux-1-schnell-fp8",
+                    "accounts/fireworks/models/flux-1-dev-fp8"):
+            self.assertFalse(is_image_model("fireworks", mid), mid)
+            reason = rejected_image_reason("fireworks", mid)
+            self.assertIn("per diffusion step", reason)
+
+    def test_nscale_has_no_documented_free_allocation(self):
+        self.assertFalse(is_image_model(
+            "nscale", "black-forest-labs/FLUX.1-schnell"))
+        self.assertIn("no documented free allocation", rejected_image_reason(
+            "nscale", "black-forest-labs/FLUX.1-schnell"))
+
+    def test_novita_one_time_trial_allowance_is_not_a_recurring_free_tier(self):
+        self.assertFalse(is_image_model("novita", "flux-1-schnell"))
+        reason = rejected_image_reason("novita", "flux-1-schnell")
+        self.assertIn("not a recurring free tier", reason)
+
+    def test_wavespeed_is_paid_only(self):
+        self.assertFalse(is_image_model("wavespeed", "wavespeed-ai/flux-schnell"))
+        self.assertIn("paid-only", rejected_image_reason(
+            "wavespeed", "wavespeed-ai/flux-schnell"))
+
+    def test_none_of_the_reaudited_providers_entered_the_free_pool(self):
+        # The strict audit found no additional genuinely-free provider, so
+        # the pool must remain exactly what it was before this re-audit.
+        investigated = {"together", "huggingface", "fal", "replicate",
+                        "fireworks", "nscale", "novita", "wavespeed"}
+        pool_providers = {p for p, _m in image_pool()}
+        self.assertEqual(pool_providers & investigated, set())
+        self.assertEqual(FREE_IMAGE_PROVIDERS, frozenset({"cloudflare"}))
+
+    def test_reaudit_evidence_never_invents_a_free_claim(self):
+        # Every rejected (provider, model) pair investigated in the
+        # re-audit must have a non-empty, specific reason -- never a blank
+        # "unknown" rejection, which would defeat the audit-trail purpose.
+        investigated_pairs = [
+            ("together", "black-forest-labs/FLUX.1-schnell-Free"),
+            ("huggingface", "black-forest-labs/FLUX.1-schnell"),
+            ("fal", "fal-ai/flux/schnell"),
+            ("replicate", "black-forest-labs/flux-schnell"),
+            ("fireworks", "accounts/fireworks/models/flux-1-schnell-fp8"),
+            ("nscale", "black-forest-labs/FLUX.1-schnell"),
+            ("novita", "flux-1-schnell"),
+            ("wavespeed", "wavespeed-ai/flux-schnell"),
+        ]
+        for provider, mid in investigated_pairs:
+            reason = rejected_image_reason(provider, mid)
+            self.assertTrue(reason, f"{provider}/{mid} has no recorded reason")
+            self.assertGreater(len(reason), 20, f"{provider}/{mid} reason too thin")
+
+    def test_cloudflare_free_evidence_reflects_the_current_per_task_table(self):
+        # Re-audit 2026-09-26: Cloudflare's pricing docs now express the
+        # image free allocation directly in steps/day rather than only via
+        # the old blanket Neurons/day figure.
+        spec = image_spec("cloudflare", FLUX)
+        self.assertIn("250", spec.free_evidence)
+        self.assertIn("steps", spec.free_evidence.lower())
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 2. Classification — English, Bangla, Banglish; vision vs image_generation
 # ═══════════════════════════════════════════════════════════════════════════
 class TestImageRequestClassification(unittest.TestCase):

@@ -568,7 +568,8 @@ class ChatPipeline:
                  max_tokens: int | None = None, registry=None, terminal=None,
                  runtime=None, execution_history=None, max_tool_steps: int = 8,
                  approvals=None, fallback=None,
-                 agent_brain: str = "provider"):
+                 agent_brain: str = "provider",
+                 artifact_dir: str | None = None):
         self.gateway = gateway
         self.router = router
         self.events = events
@@ -603,6 +604,11 @@ class ChatPipeline:
         # astra/ai/agent_tool_loop.py.
         self.agent_brain = (str(agent_brain or "provider").strip().lower()
                             or "provider")
+        # Where generated artifacts (images/audio/...) are stored and served
+        # from. Injectable so callers (and tests) can point it at a writable,
+        # per-run directory instead of relying on a shared system temp path.
+        self.artifact_dir = (artifact_dir or os.path.join(
+            tempfile.gettempdir(), "astra", "artifacts"))
 
     def _tool_loop_usable(self) -> bool:
         if self.registry is None:
@@ -1342,11 +1348,10 @@ class ChatPipeline:
         rr._port_kind = "gateway"
         return rr
 
-    @staticmethod
-    def _artifacts(text: str, message: str) -> list:
+    def _artifacts(self, text: str, message: str) -> list:
         try:
-            d = os.path.join(tempfile.gettempdir(), "astra", "artifacts")
-            return extract_artifacts(text, d, detect_output_type(message))
+            return extract_artifacts(text, self.artifact_dir,
+                                     detect_output_type(message))
         except Exception:
             return []
 

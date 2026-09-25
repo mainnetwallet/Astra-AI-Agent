@@ -164,12 +164,23 @@ FREE_FALSE = "false"
 FREE_UNKNOWN = "unknown"
 
 # API protocols this repository can actually speak for image generation.
-#: OpenAI-style ``POST /images/generations`` (Z.AI GLM-Image/CogView).
+# Protocol ownership is explicit: a model is only ever dispatched through the
+# protocol its provider actually documents.
+#   * openrouter -> ``POST /api/v1/images`` (dedicated Images API)
+#   * cloudflare -> Workers AI ``/ai/run/<model>``
+#   * gemini     -> native ``models/<id>:generateContent``
+#   * zai        -> OpenAI-style ``POST /images/generations``
+#   * bedrock    -> ``InvokeModel``
+#: OpenAI-style ``POST /images/generations`` (Z.AI GLM-Image/CogView). NOT
+#: OpenRouter, which uses its own dedicated endpoint below.
 PROTOCOL_OPENAI_IMAGES = "openai_images_generations"
 #: OpenRouter dedicated Images API: ``POST /api/v1/images``.
 PROTOCOL_OPENROUTER_IMAGES = "openrouter_images"
+#: Gemini native image output: ``models/<id>:generateContent``.
 PROTOCOL_GEMINI_CONTENT = "gemini_generate_content_image"
+#: Cloudflare Workers AI image endpoint: ``/ai/run/<model>``.
 PROTOCOL_CLOUDFLARE_RUN = "cloudflare_workers_ai_run"
+#: Bedrock ``InvokeModel`` (Nova Canvas / Titan Image / Stability).
 PROTOCOL_BEDROCK_INVOKE = "bedrock_invoke_model"
 
 SUPPORTED_PROTOCOLS = frozenset({

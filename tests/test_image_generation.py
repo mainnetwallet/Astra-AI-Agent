@@ -142,6 +142,26 @@ def _cfg(**env):
     return c
 
 
+def _artifact_path(artifact_dir, art):
+    """On-disk path of a stored artifact (store_artifact names files
+    ``{id}_{filename}``)."""
+    return os.path.join(artifact_dir, "%s_%s" % (art["id"], art["filename"]))
+
+
+def _assert_readable_png_artifact(test, art, artifact_dir):
+    """Assert the artifact metadata is real: the file exists on disk, is
+    readable, has the expected image MIME and holds the exact PNG bytes the
+    provider returned -- never just a metadata claim."""
+    path = _artifact_path(artifact_dir, art)
+    test.assertTrue(os.path.isfile(path), path)
+    test.assertEqual(art["mime_type"], "image/png")
+    test.assertGreater(art["size"], 0)
+    with open(path, "rb") as f:
+        raw = f.read()
+    test.assertEqual(raw, PNG)
+    return path
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. FREE image pool — evidence, not model-name guessing
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1720,7 +1740,26 @@ class TestImageArtifactsAndFrontend(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 # 8. Chat pipeline wiring: image in, artifact out, never simple_chat
 # ═══════════════════════════════════════════════════════════════════════════
-class TestPipelineImageWiring(unittest.TestCase):
+class _TempArtifactDirMixin:
+    """Give a TestCase a deterministic, writable artifact directory that is
+    removed automatically after the test.
+
+    Without this, ChatPipeline would fall back to a shared system temp path
+    (``{tempdir}/astra/artifacts``) whose permissions this test does not own.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._artifacts_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._artifacts_tmp.cleanup)
+        self.artifact_dir = self._artifacts_tmp.name
+
+    def _pipeline(self, gw, rt):
+        from astra.ai.chat_pipeline import ChatPipeline
+        return ChatPipeline(gw, rt, artifact_dir=self.artifact_dir)
+
+
+class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
     """Real ChatPipeline with a scripted Gateway + scripted router."""
 
     class _Gateway:
@@ -1767,35 +1806,32 @@ class TestPipelineImageWiring(unittest.TestCase):
                                  provider="cloudflare", model=FLUX)
 
     def test_image_request_goes_through_the_gateway_image_path(self):
-        from astra.ai.chat_pipeline import ChatPipeline
         gw, rt = self._Gateway(), self._Router()
-        out = ChatPipeline(gw, rt).run("akta cat photo create kore dao")
+        out = self._pipeline(gw, rt).run("akta cat photo create kore dao")
         self.assertTrue(out["ok"])
         self.assertEqual(gw.image_calls[0][0], "akta cat photo create kore dao")
         self.assertEqual(rt.requests, [])          # router not used
         arts = out.get("artifacts") or []
         self.assertEqual(len(arts), 1)
         self.assertEqual(arts[0]["artifact_type"], "image")
+        _assert_readable_png_artifact(self, arts[0], self.artifact_dir)
         self.assertNotIn("base64,", out["reply"])
 
     def test_edit_request_uses_editing_mode(self):
-        from astra.ai.chat_pipeline import ChatPipeline
         gw, rt = self._Gateway(), self._Router()
-        ChatPipeline(gw, rt).run("ei photo ta edit kore dao")
+        self._pipeline(gw, rt).run("ei photo ta edit kore dao")
         self.assertTrue(gw.image_calls[0][2], "editing flag must be set")
 
     def test_gateway_without_image_path_falls_back_to_the_router(self):
-        from astra.ai.chat_pipeline import ChatPipeline
         gw, rt = self._Gateway(), self._Router()
         gw.generate_image = None                   # no Gateway image path
-        out = ChatPipeline(gw, rt).run("photo generate koro")
+        out = self._pipeline(gw, rt).run("photo generate koro")
         self.assertTrue(out["ok"])
         self.assertEqual(len(rt.requests), 1)
         self.assertEqual(rt.requests[0].task_type, "image_generation")
         self.assertEqual(rt.requests[0].required_output_modalities, ["image"])
 
     def test_no_free_image_model_gives_a_clear_error_and_no_text_answer(self):
-        from astra.ai.chat_pipeline import ChatPipeline
         from astra.ai.router import RoutingResult
         gw, rt = self._Gateway(), self._Router()
 
@@ -1806,7 +1842,7 @@ class TestPipelineImageWiring(unittest.TestCase):
 
         rt.route_request = fail
         gw.generate_image = None
-        out = ChatPipeline(gw, rt).run("akta cat photo create kore dao")
+        out = self._pipeline(gw, rt).run("akta cat photo create kore dao")
         self.assertFalse(out["ok"])
         self.assertIn("No currently available FREE image-generation model",
                       out["reply"])
@@ -1814,7 +1850,6 @@ class TestPipelineImageWiring(unittest.TestCase):
         self.assertEqual(rt.requests[0].task_type, "image_generation")
 
     def test_gateway_image_error_falls_back_to_the_router_not_to_text_chat(self):
-        from astra.ai.chat_pipeline import ChatPipeline
         gw, rt = self._Gateway(), self._Router()
 
         def boom(*a, **kw):
@@ -1822,7 +1857,7 @@ class TestPipelineImageWiring(unittest.TestCase):
                                 "configured or available.")
 
         gw.generate_image = boom
-        ChatPipeline(gw, rt).run("akta cat photo create kore dao")
+        self._pipeline(gw, rt).run("akta cat photo create kore dao")
         self.assertEqual(len(rt.requests), 1)
         self.assertEqual(rt.requests[0].task_type, "image_generation")
 
@@ -1831,7 +1866,7 @@ class TestPipelineImageWiring(unittest.TestCase):
 # 8b. End-to-end turn: real ChatPipeline + real AstraAIGateway, provider
 #     HTTP mocked at the adapter boundary (no image credentials here).
 # ═══════════════════════════════════════════════════════════════════════════
-class TestEndToEndImageTurn(unittest.TestCase):
+class TestEndToEndImageTurn(_TempArtifactDirMixin, unittest.TestCase):
     _BRIEF = ('{"final_request": "x", "was_incomplete": false, '
               '"provider": "", "model": "", "criteria": [], "reason": "", '
               '"execution": {"required": false, "capability": "", '
@@ -1839,7 +1874,6 @@ class TestEndToEndImageTurn(unittest.TestCase):
               '"intent": ""}}')
 
     def _run(self, text, *conns):
-        from astra.ai.chat_pipeline import ChatPipeline
         from astra.ai.gateway import AstraAIGateway
         real = AstraAIGateway(connections=list(conns))
 
@@ -1868,7 +1902,7 @@ class TestEndToEndImageTurn(unittest.TestCase):
 
         rt = TestPipelineImageWiring._Router()
         gw = Gw()
-        out = ChatPipeline(gw, rt).run(text)
+        out = self._pipeline(gw, rt).run(text)
         return out, gw, real, rt
 
     def test_banglish_cat_photo_fails_over_and_yields_an_artifact(self):
@@ -1888,6 +1922,7 @@ class TestEndToEndImageTurn(unittest.TestCase):
         self.assertEqual(len(arts), 1)
         self.assertEqual(arts[0]["artifact_type"], "image")
         self.assertTrue(arts[0]["mime_type"].startswith("image/"))
+        _assert_readable_png_artifact(self, arts[0], self.artifact_dir)
         self.assertNotIn("base64,", out["reply"])
         health = real.routing_state.snapshot()["model_health"]
         self.assertIn("cloudflare:" + LIGHTNING, health)
@@ -1914,6 +1949,7 @@ class TestEndToEndImageTurn(unittest.TestCase):
         self.assertTrue(arts[0]["mime_type"].startswith("image/"))
         self.assertTrue(arts[0]["id"])
         self.assertTrue(arts[0]["filename"])
+        _assert_readable_png_artifact(self, arts[0], self.artifact_dir)
         self.assertNotIn("base64,", out["reply"])
 
 

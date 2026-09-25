@@ -519,8 +519,13 @@ class _GatewayCompatibleConnection:
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1) -> str:
         """Generate an image via the OpenAI-compatible Images API
-        (`POST /images/generations`). Connections whose image API is a
-        different protocol override this (Gemini, Cloudflare, Bedrock).
+        (`POST /images/generations` + `response_format=b64_json`), used by
+        connections whose documented image protocol this is (Z.AI
+        GLM-Image/CogView). Connections with a different documented protocol
+        override this method, so protocol ownership is explicit: OpenRouter
+        (``POST /api/v1/images``), Gemini (native ``:generateContent``),
+        Cloudflare (Workers AI ``/ai/run/<model>``) and Bedrock
+        (``InvokeModel``).
         Returns `data:<mime>;base64,<...>`; a 429/5xx/network error
         propagates so the Gateway fails over to the next image target.
         """

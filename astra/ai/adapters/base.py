@@ -268,12 +268,16 @@ class CompatibleAdapter(AIProvider):
                        size: str = "1024x1024", n: int = 1) -> str:
         """Generate an image through the provider's REAL image API.
 
-        Default implementation: the OpenAI-compatible
-        `POST /images/generations` endpoint, which is the documented image
-        API for OpenRouter's Image API and Z.AI's GLM-Image/CogView. Providers
-        whose image API is a different protocol override this method
-        (Gemini native `:generateContent`, Cloudflare Workers AI
-        `/ai/run/<model>`, Bedrock `InvokeModel`).
+        Default implementation: the OpenAI-compatible Images API
+        (`POST /images/generations` + `response_format=b64_json`), the
+        documented image API for Z.AI's GLM-Image/CogView. Providers with a
+        different documented protocol override this method, so protocol
+        ownership is explicit:
+          * OpenRouter -> ``POST /api/v1/images`` (dedicated Images API)
+          * Gemini     -> native ``models/<id>:generateContent``
+          * Cloudflare -> Workers AI ``/ai/run/<model>``
+          * Bedrock    -> ``InvokeModel``
+        OpenRouter must NOT fall back to this OpenAI-compatible path.
 
         Returns a `data:<mime>;base64,<...>` string -- the exact shape
         `astra.ai.artifact_extraction` turns into a real image artifact.

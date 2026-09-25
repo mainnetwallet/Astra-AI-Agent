@@ -56,9 +56,7 @@ from __future__ import annotations
 import os
 import tempfile
 
-from astra.ai.artifact_extraction import (detect_output_type,
-                                          extract_artifacts,
-                                          extract_runtime_artifacts)
+from astra.ai.artifact_extraction import detect_output_type, extract_artifacts
 from astra.ai.capability_context import (RuntimeCapabilities,
                                          collect_runtime_capabilities,
                                          execution_policy_block)
@@ -1238,44 +1236,13 @@ class ChatPipeline:
                 trace=req))
         return rr
 
-    def _artifacts(self, text: str, message: str, scope=None) -> list:
-        """Every artifact the model made visible for this reply: anything
-        it embedded directly in its text (base64 image/audio, a data code
-        block), PLUS — separately — any binary file a tool call actually
-        wrote inside the isolated runtime this turn (an image, audio,
-        video or document saved to /workspace by a `runtime_command`, for
-        example). The second part exists so a generated file is attached
-        even when the model only describes it in prose instead of
-        embedding it: the reply text is not the only evidence of what was
-        produced, the execution history is (see artifact_extraction.py).
-        """
-        d = os.path.join(tempfile.gettempdir(), "astra", "artifacts")
+    @staticmethod
+    def _artifacts(text: str, message: str) -> list:
         try:
-            artifacts = extract_artifacts(text, d, detect_output_type(message))
+            d = os.path.join(tempfile.gettempdir(), "astra", "artifacts")
+            return extract_artifacts(text, d, detect_output_type(message))
         except Exception:
-            artifacts = []
-        try:
-            entries = (self.execution_history.entries(scope)
-                      if scope and self.execution_history else [])
-            if entries:
-                seen_files = {a.get("filename") for a in artifacts}
-                for art in extract_runtime_artifacts(
-                        entries, self._download_runtime_file, d):
-                    if art.get("filename") not in seen_files:
-                        artifacts.append(art)
-                        seen_files.add(art.get("filename"))
-        except Exception:
-            pass
-        return artifacts
-
-    def _download_runtime_file(self, path: str):
-        """Read a file's bytes out of the isolated Agent Runtime by guest
-        path, for `_artifacts`'s auto-attach pass. `None`/no runtime
-        configured means nothing to try; a missing/unreadable file raises
-        and is skipped by the caller — never treated as a hard failure."""
-        if self.runtime is None:
-            return None
-        return self.runtime.default().download_file(path)
+            return []
 
     @staticmethod
     def _reply(text, ok, data, artifacts=None, note=""):
@@ -1562,7 +1529,7 @@ class ChatPipeline:
             # plainly rather than silently skipping verification forever.
             reply_text = rr.text + "\n\n" + _NO_GATEWAY_CONFIGURED_MESSAGE
             return self._reply(reply_text, True, trace,
-                               self._artifacts(rr.text, raw, scope))
+                               self._artifacts(rr.text, raw))
 
         # 3) Gateway verifies; fix/redo loop until complete or bound reached
         state = {"verifications": 0, "unavailable": "", "last_missing": []}
@@ -1613,7 +1580,7 @@ class ChatPipeline:
                        op=f"chat:{req}", request=req, trace=req, terminal=True)
             trace["verification"] = {"status": "error", "reason": str(e)}
             return self._reply(
-                rr.text, True, trace, self._artifacts(rr.text, raw, scope),
+                rr.text, True, trace, self._artifacts(rr.text, raw),
                 note="\n\n⚠️ Gateway verification kaj korenni — uttor ta "
                      "verify kora hoyni.")
 
@@ -1626,7 +1593,7 @@ class ChatPipeline:
         self._emit("chat.pipeline.finished", status=outcome.status,
                    attempts=attempts, op=f"chat:{req}", request=req,
                    trace=req, terminal=True)
-        arts = self._artifacts(text, raw, scope)
+        arts = self._artifacts(text, raw)
 
         if outcome.status == COMPLETE:
             return self._reply(text, True, trace, arts)

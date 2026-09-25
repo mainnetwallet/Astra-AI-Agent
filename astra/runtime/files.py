@@ -228,33 +228,6 @@ def read_text(paths: RuntimePaths, path: str, *, max_bytes: int = 200_000) -> di
             "text": data.decode("utf-8", "replace")}
 
 
-def read_binary(paths: RuntimePaths, path: str, *,
-                max_bytes: int = 50_000_000) -> dict:
-    """Read a file inside the runtime as raw bytes, base64-encoded.
-
-    Counterpart to `read_text` for non-text output (images, audio, video,
-    documents, archives, ...) that a tool created inside the isolated
-    runtime and that needs to travel back out to the caller (e.g. so it can
-    be attached to a chat reply as a viewable/downloadable artifact). The
-    same guest-workspace containment as every other file op here applies:
-    only /workspace, /root and /tmp are addressable, and the resolved path
-    is re-checked against symlink escapes.
-    """
-    import base64
-    host = paths.resolve(path, must_exist=True)
-    if os.path.isdir(host):
-        raise ValidationError(f"is a directory: {path}")
-    size = os.path.getsize(host)
-    if size > max(1, int(max_bytes)):
-        raise ValidationError(
-            f"file exceeds the {max(1, int(max_bytes)) // (1024 * 1024)} MB "
-            f"download limit: {path} ({size} bytes)")
-    with open(host, "rb") as fh:
-        data = fh.read()
-    return {"path": paths.guest_of(host), "size": size,
-            "content_base64": base64.b64encode(data).decode("ascii")}
-
-
 # -- mutation ---------------------------------------------------------------
 
 def make_directory(paths: RuntimePaths, path: str, *, parents: bool = True) -> dict:

@@ -470,25 +470,6 @@ class AstraRouter:
             hard = TASK_HARD_CAPABILITIES.get(req.task_type)
             if hard:
                 req.required_capabilities = list(hard)
-        if req.task_type == "image_generation":
-            # An image request MUST declare the image output modality and the
-            # image capability even when the caller only set the task type:
-            # that is what makes `meets_hard_requirements` reject every
-            # text/vision model, and what the adapter-side gate in
-            # astra.ai.capabilities keys on. Never inferred from "vision"
-            # (image *understanding*), which is a different capability.
-            mods = list(req.required_output_modalities or [])
-            if "image" not in mods:
-                mods.append("image")
-            req.required_output_modalities = mods
-            if "image" not in req.required_capabilities:
-                req.required_capabilities.append("image")
-        elif "chat" not in req.required_capabilities:
-            # Every non-image task is answered in text, so it must land on a
-            # model that can actually chat. A generation-only model (a
-            # diffusion model whose only capability is ["image"]) is never a
-            # valid answer to "explain this".
-            req.required_capabilities.append("chat")
 
     def _route_end(self, req: RoutingRequest, op: str, kind: str, **data) -> None:
         """Emit the terminal event for one route operation, carrying the same

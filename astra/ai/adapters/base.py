@@ -28,32 +28,11 @@ DEFAULT_TIMEOUT = 60
 STREAM_TIMEOUT = 120
 
 
-def _with_image_models(configured: list, image_models) -> list[str]:
-    """Configured chat models + the provider's real image models (deduped).
-
-    Image models are appended only when the provider is actually in use
-    (`configured` non-empty), so a provider with no configured models never
-    gains a phantom image catalog.
-    """
-    out = list(configured)
-    if not out:
-        return out
-    for m in (image_models or ()):
-        if m not in out:
-            out.append(m)
-    return out
-
-
 class CompatibleAdapter(AIProvider):
     """OpenAI-compatible provider with credential-pool + normalized errors."""
 
     name: str = "compatible"
     models: list[str] = []
-    # Genuinely image-GENERATING models that this provider's real image API
-    # serves (see `generate_image`). Declared only by adapters that actually
-    # implement that API; they are merged into `models` so they are routable
-    # and pick up image metadata (astra.ai.models) — never a text/vision model.
-    image_models: tuple = ()
     base_url: str = ""                       # e.g. https://api.groq.com/openai/v1
     capabilities: list[str] = ["chat", "stream", "tools", "json"]
     extra_headers: dict = {}                  # static headers e.g. api-key
@@ -73,14 +52,8 @@ class CompatibleAdapter(AIProvider):
     # -- configuration --------------------------------------------------------
     def _configured_models(self) -> list[str]:
         if self.config and self.models_env:
-            configured = self.config.getlist(self.models_env, default=[])
-        else:
-            configured = list(self.models)
-        # A provider that is actually configured for chat also serves its own
-        # real image models through the same credential — expose them so an
-        # image request has somewhere to land. Guarded on `configured` so an
-        # unconfigured provider never fabricates image capability.
-        return _with_image_models(configured, self.image_models)
+            return self.config.getlist(self.models_env, default=[])
+        return list(self.models)
 
     def _configured_base_url(self) -> str:
         """Env override wins when set, else the class default. Normalises a

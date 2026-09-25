@@ -48,16 +48,9 @@ _FAMILIES: dict[str, tuple[str, list[str], int, str, str, list[str]]] = {
     "lfm":      ("liquid", ["chat"], 64000, "mid", "cheap", []),
     "mercury":  ("xai", ["chat", "tools"], 200000, "high", "premium", ["stream"]),
     "nova-lite":("bedrock", ["chat", "tools", "json"], 200000, "mid", "cheap", ["stream"]),
-    # Image GENERATION families: they PRODUCE images, they do not chat. The
-    # `image` capability (never `vision` — that is image *understanding*) is
-    # what marks a model as a real generator for routing, and these ids are
-    # only ever served by an adapter with a real image API (Bedrock
-    # InvokeModel, Cloudflare Workers AI `/ai/run`).
-    "stable-diffusion": ("bedrock", ["image"], 4096, "high", "premium", []),
-    "stability":("bedrock", ["image"], 4096, "high", "premium", []),
-    "titan-image":("bedrock", ["image"], 4096, "mid", "mid", []),
-    "flux":("cloudflare", ["image"], 4096, "mid", "mid", []),
-    "lucid":("cloudflare", ["image"], 4096, "mid", "mid", []),
+    "stable-diffusion": ("bedrock", ["chat"], 4096, "high", "premium", []),
+    "stability":("bedrock", ["chat"], 4096, "high", "premium", []),
+    "titan-image":("bedrock", ["chat"], 4096, "mid", "mid", []),
 }
 
 # Multimodal capability mapping: which (provider, model_family) pairs support
@@ -75,8 +68,6 @@ _MULTIMODAL_OUTPUT: dict[str, list[str]] = {
     "stable-diffusion": ["image"],
     "stability": ["image"],
     "titan-image": ["image"],
-    "flux": ["image"],
-    "lucid": ["image"],
 }
 
 # Documented per-family OUTPUT token ceiling (how many tokens a model may
@@ -113,27 +104,6 @@ PROVIDER_VAR = {
     "zai": "ZAI_MODELS",
     "bedrock": "BEDROCK_MODELS",
 }
-
-# The genuinely image-GENERATING models each provider's REAL image API can
-# serve. This is the single source of truth: adapters expose these as
-# `image_models` (so the router sees them as routable candidates) and the
-# ModelRegistry seeds them for any provider that is actually configured, so an
-# `image_generation` request always has a real (adapter, model) candidate and
-# never falls through to a text/vision model. A model id belongs here only if
-# its adapter really implements `generate_image()` — never a `vision` model.
-PROVIDER_IMAGE_MODELS: dict[str, tuple[str, ...]] = {
-    "bedrock": (
-        "amazon.titan-image-generator-v2:0",
-        "stability.stable-diffusion-xl-v1",
-        "stability.sd3-large-v1:0",
-    ),
-    "cloudflare": (
-        "@cf/stabilityai/stable-diffusion-xl-base-1.0",
-        "@cf/black-forest-labs/flux-1-schnell",
-        "@cf/leonardo/lucid-origin",
-    ),
-}
-
 
 class Model:
     """One AI model resource. Immutable-ish metadata, mutable status."""
@@ -270,12 +240,6 @@ def metadata_for(model_id: str, provider: str | None = None) -> dict:
         input_mods = ["text"] + [m for m in _MULTIMODAL_INPUT[fam] if m not in input_mods]
     if fam in _MULTIMODAL_OUTPUT:
         output_mods = ["text"] + [m for m in _MULTIMODAL_OUTPUT[fam] if m not in output_mods]
-    if "image" in output_mods and "image" not in caps:
-        # A model that EMITS images has the image-generation capability. This
-        # is deliberately derived from the output modality, never from
-        # `vision` (which means the model can READ an image) — the two are
-        # different capabilities and must not be conflated.
-        caps = caps + ["image"]
     return {
         "provider": provider or base_provider or fam or "unknown",
         "capabilities": caps, "context_window": ctx,
@@ -306,14 +270,6 @@ class ModelRegistry:
         for provider, var in PROVIDER_VAR.items():
             for mid in self.config.getlist(var, default=[]):
                 self.add(provider, mid)
-            # A provider that is actually configured for chat also serves its
-            # own real image models through the same credential, so register
-            # them too (they carry the `image` capability via metadata_for).
-            # Guarded on the provider having configured models at all, so an
-            # unconfigured provider never gains a phantom image catalog.
-            if self._models.get(provider):
-                for mid in PROVIDER_IMAGE_MODELS.get(provider, ()):
-                    self.add(provider, mid)
 
     def add(self, provider: str, model_id: str, **kw) -> Model:
         meta = metadata_for(model_id, provider)

@@ -28,11 +28,8 @@ import urllib.request
 from datetime import datetime, timezone
 
 from astra.ai.credentials import CredentialPool
-from astra.ai.models import PROVIDER_IMAGE_MODELS
 from astra.ai.provider import AIProvider, close_http_error
 from astra.core.exceptions import ProviderError
-
-from .base import _with_image_models
 
 SERVICE = "bedrock"
 
@@ -110,12 +107,7 @@ class BedrockCredentialPool(CredentialPool):
 
 class BedrockAdapter(AIProvider):
     name = "bedrock"
-    capabilities = ["chat", "stream", "tools", "json", "vision", "image"]
-
-    # Real Bedrock image-generation models (Amazon Titan Image / Stability),
-    # served through InvokeModel — see `generate_image`. Canonical list lives
-    # in astra.ai.models so the registry and the adapter never drift apart.
-    image_models = PROVIDER_IMAGE_MODELS["bedrock"]
+    capabilities = ["chat", "stream", "tools", "json", "vision"]
 
     models_env = "BEDROCK_MODELS"
     base_url_env = "BEDROCK_BASE_URL"
@@ -147,9 +139,9 @@ class BedrockAdapter(AIProvider):
         self.models = self._configured_models()
 
     def _configured_models(self) -> list[str]:
-        configured = (self.config.getlist(self.models_env, default=[])
-                      if self.config else [])
-        return _with_image_models(configured, self.image_models)
+        if self.config:
+            return self.config.getlist(self.models_env, default=[])
+        return []
 
     # -- signing --------------------------------------------------------------
     def _sign(self, cred, url: str, payload: bytes) -> dict:

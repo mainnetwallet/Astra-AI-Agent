@@ -605,14 +605,19 @@ class TestEligibleImageTargets(unittest.TestCase):
         ranked = rank_targets(
             eligible_image_generation_targets(catalog, state),
             category="image_generation")
-        self.assertEqual(ranked[0][1].model_id, FLUX)
+        from astra.ai.image_models import IMAGE_PRIORITY
+        self.assertEqual([m.model_id for _c, m, _h in ranked],
+                         [mid for mid in IMAGE_PRIORITY if mid in set(CF_POOL)])
 
     def test_configured_priority_reorders_the_serial_list(self):
+        # DREAM/INPAINT are last in the curated order, so moving them to the
+        # front proves the override is honoured (and, being reorder-only, does
+        # not drop the other eligible models).
         state = GatewayRoutingState(None)
         targets = eligible_image_generation_targets(self._catalog(), state)
-        ranked = rank_image_targets(targets, preferred_ids=[LUCID, PHOENIX])
+        ranked = rank_image_targets(targets, preferred_ids=[DREAM, INPAINT])
         self.assertEqual([m.model_id for _c, m, _h in ranked][:2],
-                         [LUCID, PHOENIX])
+                         [DREAM, INPAINT])
         self.assertEqual(len(ranked), len(CF_POOL))
 
     def test_configured_priority_cannot_add_an_ineligible_model(self):
@@ -735,15 +740,19 @@ class TestUserRequestedFreeImageModels(unittest.TestCase):
         self.assertEqual(gem.chat_calls, 0)
 
     def test_openrouter_dispatch_preserves_the_exact_model_id(self):
+        # In IMAGE_PRIORITY the OpenRouter gemini-preview id ranks before the
+        # OpenRouter flux id, so it is the first (and only) model called.
         orc = self._or()
         gw = self._gw(orc)
         self.assertTrue(gw.generate_image("a cat", discover=False))
-        self.assertEqual([m for m, _p in orc.image_calls], [OR_FLUX])
+        self.assertEqual([m for m, _p in orc.image_calls], [OR_GEMINI])
         self.assertEqual([p for _m, p in orc.image_calls], ["a cat"])
         self.assertEqual(orc.chat_calls, 0)
 
     def test_serial_fallback_crosses_providers(self):
-        # Cloudflare 429 -> Gemini timeout -> OpenRouter flux success.
+        # GLOBAL model order here: Gemini (timeout) -> Cloudflare flux (429)
+        # -> OpenRouter gemini-preview (success), i.e. three different
+        # providers tried model-by-model, never provider-by-provider.
         cf = _FakeConn("astra-gw-cloudflare", "cloudflare",
                        image_models=[FLUX], outcomes=[_http_error("u", 429)])
         gem = self._gemini(outcomes=[TimeoutError("slow")])
@@ -751,11 +760,11 @@ class TestUserRequestedFreeImageModels(unittest.TestCase):
         gw = self._gw(cf, gem, orc)
         out = gw.generate_image("a cat", discover=False)
         self.assertTrue(out.startswith("data:image/png;base64,"))
-        self.assertEqual(gw.last_model, OR_FLUX)
+        self.assertEqual(gw.last_model, OR_GEMINI)
         self.assertEqual(gw.last_attempts, 3)
         self.assertEqual([m for m, _p in cf.image_calls], [FLUX])
         self.assertEqual([m for m, _p in gem.image_calls], [GEMINI_IMG])
-        self.assertEqual([m for m, _p in orc.image_calls], [OR_FLUX])
+        self.assertEqual([m for m, _p in orc.image_calls], [OR_GEMINI])
         # no proactive health/cooldown state is written for image generation:
         # every entry is still healthy with zero recorded failures.
         health = gw.routing_state.snapshot()["model_health"]
@@ -766,26 +775,29 @@ class TestUserRequestedFreeImageModels(unittest.TestCase):
             self.assertEqual(entry["cooldown_until"], 0)
 
     def test_gemini_429_falls_over_to_openrouter(self):
+        # gemini-2.5-flash-image is #1; with only OpenRouter models left the
+        # next model in IMAGE_PRIORITY is the OpenRouter gemini-preview id.
         gem = self._gemini(outcomes=[_http_error("u", 429)])
         orc = self._or()
         gw = self._gw(gem, orc)
         self.assertTrue(gw.generate_image("a cat", discover=False))
-        self.assertEqual(gw.last_model, OR_FLUX)
+        self.assertEqual(gw.last_model, OR_GEMINI)
 
     def test_openrouter_5xx_moves_to_the_next_openrouter_model(self):
+        # OpenRouter ids rank OR_GEMINI(9) < OR_FLUX(10) < OR_RIVER(11).
         orc = self._or(outcomes=[_http_error("u", 502)])
         gw = self._gw(orc)
         self.assertTrue(gw.generate_image("a cat", discover=False))
-        self.assertEqual(gw.last_model, OR_GEMINI)
+        self.assertEqual(gw.last_model, OR_FLUX)
         self.assertEqual([m for m, _p in orc.image_calls],
-                         [OR_FLUX, OR_GEMINI])
+                         [OR_GEMINI, OR_FLUX])
 
     def test_unavailable_model_moves_to_the_next(self):
         gem = self._gemini(outcomes=[_http_error("u", 404)])
         orc = self._or()
         gw = self._gw(gem, orc)
         self.assertTrue(gw.generate_image("a cat", discover=False))
-        self.assertEqual(gw.last_model, OR_FLUX)
+        self.assertEqual(gw.last_model, OR_GEMINI)
 
     def test_no_model_is_attempted_twice_in_one_request(self):
         gem = self._gemini(outcomes=[ProviderError("boom")])
@@ -795,7 +807,7 @@ class TestUserRequestedFreeImageModels(unittest.TestCase):
             gw.generate_image("a cat", discover=False)
         self.assertEqual(len(gem.image_calls), 1)
         self.assertEqual([m for m, _p in orc.image_calls],
-                         [OR_FLUX, OR_GEMINI, OR_RIVER])
+                         [OR_GEMINI, OR_FLUX, OR_RIVER])
 
     def test_all_requested_models_fail_gives_the_clear_error(self):
         gem = self._gemini(outcomes=[ProviderError("boom")])
@@ -837,6 +849,129 @@ class TestUserRequestedFreeImageModels(unittest.TestCase):
         gw = self._gw(conn)
         ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
         self.assertEqual(ids, [OR_RIVER])
+
+    # -- GLOBAL, model-by-model ordering: provider boundaries are irrelevant --
+
+    def test_image_priority_is_the_agreed_global_order(self):
+        from astra.ai.image_models import IMAGE_PRIORITY
+        self.assertEqual(list(IMAGE_PRIORITY), [
+            GEMINI_IMG,
+            "@cf/leonardo/lucid-origin",
+            "@cf/leonardo/phoenix-1.0",
+            FLUX,
+            SDXL,
+            LIGHTNING,
+            DREAM,
+            INPAINT,
+            OR_GEMINI,
+            OR_FLUX,
+            OR_RIVER,
+        ])
+
+    def test_full_pool_priority_is_exactly_image_priority(self):
+        from astra.ai.image_models import IMAGE_PRIORITY
+        cf = _FakeConn("astra-gw-cloudflare", "cloudflare",
+                       image_models=list(CF_POOL))
+        gw = self._gw(cf, self._gemini(), self._or())
+        ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
+        self.assertEqual(ids, list(IMAGE_PRIORITY))
+
+    def test_connection_registration_order_never_changes_priority(self):
+        from astra.ai.image_models import IMAGE_PRIORITY
+
+        def ordered(*conns):
+            gw = self._gw(*conns)
+            return [m.model_id for _c, m, _h in
+                    gw.image_targets(discover=False)]
+
+        a = ordered(
+            _FakeConn("astra-gw-cloudflare", "cloudflare",
+                      image_models=list(CF_POOL)),
+            self._gemini(), self._or())
+        b = ordered(
+            self._or(),
+            _FakeConn("astra-gw-cloudflare", "cloudflare",
+                      image_models=list(CF_POOL)),
+            self._gemini())
+        self.assertEqual(a, b)
+        self.assertEqual(a, list(IMAGE_PRIORITY))
+
+    def test_gemini_then_cloudflare_chain_is_model_by_model(self):
+        # The exact global sequence, crossing the provider boundary:
+        # gemini fails -> lucid fails -> phoenix fails -> flux succeeds.
+        gem = self._gemini(outcomes=[ProviderError("boom")])
+        cf = _FakeConn("astra-gw-cloudflare", "cloudflare",
+                       image_models=[FLUX, LUCID, PHOENIX],
+                       outcomes=[ProviderError("boom"),
+                                 ProviderError("boom")])
+        gw = self._gw(gem, cf)
+        out = gw.generate_image("akta cat photo create kore dao",
+                                discover=False)
+        self.assertTrue(out.startswith("data:image/png;base64,"))
+        attempted = ([m for m, _p in gem.image_calls]
+                     + [m for m, _p in cf.image_calls])
+        self.assertEqual(attempted, [GEMINI_IMG, LUCID, PHOENIX, FLUX])
+        self.assertEqual(gw.last_model, FLUX)
+        self.assertEqual(gw.last_attempts, 4)
+
+    def test_cloudflare_pool_is_not_tried_before_higher_priority_models(self):
+        # Gemini fails, then the NEXT model in IMAGE_PRIORITY (a Cloudflare
+        # one) is tried and succeeds -- FLUX/PHOENIX are never reached, so no
+        # "try the whole Cloudflare pool" pass happens.
+        gem = self._gemini(outcomes=[ProviderError("boom")])
+        cf = _FakeConn("astra-gw-cloudflare", "cloudflare",
+                       image_models=[FLUX, LUCID, PHOENIX])
+        gw = self._gw(gem, cf)
+        self.assertTrue(gw.generate_image("a cat", discover=False))
+        self.assertEqual([m for m, _p in cf.image_calls], [LUCID])
+        self.assertEqual(gw.last_model, LUCID)
+        self.assertEqual(gw.last_attempts, 2)
+
+    def test_attempt_sequence_is_the_global_list_not_provider_groups(self):
+        # Every model fails: the attempt order must equal IMAGE_PRIORITY
+        # exactly, so providers are interleaved as the list dictates.
+        from astra.ai.image_models import IMAGE_PRIORITY
+        gem = self._gemini(outcomes=[ProviderError("boom")])
+        cf = _FakeConn("astra-gw-cloudflare", "cloudflare",
+                       image_models=list(CF_POOL),
+                       outcomes=[ProviderError("boom")] * len(CF_POOL))
+        orc = self._or(outcomes=[ProviderError("boom")] * 3)
+        gw = self._gw(gem, cf, orc)
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False)
+        seen = ([m for m, _p in gem.image_calls]
+                + [m for m, _p in cf.image_calls]
+                + [m for m, _p in orc.image_calls])
+        self.assertEqual(seen, list(IMAGE_PRIORITY))
+        self.assertEqual(len(seen), len(set(seen)))   # never retried
+
+    def test_override_is_a_global_list_cloudflare_then_gemini(self):
+        cf = _FakeConn("astra-gw-cloudflare", "cloudflare",
+                       image_models=[LUCID], outcomes=[_http_error("u", 429)])
+        gem = self._gemini()
+        gw = self._gw(cf, gem, config=_cfg(
+            GW_IMAGE_GENERATION_PRIORITY=LUCID + "," + GEMINI_IMG))
+        self.assertTrue(gw.generate_image("a cat", discover=False))
+        self.assertEqual([m for m, _p in cf.image_calls], [LUCID])
+        self.assertEqual(gw.last_model, GEMINI_IMG)
+
+    def test_override_is_a_global_list_openrouter_then_cloudflare(self):
+        orc = self._or(outcomes=[_http_error("u", 429)])
+        cf = _FakeConn("astra-gw-cloudflare", "cloudflare",
+                       image_models=[LUCID])
+        gw = self._gw(orc, cf, config=_cfg(
+            GW_IMAGE_GENERATION_PRIORITY=OR_FLUX + "," + LUCID))
+        self.assertTrue(gw.generate_image("a cat", discover=False))
+        self.assertEqual([m for m, _p in orc.image_calls], [OR_FLUX])
+        self.assertEqual(gw.last_model, LUCID)
+
+    def test_override_cannot_add_a_text_vision_or_paid_model(self):
+        gem = self._gemini()
+        gw = self._gw(gem, config=_cfg(
+            GW_IMAGE_GENERATION_PRIORITY=LLAMA + ",gemini-3.1-flash-image,"
+            + "command-a-vision-07-2025," + GEMINI_IMG))
+        ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
+        self.assertEqual(ids, [GEMINI_IMG])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -891,15 +1026,19 @@ class TestGatewayImageFailover(unittest.TestCase):
         self.assertTrue(out.startswith("data:image/png;base64,"))
         self.assertEqual(gw.last_model, LIGHTNING)
 
-    # D. 5xx then 429 then success -> third model, three attempts
+    # D. 5xx then 429 then success -> third model in the GLOBAL order
     def test_d_multi_failure_chain_reaches_the_third_target(self):
+        # Present models {LUCID, FLUX, LIGHTNING} rank LUCID < FLUX <
+        # LIGHTNING in IMAGE_PRIORITY, so the serial order is exactly that.
         cf = self._cf(models=(FLUX, LIGHTNING, LUCID),
                       outcomes=[_http_error("u", 500),
                                 _http_error("u", 429)])
         gw = self._gw(cf)
         out = gw.generate_image("create a photo of a cat", discover=False)
         self.assertTrue(out.startswith("data:image/png;base64,"))
-        self.assertEqual(gw.last_model, LUCID)
+        self.assertEqual([m for m, _p in cf.image_calls],
+                         [LUCID, FLUX, LIGHTNING])
+        self.assertEqual(gw.last_model, LIGHTNING)
         self.assertEqual(gw.last_attempts, 3)
 
     def test_quota_failure_falls_over_to_the_next_model(self):
@@ -917,10 +1056,12 @@ class TestGatewayImageFailover(unittest.TestCase):
         self.assertEqual(gw.last_model, LIGHTNING)
 
     def test_success_stops_the_chain_immediately(self):
+        # LUCID is first in IMAGE_PRIORITY among these three, so it is the
+        # only model called: success stops the chain at attempt #1.
         cf = self._cf(models=(FLUX, LIGHTNING, LUCID))
         gw = self._gw(cf)
         self.assertTrue(gw.generate_image("a cat", discover=False))
-        self.assertEqual([m for m, _p in cf.image_calls], [FLUX])
+        self.assertEqual([m for m, _p in cf.image_calls], [LUCID])
         self.assertEqual(gw.last_attempts, 1)
 
     def test_no_model_is_attempted_twice_in_one_request(self):

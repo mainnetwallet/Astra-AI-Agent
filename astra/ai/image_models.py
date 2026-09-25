@@ -131,11 +131,14 @@ promotional allowance rather than a recurring, genuinely usable free tier:
 * WaveSpeedAI -- pay-as-you-go from ~$0.005/image with a one-time $1 signup
   credit; no recurring free tier. Rejected: paid-only.
 
-Image requests are served by a SIMPLE SERIAL FALLBACK over this FREE pool: the
-eligible models are tried one after another in a deterministic, configurable
+Image requests are served by a SIMPLE SERIAL FALLBACK over this FREE pool:
+the eligible models are tried one after another in ONE deterministic GLOBAL
 priority order (``IMAGE_PRIORITY`` / ``image_priority_index`` /
 ``ordered_image_pool``, overridable with ``IMAGE_GENERATION_PRIORITY`` or
-``GW_IMAGE_GENERATION_PRIORITY``). The ACTUAL generation request is the only
+``GW_IMAGE_GENERATION_PRIORITY``). The list is model-by-model and GLOBAL --
+providers are never tried as groups (no "all Cloudflare, then all Gemini,
+then all OpenRouter"); a failure moves straight to the next model in the
+list, whatever provider serves it. The ACTUAL generation request is the only
 availability signal -- there is NO proactive/preflight image health check and
 no test image is ever generated. A failure is recorded only for that one
 request's attempted-model set, never as a permanent unhealthy state.
@@ -367,39 +370,43 @@ _SPECS: tuple = (
 )
 
 
-# ── deterministic serial-fallback order ───────────────────────────────────
-# The order the FREE models are tried in for one image request. This is a
-# curated DEFAULT derived from the documented/verified characteristics of each
-# model -- it is not a health signal, and it is not claimed to be objectively
-# optimal:
-#   1. flux-1-schnell      fastest, smallest required param set (`prompt`),
-#                          lowest Neuron cost, strongest free availability.
-#   2. sdxl-base-1.0       general-purpose high-quality SDXL; accepts
-#                          width/height.
-#   3. sd-xl-lightning     distilled few-step SDXL: quick, good prompt
-#                          adherence, accepts width/height.
-#   4. dreamshaper-8-lcm   LCM-tuned SDXL variant, accepts width/height.
-#   5. sd-v1-5-inpainting  SD1.5 family (text-to-image mode), 512px class.
-#   6. lucid-origin        Leonardo general model, accepts width/height.
-#   7. phoenix-1.0         Leonardo model, accepts width/height.
-#   8. gemini-2.5-flash-image  native Google image output (user-requested).
-#   9. OpenRouter :free image models (user-requested): flux-1-schnell,
-#      gemini-2.5-flash-image-preview, riverflow-v2.5-pro. Tried last
-#      because OpenRouter's free pool is the most rate-limited.
-# Reorder per deployment with IMAGE_GENERATION_PRIORITY (or
-# GW_IMAGE_GENERATION_PRIORITY for the AI Gateway) -- only ids that already
-# pass the FREE + image-generation eligibility rules can ever be selected.
+# ── deterministic GLOBAL, MODEL-by-MODEL serial-fallback order ────────────
+# ONE flat list: every FREE image model competes in this single priority
+# order, regardless of which provider serves it. The provider is NEVER a
+# grouping/batching unit -- a request tries model #1, then model #2, then
+# model #3, ... in exactly this order, crossing provider boundaries as often
+# as the list does (Gemini -> Cloudflare -> Cloudflare -> ... -> OpenRouter).
+# "Try every Cloudflare model, then every Gemini model, then every
+# OpenRouter model" is explicitly NOT the behaviour.
+#
+# The order is a curated DEFAULT (not a health signal, not a liveness probe):
+#   1.  gemini-2.5-flash-image               native Google image output
+#   2.  @cf/leonardo/lucid-origin            Leonardo general model
+#   3.  @cf/leonardo/phoenix-1.0             Leonardo model
+#   4.  @cf/black-forest-labs/flux-1-schnell fastest/lowest-cost CF model
+#   5.  @cf/stabilityai/stable-diffusion-xl-base-1.0
+#   6.  @cf/bytedance/stable-diffusion-xl-lightning
+#   7.  @cf/lykon/dreamshaper-8-lcm
+#   8.  @cf/runwayml/stable-diffusion-v1-5-inpainting
+#   9.  google/gemini-2.5-flash-image-preview:free   (OpenRouter)
+#   10. black-forest-labs/flux-1-schnell:free        (OpenRouter)
+#   11. sourceful/riverflow-v2.5-pro:free            (OpenRouter)
+#
+# Override the whole ordering with IMAGE_GENERATION_PRIORITY (or
+# GW_IMAGE_GENERATION_PRIORITY for the AI Gateway). The override is ALSO a
+# single global model list; it may reorder/re-select the already-eligible
+# FREE image models but can never add a text, vision-only or paid model.
 IMAGE_PRIORITY = (
+    "gemini-2.5-flash-image",
+    "@cf/leonardo/lucid-origin",
+    "@cf/leonardo/phoenix-1.0",
     "@cf/black-forest-labs/flux-1-schnell",
     "@cf/stabilityai/stable-diffusion-xl-base-1.0",
     "@cf/bytedance/stable-diffusion-xl-lightning",
     "@cf/lykon/dreamshaper-8-lcm",
     "@cf/runwayml/stable-diffusion-v1-5-inpainting",
-    "@cf/leonardo/lucid-origin",
-    "@cf/leonardo/phoenix-1.0",
-    "gemini-2.5-flash-image",
-    "black-forest-labs/flux-1-schnell:free",
     "google/gemini-2.5-flash-image-preview:free",
+    "black-forest-labs/flux-1-schnell:free",
     "sourceful/riverflow-v2.5-pro:free",
 )
 

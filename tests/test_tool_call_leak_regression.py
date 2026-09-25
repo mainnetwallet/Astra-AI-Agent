@@ -241,6 +241,53 @@ class SanitizeFinalResponseUnitTests(unittest.TestCase):
         self.assertEqual(sanitize_final_response(""), "")
         self.assertIsNone(sanitize_final_response(None))
 
+    def test_strips_embedded_base64_image_and_leaves_fallback_text(self):
+        """A generate_image() response IS the raw data URI (see
+        AstraRouter._attempt) — it must never be dumped into the visible
+        chat bubble as a wall of base64 (it's already delivered as a real
+        artifact; see ChatPipeline._artifacts + astra.ai.artifact_extraction
+        + the Chat UI's renderArtifact())."""
+        import base64
+        from astra.ai.response_boundary import MEDIA_FALLBACK_TEXT
+        img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+        b64 = base64.b64encode(img).decode()
+        text = f"data:image/png;base64,{b64}"
+        out = sanitize_final_response(text)
+        self.assertNotIn(b64, out)
+        self.assertEqual(out, MEDIA_FALLBACK_TEXT)
+
+    def test_strips_embedded_base64_audio_too(self):
+        import base64
+        audio = b"ID3" + b"\x00" * 200
+        b64 = base64.b64encode(audio).decode()
+        text = f"data:audio/mpeg;base64,{b64}"
+        out = sanitize_final_response(text)
+        self.assertNotIn(b64, out)
+
+    def test_surrounding_prose_around_a_data_uri_is_kept(self):
+        """Only the data URI itself is removed — a model that (unusually)
+        wraps it in a sentence keeps that sentence."""
+        import base64
+        img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+        b64 = base64.b64encode(img).decode()
+        text = f"Here is your image:\n\ndata:image/png;base64,{b64}"
+        out = sanitize_final_response(text)
+        self.assertNotIn(b64, out)
+        self.assertIn("Here is your image:", out)
+
+    def test_data_uri_plus_a_real_warning_keeps_the_warning_only(self):
+        """The no-gateway-configured pass-through path concatenates the raw
+        provider text with a warning message — stripping the media must
+        leave the warning intact and clean, not the fallback line."""
+        import base64
+        img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+        b64 = base64.b64encode(img).decode()
+        text = (f"data:image/png;base64,{b64}\n\n"
+               "\u26a0\ufe0f Kono AI gateway-er API key set kora nei.")
+        out = sanitize_final_response(text)
+        self.assertNotIn(b64, out)
+        self.assertIn("Kono AI gateway-er API key set kora nei.", out)
+
 
 class PlainChatUnaffectedTests(unittest.TestCase):
     def test_plain_chat_without_tools_is_unaffected(self):

@@ -328,6 +328,32 @@ class TestCapabilityRouting(unittest.TestCase):
     def test_classify_image_generation(self):
         self.assertEqual(classify("generate an image of a sunset"), "image_generation")
 
+    def test_classify_image_generation_banglish(self):
+        self.assertEqual(classify("akta chobi banao"), "image_generation")
+        self.assertEqual(classify("photo create koro"), "image_generation")
+
+    def test_classify_image_generation_bangla_script(self):
+        """Real Bengali-script phrasing (not just Latin-script Banglish
+        transliteration) must classify the same way. Regression guard for
+        the earlier version of this regex, where a noun ending in a Bengali
+        dependent vowel sign (e.g. \u09bf in \u099b\u09ac\u09bf) was
+        followed by a \\b that Python's re engine — which does not count
+        those combining marks as \\w — could never satisfy, silently
+        killing the whole branch for every Bengali-script noun."""
+        self.assertEqual(classify("\u098f\u0995\u099f\u09be \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993"),
+                         "image_generation")
+        self.assertEqual(
+            classify("\u098f\u0995\u099f\u09be futuristic city photo \u09a4\u09c8\u09b0\u09bf \u0995\u09b0\u09cb"),
+            "image_generation")
+
+    def test_classify_plain_bangla_command_is_not_image_generation(self):
+        """A bare Bengali verb like \u0995\u09b0\u09cb ("do") must not, on
+        its own, trigger image_generation — only in combination with an
+        image noun nearby."""
+        self.assertEqual(classify("\u0995\u09be\u099c \u0995\u09b0\u09cb"), "simple_chat")
+        self.assertEqual(classify("\u0986\u09ae\u09be\u0995\u09c7 \u09b8\u09be\u09b9\u09be\u09af\u09cd\u09af \u0995\u09b0\u09cb"),
+                         "simple_chat")
+
     def test_classify_audio_generation(self):
         self.assertEqual(classify("generate audio from text"), "audio")
 
@@ -939,6 +965,224 @@ class TestGatewayZeroBypass(unittest.TestCase):
         src = inspect.getsource(AstraRouter._attempt)
         self.assertIn("generate_image", src)
         self.assertNotIn("ProviderRegistry", src)
+
+
+class TestNormalizeRequirementsImageGeneration(unittest.TestCase):
+    """AstraRouter._normalize_requirements() must derive
+    required_output_modalities=["image"] from task_type=="image_generation"
+    — mirroring how it already derives req.vision/req.structured_output from
+    their task types — so EVERY caller that builds a RoutingRequest with
+    this task_type (ChatPipeline._route(), the Gateway correction ports in
+    chat_pipeline.py, the agent tool loop, ai_tools.py) gets the same
+    enforcement without each one having to remember to set it."""
+
+    @staticmethod
+    def _router():
+        from astra.ai.router import AstraRouter
+        return AstraRouter([], max_retries=0)
+
+    def test_image_generation_task_type_sets_output_modality(self):
+        router = self._router()
+        req = RoutingRequest(task_type="image_generation")
+        router._normalize_requirements(req)
+        self.assertEqual(req.required_output_modalities, ["image"])
+
+    def test_explicit_output_modalities_are_not_overridden(self):
+        router = self._router()
+        req = RoutingRequest(task_type="image_generation",
+                             required_output_modalities=["image", "audio"])
+        router._normalize_requirements(req)
+        self.assertEqual(req.required_output_modalities, ["image", "audio"])
+
+    def test_other_task_types_get_no_output_modality_requirement(self):
+        router = self._router()
+        for t in ("simple_chat", "coding", "vision", "research", "audio", "video"):
+            req = RoutingRequest(task_type=t)
+            router._normalize_requirements(req)
+            self.assertEqual(req.required_output_modalities, [],
+                             f"task_type={t!r} must not require image output")
+
+
+class TestImageGenerationEndToEndDispatch(unittest.TestCase):
+    """The wiring fix end to end through the REAL AstraRouter (routing_policy
+    + _normalize_requirements + _attempt) — not a scripted fake router — so
+    an image request is hard-filtered to an image-capable model and
+    dispatched through generate_image(), never handed to a text-only chat
+    model that would just hallucinate a description."""
+
+    class _TextOnlyAdapter:
+        name = "groq"
+        models = ["llama-70b"]
+        pool = True
+
+        def __init__(self):
+            self.chat_calls = 0
+
+        def health_check(self):
+            return True
+
+        def chat(self, messages, model=None, max_tokens=500,
+                 response_format=None):
+            self.chat_calls += 1
+            return "Here is a description of what you asked for."
+
+    class _ImageAdapter:
+        name = "bedrock"
+        models = ["stability.stable-diffusion-xl-v1"]
+        pool = True
+
+        def __init__(self):
+            self.chat_calls = 0
+            self.generate_calls = []
+
+        def health_check(self):
+            return True
+
+        def chat(self, messages, model=None, max_tokens=500,
+                 response_format=None):
+            self.chat_calls += 1
+            return "ok"
+
+        def generate_image(self, prompt, model=None, size="1024x1024", n=1):
+            import base64
+            self.generate_calls.append(prompt)
+            img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+            return f"data:image/png;base64,{base64.b64encode(img).decode()}"
+
+    def _router(self):
+        from astra.ai.router import AstraRouter
+        text_adapter = self._TextOnlyAdapter()
+        image_adapter = self._ImageAdapter()
+        router = AstraRouter([text_adapter, image_adapter], max_retries=0)
+        return router, text_adapter, image_adapter
+
+    def test_image_generation_routes_to_image_capable_model_only(self):
+        router, text_adapter, image_adapter = self._router()
+        req = RoutingRequest(
+            task_type="image_generation",
+            messages=[{"role": "user",
+                      "content": "generate an image of a sunset over mountains"}])
+        rr = router.route_request(req)
+        self.assertTrue(rr.ok, rr.error)
+        self.assertEqual(rr.provider, "bedrock")
+        self.assertTrue(rr.text.startswith("data:image/png;base64,"))
+        self.assertEqual(text_adapter.chat_calls, 0)
+        self.assertEqual(len(image_adapter.generate_calls), 1)
+        self.assertIn("sunset over mountains", image_adapter.generate_calls[0])
+
+    def test_banglish_image_request_routes_the_same_way(self):
+        router, text_adapter, image_adapter = self._router()
+        text = "akta chobi banao - ekta cyberpunk city"
+        task_type = classify(text)
+        self.assertEqual(task_type, "image_generation")
+        req = RoutingRequest(task_type=task_type,
+                             messages=[{"role": "user", "content": text}])
+        rr = router.route_request(req)
+        self.assertTrue(rr.ok, rr.error)
+        self.assertEqual(rr.provider, "bedrock")
+        self.assertEqual(text_adapter.chat_calls, 0)
+
+    def test_bangla_script_image_request_routes_the_same_way(self):
+        """Real Bengali script, not just Latin-script Banglish."""
+        router, text_adapter, image_adapter = self._router()
+        text = "\u098f\u0995\u099f\u09be cyberpunk city-\u098f\u09b0 \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993"
+        task_type = classify(text)
+        self.assertEqual(task_type, "image_generation")
+        req = RoutingRequest(task_type=task_type,
+                             messages=[{"role": "user", "content": text}])
+        rr = router.route_request(req)
+        self.assertTrue(rr.ok, rr.error)
+        self.assertEqual(rr.provider, "bedrock")
+        self.assertEqual(text_adapter.chat_calls, 0)
+        self.assertEqual(len(image_adapter.generate_calls), 1)
+        self.assertEqual(len(image_adapter.generate_calls), 1)
+
+    def test_banglish_photo_create_koro_routes_the_same_way(self):
+        router, text_adapter, image_adapter = self._router()
+        text = "photo create koro of a rainy street"
+        task_type = classify(text)
+        self.assertEqual(task_type, "image_generation")
+        req = RoutingRequest(task_type=task_type,
+                             messages=[{"role": "user", "content": text}])
+        rr = router.route_request(req)
+        self.assertTrue(rr.ok, rr.error)
+        self.assertEqual(rr.provider, "bedrock")
+        self.assertEqual(text_adapter.chat_calls, 0)
+
+    def test_explicit_text_provider_preference_is_soft_not_hard(self):
+        """An explicit provider/model preference for image generation is a
+        scoring bonus (routing_policy.PREFERENCE_MATCH_BONUS), never a hard
+        override of the capability gate — so a Gateway/UI that names a
+        text-only model for an image request still gets routed to a real
+        image-capable model instead of failing or silently hallucinating a
+        text description."""
+        router, text_adapter, image_adapter = self._router()
+        req = RoutingRequest(task_type="image_generation",
+                             preferred_provider="groq",
+                             preferred_model="llama-70b",
+                             messages=[{"role": "user", "content": "draw a cat"}])
+        rr = router.route_request(req)
+        self.assertTrue(rr.ok, rr.error)
+        self.assertEqual(rr.provider, "bedrock")
+        self.assertEqual(text_adapter.chat_calls, 0)
+
+    def test_normal_text_chat_is_unaffected(self):
+        """Regression guard: an ordinary chat request (no output-modality
+        requirement) still routes through the normal chat() path."""
+        router, text_adapter, image_adapter = self._router()
+        req = RoutingRequest(task_type="simple_chat",
+                             preferred_provider="groq",
+                             messages=[{"role": "user", "content": "hello there"}])
+        rr = router.route_request(req)
+        self.assertTrue(rr.ok, rr.error)
+        self.assertEqual(rr.provider, "groq")
+        self.assertEqual(text_adapter.chat_calls, 1)
+        self.assertEqual(len(image_adapter.generate_calls), 0)
+
+
+class TestArtifactImageRenderUI(unittest.TestCase):
+    """renderArtifact() in static/js/astra.js must give a generated image
+    real Open/Download affordances, not just an inline <img> with no way to
+    view it full-size or save it — the generic non-media artifact-file
+    branch already had a Download link; the image branch did not."""
+
+    @staticmethod
+    def _read(*parts):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, *parts), encoding="utf-8") as fh:
+            return fh.read()
+
+    def setUp(self):
+        self.js = self._read("static", "js", "astra.js")
+        self.css = self._read("static", "css", "style.css")
+        start = self.js.index("function renderArtifact(a) {")
+        end = self.js.index("\n}\n", start)
+        self.fn = self.js[start:end]
+
+    def test_image_branch_still_renders_the_inline_preview(self):
+        self.assertIn('type === "image"', self.fn)
+        self.assertIn("artifact-image", self.fn)
+
+    def test_image_branch_has_open_and_download_actions(self):
+        image_branch = self.fn[self.fn.index('if (type === "image")'):
+                               self.fn.index('} else if (type === "audio")')]
+        self.assertIn("artifact-actions", image_branch)
+        self.assertIn(">Open<", image_branch)
+        self.assertIn(">Download<", image_branch)
+        # Open views the artifact inline (no forced download); Download
+        # forces a save — both hit the same artifact-serving URL.
+        self.assertIn('target="_blank"', image_branch)
+        self.assertIn("download=", image_branch)
+        self.assertEqual(image_branch.count("${esc(url)}"), 3)
+
+    def test_artifact_actions_row_is_styled(self):
+        self.assertIn(".artifact-actions", self.css)
+
+    def test_audio_and_video_branches_are_unchanged(self):
+        # scope of this fix is the image branch only
+        audio_branch = self.fn[self.fn.index('} else if (type === "audio")'):
+                               self.fn.index('} else if (type === "video")')]
+        self.assertNotIn("artifact-actions", audio_branch)
 
 
 if __name__ == "__main__":

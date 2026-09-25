@@ -17,6 +17,8 @@ the `Agent.handle` exception fallback (see agent.py).
 """
 from __future__ import annotations
 
+import re
+
 from astra.security import redact_text
 
 # Keys that, in combination, identify Astra's internal tool-call/agent
@@ -25,6 +27,17 @@ from astra.security import redact_text
 # "action"); requiring at least two is a low-false-positive signal that a
 # JSON blob is internal protocol, not legitimate content.
 _PROTOCOL_KEYS = ("action", "tool", "args", "session_id", "thought")
+
+# A generated image/audio response (astra.ai.router._attempt's
+# generate_image()/text_to_speech() dispatch) comes back from the adapter as
+# a raw `data:image/png;base64,<...>` (or audio/*) string — often hundreds of
+# KB. astra.ai.artifact_extraction.extract_artifacts() already turns that
+# same string into a real, downloadable artifact (see ChatPipeline._artifacts
+# and the Chat UI's renderArtifact()), so it must never ALSO be dumped into
+# the visible chat bubble as a wall of base64 text — that used to be exactly
+# what happened, since nothing stripped it before it reached `reply`.
+_DATA_URI_MEDIA_RE = re.compile(
+    r"data:(?:image|audio)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+")
 
 
 def _looks_like_protocol_json(fragment: str) -> bool:
@@ -98,6 +111,20 @@ FALLBACK_TEXT = (
     "Sorry — I ran into an internal formatting issue producing that reply. "
     "Please try again.")
 
+# Shown when stripping an embedded media data URI leaves nothing else in the
+# reply (the common case for a plain "generate an image of X" turn, where the
+# adapter's entire output IS the data URI) — the artifact card is the real
+# answer here, this is just the accompanying chat line.
+MEDIA_FALLBACK_TEXT = "Ready — dekhe nin niche."
+
+
+def _strip_embedded_media(text: str) -> tuple[str, bool]:
+    """Remove any embedded base64 image/audio data URI. Returns
+    (cleaned_text, removed_any) — mirrors _strip_protocol_fragments so the
+    caller can tell an "everything was media" reply from ordinary text."""
+    cleaned, n = _DATA_URI_MEDIA_RE.subn("", text)
+    return cleaned, n > 0
+
 
 def sanitize_final_response(text: str) -> str:
     """The response-boundary guard. Call this on every piece of text that is
@@ -118,8 +145,11 @@ def sanitize_final_response(text: str) -> str:
     if not text:
         return text
     cleaned, removed_protocol = _strip_protocol_fragments(text)
+    cleaned, removed_media = _strip_embedded_media(cleaned)
     cleaned = redact_text(cleaned)
     cleaned = cleaned.strip()
     if removed_protocol and not cleaned:
         return FALLBACK_TEXT
+    if removed_media and not cleaned:
+        return MEDIA_FALLBACK_TEXT
     return cleaned if cleaned else text

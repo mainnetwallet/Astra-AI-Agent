@@ -79,11 +79,25 @@ from astra.core.events import new_op_id
 from astra.terminal.manager import default_session_id_for
 
 # Task types that are safe to hand the router for a plain chat turn.
-# Everything else `classify()` can return (image/audio/video generation,
+# Everything else `classify()` can return (audio/video generation,
 # structured_output -> forced JSON mode, browser/web3 -> tool territory)
 # is served as ordinary chat here.
+#
+# "image_generation" is deliberately included (unlike audio/video
+# generation, which stay out of scope here): classify() already detects it
+# correctly, in English and Bangla/Banglish alike ("akta chobi banao",
+# "photo create koro"), and AstraRouter already knows how to hard-filter to
+# an image-capable model and dispatch generate_image() for it (see
+# AstraRouter._normalize_requirements/_attempt) — but none of that ever
+# actually ran, because this exact line coerced task_type down to
+# "simple_chat" before _route() ever saw it, so every image request was
+# quietly handed to a plain text model that just described an image in
+# words instead of generating one. See tests.test_chat_pipeline
+# .TestImageGenerationPipelineWiring and tests.test_multimodal
+# .TestImageGenerationEndToEndDispatch for the regression coverage.
 _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
-                              "summarization", "research", "planning"})
+                              "summarization", "research", "planning",
+                              "image_generation"})
 
 # Plain-text replies for missing AI configuration. Shown as-is (no
 # markdown rendering in the chat UI — see the note on _run_turn's fail
@@ -1220,11 +1234,25 @@ class ChatPipeline:
         return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
     def _route(self, task_type, messages, provider, model, vision, req=""):
+        # image_generation must only ever land on a model that genuinely
+        # supports image output AND exposes generate_image() — the router
+        # also derives this from task_type on its own (see
+        # AstraRouter._normalize_requirements), but it is set explicitly
+        # here too so the requirement is visible at the call site and
+        # survives even if a future router change narrows that inference.
+        # A caller-explicit provider/model (brief["provider"]/brief["model"]
+        # from the Gateway's understanding) stays a soft preference, not a
+        # hard filter — see routing_policy.PREFERENCE_MATCH_BONUS — so an
+        # image request assigned to a text-only model by the Gateway still
+        # gets routed to an actual image-capable model instead of being
+        # rejected outright.
+        out_mods = ["image"] if task_type == "image_generation" else None
         rr = self.router.route_request(RoutingRequest(
             task_type=task_type, messages=messages,
             preferred_provider=provider or None,
             preferred_model=model or None,
-            vision=vision, max_tokens=self.max_tokens, trace=req))
+            vision=vision, max_tokens=self.max_tokens, trace=req,
+            required_output_modalities=out_mods))
         if (rr is None or not rr.ok) and task_type not in ("simple_chat", "vision") \
                 and "no eligible" in (getattr(rr, "error", "") or ""):
             # A hard capability filter (e.g. "coding") left nothing to run

@@ -216,11 +216,25 @@ def classify(text: str) -> str:
     # capability axis entirely for an image *generation* request — and
     # that hard-filters out every text-only model, failing the request
     # for a reason that has nothing to do with what the user actually
-    # asked for.
-    _img_nouns = r"(image|picture|photo|photograph|illustration|diagram|logo|icon|art|chobi|chhobi)"
-    _img_verbs = r"(generate|create|draw|make|design|banao|banan|toiri)"
+    # asked for. Bengali written in its own script (not just transliterated
+    # Banglish) uses the same noun-then-verb order — "ছবি বানাও" (chobi
+    # banao), "তৈরি করো" (toiri koro) — so the noun/verb token lists carry
+    # both the Latin-script transliteration AND the Bengali-script word.
+    # NOTE: the noun<->verb connector below does NOT use \b at the join —
+    # Bengali dependent vowel signs ("ি" in ছবি, "ো" in ফোটো, "ৈ" in তৈরি,
+    # Unicode category Mc) are not \w to Python's re engine, so a \b placed
+    # right after a noun ending in one of these never matches and silently
+    # kills the whole branch. The join only needs "nearby", not "exactly
+    # adjacent", so requiring a hard word boundary there was never doing
+    # useful work anyway — see test_multimodal.TestCapabilityRouting for
+    # the exact phrases this must (and, for plain "কাজ করো"/"do work" with
+    # no image noun in range, must not) match.
+    _img_nouns = (r"(image|picture|photo|photograph|illustration|diagram|"
+                 r"logo|icon|art|chobi|chhobi|ছবি|ফটো|ফোটো)")
+    _img_verbs = (r"(generate|create|draw|make|design|banao|banan|toiri|"
+                 r"বানাও|বানান|তৈরি|করো)")
     if re.search(_img_verbs + r"\s+(an?\s+)?" + _img_nouns, low) or \
-       re.search(_img_nouns + r"\b.{0,20}\b" + _img_verbs, low):
+       re.search(_img_nouns + r".{0,20}" + _img_verbs, low):
         return "image_generation"
     if re.search(r"generate\s+(an?\s+)?audio|create\s+(an?\s+)?audio|text.to.speech|tts\b", low):
         return "audio"
@@ -443,6 +457,25 @@ class AstraRouter:
             hard = TASK_HARD_CAPABILITIES.get(req.task_type)
             if hard:
                 req.required_capabilities = list(hard)
+        # `classify()` already recognizes image-generation intent in both
+        # English ("create an image") and Bangla/Banglish ("akta chobi
+        # banao", "photo create koro") word orders and returns task_type
+        # "image_generation" — but until now nothing translated that into
+        # `required_output_modalities`, so `meets_hard_requirements()`
+        # (routing_policy.py) never actually excluded text-only models and
+        # `_attempt()`'s "image" in out_mods dispatch to generate_image()
+        # was unreachable in production: any ranked text model would just
+        # be asked to `chat()` and hallucinate a description instead of
+        # calling the real image adapter. This is set centrally here
+        # (mirroring the `vision`/`structured_output` derivations above) so
+        # every caller that builds a RoutingRequest with this task_type —
+        # ChatPipeline._route(), the Gateway correction ports, the agent
+        # tool loop, ai_tools.py — gets the same enforcement without each
+        # one having to remember to set it. A caller that already set its
+        # own required_output_modalities (e.g. an explicit audio/video
+        # request layered on top) is never overridden.
+        if req.task_type == "image_generation" and not req.required_output_modalities:
+            req.required_output_modalities = ["image"]
 
     def _route_end(self, req: RoutingRequest, op: str, kind: str, **data) -> None:
         """Emit the terminal event for one route operation, carrying the same

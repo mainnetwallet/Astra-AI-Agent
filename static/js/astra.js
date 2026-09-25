@@ -2742,7 +2742,11 @@ function renderArtifact(a) {
   const type = (a.type || a.mime || "").split("/")[0];
   if (type === "image") {
     el.innerHTML = `<img class="artifact-image" src="${esc(url)}" alt="${esc(a.filename)}">
-      <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>`;
+      <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>
+      <div class="artifact-actions">
+        <a class="btn mini" href="${esc(url)}" target="_blank" rel="noopener">Open</a>
+        <a class="btn mini" href="${esc(url)}" download="${esc(a.filename)}">Download</a>
+      </div>`;
   } else if (type === "audio") {
     el.innerHTML = `<audio class="artifact-audio" controls src="${esc(url)}"></audio>
       <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>`;

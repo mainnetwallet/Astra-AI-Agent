@@ -494,5 +494,89 @@ class TestChatEndpoint(unittest.TestCase):
         self.assertEqual(body["data"]["data"]["verification"]["status"], "COMPLETE")
 
 
+class TestImageGenerationPipelineWiring(unittest.TestCase):
+    """ChatPipeline._route() must translate an image-generation task_type
+    into RoutingRequest.required_output_modalities=["image"], for English
+    and Bangla/Banglish phrasing alike, and the generated image must reach
+    the user as a real artifact — not a wall of base64 text pretending to be
+    the chat reply. Uses the same FakeGateway/FakeRouter harness as the rest
+    of this file; FakeRouter records every RoutingRequest it was given, so
+    the wiring is asserted directly against what ChatPipeline actually
+    built, not against router-internal behavior (that's covered by the real
+    AstraRouter in tests/test_multimodal.py)."""
+
+    _PNG_DATA_URI = None
+
+    @classmethod
+    def setUpClass(cls):
+        import base64
+        img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+        cls._PNG_DATA_URI = f"data:image/png;base64,{base64.b64encode(img).decode()}"
+
+    def test_english_image_request_sets_output_modality(self):
+        # was_incomplete=False (the understand() default) means the Gateway's
+        # final_request is NOT what reaches _task_type() — the ORIGINAL
+        # message is (see ChatPipeline._understand: `"final_request":
+        # ... if rewrote else message`) — so it's the literal text below
+        # that classify() must recognize, not anything scripted into
+        # understand().
+        pipe, gw, rt = make([understand(), verdict("complete")],
+                            [self._PNG_DATA_URI])
+        pipe.run("generate an image of a sunset over the mountains")
+        self.assertEqual(rt.requests[0].task_type, "image_generation")
+        self.assertEqual(rt.requests[0].required_output_modalities, ["image"])
+
+    def test_bangla_image_request_sets_output_modality(self):
+        pipe, gw, rt = make([understand(), verdict("complete")],
+                            [self._PNG_DATA_URI])
+        pipe.run("akta chobi banao")
+        self.assertEqual(rt.requests[0].task_type, "image_generation")
+        self.assertEqual(rt.requests[0].required_output_modalities, ["image"])
+
+    def test_bangla_script_image_request_sets_output_modality(self):
+        """Real Bengali script, not just Latin-script Banglish."""
+        pipe, gw, rt = make([understand(), verdict("complete")],
+                            [self._PNG_DATA_URI])
+        pipe.run("\u098f\u0995\u099f\u09be \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993")
+        self.assertEqual(rt.requests[0].task_type, "image_generation")
+        self.assertEqual(rt.requests[0].required_output_modalities, ["image"])
+
+    def test_banglish_photo_create_koro_sets_output_modality(self):
+        pipe, gw, rt = make([understand(), verdict("complete")],
+                            [self._PNG_DATA_URI])
+        pipe.run("photo create koro")
+        self.assertEqual(rt.requests[0].task_type, "image_generation")
+        self.assertEqual(rt.requests[0].required_output_modalities, ["image"])
+
+    def test_normal_chat_request_gets_no_output_modality(self):
+        """Regression guard: 'python code likhe dao' and other ordinary
+        requests must not be redirected through the image-generation path."""
+        pipe, gw, rt = make([understand(), verdict("complete")],
+                            ["def reverse(s): return s[::-1]"])
+        pipe.run("python code likhe dao — ekta reverse string function")
+        self.assertNotEqual(rt.requests[0].task_type, "image_generation")
+        self.assertEqual(rt.requests[0].required_output_modalities, [])
+
+    def test_generated_image_reaches_the_user_as_a_real_artifact(self):
+        pipe, gw, rt = make([understand(), verdict("complete")],
+                            [self._PNG_DATA_URI])
+        out = pipe.run("generate an image of a sunset over the mountains")
+        self.assertTrue(out["ok"])
+        arts = out.get("artifacts") or []
+        self.assertEqual(len(arts), 1)
+        self.assertEqual(arts[0]["artifact_type"], "image")
+        self.assertTrue(arts[0]["validated"])
+
+    def test_raw_base64_never_leaks_into_the_visible_reply(self):
+        """The image is delivered via `artifacts`; the visible `reply` text
+        must never contain the raw data URI (see
+        astra.ai.response_boundary.sanitize_final_response)."""
+        pipe, gw, rt = make([understand(), verdict("complete")],
+                            [self._PNG_DATA_URI])
+        out = pipe.run("generate an image of a sunset over the mountains")
+        self.assertNotIn("base64,", out["reply"])
+        self.assertTrue((out["reply"] or "").strip())  # some human-readable line remains
+
+
 if __name__ == "__main__":
     unittest.main()

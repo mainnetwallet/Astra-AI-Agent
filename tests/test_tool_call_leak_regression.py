@@ -39,12 +39,13 @@ from astra.agent import Agent
 from astra.ai.chat_pipeline import ChatPipeline
 from astra.ai.response_boundary import sanitize_final_response
 from astra.core.permissions import Policy
+from astra.ai.chat_pipeline import _NO_GATEWAY_CONFIGURED_MESSAGE
 from astra.runtime.tools import register_runtime_tools
 from astra.terminal import TerminalManager, register_terminal_tools
 from astra.tools.builtins import register_builtins
 from astra.tools.registry import ToolRegistry
 
-from tests.helpers import LocalRuntimeStub
+from tests.helpers import LocalRuntimeStub, requires_posix_host
 from tests.test_chat_pipeline import FakeGateway, FakeRouter
 
 _PROTOCOL_MARKERS = ('"action"', '"tool"', '"args"', '"session_id"',
@@ -90,6 +91,7 @@ def _pipeline(outputs, reg, manager, runtime=None, **kw):
 class PrefacedToolCallLeakTests(unittest.TestCase):
     """Case 3 from the bug report."""
 
+    @requires_posix_host
     def test_prefaced_tool_call_is_executed_not_leaked(self):
         reg, manager, runtime = _stack()
         outputs = [
@@ -306,13 +308,16 @@ class PlainChatUnaffectedTests(unittest.TestCase):
     def test_no_registry_single_call_path_unaffected(self):
         """When no terminal/registry is wired (many embedders), the
         original single-provider-call path runs — the boundary guard must
-        not alter a normal answer on that path either."""
+        not alter a normal answer on that path either. The only thing added
+        is the deliberate missing-Gateway-key notice."""
         gw = FakeGateway([], usable=False)
         rt = FakeRouter(["Paris is the capital of France."])
         pipe = ChatPipeline(gw, rt, max_tokens=800)
         result = pipe.run("capital of France?", conversation_id="c-noreg")
         self.assertTrue(result["ok"])
-        self.assertEqual(result["reply"], "Paris is the capital of France.")
+        self.assertEqual(result["reply"],
+                         "Paris is the capital of France.\n\n" +
+                         _NO_GATEWAY_CONFIGURED_MESSAGE)
 
 
 if __name__ == "__main__":

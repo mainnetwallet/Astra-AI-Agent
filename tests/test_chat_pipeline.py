@@ -11,6 +11,7 @@ import unittest
 
 from astra.agent import Agent
 from astra.ai.chat_pipeline import ChatPipeline
+from astra.ai.chat_pipeline import _NO_GATEWAY_CONFIGURED_MESSAGE
 from astra.ai.gateway_task_completion import GatewayTaskCompletionSupervisor
 from astra.ai.router import RoutingResult
 from astra.core.correction import MAX_CORRECTION_ATTEMPTS
@@ -237,7 +238,13 @@ class TestFailOpen(unittest.TestCase):
         pipe, gw, rt = make([], ["plain answer"], usable=False)
         out = pipe.run("hi")
         self.assertTrue(out["ok"])
-        self.assertEqual(out["reply"], "plain answer")
+        # Pass-through as before, but the reply now carries the plain-text
+        # notice that Gateway verification was skipped because no GW_* API
+        # key is configured (deliberate, see chat_pipeline
+        # ._NO_GATEWAY_CONFIGURED_MESSAGE: the user is told instead of the
+        # skip being silent forever).
+        self.assertEqual(out["reply"],
+                         "plain answer\n\n" + _NO_GATEWAY_CONFIGURED_MESSAGE)
         self.assertEqual(gw.calls, [])
         self.assertEqual(out["data"]["gateway"], "unavailable")
         self.assertEqual(out["data"]["verification"]["status"], "skipped")
@@ -361,8 +368,12 @@ class TestNoInternalDebugLeak(unittest.TestCase):
         """Guards the wiring itself: `_reply`'s `text` argument must be the
         only thing that ends up as `out["reply"]` — `note` may only affect
         `data`. If a future change reintroduces string concatenation this
-        catches it directly, independent of any particular wording."""
-        pipe, gw, rt = make([understand()], ["clean answer"], usable=False)
+        catches it directly, independent of any particular wording.
+
+        Runs on the Gateway-available path: the ONE deliberate exception to
+        the no-concatenation rule is the missing-Gateway-key notice asserted
+        in TestFailOpen above (a user-facing message, not internal debug)."""
+        pipe, gw, rt = make([understand()], ["clean answer"], usable=True)
         out = pipe.run("hi")
         self.assertEqual(out["reply"], "clean answer")
         self.assertNotIn("\n\n⚠️", out["reply"])
@@ -451,8 +462,11 @@ class TestRealRouterAndGatewayWiring(unittest.TestCase):
         self.assertEqual({(t["provider"], t["model"]) for t in targets},
                          {("groq", "llama-fast"), ("gemini", "gemini-pro")})
         for t in targets:
+            # `health` is part of the documented catalogue the Gateway's
+            # "assign" call sees (router.available_targets; commit 976b2ea) —
+            # the Gateway must not be blind to real per-model health.
             self.assertEqual(set(t), {"provider", "model", "capabilities",
-                                      "quality", "context_window"})
+                                      "quality", "context_window", "health"})
 
     def test_full_flow_with_fix_uses_assigned_provider_only(self):
         pipe, conn, groq, gemini = self._build(

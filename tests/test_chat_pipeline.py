@@ -6,6 +6,8 @@ bounded verify/correct supervisor (GatewayTaskCompletionSupervisor), so the
 loop semantics tested here are the ones that run in production.
 """
 import json
+import os
+import tempfile
 import unittest
 
 
@@ -92,7 +94,12 @@ class FakeRouter:
 def make(gateway_replies, outputs, **kw):
     gw = FakeGateway(gateway_replies, usable=kw.pop("usable", True))
     rt = FakeRouter(outputs)
-    return ChatPipeline(gw, rt, max_tokens=800), gw, rt
+    # Optional deterministic artifact directory: tests that generate images
+    # pass their own temp dir instead of relying on the shared system temp
+    # path ({tempdir}/astra/artifacts). None keeps production behaviour.
+    artifact_dir = kw.pop("artifact_dir", None)
+    return ChatPipeline(gw, rt, max_tokens=800,
+                        artifact_dir=artifact_dir), gw, rt
 
 
 def user_text(req):
@@ -521,6 +528,18 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
 
     _PNG_DATA_URI = None
 
+    def setUp(self):
+        # Deterministic, writable artifact storage that is cleaned up
+        # automatically after each test. ChatPipeline must never fall back to
+        # the shared system temp path ({tempdir}/astra/artifacts) here.
+        self._artifacts_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._artifacts_tmp.cleanup)
+        self.artifact_dir = self._artifacts_tmp.name
+
+    def _make(self, gateway_replies, outputs, **kw):
+        kw.setdefault("artifact_dir", self.artifact_dir)
+        return make(gateway_replies, outputs, **kw)
+
     @classmethod
     def setUpClass(cls):
         import base64
@@ -534,30 +553,30 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         # ... if rewrote else message`) — so it's the literal text below
         # that classify() must recognize, not anything scripted into
         # understand().
-        pipe, gw, rt = make([understand(), verdict("complete")],
-                            [self._PNG_DATA_URI])
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
+                                  [self._PNG_DATA_URI])
         pipe.run("generate an image of a sunset over the mountains")
         self.assertEqual(rt.requests[0].task_type, "image_generation")
         self.assertEqual(rt.requests[0].required_output_modalities, ["image"])
 
     def test_bangla_image_request_sets_output_modality(self):
-        pipe, gw, rt = make([understand(), verdict("complete")],
-                            [self._PNG_DATA_URI])
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
+                                  [self._PNG_DATA_URI])
         pipe.run("akta chobi banao")
         self.assertEqual(rt.requests[0].task_type, "image_generation")
         self.assertEqual(rt.requests[0].required_output_modalities, ["image"])
 
     def test_bangla_script_image_request_sets_output_modality(self):
         """Real Bengali script, not just Latin-script Banglish."""
-        pipe, gw, rt = make([understand(), verdict("complete")],
-                            [self._PNG_DATA_URI])
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
+                                  [self._PNG_DATA_URI])
         pipe.run("\u098f\u0995\u099f\u09be \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993")
         self.assertEqual(rt.requests[0].task_type, "image_generation")
         self.assertEqual(rt.requests[0].required_output_modalities, ["image"])
 
     def test_banglish_photo_create_koro_sets_output_modality(self):
-        pipe, gw, rt = make([understand(), verdict("complete")],
-                            [self._PNG_DATA_URI])
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
+                                  [self._PNG_DATA_URI])
         pipe.run("photo create koro")
         self.assertEqual(rt.requests[0].task_type, "image_generation")
         self.assertEqual(rt.requests[0].required_output_modalities, ["image"])
@@ -565,28 +584,37 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
     def test_normal_chat_request_gets_no_output_modality(self):
         """Regression guard: 'python code likhe dao' and other ordinary
         requests must not be redirected through the image-generation path."""
-        pipe, gw, rt = make([understand(), verdict("complete")],
-                            ["def reverse(s): return s[::-1]"])
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
+                                  ["def reverse(s): return s[::-1]"])
         pipe.run("python code likhe dao — ekta reverse string function")
         self.assertNotEqual(rt.requests[0].task_type, "image_generation")
         self.assertEqual(rt.requests[0].required_output_modalities, [])
 
     def test_generated_image_reaches_the_user_as_a_real_artifact(self):
-        pipe, gw, rt = make([understand(), verdict("complete")],
-                            [self._PNG_DATA_URI])
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
+                                  [self._PNG_DATA_URI])
         out = pipe.run("generate an image of a sunset over the mountains")
         self.assertTrue(out["ok"])
         arts = out.get("artifacts") or []
-        self.assertEqual(len(arts), 1)
+        self.assertEqual(len(arts), 1)                 # exactly one artifact
         self.assertEqual(arts[0]["artifact_type"], "image")
         self.assertTrue(arts[0]["validated"])
+        # A REAL, readable image file in the deterministic temp dir -- not
+        # just metadata. store_artifact names files {id}_{filename}.
+        path = os.path.join(self.artifact_dir,
+                            "%s_%s" % (arts[0]["id"], arts[0]["filename"]))
+        self.assertTrue(os.path.isfile(path), path)
+        self.assertEqual(arts[0]["mime_type"], "image/png")
+        with open(path, "rb") as f:
+            raw = f.read()
+        self.assertTrue(raw.startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_raw_base64_never_leaks_into_the_visible_reply(self):
         """The image is delivered via `artifacts`; the visible `reply` text
         must never contain the raw data URI (see
         astra.ai.response_boundary.sanitize_final_response)."""
-        pipe, gw, rt = make([understand(), verdict("complete")],
-                            [self._PNG_DATA_URI])
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
+                                  [self._PNG_DATA_URI])
         out = pipe.run("generate an image of a sunset over the mountains")
         self.assertNotIn("base64,", out["reply"])
         self.assertTrue((out["reply"] or "").strip())  # some human-readable line remains

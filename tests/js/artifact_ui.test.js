@@ -13,8 +13,10 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const ROOT = path.join(__dirname, "..", "..");
+// Normalise CRLF (what a Windows checkout with core.autocrlf=true produces)
+// so the `\n}\n` function-end search below works on every platform.
 const SOURCE = fs.readFileSync(
-  path.join(ROOT, "static/js/astra.js"), "utf8");
+  path.join(ROOT, "static/js/astra.js"), "utf8").replace(/\r\n/g, "\n");
 
 function loadRenderArtifact() {
   const start = SOURCE.indexOf("function renderArtifact(a) {");

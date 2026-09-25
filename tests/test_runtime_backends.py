@@ -684,9 +684,23 @@ class TestProotBackendIsUnchanged(unittest.TestCase):
         # NOT `/usr/bin/env` - that is the path inside a WSL2 distribution and
         # does not exist on Android, where the runtime lives under the Termux
         # prefix. Changing it would be a silent contract break.
+        #
+        # It is pinned through `shutil.which` and its basename rather than by
+        # forbidding the literal "/usr/bin/env": on a plain Linux host
+        # `which("env")` legitimately IS /usr/bin/env (Termux and WSL are not
+        # the only hosts that run this backend), so a literal check fails
+        # there while the contract still holds. The bare-name fallback branch
+        # is pinned separately below.
         self.assertEqual(argv[0], shutil.which("env") or "env")
         self.assertEqual(argv[1], "-i")
-        self.assertNotIn("/usr/bin/env", argv)
+        self.assertEqual(os.path.basename(argv[0]), "env")
+        with mock.patch("astra.runtime.backends.proot.shutil.which",
+                        return_value=None):
+            bare = backend.build_argv(
+                binds=[(workspace, GUEST_WORKSPACE)], cwd=GUEST_WORKSPACE,
+                argv=["/bin/bash"])
+        self.assertEqual(bare[0], "env")            # bare-name fallback
+        self.assertEqual(bare[1], "-i")
         self.assertIn("--kill-on-exit", argv)
         self.assertIn("--change-id=0:0", argv)
         self.assertIn("--rootfs=" + info["rootfs"], argv)
@@ -704,8 +718,11 @@ class TestProotBackendIsUnchanged(unittest.TestCase):
         self.assertEqual(backend.guest_dirs("default", base),
                          (GUEST_WORKSPACE, GUEST_HOME, GUEST_TMP))
         self.assertEqual(backend.pty_class(), PtyProcess)
-        self.assertEqual(backend.pty_argv(binds=[], cwd=GUEST_WORKSPACE)[0],
-                         "env")
+        # Same launcher contract as build_argv above (pty_argv delegates to
+        # it), pinned host-independently for the same reason.
+        pty = backend.pty_argv(binds=[], cwd=GUEST_WORKSPACE)
+        self.assertEqual(os.path.basename(pty[0]), "env")
+        self.assertEqual(pty[1], "-i")
 
 
 if __name__ == "__main__":

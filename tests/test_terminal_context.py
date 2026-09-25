@@ -19,7 +19,7 @@ from astra.runtime.tools import register_runtime_tools
 from astra.terminal import TerminalManager, register_terminal_tools
 from astra.tools.builtins import register_builtins
 from astra.tools.registry import ToolRegistry
-from tests.helpers import LocalRuntimeStub
+from tests.helpers import LocalRuntimeStub, requires_posix_host
 
 TARGETS = [{"provider": "groq", "model": "llama", "capabilities": ["chat", "coding"],
             "quality": "high", "context_window": 32000}]
@@ -98,6 +98,7 @@ class ContextReachesBothTests(unittest.TestCase):
     def _prime(self, runtime, session_id, marker):
         runtime.exec_command(f"echo {marker}", session_id=session_id)
 
+    @requires_posix_host
     def test_gateway_understand_prompt_has_terminal_context(self):
         reg, host, runtime = _stack()
         self._prime(runtime, "conv-7", "TERM-MARK-7")
@@ -113,6 +114,7 @@ class ContextReachesBothTests(unittest.TestCase):
         host.close_all()
         runtime.close_all()
 
+    @requires_posix_host
     def test_provider_messages_have_terminal_context(self):
         reg, host, runtime = _stack()
         self._prime(runtime, "conv-8", "TERM-MARK-8")
@@ -193,6 +195,7 @@ class SessionIsolationTests(unittest.TestCase):
         host.close_all()
         runtime.close_all()
 
+    @requires_posix_host
     def test_explicit_session_id_isolates_cid_less_callers(self):
         """With no conversation_id an embedder can still isolate runs by
         passing session_id; two ids must never share cwd/history."""
@@ -224,6 +227,7 @@ class SessionIsolationTests(unittest.TestCase):
         host.close_all()
         runtime.close_all()
 
+    @requires_posix_host
     def test_concurrent_conversations_keep_terminal_state_isolated(self):
         """Two chats served at the same time, through ONE shared pipeline
         stack (registry + terminal + execution history), must each keep
@@ -330,6 +334,7 @@ class NoConversationSessionTests(unittest.TestCase):
                                     os.path.realpath(base_a))
         self.assertEqual(runtime.session_ids(), [])
 
+    @requires_posix_host
     def test_conversation_session_still_persists_across_turns(self):
         reg, host, runtime = _stack()
         base = tempfile.mkdtemp()
@@ -348,6 +353,7 @@ class NoConversationSessionTests(unittest.TestCase):
 
 
 class GatewayBrainTests(unittest.TestCase):
+    @requires_posix_host
     def test_gateway_brain_drives_the_same_loop_and_terminal(self):
         reg, host, runtime = _stack()
 
@@ -387,6 +393,7 @@ class GatewayBrainTests(unittest.TestCase):
 
 
 class CorrectionPhaseTests(unittest.TestCase):
+    @requires_posix_host
     def test_correction_messages_exclude_tool_protocol(self):
         reg, host, runtime = _stack()
         workdir = tempfile.mkdtemp()
@@ -450,6 +457,7 @@ class MultimodalToolLoopTests(unittest.TestCase):
 
 
 class ToolLoopTraceTests(unittest.TestCase):
+    @requires_posix_host
     def test_pipeline_records_tool_loop_trace(self):
         reg, host, runtime = _stack()
         runtime.exec_command("echo VERIFY-CTX", session_id="conv-5")

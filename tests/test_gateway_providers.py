@@ -23,6 +23,7 @@ import urllib.error
 from unittest import mock
 
 from astra.core.config import Config
+from tests.helpers import requires_posix_host
 from astra.core.exceptions import ProviderError, TimeoutError
 from astra.ai.gateway import (GATEWAY_CONNECTIONS, AstraAIGateway,
                               AstraGatewayBedrock, AstraGatewayCerebras,
@@ -823,6 +824,7 @@ class GatewayIntegrationTests(unittest.TestCase):
         self.assertEqual(res.stopped_reason, "error")
         self.assertTrue(res.error, "the loop must report the failure, not crash")
 
+    @requires_posix_host
     def test_tool_loop_still_executes_tools_when_the_gateway_works(self):
         from astra.ai.agent_tool_loop import AgentToolLoop, GatewayToolCaller
         from astra.core.permissions import Policy

@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from astra.core.blob_store import BlobStore
 from astra.store import Store
 from astra.terminal import TerminalManager, TerminalSession
+from tests.helpers import requires_posix_terminal
 from astra.terminal.tools import (terminal_exec, terminal_history_read,
                                   terminal_output_read)
 from astra.ai.execution_history import AgentExecutionHistory
@@ -180,6 +181,7 @@ def _session(history_limit=50, max_output_chars=20000, **kw):
 
 
 class TerminalOutputRetrievalTests(unittest.TestCase):
+    @requires_posix_terminal
     def test_large_stdout_is_retrievable_beyond_the_cap(self):
         s = _session(max_output_chars=2000)
         # A command whose stdout is well beyond the 2000-char hot cap.
@@ -204,6 +206,7 @@ class TerminalOutputRetrievalTests(unittest.TestCase):
         self.assertEqual(full.count("A"), 30000)
         s.close()
 
+    @requires_posix_terminal
     def test_large_stderr_is_retrievable_beyond_the_cap(self):
         s = _session(max_output_chars=1500)
         r = s.exec("python3 -c \"import sys; sys.stderr.write('E'*20000)\"")
@@ -215,6 +218,7 @@ class TerminalOutputRetrievalTests(unittest.TestCase):
         self.assertTrue(chunk["done"])
         s.close()
 
+    @requires_posix_terminal
     def test_terminal_output_read_tool(self):
         manager = TerminalManager(max_output_chars=1000)
         manager.get("t1", cwd=tempfile.mkdtemp())
@@ -404,6 +408,7 @@ class BlobStoreRetentionAuditTests(unittest.TestCase):
         path = os.path.join(tempfile.mkdtemp(), "retention.db")
         return Store(path)
 
+    @requires_posix_terminal
     def test_closing_a_session_does_not_delete_its_blobs(self):
         from astra.terminal.manager import DEFAULT_SESSION_ID
         store = self._store()

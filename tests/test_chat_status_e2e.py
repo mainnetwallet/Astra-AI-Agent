@@ -33,6 +33,7 @@ import unittest
 
 from tests.test_gateway_provider_tool_architecture import (
     Harness, final, tool_call, understand, verdict)
+from tests.helpers import requires_posix_host
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATUS_MODEL = os.path.join(ROOT, "static", "js", "chat_status.js")
@@ -115,7 +116,8 @@ class RecordingHarness(Harness):
                 json.dump(self.records, fh)
             proc = subprocess.run(
                 ["node", "-r", prelude, driver, payload],
-                cwd=ROOT, capture_output=True, text=True, timeout=120)
+                cwd=ROOT, capture_output=True, text=True,
+                encoding="utf-8", timeout=120)
             if proc.returncode != 0:
                 raise AssertionError(
                     f"node status model failed:\n{proc.stdout}\n{proc.stderr}")
@@ -129,6 +131,11 @@ class RecordingHarness(Harness):
 
 @unittest.skipUnless(shutil.which("node"), "node not installed")
 class ChatStatusAcceptanceTests(unittest.TestCase):
+    # The turn under test drives the real AgentToolLoop with the runtime test
+    # double, which shells out to /bin/sh (see tests.helpers
+    # .requires_posix_host). The frontend-status model itself is portable and
+    # the frontend-only coverage lives in tests/test_chat_status_ui.py.
+    @requires_posix_host
     def test_gateway_provider_terminal_provider_final_sequence(self):
         h = RecordingHarness(
             [understand("Clone the repo.", required=True,
@@ -180,6 +187,7 @@ class ChatStatusAcceptanceTests(unittest.TestCase):
             self.assertNotRegex(line, r"req-|op:|trace:|process_id")
             self.assertLessEqual(len(line), 140)
 
+    @requires_posix_host
     def test_multiple_terminal_calls_render_separate_cards(self):
         """A real turn that runs three commands produces three cards."""
         sample = os.path.join(tempfile.mkdtemp(prefix="astra-cards-"),
@@ -219,6 +227,7 @@ class ChatStatusAcceptanceTests(unittest.TestCase):
         self.assertNotIn('"stdout"', blob)
         self.assertNotIn('"args"', blob)
 
+    @requires_posix_host
     def test_failing_command_does_not_end_the_turn(self):
         h = RecordingHarness(
             [understand("Run the tests and fix the failure.", required=True,

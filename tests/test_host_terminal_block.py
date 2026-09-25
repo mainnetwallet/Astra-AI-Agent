@@ -35,7 +35,8 @@ from astra.runtime.tools import register_runtime_tools
 from astra.terminal import TerminalManager, register_terminal_tools
 from astra.tools.builtins import register_builtins
 from astra.tools.registry import ToolRegistry
-from tests.helpers import LocalRuntimeStub, ScriptedBrain
+from tests.helpers import (LocalRuntimeStub, ScriptedBrain,
+                           requires_posix_host)
 
 HOST_TERMINAL_TOOLS = ("terminal_exec", "terminal_start", "terminal_status",
                        "terminal_stop", "terminal_kill", "terminal_history",
@@ -191,6 +192,7 @@ class AgentLoopCannotReachTheHostTests(unittest.TestCase):
         host.close_all()
         runtime.close_all()
 
+    @requires_posix_host
     def test_the_legit_runtime_path_still_works_in_the_loop(self):
         reg, host, runtime = _stack()
         brain = ScriptedBrain([

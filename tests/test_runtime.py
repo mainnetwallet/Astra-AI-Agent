@@ -270,7 +270,12 @@ class TestRuntimePaths(unittest.TestCase):
         outside = os.path.join(self.root, "outside")
         os.makedirs(outside, exist_ok=True)
         link = os.path.join(ws, "escape")
-        os.symlink(outside, link)
+        try:
+            os.symlink(outside, link)
+        except (OSError, NotImplementedError):
+            # Creating symlinks needs developer mode / SeCreateSymbolicLink
+            # on Windows; there is nothing to escape through without one.
+            self.skipTest("symlinks not supported on this platform")
         with self.assertRaises(ValidationError):
             self.paths.resolve("/workspace/escape/secret.txt")
 

@@ -32,7 +32,8 @@ from astra.runtime.tools import register_runtime_tools
 from astra.terminal import TerminalManager, register_terminal_tools
 from astra.tools import builtins
 from astra.tools.registry import ToolRegistry
-from tests.helpers import LocalRuntimeStub
+from tests.helpers import (LocalRuntimeStub, requires_posix_host,
+                           runtime_python_has_pytest)
 
 BUGGY = "def add(a, b):\n    return a - b\n"
 FIXED = "def add(a, b):\n    return a + b\n"
@@ -100,6 +101,10 @@ def _final(answer):
     return json.dumps({"action": "final", "answer": answer})
 
 
+_HAS_RUNTIME_PYTEST = runtime_python_has_pytest()
+
+
+@requires_posix_host
 class RealRepoTaskE2E(unittest.TestCase):
     def setUp(self):
         self.repo = tempfile.mkdtemp(prefix="astra-e2e-")
@@ -114,6 +119,8 @@ class RealRepoTaskE2E(unittest.TestCase):
         builtins.WORKSPACE = self._old_workspace
         shutil.rmtree(self.repo, ignore_errors=True)
 
+    @unittest.skipUnless(_HAS_RUNTIME_PYTEST,
+                         "requires pytest importable by the runtime python3")
     def test_fix_failing_tests_end_to_end(self):
         policy = Policy(granted=["read", "low_risk_write", "browser_action",
                                  "system_action"])

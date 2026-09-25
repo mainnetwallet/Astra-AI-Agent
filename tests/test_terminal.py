@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astra.terminal import (COMPLETED, FAILED, RUNNING, STOPPED, TIMEOUT,
                             TerminalManager, TerminalSession, detect_shell)
+from tests.helpers import requires_posix_terminal
 
 
 def _session(**kw):
@@ -36,6 +37,7 @@ class SessionExecutionTests(unittest.TestCase):
         self.assertEqual(r["shell"], s.shell["name"])
         s.close()
 
+    @requires_posix_terminal
     def test_stdout_and_stderr_are_separate(self):
         s = _session()
         r = s.exec("echo out; echo err 1>&2")
@@ -60,6 +62,7 @@ class SessionExecutionTests(unittest.TestCase):
 
 
 class PersistenceTests(unittest.TestCase):
+    @requires_posix_terminal
     def test_cwd_persists_between_commands(self):
         base = tempfile.mkdtemp()
         sub = os.path.join(base, "sub")
@@ -75,6 +78,7 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(os.path.realpath(r2["cwd"]), os.path.realpath(sub))
         s.close()
 
+    @requires_posix_terminal
     def test_environment_persists_between_commands(self):
         s = _session()
         s.exec("export ASTRA_TEST_VAR=abc123")
@@ -89,6 +93,7 @@ class PersistenceTests(unittest.TestCase):
             s.set_cwd("/no/such/dir/astra")
         s.close()
 
+    @requires_posix_terminal
     def test_sessions_are_isolated(self):
         a = TerminalSession("a", cwd=tempfile.mkdtemp())
         b = TerminalSession("b", cwd=tempfile.mkdtemp())

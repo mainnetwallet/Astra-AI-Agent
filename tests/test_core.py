@@ -611,6 +611,21 @@ class TestEventBusValidation(unittest.TestCase):
 
 
 # ── AI Providers + Router (Phase 4) ───────────────────────────────────────────
+def _drain_request(handler):
+    """Consume a request body before the fake AI server replies.
+
+    A `BaseHTTPRequestHandler` that answers without reading the body leaves
+    unread bytes in the socket, so closing the connection sends a TCP RST
+    rather than a FIN. Linux usually delivers the already-written response
+    before the RST and the test passes; Windows surfaces it to the client as
+    `ConnectionAbortedError (WinError 10053)` and the request fails. Draining
+    the body is what a real HTTP server does and makes the fake one behave
+    identically on every platform."""
+    length = int(handler.headers.get("Content-Length") or 0)
+    if length:
+        handler.rfile.read(length)
+
+
 class TestPhase4Providers(unittest.TestCase):
     def make_events(self):
         return make_stack()["events"]
@@ -655,6 +670,7 @@ class TestPhase4Providers(unittest.TestCase):
     def test_openai_chat_parses_reply(self):
         class H(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
+                _drain_request(self)
                 body = json.dumps(
                     {"choices": [{"message": {"content": "hello from openai"}}]}
                 ).encode()
@@ -683,6 +699,7 @@ class TestPhase4Providers(unittest.TestCase):
                 b"data: [DONE]\n\n")
         class H(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
+                _drain_request(self)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(body)))
@@ -712,6 +729,7 @@ class TestPhase4Providers(unittest.TestCase):
                 b'data: {"type":"message_stop"}\n\n')
         class H(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
+                _drain_request(self)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(body)))

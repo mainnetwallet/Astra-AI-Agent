@@ -37,7 +37,8 @@ from astra.ai.gateway import AstraAIGateway
 from astra.ai.router import AstraRouter, RoutingRequest, RoutingResult
 from astra.core.exceptions import ProviderError
 from astra.store import Store
-from tests.helpers import LocalRuntimeStub, ScriptedBrain, make_stack
+from tests.helpers import (LocalRuntimeStub, ScriptedBrain, make_stack,
+                           requires_posix_host)
 
 # A synthetic, deliberately NON-real credential for the redaction test.
 FAKE_TOKEN = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
@@ -262,6 +263,7 @@ class GatewayExecutionDecisionTests(unittest.TestCase):
 
 
 class RealToolExecutionTests(unittest.TestCase):
+    @requires_posix_host
     def test_terminal_exec_runs_and_result_returns_to_the_provider(self):
         h = Harness(
             [understand("Clone the repo.", required=True,
@@ -280,6 +282,7 @@ class RealToolExecutionTests(unittest.TestCase):
         self.assertIn("Tool result", h.brain.calls[1][-1]["content"])
         self.assertIn("astra-clone-ok", h.brain.calls[1][-1]["content"])
 
+    @requires_posix_host
     def test_multi_step_execution_continues_until_final_answer(self):
         h = Harness(
             [understand("Do the two steps.", required=True,
@@ -307,6 +310,7 @@ class RealToolExecutionTests(unittest.TestCase):
 
 
 class VerificationUsesExecutionEvidenceTests(unittest.TestCase):
+    @requires_posix_host
     def test_verifier_sees_the_execution_decision_and_evidence(self):
         h = Harness(
             [understand("Clone it.", required=True, capability="terminal",

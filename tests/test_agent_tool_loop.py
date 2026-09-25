@@ -21,7 +21,8 @@ from astra.runtime.tools import register_runtime_tools
 from astra.terminal import TerminalManager, register_terminal_tools
 from astra.tools.builtins import register_builtins
 from astra.tools.registry import ToolRegistry
-from tests.helpers import LocalRuntimeStub, ScriptedBrain
+from tests.helpers import (LocalRuntimeStub, ScriptedBrain,
+                           requires_posix_host)
 
 
 def _tool(command):
@@ -71,6 +72,7 @@ def _stack(**kw):
 
 
 class LoopExecutionTests(unittest.TestCase):
+    @requires_posix_host
     def test_multi_step_loop_executes_and_continues(self):
         reg, host, runtime = _stack()
         brain = ScriptedBrain([_tool("echo one"), _tool("echo two"),
@@ -89,6 +91,7 @@ class LoopExecutionTests(unittest.TestCase):
         host.close_all()
         runtime.close_all()
 
+    @requires_posix_host
     def test_failed_command_is_recoverable(self):
         reg, host, runtime = _stack()
         brain = ScriptedBrain([_tool("exit 7"), _tool("echo fixed"),
@@ -103,6 +106,7 @@ class LoopExecutionTests(unittest.TestCase):
         host.close_all()
         runtime.close_all()
 
+    @requires_posix_host
     def test_cwd_persists_across_loop_steps(self):
         base = tempfile.mkdtemp()
         sub = os.path.join(base, "project")
@@ -250,6 +254,7 @@ class EventsTests(unittest.TestCase):
         host.close_all()
         runtime.close_all()
 
+    @requires_posix_host
     def test_lifecycle_events_emitted(self):
         bus = Bus()
         reg, host, runtime = _stack()
@@ -271,6 +276,7 @@ class EventsTests(unittest.TestCase):
         host.close_all()
         runtime.close_all()
 
+    @requires_posix_host
     def test_started_and_terminal_events_share_op(self):
         bus = Bus()
         reg, host, runtime = _stack()
@@ -339,6 +345,7 @@ class EventsTests(unittest.TestCase):
         host.close_all()
         runtime.close_all()
 
+    @requires_posix_host
     def test_no_duplicate_execution_of_one_requested_command(self):
         reg, host, runtime = _stack()
         brain = ScriptedBrain([_tool("echo once"), _final("ok")])
@@ -374,6 +381,7 @@ class CallerTests(unittest.TestCase):
             return RoutingResult(ok=True, text=text, provider="groq",
                                  model="llama")
 
+    @requires_posix_host
     def test_gateway_brained_loop_uses_gateway_and_same_terminal(self):
         bus = Bus()
         reg, host, runtime = _stack()

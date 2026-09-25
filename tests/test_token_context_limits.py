@@ -49,7 +49,7 @@ from astra.chat_log import ChatLog
 from astra.runtime.tools import register_runtime_tools
 from astra.terminal import (TerminalManager, TerminalSession,
                             register_terminal_tools)
-from tests.helpers import LocalRuntimeStub
+from tests.helpers import LocalRuntimeStub, requires_posix_host
 from astra.tools.builtins import register_builtins
 from astra.tools.registry import ToolRegistry
 
@@ -305,6 +305,7 @@ class ToolResultAndTerminalTests(unittest.TestCase):
         register_runtime_tools(reg, runtime)
         return reg, manager, runtime
 
+    @requires_posix_host
     def test_long_tool_result_reaches_the_model(self):
         registry, terminal, runtime = self._stack()
         brain = ScriptedBrain([

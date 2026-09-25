@@ -4,11 +4,54 @@ The plugin system has been removed — `plugins/` is an empty placeholder
 (see plugins/README.md), so the legacy `plugins` list is always empty."""
 import os
 import sys
+import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astra.store import Store              # noqa: E402
 from astra.agent import Agent              # noqa: E402
+from astra.terminal import detect_shell    # noqa: E402
+
+
+# ── environment gates ────────────────────────────────────────────────────────
+#
+# Two host runtimes the suite can genuinely not provide on every machine, so
+# the tests that need them skip instead of failing:
+#
+# * POSIX host shell - `LocalRuntimeStub` (the stand-in for the Agent Runtime,
+#   which is a Linux sandbox on every platform) shells out to `/bin/sh`. On
+#   Windows the real runtime is WSL2 (see docs/AGENT_RUNTIME.md) and the host
+#   has no `/bin/sh`, so the stub cannot run there.
+# * POSIX terminal shell - the persistent host TerminalSession auto-detects
+#   bash/sh on POSIX but cmd/PowerShell on Windows (see
+#   astra/terminal/session.py::detect_shell). A test that asserts POSIX shell
+#   semantics (`export FOO=bar`, `1>&2`, `printf`, `seq`, ...) is only
+#   meaningful against a real POSIX shell.
+POSIX_HOST_SHELL = os.path.exists("/bin/sh")
+_SHELL = detect_shell()
+POSIX_TERMINAL_SHELL = _SHELL.get("kind") == "posix"
+
+requires_posix_host = unittest.skipUnless(
+    POSIX_HOST_SHELL,
+    "requires a POSIX host shell (/bin/sh) for the runtime test double")
+requires_posix_terminal = unittest.skipUnless(
+    POSIX_TERMINAL_SHELL,
+    "requires a POSIX terminal shell (this host auto-detects %r)"
+    % _SHELL.get("name"))
+
+
+def runtime_python_has_pytest() -> bool:
+    """Can the shell's own `python3` import pytest?
+
+    The end-to-end "fix the failing tests" flow runs a REAL pytest inside the
+    runtime; if that python has no pytest there is nothing to fix, so the
+    tests built on it must skip rather than fail."""
+    import subprocess
+    try:
+        return subprocess.run(["python3", "-m", "pytest", "--version"],
+                              capture_output=True, timeout=120).returncode == 0
+    except Exception:
+        return False
 
 
 def make_agent():

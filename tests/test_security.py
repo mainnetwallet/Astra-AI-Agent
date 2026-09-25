@@ -193,8 +193,12 @@ class TestRateLimiterRequestId(unittest.TestCase):
         for i in range(rl._PRUNE_AT + 10):
             rl.allow(f"ip-{i}")
         self.assertGreater(len(rl._hits), rl._PRUNE_AT)
-        rl.window = 1e-9                 # every recorded hit is now stale
-        time.sleep(0.001)
+        # Age the recorded hits past the window instead of sleeping 1ms with a
+        # 1e-9s window: time.monotonic() on Windows only ticks every ~15.6ms,
+        # so the whole test ran inside one tick, `now - ts` stayed 0, nothing
+        # counted as stale and this failed on roughly 60% of runs there.
+        for key, stamps in list(rl._hits.items()):
+            rl._hits[key] = [t - 120.0 for t in stamps]
         self.assertTrue(rl.allow("fresh"))
         self.assertLessEqual(len(rl._hits), 2)
 

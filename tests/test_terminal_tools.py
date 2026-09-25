@@ -14,6 +14,7 @@ from astra.core.exceptions import PermissionError, ValidationError
 from astra.core.permissions import Level, Policy
 from astra.terminal import TerminalManager, register_terminal_tools
 from astra.tools.registry import ToolRegistry
+from tests.helpers import requires_posix_terminal
 
 
 def _reg(granted=None, **kw):
@@ -64,6 +65,7 @@ class PolicyGateTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
+    @requires_posix_terminal
     def test_exec_returns_structured_result(self):
         reg, manager = _reg()
         out = reg.execute("terminal_exec", {"command": "printf 'abc'"},

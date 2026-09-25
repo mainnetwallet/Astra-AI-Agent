@@ -24,7 +24,7 @@ import unittest
 
 from astra.web import AstraSite, Request, WebApp
 
-from tests.helpers import make_stack
+from tests.helpers import make_stack, requires_posix_terminal
 
 
 class TerminalOutputApiTests(unittest.TestCase):
@@ -49,6 +49,7 @@ class TerminalOutputApiTests(unittest.TestCase):
         return self.session.exec(command, timeout=20, wait=True)
 
     # -- the happy path ------------------------------------------------------
+    @requires_posix_terminal
     def test_captured_output_is_returned_with_its_record(self):
         result = self._run("printf 'hello\\nworld\\n'")
         status, body = self._get("process_id=" + result["process_id"])
@@ -71,6 +72,7 @@ class TerminalOutputApiTests(unittest.TestCase):
         self.assertEqual(resp.status, 200)
 
     # -- long output ---------------------------------------------------------
+    @requires_posix_terminal
     def test_long_output_pages_back_the_full_stream(self):
         result = self._run("seq 1 4000")           # ~19k chars
         full = result["stdout"]
@@ -89,6 +91,7 @@ class TerminalOutputApiTests(unittest.TestCase):
             self.assertLess(guard, 100, "pagination must terminate")
         self.assertEqual("".join(collected), full)
 
+    @requires_posix_terminal
     def test_blob_id_can_be_read_directly(self):
         result = self._run("printf 'blob-content\\n'")
         blob = result["stdout_blob_id"]
@@ -143,6 +146,7 @@ class TerminalOutputApiTests(unittest.TestCase):
         self.assertIn("***redacted***", blob)
 
     # -- READ-ONLY: it never executes anything again --------------------------
+    @requires_posix_terminal
     def test_requesting_output_never_re_runs_the_command(self):
         result = self._run("printf 'x' >> counter.txt")
         counter = os.path.join(self.tmp, "counter.txt")

@@ -15,6 +15,32 @@ import re
 
 from astra.core.artifacts import store_artifact, validate_artifact
 
+# Extensions worth pulling back out of the runtime automatically when a
+# tool call's result mentions a path under /workspace ending in one of
+# these. Kept to genuinely binary/non-text output — a provider can already
+# read/quote text files (.txt, .md, .py, ...) straight out of
+# runtime_command's own stdout, so there is no "invisible to the user"
+# problem for those.
+_RUNTIME_ARTIFACT_EXT: dict[str, str] = {
+    ".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image",
+    ".webp": "image",
+    ".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".flac": "audio",
+    ".ogg": "audio",
+    ".mp4": "video", ".webm": "video", ".mov": "video",
+    ".pdf": "document",
+    ".xlsx": "spreadsheet",
+    ".pptx": "presentation",
+}
+
+_RUNTIME_PATH_RE = re.compile(
+    r"""(/workspace/[^\s"'\\]+?\.(?:png|jpe?g|gif|webp|mp3|wav|m4a|flac|
+        ogg|mp4|webm|mov|pdf|xlsx|pptx))""",
+    re.IGNORECASE | re.VERBOSE)
+
+# Cap how many files one turn will auto-download, so a chatty tool loop
+# with many command results can't turn one reply into dozens of downloads.
+_MAX_RUNTIME_ARTIFACTS = 5
+
 
 def extract_artifacts(response_text: str, artifact_dir: str,
                       requested_output: str = "") -> list[dict]:
@@ -120,6 +146,81 @@ def _extract_code_artifacts(text: str, artifact_dir: str,
                 art.validated = True
                 artifacts.append(art.to_dict())
 
+    return artifacts
+
+
+def find_runtime_output_paths(entries: list[dict]) -> list[str]:
+    """Scan agent/tool execution history entries for guest paths under
+    /workspace that look like generated binary output (image, audio,
+    video, document, ...), in the order first seen.
+
+    `entries` is whatever `AgentExecutionHistory.entries(scope)` returns —
+    each entry's `summary` is a JSON-ish dump of that tool call's result
+    (e.g. a `runtime_command` result echoes the command and any path it
+    wrote to), so the path just needs to be pulled back out of that text.
+    A path is only a candidate here; whether the file actually exists is
+    decided later by trying to download it.
+    """
+    seen: list[str] = []
+    for entry in entries or []:
+        text = entry.get("summary") or ""
+        if not text:
+            continue
+        for match in _RUNTIME_PATH_RE.finditer(text):
+            path = match.group(1)
+            if path not in seen:
+                seen.append(path)
+            if len(seen) >= _MAX_RUNTIME_ARTIFACTS:
+                return seen
+    return seen
+
+
+def extract_runtime_artifacts(entries: list[dict], download_fn,
+                              artifact_dir: str) -> list[dict]:
+    """Pull binary files a tool call created inside the isolated runtime
+    back out and store them as artifacts, so they can be attached to the
+    chat reply instead of only being described in text.
+
+    `download_fn(path) -> dict` must behave like
+    `AgentRuntime.download_file`: return `{"content_base64": ..., "size":
+    ...}` for a real file, or raise/return falsy for one that doesn't
+    exist (e.g. because the model only *talked about* creating a file, or
+    a later step deleted it). Any error for one path is skipped rather
+    than failing the whole turn — a real reply the user can read is always
+    better than losing it over one bad path.
+    """
+    artifacts: list[dict] = []
+    if download_fn is None:
+        return artifacts
+    for path in find_runtime_output_paths(entries):
+        ext = ""
+        for candidate in _RUNTIME_ARTIFACT_EXT:
+            if path.lower().endswith(candidate):
+                ext = candidate
+                break
+        if not ext:
+            continue
+        try:
+            result = download_fn(path)
+        except Exception:
+            continue
+        if not result:
+            continue
+        b64 = result.get("content_base64") if isinstance(result, dict) else None
+        if not b64:
+            continue
+        try:
+            raw = base64.b64decode(b64)
+        except Exception:
+            continue
+        if not raw:
+            continue
+        filename = path.rsplit("/", 1)[-1]
+        art = store_artifact(raw, filename, _RUNTIME_ARTIFACT_EXT[ext],
+                             artifact_dir)
+        ok, _ = validate_artifact(art)
+        if ok:
+            artifacts.append(art.to_dict())
     return artifacts
 
 

@@ -177,6 +177,22 @@ def runtime_file_read(args, ctx=None, manager=None) -> dict:
     return runtime.read_file(path, max_bytes=int(args.get("max_bytes") or 200000))
 
 
+def runtime_file_download(args, ctx=None, manager=None) -> dict:
+    """Read a file out of the runtime as base64 bytes. Use this for any
+    non-text output a command created inside the runtime (an image, audio,
+    video, PDF, or other binary file) that needs to be returned to the user
+    — for example embedding it as a `data:<mime>;base64,...` URI in the
+    reply so it renders inline instead of only being described in text.
+    `runtime_file_read` decodes as UTF-8 text and will corrupt binary data;
+    use this tool for anything that is not plain text."""
+    runtime = _runtime(args, ctx, manager)
+    path = args.get("path")
+    if not path:
+        raise ValidationError("path required")
+    return runtime.download_file(
+        path, max_bytes=int(args.get("max_bytes") or 50_000_000))
+
+
 def runtime_file_write(args, ctx=None, manager=None) -> dict:
     """Create or overwrite a text file inside the runtime."""
     runtime = _runtime(args, ctx, manager)
@@ -345,6 +361,14 @@ RUNTIME_TOOLS = [
      {"path": {"type": "string", "required": True},
       "content": {"type": "string", "required": True},
       "overwrite": {"type": "bool"}, **_RUNTIME_ARG}, FILE_RISK),
+    ("runtime_file_download", runtime_file_download,
+     "Read a file out of the runtime as base64 bytes (images, audio, "
+     "video, PDFs, and other binary output). Use this — not "
+     "runtime_file_read — to bring a non-text file a command created back "
+     "out so it can be shown/attached to the user instead of only "
+     "described in text.",
+     {"path": {"type": "string", "required": True},
+      "max_bytes": {"type": "int"}, **_RUNTIME_ARG}, READ_RISK),
     ("runtime_file_upload", runtime_file_upload,
      "Write a base64-encoded file into the runtime (optionally extracting "
      "it when it is an archive).",
@@ -381,7 +405,7 @@ RUNTIME_TOOLS = [
 
 _IDEMPOTENT = {"runtime_status", "runtime_package_manager_detect",
                "runtime_directory_list", "runtime_file_info",
-               "runtime_file_read"}
+               "runtime_file_read", "runtime_file_download"}
 
 
 def register_runtime_tools(reg, manager) -> int:

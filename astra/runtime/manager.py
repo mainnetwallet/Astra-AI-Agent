@@ -685,6 +685,12 @@ class AgentRuntime:
     def read_file(self, path: str, *, max_bytes: int = 200_000):
         return runtime_files.read_text(self.paths, path, max_bytes=max_bytes)
 
+    def download_file(self, path: str, *, max_bytes: int = 50_000_000):
+        """Read a file out of the runtime as base64 bytes (images, audio,
+        documents, ...) — the guest→host counterpart to `read_file`, which
+        only handles text."""
+        return runtime_files.read_binary(self.paths, path, max_bytes=max_bytes)
+
     def write_file(self, path: str, text: str, *, overwrite: bool = True):
         return runtime_files.write_text(self.paths, path, text,
                                         overwrite=overwrite)

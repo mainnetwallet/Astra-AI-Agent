@@ -1198,23 +1198,28 @@ class AstraRouter:
                             reserve_tokens=reserve)
 
     @staticmethod
-    def _image_failure_category(err: str) -> str:
-        """Map a provider error string to a coarse, credential-free category
-        for the Activity Log (never the raw provider response)."""
+    def _image_failure_category(err: str, code: int = 0) -> str:
+        """Map a provider error string -- plus the real HTTP status when the
+        adapter attached one -- to a coarse, credential-free category for the
+        Activity Log (never the raw provider response)."""
         low = (err or "").lower()
-        if "429" in low or "rate limit" in low:
+        if code == 429 or "429" in low or "rate limit" in low:
             return "429 rate limit"
-        if "timeout" in low or "timed out" in low:
+        if code == 408 or "timeout" in low or "timed out" in low:
             return "timeout"
-        for code in ("500", "502", "503", "504"):
-            if code in low:
-                return "provider error (%s)" % code
+        if code in (500, 501, 502, 503, 504):
+            return "provider error (%s)" % code
+        for http_code in ("500", "502", "503", "504"):
+            if http_code in low:
+                return "provider error (%s)" % http_code
         if "quota" in low or "exhausted" in low or "billing" in low:
             return "quota exhausted"
-        if "404" in low or "not found" in low or "unavailable" in low:
+        if code == 404 or "404" in low or "not found" in low or "unavailable" in low:
             return "model unavailable"
-        if "credential" in low or "auth" in low:
+        if code in (401, 403) or "credential" in low or "auth" in low:
             return "provider authentication/credential failure"
+        if code:
+            return "http %s" % code
         return (err or "unknown error")[:120]
 
     def _route_image_serial(self, req: RoutingRequest, candidates: list,
@@ -1390,8 +1395,14 @@ class AstraRouter:
                                    usage=getattr(adapter, "_last_usage", None) or {},
                                    _reason=("matched preference" if not attempt else
                                             f"retry #{attempt}"))
+                # An image API call reports the real HTTP status on the SAME
+                # api-call contract as a chat call (provider, model, duration),
+                # so image generation is visible in the Activity Log for every
+                # supported image provider. Chat events are unchanged.
+                image_call = req.task_type in ("image_generation", "image_editing")
                 self._emit("ai.completed", provider=name, model=model.model_id,
-                           latency_ms=ms, op=op, trace=req.trace, terminal=True)
+                           latency_ms=ms, op=op, trace=req.trace, terminal=True,
+                           **({"status_code": 200} if image_call else {}))
                 self._record_key_model(adapter, model.model_id, True, ms, "", req)
                 return rr
             except (ProviderError, TimeoutError) as e:
@@ -1402,9 +1413,15 @@ class AstraRouter:
                 # per-key test: one attempt, on that key only -> terminal.
                 retry = (not self._pinned(adapter) and attempt <= retries
                          and getattr(e, "retryable", True))
+                image_call = req.task_type in ("image_generation", "image_editing")
+                status_code = int(getattr(e, "code", 0) or 0) if image_call else 0
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt, op=op,
-                           trace=req.trace, terminal=not retry, retrying=retry)
+                           trace=req.trace, terminal=not retry, retrying=retry,
+                           **(dict(status_code=status_code,
+                                   reason=self._image_failure_category(
+                                       last_error, status_code))
+                              if image_call else {}))
                 if self._pinned(adapter):
                     break
                 # A NON-retryable error (e.g. "no healthy credential
@@ -1422,9 +1439,17 @@ class AstraRouter:
                 last_error = f"{type(e).__name__}: {e}"
                 self._errors[name] = self._errors.get(name, 0) + 1
                 retry = (not self._pinned(adapter) and attempt <= retries)
+                image_call = req.task_type in ("image_generation",
+                                              "image_editing")
+                status_code = (int(getattr(e, "code", 0) or 0)
+                               if image_call else 0)
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt, op=op,
-                           trace=req.trace, terminal=not retry, retrying=retry)
+                           trace=req.trace, terminal=not retry, retrying=retry,
+                           **(dict(status_code=status_code,
+                                   reason=self._image_failure_category(
+                                       last_error, status_code))
+                              if image_call else {}))
                 if self._pinned(adapter):
                     break
                 if retry:

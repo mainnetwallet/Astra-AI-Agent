@@ -1232,3 +1232,86 @@ test("rowsToText: rows are separated by a blank line and gaps are skipped", () =
   assert.strictEqual(text.split("\n\n").length, 2);
   assert.match(text, /t1[\s\S]*Output:\n      A[\s\S]*\n\nt?[\s\S]*t2/);
 });
+
+/* ------------------------------------------------- image API calls -------
+ * An image-generation attempt is a REAL provider API call, so it must show up
+ * as a normal api-call row (START -> SUCCESS/FAILED) in the SAME Activity Log
+ * the chat/text calls use. The backend emits these on the existing
+ * "astra_gateway.*" contract; the presentation model below is what proves the
+ * existing Logs panel renders them without any UI change.
+ */
+test("image api call: START renders as a running gateway row", () => {
+  const start = ev("astra_gateway.request", {
+    op: "img1", category: "image_generation", provider: "cloudflare",
+    model: "@cf/black-forest-labs/flux-1-schnell", attempt: 1,
+    input: "akta cat photo",
+  });
+  assert.strictEqual(Log.isMeaningful(start), true);
+  const m = Log.normalize(start);
+  assert.strictEqual(m.category, "ai");
+  assert.strictEqual(m.status, "running");
+  assert.strictEqual(m.title, "Gateway routing");
+  assert.strictEqual(
+    m.subject, "cloudflare · @cf/black-forest-labs/flux-1-schnell");
+});
+
+test("image api call: SUCCESS carries provider, model, duration and status", () => {
+  const m = Log.normalize(ev("astra_gateway.success", {
+    op: "img1", provider: "cloudflare", terminal: true,
+    model: "@cf/leonardo/phoenix-1.0", status_code: 200,
+    duration_ms: 8400, attempt: 2,
+  }));
+  assert.strictEqual(m.status, "ok");
+  assert.strictEqual(m.title, "Gateway call");
+  assert.strictEqual(m.subject, "cloudflare · @cf/leonardo/phoenix-1.0");
+  assert.strictEqual(m.detail, "8.4s");
+  const fields = Log.detailFields(m);
+  assert.match(JSON.stringify(fields), /cloudflare/);
+  assert.match(JSON.stringify(fields), /phoenix-1\.0/);
+});
+
+test("image api call: FAILED renders the status code and safe reason", () => {
+  const m = Log.normalize(ev("astra_gateway.error", {
+    op: "img1", provider: "cloudflare", terminal: true,
+    model: "@cf/black-forest-labs/flux-1-schnell",
+    status_code: 429, duration_ms: 1200, reason: "429 rate limit",
+  }));
+  assert.strictEqual(m.status, "err");
+  assert.strictEqual(m.title, "Gateway error");
+  assert.strictEqual(m.detail, "429 rate limit");
+  assert.match(JSON.stringify(Log.detailFields(m)), /429/);
+});
+
+test("image api call: each fallback model is its own lifecycle row", () => {
+  // model A: START -> FAILED, model B: START -> SUCCESS
+  const { state, rows } = simulate([
+    lifeEvent("astra_gateway.request",
+      { op: "a", provider: "cloudflare", model: "flux-1-schnell" }, 1),
+    lifeEvent("astra_gateway.error",
+      { op: "a", provider: "cloudflare", model: "flux-1-schnell",
+        status_code: 429, reason: "429 rate limit", terminal: true }, 2),
+    lifeEvent("astra_gateway.request",
+      { op: "b", provider: "cloudflare", model: "phoenix-1.0" }, 3),
+    lifeEvent("astra_gateway.success",
+      { op: "b", provider: "cloudflare", model: "phoenix-1.0",
+        status_code: 200, duration_ms: 8400, terminal: true }, 4),
+  ]);
+  // Two DISTINCT api calls -> two separate rows, never merged into one.
+  assert.strictEqual(rows.length, 2);
+  assert.deepStrictEqual(rows.map((r) => r.model.status), ["err", "ok"]);
+  assert.deepStrictEqual(rows.map((r) => r.model.subject),
+    ["cloudflare · flux-1-schnell", "cloudflare · phoenix-1.0"]);
+  assert.strictEqual(rows[1].model.detail, "8.4s");
+  assert.strictEqual(state.active.size, 0);
+});
+
+test("image request-level lifecycle stays noise; only api calls are rows", () => {
+  // image.generation.* is the request-level lifecycle the image router emits
+  // internally; it is not an api call and must not add duplicate rows now that
+  // the actual provider calls are reported.
+  assert.strictEqual(
+    Log.isMeaningful(ev("image.generation.attempt",
+      { provider: "cloudflare", model: "flux-1-schnell" }, "gateway")), false);
+  assert.strictEqual(
+    Log.isMeaningful(ev("image.generation.start", {}, "gateway")), false);
+});

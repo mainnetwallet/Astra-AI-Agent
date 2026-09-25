@@ -179,6 +179,15 @@ class _GatewayCompatibleConnection:
     api_keys_env: str = ""
     base_url_env: str = ""
     image_models_env: str = ""
+    #: Image generation gets its OWN dedicated credentials/base URL, separate
+    #: from the connection's normal chat pool (``api_keys_env``/
+    #: ``base_url_env``). Set per-connection to the documented ``IMAGE_*``
+    #: env names (e.g. ``IMAGE_GEMINI_API_KEY``). When unset/empty, image
+    #: generation explicitly falls back to the connection's normal GW_*
+    #: credentials/base URL — an intentional, documented fallback, never an
+    #: accidental reuse.
+    image_api_keys_env: str = ""
+    image_base_url_env: str = ""
     base_url: str = ""
     capabilities: list[str] = ["chat", "stream"]
     #: Image-generation model ids, configured SEPARATELY from the chat list
@@ -206,6 +215,26 @@ class _GatewayCompatibleConnection:
                              else list(getattr(type(self), "image_models", []) or []))
         raw = self._env_str(self.base_url_env)
         self.base_url = (raw or self.base_url or "").rstrip("/")
+        # -- dedicated image-generation credentials/base URL (see class doc) --
+        img_secrets = (self._env_list(self.image_api_keys_env)
+                       if config and self.image_api_keys_env else [])
+        if img_secrets:
+            img_label = self._first_env(self.image_api_keys_env)
+            self.image_pool = CredentialPool(f"{img_label}", img_secrets)
+        else:
+            # No dedicated IMAGE_* credentials configured: fall back to this
+            # connection's normal pool. Explicit and documented (see class
+            # doc), never an accident of shared state.
+            self.image_pool = self.pool
+        raw_img_base = (self._env_str(self.image_base_url_env)
+                        if self.image_base_url_env else None)
+        self.image_base_url = (raw_img_base or "").rstrip("/")
+        # Thread-local "which pool is this call using" — set by `_run()` for
+        # the duration of one request so `_pick()`/`_done()` (called deep
+        # inside `_post`/`_classify_http`) route success/failure to the
+        # correct pool (chat vs. dedicated image) without changing every
+        # helper's signature.
+        self._tl_pool = threading.local()
         self._last_usage: dict = {}
         self._last_usage_stream: dict = {}
         # The most recent CREDENTIAL-level rejection (HTTP 401/403) seen by
@@ -254,8 +283,14 @@ class _GatewayCompatibleConnection:
         return None
 
     # -- credentials ------------------------------------------------------
+    def _active_pool(self):
+        """The pool THIS thread's current `_run()` call is using — the
+        dedicated image pool while an image-generation call is in flight,
+        else the normal chat pool. See `image_pool` in `__init__`."""
+        return getattr(self._tl_pool, "pool", None) or self.pool
+
     def _pick(self):
-        return self.pool.pick()
+        return self._active_pool().pick()
 
     def _credential_error(self):
         """The REAL credential rejection for this connection, when the pool
@@ -272,8 +307,9 @@ class _GatewayCompatibleConnection:
         cached = getattr(self, "_last_auth_error", None)
         if cached is None:
             return None
-        count = getattr(self.pool, "count", 0)
-        if not count or bool(self.pool):
+        pool = self._active_pool()
+        count = getattr(pool, "count", 0)
+        if not count or bool(pool):
             return None
         return cached
 
@@ -281,11 +317,12 @@ class _GatewayCompatibleConnection:
               auth_failure=False, cooldown_s: float = 30.0) -> None:
         if cred is None:
             return
+        pool = self._active_pool()
         if errored:
-            self.pool.report_failure(cred, reason=reason, rate_limited=rate_limited,
-                                     auth_failure=auth_failure, cooldown_s=cooldown_s)
+            pool.report_failure(cred, reason=reason, rate_limited=rate_limited,
+                                auth_failure=auth_failure, cooldown_s=cooldown_s)
         else:
-            self.pool.report_success(cred)
+            pool.report_success(cred)
 
     def _headers(self, cred) -> dict:
         h = {"content-type": "application/json", **dict(self.extra_headers)}
@@ -363,7 +400,7 @@ class _GatewayCompatibleConnection:
     def _attempt_count(self) -> int:
         return max(0, int(getattr(self, "max_retries", GW_MAX_RETRIES))) + 1
 
-    def _run(self, fn):
+    def _run(self, fn, *, pool: CredentialPool | None = None):
         """Run `fn(cred)` with a bounded number of attempts.
 
         A fresh credential is picked for every attempt, so a 429/auth
@@ -374,30 +411,48 @@ class _GatewayCompatibleConnection:
         moves to the next connection without pointless extra latency. When
         the retry cannot even get a credential (all keys cooled down) the
         original, informative error is re-raised rather than a generic
-        "no healthy credential" — failover reporting stays truthful."""
-        attempts = self._attempt_count()
-        last = None
-        for attempt in range(attempts):
-            cred = self._pick()
-            if cred is None:
-                if last is not None:
-                    raise last
-                auth = self._credential_error()
-                if auth is not None:
-                    raise auth
-                err = ProviderError(
-                    f"{self.name}: no healthy credential configured")
-                err.retryable = False
-                raise err
-            try:
-                return fn(cred)
-            except (ProviderError, TimeoutError) as e:
-                last = e
-                if attempt + 1 >= attempts or not getattr(e, "retryable", False):
-                    raise
-                time.sleep(min(self.retry_backoff * (attempt + 1),
-                               GW_RETRY_MAX_BACKOFF))
-        raise last
+        "no healthy credential" — failover reporting stays truthful.
+
+        ``pool``: which CredentialPool `_pick()`/`_done()` should use for the
+        duration of this call (defaults to the connection's normal chat
+        pool). Image generation passes `self.image_pool` so a dedicated
+        IMAGE_* credential never borrows/consumes the chat pool's health
+        state, and vice versa."""
+        prev = getattr(self._tl_pool, "pool", None)
+        self._tl_pool.pool = pool or self.pool
+        try:
+            attempts = self._attempt_count()
+            last = None
+            for attempt in range(attempts):
+                cred = self._pick()
+                if cred is None:
+                    if last is not None:
+                        raise last
+                    auth = self._credential_error()
+                    if auth is not None:
+                        raise auth
+                    err = ProviderError(
+                        f"{self.name}: no healthy credential configured")
+                    err.retryable = False
+                    raise err
+                try:
+                    return fn(cred)
+                except (ProviderError, TimeoutError) as e:
+                    last = e
+                    if attempt + 1 >= attempts or not getattr(e, "retryable", False):
+                        raise
+                    time.sleep(min(self.retry_backoff * (attempt + 1),
+                                   GW_RETRY_MAX_BACKOFF))
+            raise last
+        finally:
+            self._tl_pool.pool = prev
+
+    def _image_api_base(self) -> str:
+        """Base URL for an image-generation request: the dedicated
+        ``IMAGE_*_BASE_URL`` when configured, else this connection's normal
+        base URL (documented, intentional fallback — see `image_base_url_env`
+        on the class)."""
+        return (self.image_base_url or self._api_base() or "").rstrip("/")
 
     def _api_base(self) -> str:
         """Base URL for ONE request (see CompatibleAdapter._api_base): connections
@@ -570,12 +625,12 @@ class _GatewayCompatibleConnection:
                 "size": size, "response_format": "b64_json"}
 
         def once(cred):
-            data = self._post(f"{self._api_base()}/images/generations",
+            data = self._post(f"{self._image_api_base()}/images/generations",
                               body, cred)
             self._done(cred)
             return data
 
-        data = self._run(once)
+        data = self._run(once, pool=self.image_pool)
         uri = image_result_to_data_uri(data)
         if not uri:
             err = ProviderError(
@@ -614,13 +669,17 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
     models_env = "GW_GEMINI_MODELS"
     api_keys_env = "GW_GEMINI_API_KEYS"
     base_url_env = "GW_GEMINI_BASE_URL"
+    image_api_keys_env = "IMAGE_GEMINI_API_KEY"
+    image_base_url_env = "IMAGE_GEMINI_BASE_URL"
     capabilities = ["chat", "stream", "tools", "json", "vision"]
 
     # ── image generation (native :generateContent) ────────────────────────
     native_base_url = "https://generativelanguage.googleapis.com/v1beta"
 
     def _native_base(self) -> str:
-        base = (self._api_base() or "").rstrip("/")
+        # Dedicated IMAGE_GEMINI_BASE_URL first (see `image_base_url_env`),
+        # else the connection's normal (chat) base URL.
+        base = (self.image_base_url or self._api_base() or "").rstrip("/")
         if base.endswith("/openai"):
             return base[: -len("/openai")]
         return base or self.native_base_url
@@ -659,14 +718,14 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
         url = f"{self._native_base()}/models/{model}:generateContent"
 
         def once(cred):
-            secret = self.pool.get_secret_for(cred)
+            secret = self.image_pool.get_secret_for(cred)
             headers = {"content-type": "application/json",
                        "x-goog-api-key": secret}
             data = self._post_with_headers(url, body, cred, headers)
             self._done(cred)
             return data
 
-        data = self._run(once)
+        data = self._run(once, pool=self.image_pool)
         uri = self._inline_image(data)
         if not uri:
             err = ProviderError(
@@ -697,14 +756,24 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
     api_keys_env = "GW_CLOUDFLARE_API_KEYS"
     base_url_env = "GW_CLOUDFLARE_BASE_URL"
     account_ids_env = "GW_CLOUDFLARE_ACCOUNT_IDS"
+    image_api_keys_env = "IMAGE_CLOUDFLARE_API_KEY"
+    image_base_url_env = "IMAGE_CLOUDFLARE_BASE_URL"
+    #: Dedicated account id(s) for image generation. Falls back to
+    #: `account_ids_env` when unset — an explicit, documented fallback.
+    image_account_ids_env = "IMAGE_CLOUDFLARE_ACCOUNT_ID"
     capabilities = ["chat", "stream", "tools", "json"]
 
     def __init__(self, config=None, events=None, pool=None):
         super().__init__(config, events, pool)
         accounts = (config.getlist(self.account_ids_env) if config else []) or []
         self._accounts = accounts or []
+        image_accounts = (config.getlist(self.image_account_ids_env)
+                          if config else []) or []
+        self._image_accounts = image_accounts or self._accounts
         self._aidx = 0
         self._aidx_lock = threading.Lock()
+        self._image_aidx = 0
+        self._image_aidx_lock = threading.Lock()
 
     def _api_base(self) -> str:
         # Per-request account pick; never mutates self.base_url (shared by
@@ -716,6 +785,25 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
             acc = self._accounts[self._aidx % len(self._accounts)]
             self._aidx += 1
         return f"{self.base_url}/accounts/{acc}/ai/v1"
+
+    def _image_api_base(self) -> str:
+        # Bare base only (no account/path suffix) -- `generate_image` appends
+        # `/accounts/<id>/ai/run/<model>` itself. The chat `_api_base()`
+        # embeds a *chat* account id + `/ai/v1`, which is the wrong shape for
+        # the image path, so this is NOT `self._api_base()`.
+        return (self.image_base_url or self.base_url or "").rstrip("/")
+
+    def _image_account(self) -> str:
+        """Per-request account pick from the dedicated image account pool
+        (`IMAGE_CLOUDFLARE_ACCOUNT_ID`, else `GW_CLOUDFLARE_ACCOUNT_IDS`)."""
+        if not self._image_accounts:
+            raise ProviderError(
+                f"{self.name}: no account ids configured "
+                f"({self.image_account_ids_env} or {self.account_ids_env})")
+        with self._image_aidx_lock:
+            acc = self._image_accounts[self._image_aidx % len(self._image_accounts)]
+            self._image_aidx += 1
+        return acc
 
 
 # ── additional OpenAI-compatible Gateway connections ────────────────────────
@@ -738,9 +826,10 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
-        if not self._accounts:
+        if not self._image_accounts:
             raise ProviderError(
-                f"{self.name}: no account ids configured ({self.account_ids_env})")
+                f"{self.name}: no account ids configured "
+                f"({self.image_account_ids_env} or {self.account_ids_env})")
         # Only send parameters the model's published schema accepts, so a
         # model like flux-1-schnell (prompt/steps only) never gets a 400 for
         # an unsupported width/height.
@@ -757,15 +846,13 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
             body["height"] = max(256, min(h, 2048))
 
         def once(cred):
-            with self._aidx_lock:
-                acc = self._accounts[self._aidx % len(self._accounts)]
-                self._aidx += 1
-            url = f"{self.base_url}/accounts/{acc}/ai/run/{model}"
+            acc = self._image_account()
+            url = f"{self._image_api_base()}/accounts/{acc}/ai/run/{model}"
             raw = self._post_raw(url, body, cred)
             self._done(cred)
             return raw
 
-        raw = self._run(once)
+        raw = self._run(once, pool=self.image_pool)
         uri = ""
         if raw[:1] == b"{":
             try:
@@ -795,6 +882,8 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
     models_env = "GW_OPENROUTER_MODELS"
     api_keys_env = "GW_OPENROUTER_API_KEYS"
     base_url_env = "GW_OPENROUTER_BASE_URL"
+    image_api_keys_env = "IMAGE_OPENROUTER_API_KEY"
+    image_base_url_env = "IMAGE_OPENROUTER_BASE_URL"
     # Optional attribution headers OpenRouter documents for API clients.
     extra_headers = {
         "HTTP-Referer": "https://github.com/mainnetwallet/Astra-AI-Agent",
@@ -891,11 +980,11 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
             body["size"] = size
 
         def once(cred):
-            data = self._post(f"{self._api_base()}/images", body, cred)
+            data = self._post(f"{self._image_api_base()}/images", body, cred)
             self._done(cred)
             return data
 
-        data = self._run(once)
+        data = self._run(once, pool=self.image_pool)
         uri = image_result_to_data_uri(data)
         if not uri:
             err = ProviderError(

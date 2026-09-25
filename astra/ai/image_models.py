@@ -57,6 +57,15 @@ Audited 2026-09-25 against the providers' CURRENT official sources:
 
 * Groq, Cerebras, SambaNova, Cohere, Mistral -- no image-generation API path
   in this repository at all -> never image-capable.
+
+Image requests are served by a SIMPLE SERIAL FALLBACK over this FREE pool: the
+eligible models are tried one after another in a deterministic, configurable
+priority order (``IMAGE_PRIORITY`` / ``image_priority_index`` /
+``ordered_image_pool``, overridable with ``IMAGE_GENERATION_PRIORITY`` or
+``GW_IMAGE_GENERATION_PRIORITY``). The ACTUAL generation request is the only
+availability signal -- there is NO proactive/preflight image health check and
+no test image is ever generated. A failure is recorded only for that one
+request's attempted-model set, never as a permanent unhealthy state.
 """
 from __future__ import annotations
 
@@ -108,6 +117,11 @@ IMAGE_MODELS_ENV = {
 
 # Gateway (GW_*) equivalents — the Gateway keeps its own, fully independent
 # model lists (see astra/ai/gateway.py).
+#: env var holding the optional, comma-separated serial-fallback order (the
+#: in-repo ``IMAGE_PRIORITY`` order is the deterministic default).
+IMAGE_PRIORITY_ENV = "IMAGE_GENERATION_PRIORITY"
+GATEWAY_IMAGE_PRIORITY_ENV = "GW_IMAGE_GENERATION_PRIORITY"
+
 GATEWAY_IMAGE_MODELS_ENV = {
     "astra-gw-gemini": "GW_GEMINI_IMAGE_MODELS",
     "astra-gw-cloudflare": "GW_CLOUDFLARE_IMAGE_MODELS",
@@ -228,6 +242,43 @@ _SPECS: tuple = (
 )
 
 
+# ── deterministic serial-fallback order ───────────────────────────────────
+# The order the FREE models are tried in for one image request. This is a
+# curated DEFAULT derived from the documented/verified characteristics of each
+# model -- it is not a health signal, and it is not claimed to be objectively
+# optimal:
+#   1. flux-1-schnell      fastest, smallest required param set (`prompt`),
+#                          lowest Neuron cost, strongest free availability.
+#   2. sdxl-base-1.0       general-purpose high-quality SDXL; accepts
+#                          width/height.
+#   3. sd-xl-lightning     distilled few-step SDXL: quick, good prompt
+#                          adherence, accepts width/height.
+#   4. dreamshaper-8-lcm   LCM-tuned SDXL variant, accepts width/height.
+#   5. sd-v1-5-inpainting  SD1.5 family (text-to-image mode), 512px class.
+#   6. lucid-origin        Leonardo general model, accepts width/height.
+#   7. phoenix-1.0         Leonardo model, accepts width/height.
+# Reorder per deployment with IMAGE_GENERATION_PRIORITY (or
+# GW_IMAGE_GENERATION_PRIORITY for the AI Gateway) -- only ids that already
+# pass the FREE + image-generation eligibility rules can ever be selected.
+IMAGE_PRIORITY = (
+    "@cf/black-forest-labs/flux-1-schnell",
+    "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+    "@cf/bytedance/stable-diffusion-xl-lightning",
+    "@cf/lykon/dreamshaper-8-lcm",
+    "@cf/runwayml/stable-diffusion-v1-5-inpainting",
+    "@cf/leonardo/lucid-origin",
+    "@cf/leonardo/phoenix-1.0",
+)
+
+_PRIORITY_INDEX = {mid: i for i, mid in enumerate(IMAGE_PRIORITY)}
+
+#: Raised/returned when every eligible FREE image model was attempted for one
+#: request and all of them failed. User-facing and credential-free.
+IMAGE_EXHAUSTED_MESSAGE = (
+    "All available FREE image-generation models failed to generate the image. "
+    "Please try again later.")
+
+
 # ── explicitly rejected models (audit trail, never selectable) ────────────
 _REJECT_PAID_GEMINI = ("paid-only: Gemini image models list Free Tier = "
                        "'Not available' in the official pricing table")
@@ -320,6 +371,46 @@ def is_free_image_model(provider: str, model_id: str) -> bool:
 def is_image_editing_model(provider: str, model_id: str) -> bool:
     spec = image_spec(provider, model_id)
     return bool(spec and spec.supports_editing)
+
+
+def image_priority_index(provider: str, model_id: str) -> int:
+    """Deterministic serial-fallback position for a model (lower runs first).
+
+    Returns a large sentinel for anything not in the FREE pool, so an
+    ineligible model can never rank ahead of an eligible one.
+    """
+    spec = image_spec(provider, model_id)
+    if spec is None:
+        return 10_000
+    return _PRIORITY_INDEX.get(spec.model, 10_000)
+
+
+def ordered_image_pool(preferred_ids=None) -> tuple:
+    """The FREE pool in its deterministic serial order.
+
+    ``preferred_ids`` (already-declared model ids, e.g. from
+    IMAGE_GENERATION_PRIORITY) are moved to the front in the given order;
+    everything else follows in the curated ``IMAGE_PRIORITY`` order. Only
+    models already in the FREE pool are returned -- the override can reorder
+    the pool but can never add a model to it.
+    """
+    specs = sorted(_SPECS, key=lambda s: (_PRIORITY_INDEX.get(s.model, 10_000),
+                                          s.model))
+    if not preferred_ids:
+        return tuple(specs)
+    head, chosen = [], set()
+    for raw in preferred_ids:
+        raw = str(raw or "").strip()
+        if not raw:
+            continue
+        for spec in specs:
+            if spec.model in chosen:
+                continue
+            if spec.matches(raw):
+                head.append(spec)
+                chosen.add(spec.model)
+                break
+    return tuple(head + [s for s in specs if s.model not in chosen])
 
 
 def provider_supports_image_generation(provider: str) -> bool:

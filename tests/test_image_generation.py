@@ -26,7 +26,7 @@ from astra.ai.gateway_routing import (
     CATEGORY_HARD_CAPS, CATEGORY_REQUIRED_OUTPUT_MODALITY, REQUEST_CATEGORIES,
     GatewayRoutingState, build_gateway_catalog, classify_gateway_request,
     describe_image_targets, eligible_image_generation_targets,
-    meets_gateway_requirements, rank_targets)
+    meets_gateway_requirements, rank_image_targets, rank_targets)
 from astra.ai.image_models import (
     FREE_FALSE, FREE_IMAGE_PROVIDERS, FREE_TRUE, FREE_UNKNOWN, IMAGE_EDITING,
     IMAGE_GENERATION, REJECTED_IMAGE_MODELS, documented_image_models,
@@ -435,7 +435,8 @@ class TestEligibleImageTargets(unittest.TestCase):
         self.assertFalse(meets_gateway_requirements(
             m, category="image_generation"))
 
-    def test_ranking_never_surfaces_a_text_model(self):
+    def test_ranking_is_the_deterministic_serial_order(self):
+        from astra.ai.image_models import IMAGE_PRIORITY
         state = GatewayRoutingState(None)
         targets = eligible_image_generation_targets(
             self._catalog(self._text(), self._vision()), state)
@@ -443,32 +444,69 @@ class TestEligibleImageTargets(unittest.TestCase):
         self.assertTrue(ranked)
         self.assertTrue(all(m.has("image_generation")
                             for _c, m, _h in ranked))
-        self.assertEqual(ranked[0][1].model_id, LIGHTNING)
+        # deterministic, curated order -- never health/latency based
+        self.assertEqual([m.model_id for _c, m, _h in ranked],
+                         list(IMAGE_PRIORITY))
 
-    def test_describe_image_targets_reports_health_and_modalities(self):
+    def test_serial_order_is_identical_across_calls(self):
+        state = GatewayRoutingState(None)
+        catalog = self._catalog()
+        first = [m.model_id for _c, m, _h in rank_targets(
+            eligible_image_generation_targets(catalog, state),
+            category="image_generation")]
+        second = [m.model_id for _c, m, _h in rank_targets(
+            eligible_image_generation_targets(catalog, state),
+            category="image_generation")]
+        self.assertEqual(first, second)
+
+    def test_health_state_never_excludes_an_image_target(self):
+        # No proactive image health check: even a model the routing state has
+        # on cooldown from an earlier request is still eligible -- only the
+        # actual generation request decides, and only for that request.
+        state = GatewayRoutingState(None)
+        catalog = self._catalog()
+        state.record_failure("cloudflare", FLUX, cooldown_s=999)
+        self.assertFalse(state.get_health("cloudflare", FLUX).healthy)
+        ids = {m.model_id for _c, m, _h in
+               eligible_image_generation_targets(catalog, state)}
+        self.assertIn(FLUX, ids)
+        ranked = rank_targets(
+            eligible_image_generation_targets(catalog, state),
+            category="image_generation")
+        self.assertEqual(ranked[0][1].model_id, FLUX)
+
+    def test_configured_priority_reorders_the_serial_list(self):
+        state = GatewayRoutingState(None)
+        targets = eligible_image_generation_targets(self._catalog(), state)
+        ranked = rank_image_targets(targets, preferred_ids=[LUCID, PHOENIX])
+        self.assertEqual([m.model_id for _c, m, _h in ranked][:2],
+                         [LUCID, PHOENIX])
+        self.assertEqual(len(ranked), len(CF_POOL))
+
+    def test_configured_priority_cannot_add_an_ineligible_model(self):
+        state = GatewayRoutingState(None)
+        targets = eligible_image_generation_targets(self._catalog(), state)
+        ranked = rank_image_targets(
+            targets, preferred_ids=["gemini-3.1-flash-image", LLAMA, FLUX])
+        ids = [m.model_id for _c, m, _h in ranked]
+        self.assertEqual(len(ids), len(CF_POOL))
+        self.assertNotIn("gemini-3.1-flash-image", ids)
+        self.assertNotIn(LLAMA, ids)
+        self.assertEqual(ids[0], FLUX)
+
+    def test_describe_image_targets_reports_priority_and_modalities(self):
+        from astra.ai.image_models import image_priority_index
         state = GatewayRoutingState(None)
         targets = eligible_image_generation_targets(self._catalog(), state)
         rows = describe_image_targets(targets)
         self.assertEqual(len(rows), len(CF_POOL))
-        self.assertTrue(all(r["healthy"] for r in rows))
         self.assertTrue(all("image" in r["output_modalities"] for r in rows))
         self.assertEqual(rows[0]["provider"], "cloudflare")
-
-    def test_cooldown_excludes_one_target_and_expiry_restores_it(self):
-        state = GatewayRoutingState(None)
-        catalog = self._catalog()
-        self.assertEqual(
-            len(eligible_image_generation_targets(catalog, state)),
-            len(CF_POOL))
-        state.record_failure("cloudflare", FLUX)
-        ids = {m.model_id for _c, m, _h in
-               eligible_image_generation_targets(catalog, state)}
-        self.assertNotIn(FLUX, ids)
-        self.assertEqual(len(ids), len(CF_POOL) - 1)
-        state.get_health("cloudflare", FLUX).cooldown_until = time.time() - 1
-        ids = {m.model_id for _c, m, _h in
-               eligible_image_generation_targets(catalog, state)}
-        self.assertIn(FLUX, ids)
+        self.assertEqual(rows[0]["model"], FLUX)
+        for row in rows:
+            self.assertEqual(
+                row["priority"],
+                image_priority_index(row["provider"], row["model"]))
 
     def test_a_disabled_model_is_never_eligible(self):
         state = GatewayRoutingState(None)
@@ -524,31 +562,31 @@ class TestGatewayImageFailover(unittest.TestCase):
         self.assertEqual(cf.image_calls[0][0], FLUX)
         self.assertEqual(cf.chat_calls, 0)
 
-    # B. 429 on the fastest target -> cooldown + next target
+    # B. 429 on the first model -> next model
     def test_b_rate_limit_fails_over_to_the_next_image_model(self):
-        cf = self._cf(models=(LIGHTNING, FLUX),
+        cf = self._cf(models=(FLUX, LIGHTNING),
                       outcomes=[_http_error("u", 429)])
         gw = self._gw(cf)
         out = gw.generate_image("photo generate koro", discover=False)
         self.assertTrue(out.startswith("data:image/png;base64,"))
-        self.assertEqual(gw.last_model, FLUX)
-        self.assertFalse(
-            gw.routing_state.get_health("cloudflare", LIGHTNING).healthy)
+        self.assertEqual(gw.last_model, LIGHTNING)
+        self.assertEqual(gw.last_attempts, 2)
+        # per-request only: no cooldown/health state is written
         self.assertTrue(
             gw.routing_state.get_health("cloudflare", FLUX).healthy)
 
-    # C. timeout on the first target -> next target
+    # C. timeout on the first model -> next model
     def test_c_timeout_fails_over_to_the_next_image_model(self):
-        cf = self._cf(models=(LIGHTNING, FLUX),
+        cf = self._cf(models=(FLUX, LIGHTNING),
                       outcomes=[TimeoutError("timed out")])
         gw = self._gw(cf)
         out = gw.generate_image("ekta chobi baniye dao", discover=False)
         self.assertTrue(out.startswith("data:image/png;base64,"))
-        self.assertEqual(gw.last_model, FLUX)
+        self.assertEqual(gw.last_model, LIGHTNING)
 
-    # D. 5xx then 429 then success -> third target, three attempts
+    # D. 5xx then 429 then success -> third model, three attempts
     def test_d_multi_failure_chain_reaches_the_third_target(self):
-        cf = self._cf(models=(LIGHTNING, FLUX, LUCID),
+        cf = self._cf(models=(FLUX, LIGHTNING, LUCID),
                       outcomes=[_http_error("u", 500),
                                 _http_error("u", 429)])
         gw = self._gw(cf)
@@ -557,18 +595,47 @@ class TestGatewayImageFailover(unittest.TestCase):
         self.assertEqual(gw.last_model, LUCID)
         self.assertEqual(gw.last_attempts, 3)
 
-    # E. every image target fails -> clear error, each target cooled down
+    def test_quota_failure_falls_over_to_the_next_model(self):
+        cf = self._cf(models=(FLUX, LIGHTNING),
+                      outcomes=[ProviderError("quota exhausted for account")])
+        gw = self._gw(cf)
+        self.assertTrue(gw.generate_image("a cat", discover=False))
+        self.assertEqual(gw.last_model, LIGHTNING)
+
+    def test_provider_api_error_falls_over_to_the_next_model(self):
+        cf = self._cf(models=(FLUX, LIGHTNING),
+                      outcomes=[ProviderError("provider error 502 bad gateway")])
+        gw = self._gw(cf)
+        self.assertTrue(gw.generate_image("a cat", discover=False))
+        self.assertEqual(gw.last_model, LIGHTNING)
+
+    def test_success_stops_the_chain_immediately(self):
+        cf = self._cf(models=(FLUX, LIGHTNING, LUCID))
+        gw = self._gw(cf)
+        self.assertTrue(gw.generate_image("a cat", discover=False))
+        self.assertEqual([m for m, _p in cf.image_calls], [FLUX])
+        self.assertEqual(gw.last_attempts, 1)
+
+    def test_no_model_is_attempted_twice_in_one_request(self):
+        cf = self._cf(models=(FLUX, LIGHTNING),
+                      outcomes=[ProviderError("boom"), ProviderError("boom")])
+        gw = self._gw(cf)
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False)
+        tried = [m for m, _p in cf.image_calls]
+        self.assertEqual(tried, [FLUX, LIGHTNING])
+        self.assertEqual(len(tried), len(set(tried)))
+
+    # E. every image model fails -> the clear FREE-exhaustion error
     def test_e_all_targets_fail_raises_a_clear_error(self):
-        cf = self._cf(models=(LIGHTNING, FLUX),
+        from astra.ai.image_models import IMAGE_EXHAUSTED_MESSAGE
+        cf = self._cf(models=(FLUX, LIGHTNING),
                       outcomes=[ProviderError("boom"), ProviderError("boom")])
         gw = self._gw(cf)
         with self.assertRaises(ProviderError) as ctx:
             gw.generate_image("a cat", discover=False)
-        self.assertIn("all image-generation targets failed",
-                      str(ctx.exception))
-        for mid in (LIGHTNING, FLUX):
-            self.assertFalse(
-                gw.routing_state.get_health("cloudflare", mid).healthy, mid)
+        self.assertIn(IMAGE_EXHAUSTED_MESSAGE, str(ctx.exception))
+        self.assertEqual(gw.last_attempts, 2)
 
     # F. only vision/text models exist -> no attempt, no text fallback
     def test_f_no_image_model_never_falls_back_to_text(self):
@@ -583,7 +650,7 @@ class TestGatewayImageFailover(unittest.TestCase):
         self.assertEqual(text.image_calls, [])
         self.assertEqual(vision.image_calls, [])
 
-    # G. text model healthy but image model fails -> text model never used
+    # G. text model available but image model fails -> text model never used
     def test_g_text_model_is_never_a_fallback_for_a_failed_image_model(self):
         cf = self._cf(outcomes=[ProviderError("boom")])
         text = self._text()
@@ -592,6 +659,25 @@ class TestGatewayImageFailover(unittest.TestCase):
             gw.generate_image("a cat", discover=False)
         self.assertEqual(text.chat_calls, 0)
         self.assertEqual(text.image_calls, [])
+
+    def test_vision_only_model_is_never_a_fallback(self):
+        cf = self._cf(outcomes=[ProviderError("boom")])
+        vision = self._vision()
+        gw = self._gw(cf, vision)
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False)
+        self.assertEqual(vision.chat_calls, 0)
+        self.assertEqual(vision.image_calls, [])
+
+    def test_paid_image_model_is_never_a_fallback(self):
+        paid = _FakeConn("astra-gw-gemini", "gemini",
+                         image_models=["gemini-3.1-flash-image"])
+        cf = self._cf(outcomes=[ProviderError("boom")])
+        gw = self._gw(paid, cf)
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False)
+        self.assertEqual(paid.image_calls, [])
+        self.assertEqual(paid.chat_calls, 0)
 
     # H. two credentials, same target: first 429, second works
     def test_h_credential_rotation_within_one_target(self):
@@ -612,43 +698,78 @@ class TestGatewayImageFailover(unittest.TestCase):
         self.assertTrue(out.startswith("data:image/png;base64,"))
         self.assertGreaterEqual(calls["n"], 2)
 
-    # I. a cooled-down image model becomes eligible again after expiry
-    def test_i_cooldown_expiry_makes_a_target_eligible_again(self):
-        cf = self._cf(outcomes=[ProviderError("rate limit")])
+    # I. a model that failed in request #1 is tried first again in request #2
+    def test_i_a_failed_model_is_retried_on_the_next_request(self):
+        cf = self._cf(models=(FLUX, LIGHTNING),
+                      outcomes=[ProviderError("boom")])
         gw = self._gw(cf)
-        with self.assertRaises(ProviderError):
-            gw.generate_image("a cat", discover=False)
-        self.assertEqual(gw.image_targets(discover=False), [])
-        gw.routing_state.get_health(
-            "cloudflare", FLUX).cooldown_until = time.time() - 1
-        self.assertEqual(
-            [m.model_id for _c, m, _h in gw.image_targets(discover=False)],
-            [FLUX])
+        self.assertTrue(gw.generate_image("a cat", discover=False))
+        self.assertEqual(gw.last_model, LIGHTNING)
+        # request #2: the deterministic order is unchanged, so FLUX is first
+        # again and -- with no failure scripted this time -- succeeds. A
+        # failure is never a permanent unhealthy state.
+        self.assertTrue(gw.generate_image("a cat", discover=False))
+        self.assertEqual(gw.last_model, FLUX)
+        self.assertEqual([m for m, _p in cf.image_calls],
+                         [FLUX, LIGHTNING, FLUX])
+        self.assertTrue(
+            gw.routing_state.get_health("cloudflare", FLUX).healthy)
 
-    def test_routing_details_are_emitted_only_to_the_activity_log(self):
+    def test_each_attempt_is_recorded_in_the_activity_log(self):
         from astra.core.events import EventBus
         from astra.store import Store
         bus = EventBus(Store(":memory:"))
-        cf = self._cf(models=(LIGHTNING, FLUX),
+        cf = self._cf(models=(FLUX, LIGHTNING),
                       outcomes=[_http_error("u", 429)])
         self._gw(cf, events=bus).generate_image("a cat", discover=False)
-        rows = bus.history(limit=50)
+        rows = bus.history(limit=80)
         kinds = [e["kind"] for e in rows]
-        self.assertIn("astra_gateway.image_request", kinds)
-        self.assertIn("astra_gateway.image_failure", kinds)
-        self.assertIn("astra_gateway.image_fallback", kinds)
-        self.assertIn("astra_gateway.image_success", kinds)
-        fb = [e for e in rows
-              if e["kind"] == "astra_gateway.image_fallback"][0]
+        for kind in ("image.generation.start", "image.generation.attempt",
+                     "image.generation.failure", "image.generation.fallback",
+                     "image.generation.success"):
+            self.assertIn(kind, kinds)
+        attempts = sorted(
+            (e for e in rows
+             if e["kind"] == "image.generation.attempt"),
+            key=lambda e: e["data"]["attempt"])
+        self.assertEqual([e["data"]["model"] for e in attempts],
+                         [FLUX, LIGHTNING])
+        self.assertEqual([e["data"]["attempt"] for e in attempts], [1, 2])
+        for e in attempts:
+            self.assertIn("op", e["data"])
+        fb = [e for e in rows if e["kind"] == "image.generation.fallback"][0]
         self.assertEqual(fb["data"]["reason"], "429 rate limit")
-        self.assertEqual(fb["data"]["next_model"], FLUX)
-        self.assertEqual(fb["data"]["model"], LIGHTNING)
+        self.assertEqual(fb["data"]["model"], FLUX)
+        self.assertEqual(fb["data"]["next_model"], LIGHTNING)
+        success = [e for e in rows
+                   if e["kind"] == "image.generation.success"][0]
+        self.assertIn("duration_ms", success["data"])
+        self.assertEqual(success["data"]["model"], LIGHTNING)
+        failure = [e for e in rows
+                   if e["kind"] == "image.generation.failure"][0]
+        self.assertIn("duration_ms", failure["data"])
+        self.assertEqual(failure["data"]["failure_category"], "429 rate limit")
+
+    def test_exhaustion_is_recorded_in_the_activity_log(self):
+        from astra.core.events import EventBus
+        from astra.store import Store
+        bus = EventBus(Store(":memory:"))
+        cf = self._cf(models=(FLUX, LIGHTNING),
+                      outcomes=[ProviderError("boom"), ProviderError("boom")])
+        gw = self._gw(cf, events=bus)
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False)
+        rows = bus.history(limit=80)
+        exhausted = [e for e in rows
+                     if e["kind"] == "image.generation.exhausted"]
+        self.assertEqual(len(exhausted), 1)
+        self.assertEqual(exhausted[0]["data"]["attempts"], 2)
 
     def test_an_explicit_text_model_preference_is_soft(self):
-        cf = self._cf(models=(LIGHTNING, FLUX))
+        cf = self._cf(models=(FLUX, LIGHTNING))
         gw = self._gw(cf)
         gw.generate_image("a cat", model="llama-70b", discover=False)
-        self.assertIn(gw.last_model, {LIGHTNING, FLUX})
+        self.assertEqual(gw.last_model, FLUX)
 
     def test_editing_returns_a_clear_error_because_nothing_advertises_editing(self):
         gw = self._gw(self._cf())
@@ -658,24 +779,68 @@ class TestGatewayImageFailover(unittest.TestCase):
         self.assertIn("No image-generation model is currently configured",
                       str(ctx.exception))
 
-    def test_health_is_isolated_per_provider_model(self):
-        # One model failing must not cool down its provider's other models:
-        # LIGHTNING fails, FLUX is still attempted and succeeds.
-        cf = self._cf(models=(LIGHTNING, FLUX),
-                      outcomes=[ProviderError("boom")])
+    def test_gateway_priority_is_configurable(self):
+        from astra.ai.gateway import AstraAIGateway
+        cf = self._cf(models=(FLUX, LIGHTNING, LUCID))
+        gw = AstraAIGateway(connections=[cf], config=_cfg(
+            GW_IMAGE_GENERATION_PRIORITY=LUCID + "," + LIGHTNING))
+        ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
+        self.assertEqual(ids[:2], [LUCID, LIGHTNING])
+
+    # J. image generation NEVER performs a proactive health probe: the only
+    # provider call is the real generation request itself.
+    def test_no_health_probe_is_performed_for_image_generation(self):
+        probe_calls = []
+
+        class _ProbeCountingConn(_FakeConn):
+            def health_check(self):
+                probe_calls.append(self.name)
+                return True
+
+        cf = _ProbeCountingConn(
+            "astra-gw-cloudflare", "cloudflare",
+            image_models=[FLUX, LIGHTNING],
+            outcomes=[_http_error("u", 429)])
         gw = self._gw(cf)
         out = gw.generate_image("a cat", discover=False)
         self.assertTrue(out.startswith("data:image/png;base64,"))
-        self.assertEqual(gw.last_model, FLUX)
-        self.assertFalse(
-            gw.routing_state.get_health("cloudflare", LIGHTNING).healthy)
-        self.assertTrue(
-            gw.routing_state.get_health("cloudflare", FLUX).healthy)
+        # no health_check()/probe at any point in the generation path
+        self.assertEqual(probe_calls, [])
+        # the only two calls are the two REAL generation attempts, and each
+        # carries the user's own prompt -- no synthetic probe image/prompt.
+        self.assertEqual([m for m, _p in cf.image_calls], [FLUX, LIGHTNING])
+        self.assertEqual([p for _m, p in cf.image_calls], ["a cat", "a cat"])
+
+    def test_no_health_probe_on_the_all_failed_path(self):
+        probe_calls = []
+
+        class _ProbeCountingConn(_FakeConn):
+            def health_check(self):
+                probe_calls.append(self.name)
+                return True
+
+        cf = _ProbeCountingConn(
+            "astra-gw-cloudflare", "cloudflare",
+            image_models=[FLUX, LIGHTNING],
+            outcomes=[ProviderError("boom"), ProviderError("boom")])
+        gw = self._gw(cf)
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False)
+        self.assertEqual(probe_calls, [])
+
+    def test_image_targets_include_a_cooled_down_model(self):
+        # A model in cooldown is still in the serial pool: there is no
+        # proactive health gating for image generation.
+        cf = self._cf(models=(FLUX, LIGHTNING))
+        gw = self._gw(cf)
+        gw.routing_state.record_failure("cloudflare", FLUX)
+        gw.routing_state.record_failure("cloudflare", FLUX)
+        gw.routing_state.record_failure("cloudflare", FLUX)
+        ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
+        self.assertIn(FLUX, ids)
+        self.assertEqual(ids[0], FLUX)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 5. Real provider image-API contract mechanics (urllib patched)
-# ═══════════════════════════════════════════════════════════════════════════
 class TestProviderImageAdapterMechanics(unittest.TestCase):
     def _cf(self, **env):
         from astra.ai.adapters.cloudflare import CloudflareAdapter
@@ -798,7 +963,38 @@ class TestRouterImageDispatch(unittest.TestCase):
             task_type="image_generation",
             messages=[{"role": "user", "content": "photo generate koro"}]))
         self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.model, FLUX)
+        # FLUX is first in the deterministic serial order and 429s, so the
+        # next eligible FREE model -- LIGHTNING -- serves the request.
+        self.assertEqual(rr.model, LIGHTNING)
+
+    def test_router_image_failure_never_marks_the_provider_down(self):
+        # The serial fallback keeps no permanent unhealthy state: a 429 on
+        # one model must not take the whole provider out of rotation.
+        img = _FakeConn("cloudflare", "cloudflare",
+                        image_models=[FLUX, LIGHTNING],
+                        outcomes=[_http_error("u", 429)])
+        router = AstraRouter([img], max_retries=0)
+        rr = router.route_request(RoutingRequest(
+            task_type="image_generation",
+            messages=[{"role": "user", "content": "photo banao"}]))
+        self.assertTrue(rr.ok, rr.error)
+        self.assertNotIn("cloudflare", router._down)
+
+    def test_router_only_calls_generate_image_with_the_user_prompt(self):
+        # No synthetic probe image/prompt is ever sent: every provider call is
+        # one real generation attempt carrying the user's own prompt.
+        img = _FakeConn("cloudflare", "cloudflare",
+                        image_models=[FLUX, LIGHTNING],
+                        outcomes=[_http_error("u", 429)])
+        router = AstraRouter([img], max_retries=0)
+        rr = router.route_request(RoutingRequest(
+            task_type="image_generation",
+            messages=[{"role": "user", "content": "akta cat photo banao"}]))
+        self.assertTrue(rr.ok, rr.error)
+        self.assertEqual(img.chat_calls, 0)
+        self.assertEqual([m for m, _p in img.image_calls], [FLUX, LIGHTNING])
+        self.assertEqual([p for _m, p in img.image_calls],
+                         ["akta cat photo banao", "akta cat photo banao"])
 
     def test_router_never_routes_an_image_request_to_a_paid_image_model(self):
         paid = _FakeConn("gemini", "gemini",
@@ -1090,8 +1286,8 @@ class TestEndToEndImageTurn(unittest.TestCase):
         self.assertTrue(out["ok"], out.get("reply"))
         self.assertEqual(rt.requests, [])              # router never used
         self.assertEqual(gw.image_calls[0][0], "akta cat photo create kore dao")
-        self.assertEqual(real.last_model, FLUX)
-        self.assertEqual([m for m, _p in cf.image_calls], [LIGHTNING, FLUX])
+        self.assertEqual(real.last_model, LIGHTNING)
+        self.assertEqual([m for m, _p in cf.image_calls], [FLUX, LIGHTNING])
         arts = out.get("artifacts") or []
         self.assertEqual(len(arts), 1)
         self.assertEqual(arts[0]["artifact_type"], "image")

@@ -65,6 +65,14 @@ EVENT_KINDS = (
     # fallback/success chain must be visible in the Activity Log (spec 8).
     "astra_gateway.image_request", "astra_gateway.image_failure",
     "astra_gateway.image_fallback", "astra_gateway.image_success",
+    # FREE image generation uses a simple SERIAL FALLBACK (no proactive
+    # health probing): the actual generation request is the availability
+    # signal, and each attempt is visible here. See
+    # astra/ai/gateway.py::generate_image and
+    # astra/ai/router.py::_route_image_serial.
+    "image.generation.start", "image.generation.attempt",
+    "image.generation.failure", "image.generation.fallback",
+    "image.generation.success", "image.generation.exhausted",
     # Gateway-spec supervision (§9-12, §19): deterministic result
     # validation + bounded correction, layered on top of the existing
     # retry/verify pipeline — see astra.core.classification + correction.

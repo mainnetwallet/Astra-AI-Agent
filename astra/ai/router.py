@@ -588,6 +588,14 @@ class AstraRouter:
                 req, op, ok=False, error="no eligible provider/model available",
                 requested_provider=req.preferred_provider or "",
                 requested_model=req.preferred_model or "")
+        # Image generation is a SIMPLE SERIAL FALLBACK over the FREE image
+        # pool: deterministic priority order, one attempt per model, and the
+        # actual generation call -- never a proactive health probe -- is the
+        # availability signal. It deliberately bypasses the
+        # health/latency-scored ranking and the Gateway execution-recovery
+        # loop used for ordinary chat routing.
+        if req.task_type in ("image_generation", "image_editing"):
+            return self._route_image_serial(req, candidates, op)
         ranked = self.policy.rank(candidates, req) if self.policy else \
             [(0.0, c[0], c[1]) for c in candidates]
         # Healthy first: a (provider, model) whose every key recently failed
@@ -1183,6 +1191,133 @@ class AstraRouter:
         return fit_messages(messages, context_window=ctx,
                             reserve_tokens=reserve)
 
+    @staticmethod
+    def _image_failure_category(err: str) -> str:
+        """Map a provider error string to a coarse, credential-free category
+        for the Activity Log (never the raw provider response)."""
+        low = (err or "").lower()
+        if "429" in low or "rate limit" in low:
+            return "429 rate limit"
+        if "timeout" in low or "timed out" in low:
+            return "timeout"
+        for code in ("500", "502", "503", "504"):
+            if code in low:
+                return "provider error (%s)" % code
+        if "quota" in low or "exhausted" in low or "billing" in low:
+            return "quota exhausted"
+        if "404" in low or "not found" in low or "unavailable" in low:
+            return "model unavailable"
+        if "credential" in low or "auth" in low:
+            return "provider authentication/credential failure"
+        return (err or "unknown error")[:120]
+
+    def _route_image_serial(self, req: RoutingRequest, candidates: list,
+                            op: str) -> RoutingResult:
+        """Simple serial fallback over the eligible FREE image models.
+
+        `candidates` already passed the static eligibility rules (configured +
+        image-generation capability + image output modality + FREE pool, via
+        _candidates/meets_hard_requirements). Here they are put in the
+        deterministic priority order and each is attempted exactly once. There
+        is no health/cooldown gating and no same-model retry: the real
+        generation call decides success/failure, and a failure only skips that
+        model for THIS request. Fallback never leaves the FREE image pool.
+        """
+        import time as _time
+        from astra.ai.image_models import (GATEWAY_IMAGE_PRIORITY_ENV,
+                                           IMAGE_EXHAUSTED_MESSAGE,
+                                           IMAGE_PRIORITY_ENV,
+                                           image_priority_index,
+                                           ordered_image_pool)
+        from astra.ai.routing_policy import meets_hard_requirements
+        preferred = []
+        if self.config is not None:
+            for env in (IMAGE_PRIORITY_ENV, GATEWAY_IMAGE_PRIORITY_ENV):
+                try:
+                    preferred = self.config.getlist(env)
+                except Exception:
+                    preferred = []
+                if preferred:
+                    break
+        pref = {}
+        if preferred:
+            pref = {s.model: i
+                    for i, s in enumerate(ordered_image_pool(preferred))}
+        seen, ordered = set(), []
+        for adapter, model in candidates:
+            # Re-apply the STATIC eligibility gate the scored ranking normally
+            # enforces: required capability (image_generation/image_editing),
+            # required output modality ("image") and the FREE-pool rule -- a
+            # text/vision/paid model must never reach the serial image loop.
+            if not meets_hard_requirements(model, req):
+                continue
+            key = (getattr(adapter, "name", ""), model.model_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append((adapter, model))
+        ordered.sort(key=lambda am: (pref.get(am[1].model_id, 10_000),
+                                     image_priority_index(
+                                         getattr(am[0], "name", ""),
+                                         am[1].model_id),
+                                     am[1].model_id))
+        self._emit("image.generation.start", task=req.task_type,
+                   candidates=len(ordered),
+                   targets=[m.model_id for _a, m in ordered], op=op,
+                   trace=req.trace)
+        failures, attempted, attempts = [], set(), 0
+        for idx, (adapter, model) in enumerate(ordered):
+            key = (getattr(adapter, "name", ""), model.model_id)
+            if key in attempted:
+                continue
+            attempted.add(key)
+            attempts += 1
+            name = getattr(adapter, "name", "")
+            self._emit("image.generation.attempt", provider=name,
+                       model=model.model_id, attempt=attempts, op=op,
+                       trace=req.trace)
+            start = _time.perf_counter()
+            rr = self._attempt(adapter, model, req)
+            duration_ms = round((_time.perf_counter() - start) * 1000.0, 1)
+            if rr is not None and rr.ok:
+                rr.attempts = attempts
+                rr.fallback_used = attempts > 1
+                rr.requested_provider = req.preferred_provider or ""
+                rr.requested_model = req.preferred_model or ""
+                self._emit("image.generation.success", provider=rr.provider,
+                           model=rr.model, attempt=attempts,
+                           duration_ms=duration_ms, op=op, trace=req.trace,
+                           terminal=True)
+                self._emit("router.decision", task=req.task_type,
+                           provider=rr.provider, model=rr.model, score=0.0,
+                           reason="image serial fallback",
+                           latency_ms=rr.latency_ms, fallback=rr.fallback_used,
+                           op=op, trace=req.trace, terminal=True)
+                self._record_route(req, rr)
+                return rr
+            err = (getattr(rr, "error", "") or "unknown error") if rr else "no result"
+            failures.append(err)
+            category = self._image_failure_category(err)
+            self._emit("image.generation.failure", provider=name,
+                       model=model.model_id, attempt=attempts,
+                       duration_ms=duration_ms, reason=category,
+                       failure_category=category, op=op, trace=req.trace,
+                       terminal=False)
+            nxt = next((m for _a, m in ordered[idx + 1:]
+                        if (getattr(_a, "name", ""), m.model_id)
+                        not in attempted), None)
+            if nxt is not None:
+                self._emit("image.generation.fallback", provider=name,
+                           model=model.model_id, reason=category,
+                           next_model=nxt.model_id, attempt=attempts, op=op,
+                           trace=req.trace)
+        error = (IMAGE_EXHAUSTED_MESSAGE if attempts
+                 else "no eligible provider/model available")
+        self._emit("image.generation.exhausted", attempts=attempts,
+                   reason="; ".join(failures)[:300] or error, op=op,
+                   trace=req.trace, terminal=True)
+        return self._route_failed(req, op, error=error, attempts=attempts)
+
     def _attempt(self, adapter, model: Model, req: RoutingRequest) -> RoutingResult | None:
         name = getattr(adapter, "name", "")
         op = new_op_id()
@@ -1192,7 +1327,13 @@ class AstraRouter:
         last_error = ""
         # per-credential + per-model retries: a failed key rolls to the next
         # key on the same model, then same provider's next model, then provider.
-        for attempt in range(1, self.max_retries + 2):
+        # Image generation is the exception: the serial fallback gives each
+        # model exactly ONE attempt per request (an already-failed model must
+        # never be retried immediately in the same request), so no
+        # same-model retries are performed for it.
+        retries = (0 if req.task_type in ("image_generation", "image_editing")
+                   else self.max_retries)
+        for attempt in range(1, retries + 2):
             if attempt > 1:
                 self._emit("credential.rotation", provider=name, model=model.model_id,
                            attempt=attempt, op=op, trace=req.trace)
@@ -1253,7 +1394,7 @@ class AstraRouter:
                 self._record_key_model(adapter, model.model_id, False,
                                        duration_ms(t0), last_error, req)
                 # per-key test: one attempt, on that key only -> terminal.
-                retry = (not self._pinned(adapter) and attempt <= self.max_retries
+                retry = (not self._pinned(adapter) and attempt <= retries
                          and getattr(e, "retryable", True))
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt, op=op,
@@ -1274,7 +1415,7 @@ class AstraRouter:
             except Exception as e:           # never let a provider kill routing
                 last_error = f"{type(e).__name__}: {e}"
                 self._errors[name] = self._errors.get(name, 0) + 1
-                retry = (not self._pinned(adapter) and attempt <= self.max_retries)
+                retry = (not self._pinned(adapter) and attempt <= retries)
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt, op=op,
                            trace=req.trace, terminal=not retry, retrying=retry)
@@ -1282,7 +1423,11 @@ class AstraRouter:
                     break
                 if retry:
                     time.sleep(min(self.backoff_s * attempt, 8))
-        self._mark_down(name, last_error)
+        if req.task_type not in ("image_generation", "image_editing"):
+            # A failed image generation must NOT disable the model (or its
+            # whole provider) for later requests -- the failure is only
+            # remembered for the current request's attempted-model set.
+            self._mark_down(name, last_error)
         return RoutingResult(ok=False, error=f"{name}: {last_error}",
                              attempts=0)
 

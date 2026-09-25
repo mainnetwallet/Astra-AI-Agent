@@ -517,19 +517,25 @@ def eligible_image_generation_targets(
 
     A target qualifies only when all of the following hold:
 
-    1. its connection is configured/healthy (`_connection_usable`),
+    1. its connection is configured/usable (`_connection_usable`),
     2. its model declares the exact image capability for this category
        (`image_generation`, or `image_editing` when editing an existing
        image) — granted only by astra.ai.image_models,
     3. its output modalities genuinely include "image",
-    4. its (provider, model) health entry is not in cooldown.
+    4. it is not explicitly disabled.
+
+    Deliberately NO health/cooldown filter: image generation uses a simple
+    serial fallback, so the ACTUAL generation request -- not a proactive
+    health probe -- is the availability signal. A model is only skipped
+    within the current request, once it has actually failed there.
 
     Returns (connection, model, health) triples, preserving configured
-    order (call `rank_targets` to score them).
+    order (call `rank_targets`/`rank_image_targets` for the serial order).
     """
     category = "image_editing" if editing else "image_generation"
     return eligible_targets(catalog, routing_state, category=category,
-                            context_tokens=context_tokens)
+                            context_tokens=context_tokens,
+                            require_health=False)
 
 
 #: Short alias (the explicit name is the one the Gateway's decision path
@@ -543,6 +549,7 @@ def describe_image_targets(
     """Machine/human-readable inventory of eligible image targets, for the
     Activity Log and for tests asserting exactly which models the Gateway
     considered. Never contains credentials."""
+    from astra.ai.image_models import image_priority_index
     return [
         {
             "provider": model.provider,
@@ -553,7 +560,10 @@ def describe_image_targets(
             "latency_ms": round(health.average_latency_ms, 1),
             "consecutive_failures": health.consecutive_failures,
             "cost_class": model.cost_class,
-            "priority": idx,
+            # deterministic serial-fallback position (lower runs first)
+            "priority": image_priority_index(model.provider,
+                                             model.model_id),
+            "order": idx,
         }
         for idx, (_conn, model, health) in enumerate(targets)
     ]
@@ -561,10 +571,17 @@ def describe_image_targets(
 
 def eligible_targets(catalog: list[tuple[object, Model]],
                       routing_state: GatewayRoutingState, *, category: str,
-                      context_tokens: int = 0
+                      context_tokens: int = 0,
+                      require_health: bool = True
                       ) -> list[tuple[object, Model, GatewayModelHealth]]:
-    """Connection-usable + capability/context-suitable + enabled +
-    not-in-cooldown."""
+    """Connection-usable + capability/context-suitable + enabled.
+
+    `require_health=True` (the default -- unchanged for chat/vision/coding
+    /reasoning/... routing) additionally excludes a target whose
+    (provider, model) entry is in cooldown. Image generation passes
+    `require_health=False`: there is no proactive image health check, so a
+    model is never excluded before the real generation request was attempted.
+    """
     out = []
     for conn, model in catalog:
         if not _connection_usable(conn):
@@ -578,7 +595,7 @@ def eligible_targets(catalog: list[tuple[object, Model]],
                                           context_tokens=context_tokens):
             continue
         health = routing_state.get_health(model.provider, model.model_id)
-        if not health.healthy:
+        if require_health and not health.healthy:
             continue
         out.append((conn, model, health))
     return out
@@ -639,6 +656,31 @@ def score_target(model: Model, health: GatewayModelHealth, *, category: str,
     return round(score, 4)
 
 
+def rank_image_targets(
+        targets: list[tuple[object, Model, GatewayModelHealth]], *,
+        preferred_ids=None
+        ) -> list[tuple[object, Model, GatewayModelHealth]]:
+    """Deterministic serial-fallback order for image generation.
+
+    Sorts by the curated/verified FREE-pool priority (astra.ai.image_models)
+    and never by health, latency or past success -- so the order is identical
+    for every request and each model is always tried in the same place. An
+    explicit `preferred_ids` (IMAGE_GENERATION_PRIORITY /
+    GW_IMAGE_GENERATION_PRIORITY) reorders the pool but can never add a model
+    that failed the static eligibility checks.
+    """
+    from astra.ai.image_models import image_priority_index, ordered_image_pool
+    preferred = {}
+    if preferred_ids:
+        for i, spec in enumerate(ordered_image_pool(preferred_ids)):
+            preferred[spec.model] = i
+    return sorted(
+        targets,
+        key=lambda t: (preferred.get(t[1].model_id, 10_000),
+                       image_priority_index(t[1].provider, t[1].model_id),
+                       t[1].model_id))
+
+
 def rank_targets(targets: list[tuple[object, Model, GatewayModelHealth]], *,
                  category: str
                  ) -> list[tuple[object, Model, GatewayModelHealth]]:
@@ -646,6 +688,10 @@ def rank_targets(targets: list[tuple[object, Model, GatewayModelHealth]], *,
     order — Python's sort is stable and every tie also gets an explicit,
     small `priority_bonus` favoring earlier configuration, so "configured
     priority" (§9) is honoured even without any other signal."""
+    # Image categories use the deterministic serial-fallback order
+    # (astra.ai.image_models priority) instead of health/latency scoring.
+    if category in ("image_generation", "image_editing"):
+        return rank_image_targets(targets)
     n = len(targets)
     scored = []
     for idx, (conn, model, health) in enumerate(targets):

@@ -68,6 +68,7 @@ from astra.ai.gateway_contract import (ENVIRONMENT_HOST_FALLBACK,
                                        ProviderExecutionTarget)
 from astra.ai.gateway_task_completion import (COMPLETE, FAILED, INCOMPLETE,
                                               build_task_completion_contract)
+from astra.ai.image_models import IMAGE_EXHAUSTED_MESSAGE
 from astra.ai.json_extract import loads_lenient
 from astra.ai.multimodal_messages import build_multimodal_content
 from astra.ai.execution_history import AgentExecutionHistory
@@ -110,6 +111,11 @@ _NO_PROVIDER_CONFIGURED_MESSAGE = (
 # healthy model genuinely supports image generation. An image request is
 # NEVER downgraded to a text model -- a text model cannot make an image,
 # and a written description would be a false answer.
+# Shown when every eligible FREE image model was ACTUALLY attempted for
+# the user's request and all of them failed. Deliberately distinct from
+# the "nothing configured/eligible" message below.
+_ALL_IMAGE_MODELS_FAILED_MESSAGE = "\u2715 " + IMAGE_EXHAUSTED_MESSAGE
+
 _NO_IMAGE_MODEL_MESSAGE = (
     "✕ No currently available FREE image-generation model is available.\n\n"
     "Astra shudhu free/free-tier image model diye chobi banay (ekhon: "
@@ -1262,8 +1268,15 @@ class ChatPipeline:
             rr = self._route_image(task_type, messages, model, req)
             if rr is not None and rr.ok:
                 return rr
-            # 2) Otherwise fall back to the Provider router, which has its own
-            #    image-capable-only filter and per-(provider, model) failover.
+            if rr is not None:
+                # The Gateway has an image path and already attempted the
+                # whole FREE pool: report that terminal failure instead of
+                # re-running the identical models through the Provider router
+                # (which would only duplicate the image-generation spend).
+                return rr
+            # 2) The Gateway has no image execution path, so fall back to the
+            #    Provider router, which has its own image-capable-only filter
+            #    and serial failover over the same FREE pool.
             return self.router.route_request(RoutingRequest(
                 task_type=task_type, messages=messages,
                 preferred_provider=provider or None,
@@ -1292,9 +1305,11 @@ class ChatPipeline:
     def _route_image(self, task_type, messages, model, req=""):
         """Run an image request through the Gateway's image path.
 
-        Returns a RoutingResult on success, or None when the Gateway has no
-        image execution path / no eligible image model, so the caller can
-        fall back to the Provider router. Never returns a text answer.
+        Returns a successful RoutingResult, a FAILED one when the Gateway
+        attempted every eligible FREE image model and all of them failed (so
+        the caller stops rather than re-running the identical FREE pool), or
+        None when the Gateway simply has no image execution path / no eligible
+        image model. Never returns a text answer.
         """
         fn = getattr(self.gateway, "generate_image", None)
         if not callable(fn) or not self._gateway_usable():
@@ -1306,8 +1321,19 @@ class ChatPipeline:
             uri = fn(prompt, model=model or None,
                      editing=(task_type == "image_editing"), trace=req)
         except Exception as e:
-            self._emit("chat.pipeline.image_unavailable", error=str(e),
+            err = getattr(e, "message", None) or str(e)
+            self._emit("chat.pipeline.image_unavailable", error=err,
                        op=f"chat:{req}", request=req, trace=req, terminal=False)
+            if IMAGE_EXHAUSTED_MESSAGE in err:
+                # Every eligible FREE image model was attempted for this
+                # request and failed. Re-running the same pool through the
+                # Provider router would only duplicate the spend, so report
+                # the clear exhaustion error and stop.
+                failed = RoutingResult(ok=False, error=err)
+                failed.attempts = int(
+                    getattr(self.gateway, "last_attempts", 0) or 0)
+                failed._port_kind = "gateway"
+                return failed
             return None
         if not uri:
             return None
@@ -1577,11 +1603,16 @@ class ChatPipeline:
             trace["error"] = err
             if task_type in ("image_generation", "image_editing"):
                 # NEVER downgrade an image request to a text model. Report
-                # honestly that no image model could serve it.
+                # honestly, and distinguish "nothing eligible was configured"
+                # from "every eligible FREE model was attempted and failed".
+                exhausted = (IMAGE_EXHAUSTED_MESSAGE in (err or "")
+                             or bool(getattr(rr, "attempts", 0)))
+                message = (_ALL_IMAGE_MODELS_FAILED_MESSAGE if exhausted
+                           else _NO_IMAGE_MODEL_MESSAGE)
                 self._emit("chat.pipeline.finished", status="no_image_model",
                            op=f"chat:{req}", request=req, trace=req,
                            terminal=True)
-                return self._reply(_NO_IMAGE_MODEL_MESSAGE, False, trace,
+                return self._reply(message, False, trace,
                                    {"stage": "image_generation", "error": err})
             if "no eligible" in err:
                 # No Provider key is configured (empty/missing plain

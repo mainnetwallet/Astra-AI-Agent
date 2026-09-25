@@ -1259,6 +1259,13 @@ class AstraAIGateway:
     See astra/ai/gateway_routing.py for the actual classification/
     scoring/health/persistence logic — this class only owns HTTP execution
     and the attempt loop.
+
+    IMAGE GENERATION is the deliberate exception to steps 3/4 above: it
+    uses a SIMPLE SERIAL FALLBACK over its own FREE image-model pool, in a
+    deterministic priority order (astra.ai.image_models), with NO proactive
+    health check and no cooldown gating -- the actual generation request is
+    the availability signal, and a failure is remembered only for that one
+    request. See `image_targets()` / `generate_image()`.
     """
 
     def __init__(self, connections: list | None = None, config=None,
@@ -1765,21 +1772,29 @@ class AstraAIGateway:
 
     def image_targets(self, *, editing: bool = False,
                       discover: bool = True) -> list:
-        """The eligible image targets, already filtered to (configured +
-        healthy + genuinely image-capable) and ranked. A model in cooldown is
-        excluded (see eligible_image_generation_targets)."""
+        """The eligible FREE image targets, in their deterministic serial
+        order.
+
+        Deliberately NO health filter and NO health-based ranking: image
+        generation has no proactive health check, so a model is only ever
+        considered "unavailable" after the real generation request for the
+        current user turn actually failed. The order comes from
+        astra.ai.image_models' curated priority (overridable per deployment
+        with GW_IMAGE_GENERATION_PRIORITY).
+        """
         from astra.ai.gateway_routing import (
-            eligible_image_generation_targets, prefer_last_successful,
-            rank_targets)
+            eligible_image_generation_targets, rank_image_targets)
+        from astra.ai.image_models import GATEWAY_IMAGE_PRIORITY_ENV
         catalog = self._image_catalog(discover=discover)
         targets = eligible_image_generation_targets(
             catalog, self.routing_state, editing=editing)
-        category = "image_editing" if editing else "image_generation"
-        ranked = rank_targets(targets, category=category)
-        if not editing:
-            ranked = prefer_last_successful(
-                ranked, self.routing_state.last_successful())
-        return ranked
+        preferred = []
+        if self.config is not None:
+            try:
+                preferred = self.config.getlist(GATEWAY_IMAGE_PRIORITY_ENV)
+            except Exception:
+                preferred = []
+        return rank_image_targets(targets, preferred_ids=preferred)
 
     @staticmethod
     def _image_failure_reason(exc) -> str:
@@ -1791,25 +1806,33 @@ class AstraAIGateway:
             return "timeout"
         if code in (500, 501, 502, 503, 504) or "temporary" in text:
             return f"provider error ({code})" if code else "provider error"
-        if code in (401, 403) or "auth" in text:
-            return "authentication failed"
+        if code in (401, 403) or "auth" in text or "credential" in text:
+            return "provider authentication/credential failure"
         if code == 404 or "not found" in text:
             return "model unavailable"
+        if "quota" in text or "exhausted" in text or "billing" in text:
+            return "quota exhausted"
         return text[:120] or "unknown error"
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1, *,
                        editing: bool = False, trace: str = "",
                        discover: bool = True) -> str:
-        """Generate one image across the eligible image targets, with
-        per-(provider, model) failover.
+        """Generate one image with a SIMPLE SERIAL FALLBACK.
 
-        A failure (429 / timeout / 5xx / model-unavailable / credential)
-        cools down ONLY that target and moves to the next eligible one; the
-        same target is never retried endlessly. Returns the image as a
-        `data:` URI, or raises a clear error when no image model is
-        available -- it NEVER answers an image request with text.
+        The eligible FREE image models are tried one after another in the
+        deterministic priority order. Each model gets at most ONE attempt per
+        request (an in-request attempted set), and the ACTUAL generation call
+        -- never a proactive health probe -- decides success/failure. No
+        health/cooldown state is written, so a failure here never disables the
+        model for a later request.
+
+        Returns a `data:` URI on the first success and stops immediately, or
+        raises ProviderError(IMAGE_EXHAUSTED_MESSAGE) when every eligible FREE
+        model failed. It NEVER falls back to a paid image model, a text model,
+        a vision-only model or simple_chat.
         """
+        from astra.ai.image_models import IMAGE_EXHAUSTED_MESSAGE
         op = new_op_id()
         category = "image_editing" if editing else "image_generation"
         ranked = self.image_targets(editing=editing, discover=discover)
@@ -1819,58 +1842,65 @@ class AstraAIGateway:
         self.last_attempts = 0
         self.last_connection = ""
         self.last_model = ""
-        self._emit("astra_gateway.image_request", category=category,
+        self._emit("image.generation.start", category=category,
                    candidates=len(ranked),
-                   targets=[t[1].model_id for t in ranked],
-                   op=op, trace=trace, input=_gw_log_cap(prompt))
+                   targets=[t[1].model_id for t in ranked], op=op,
+                   trace=trace, input=_gw_log_cap(prompt))
         if not ranked:
-            self._emit("astra_gateway.image_failure", provider="", model="",
-                       reason="no eligible image-generation model", op=op,
-                       trace=trace, terminal=True)
+            self._emit("image.generation.exhausted", provider="", model="",
+                       attempts=0, reason="no eligible FREE image model",
+                       op=op, trace=trace, terminal=True)
             raise ProviderError(
                 "No image-generation model is currently configured or available.")
-        last_error = ""
+        attempted = set()
+        failures = []
         attempts = 0
         for idx, (conn, tmodel, _health) in enumerate(ranked):
-            attempts = idx + 1
+            key = (tmodel.provider, tmodel.model_id)
+            if key in attempted:
+                continue                      # one attempt per model per request
+            attempted.add(key)
+            attempts += 1
             self.last_attempts = attempts
+            self._emit("image.generation.attempt", provider=tmodel.provider,
+                       model=tmodel.model_id, attempt=attempts, op=op,
+                       trace=trace)
             start = time.perf_counter()
             try:
                 uri = conn.generate_image(prompt, model=tmodel.model_id,
                                           size=size, n=n)
             except Exception as e:
                 reason = self._image_failure_reason(e)
-                last_error = f"{tmodel.provider}/{tmodel.model_id}: {reason}"
-                self.routing_state.record_failure(tmodel.provider,
-                                                  tmodel.model_id)
-                self._emit("astra_gateway.image_failure",
+                duration_ms = round((time.perf_counter() - start) * 1000.0, 1)
+                failures.append(f"{tmodel.provider}/{tmodel.model_id}: {reason}")
+                self._emit("image.generation.failure",
                            provider=tmodel.provider, model=tmodel.model_id,
-                           reason=reason, attempt=attempts, op=op,
+                           attempt=attempts, duration_ms=duration_ms,
+                           reason=reason, failure_category=reason, op=op,
                            trace=trace, terminal=False)
-                if idx + 1 < len(ranked):
-                    nxt = ranked[idx + 1][1]
-                    self._emit("astra_gateway.image_fallback",
+                nxt = next((m for _c, m, _h in ranked[idx + 1:]
+                            if (m.provider, m.model_id) not in attempted), None)
+                if nxt is not None:
+                    self._emit("image.generation.fallback",
                                provider=tmodel.provider, model=tmodel.model_id,
                                reason=reason, next_provider=nxt.provider,
                                next_model=nxt.model_id, attempt=attempts,
                                op=op, trace=trace)
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
-            self.routing_state.record_success(tmodel.provider, tmodel.model_id,
-                                              latency_ms)
             self.last_connection = conn.name
             self.last_model = tmodel.model_id
-            self._emit("astra_gateway.image_success", provider=tmodel.provider,
-                       model=tmodel.model_id,
-                       latency_ms=round(latency_ms, 1), attempt=attempts,
-                       op=op, trace=trace, terminal=True)
+            self._emit("image.generation.success", provider=tmodel.provider,
+                       model=tmodel.model_id, attempt=attempts,
+                       duration_ms=round(latency_ms, 1),
+                       latency_ms=round(latency_ms, 1), op=op, trace=trace,
+                       terminal=True)
             return uri
-        self._emit("astra_gateway.image_failure", provider="", model="",
-                   reason=last_error or "all image-generation targets failed",
-                   attempts=attempts, op=op, trace=trace, terminal=True)
-        raise ProviderError(
-            "Astra AI Gateway: all image-generation targets failed -- "
-            + (last_error or "unknown error"))
+        self._emit("image.generation.exhausted", provider="", model="",
+                   attempts=attempts,
+                   reason="; ".join(failures) or "all image models failed",
+                   op=op, trace=trace, terminal=True)
+        raise ProviderError(IMAGE_EXHAUSTED_MESSAGE)
 
     def test_connection_model(self, conn, model_id: str) -> dict:
         """Probe exactly ONE model of one connection and persist that one

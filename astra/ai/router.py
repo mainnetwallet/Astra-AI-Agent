@@ -405,7 +405,7 @@ class AstraRouter:
         # Image-generation models are configured separately from the chat
         # list; only ones the evidence registry recognizes are ever added, so
         # a stray id can never become an image candidate.
-        from astra.ai.image_models import (FREE_TRUE, PROTOCOL_OPENAI_IMAGES,
+        from astra.ai.image_models import (FREE_TRUE, PROTOCOL_OPENROUTER_IMAGES,
                                            documented_image_models,
                                            is_image_model, is_free_image_model,
                                            make_image_spec)
@@ -444,7 +444,7 @@ class AstraRouter:
                 # exact id -- authoritative even when the static registry has
                 # no entry yet. A model that is not provably free stays out.
                 image_overrides[mid] = make_image_spec(
-                    name, mid, PROTOCOL_OPENAI_IMAGES,
+                    name, mid, PROTOCOL_OPENROUTER_IMAGES,
                     capabilities=("image_generation",),
                     input_modalities=("text", "image"),
                     free_tier=FREE_TRUE,

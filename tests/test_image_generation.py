@@ -1517,7 +1517,7 @@ class TestOpenRouterLiveDiscovery(unittest.TestCase):
 
         def side(req, timeout=None):
             url = req.full_url
-            if "output_modalities=image" in url:
+            if "/images/models" in url:
                 return _resp(self._payload([self.FREE_ID, self.PAID_ID]))
             seen["url"] = url
             seen["body"] = json.loads(req.data.decode())
@@ -1531,12 +1531,160 @@ class TestOpenRouterLiveDiscovery(unittest.TestCase):
         self.assertTrue(rr.ok, rr.error)
         self.assertEqual(rr.model, self.FREE_ID)
         self.assertEqual(seen["body"]["model"], self.FREE_ID)
-        self.assertTrue(seen["url"].endswith("/images/generations"))
+        self.assertTrue(seen["url"].endswith("/images"))
+        self.assertNotIn("/images/generations", seen["url"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. Artifacts + frontend rendering
 # ═══════════════════════════════════════════════════════════════════════════
+class TestOpenRouterImagesApi(unittest.TestCase):
+    """OpenRouter's current documented Image API is the dedicated
+    ``POST /api/v1/images`` endpoint with ``GET /api/v1/images/models``
+    discovery -- NOT the OpenAI-style ``/images/generations``."""
+
+    OR_URL = "https://openrouter.ai/api/v1/images"
+    OR_DISCOVERY = "https://openrouter.ai/api/v1/images/models"
+
+    def _gw(self):
+        from astra.ai.gateway import AstraGatewayOpenRouter
+        return AstraGatewayOpenRouter(config=_cfg(GW_OPENROUTER_API_KEYS="k"))
+
+    def _adapter(self):
+        from astra.ai.adapters.openrouter import OpenRouterAdapter
+        return OpenRouterAdapter(config=_cfg(OPENROUTER_API_KEYS="k"))
+
+    def _gw_gateway(self, *conns, **env):
+        from astra.ai.gateway import AstraAIGateway
+        return AstraAIGateway(connections=list(conns), config=_cfg(**env))
+
+    def test_discovery_url_is_the_dedicated_images_models_endpoint(self):
+        from astra.ai.gateway import AstraGatewayOpenRouter
+        from astra.ai.adapters.openrouter import OpenRouterAdapter
+        self.assertEqual(AstraGatewayOpenRouter.IMAGE_MODELS_URL,
+                         self.OR_DISCOVERY)
+        self.assertEqual(OpenRouterAdapter.IMAGE_MODELS_URL,
+                         self.OR_DISCOVERY)
+
+    def test_discovery_requests_the_images_models_url(self):
+        conn = self._gw()
+        seen = {}
+
+        def side(req, timeout=None):
+            seen["url"] = req.full_url
+            return _resp(json.dumps({"data": [
+                {"id": OR_FLUX,
+                 "architecture": {"output_modalities": ["image"]}}]}))
+
+        with mock.patch("urllib.request.urlopen", side):
+            ids = conn.list_image_models(discover=True)
+        self.assertEqual(ids, [OR_FLUX])
+        self.assertEqual(seen["url"], self.OR_DISCOVERY)
+
+    def test_gateway_generate_image_calls_the_exact_images_endpoint(self):
+        conn = self._gw()
+        seen = {}
+
+        def side(req, timeout=None):
+            seen["url"] = req.full_url
+            seen["body"] = json.loads(req.data.decode())
+            return _resp(_openai_images_ok())
+
+        with mock.patch("urllib.request.urlopen", side):
+            out = conn.generate_image("a cat", model=OR_FLUX)
+        self.assertEqual(seen["url"], self.OR_URL)
+        self.assertTrue(out.startswith("data:image/png;base64,"))
+
+    def test_adapter_generate_image_calls_the_exact_images_endpoint(self):
+        conn = self._adapter()
+        seen = {}
+
+        def side(req, timeout=None):
+            seen["url"] = req.full_url
+            seen["body"] = json.loads(req.data.decode())
+            return _resp(_openai_images_ok())
+
+        with mock.patch("urllib.request.urlopen", side):
+            out = conn.generate_image("a cat", model=OR_FLUX)
+        self.assertEqual(seen["url"], self.OR_URL)
+        self.assertTrue(out.startswith("data:image/png;base64,"))
+
+    def test_images_generations_is_never_called(self):
+        # Regression: the stale OpenAI-style path must never be hit, for the
+        # Gateway connection or the standalone adapter.
+        urls = []
+        for conn in (self._gw(), self._adapter()):
+            def side(req, timeout=None):
+                urls.append(req.full_url)
+                return _resp(_openai_images_ok())
+            with mock.patch("urllib.request.urlopen", side):
+                conn.generate_image("a cat", model=OR_FLUX)
+        self.assertEqual(len(urls), 2)
+        self.assertTrue(all("/images/generations" not in u for u in urls), urls)
+        self.assertTrue(all(u.endswith("/images") for u in urls), urls)
+
+    def test_request_body_omits_response_format(self):
+        conn = self._gw()
+        seen = {}
+
+        def side(req, timeout=None):
+            seen["body"] = json.loads(req.data.decode())
+            return _resp(_openai_images_ok())
+
+        with mock.patch("urllib.request.urlopen", side):
+            conn.generate_image("a cat", model=OR_FLUX, size="2048x2048")
+        body = seen["body"]
+        self.assertNotIn("response_format", body)
+        self.assertEqual(body["model"], OR_FLUX)
+        self.assertEqual(body["prompt"], "a cat")
+        self.assertEqual(body["size"], "2048x2048")
+        # only documented Image API request fields are sent
+        self.assertEqual(set(body) - {"model", "prompt", "n", "size"}, set())
+
+    def test_b64_json_response_becomes_an_image_artifact(self):
+        conn = self._gw()
+
+        def side(req, timeout=None):
+            return _resp(json.dumps({"data": [{"b64_json": B64,
+                                              "media_type": "image/png"}]}))
+
+        with mock.patch("urllib.request.urlopen", side):
+            uri = conn.generate_image("a cat", model=OR_FLUX)
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+        self.assertEqual(base64.b64decode(uri.split(",", 1)[1]), PNG)
+        from astra.ai.artifact_extraction import extract_artifacts
+        with tempfile.TemporaryDirectory() as d:
+            arts = extract_artifacts(uri, d, "image")
+        self.assertEqual(len(arts), 1)
+        self.assertEqual(arts[0]["artifact_type"], "image")
+        self.assertTrue(arts[0]["filename"].endswith(".png"))
+
+    def test_error_statuses_propagate_as_provider_error(self):
+        conn = self._gw()
+        for code in (400, 401, 402, 403, 404, 413, 429, 500, 502, 524, 529):
+            def side(req, timeout=None, _c=code):
+                raise _http_error(self.OR_URL, _c)
+            with mock.patch("urllib.request.urlopen", side):
+                with self.assertRaises(ProviderError):
+                    conn.generate_image("a cat", model=OR_FLUX)
+
+    def test_openrouter_failure_falls_over_to_the_next_global_model(self):
+        # Priority override puts the OpenRouter model first; a 429 on it must
+        # advance to the next model in the ONE global list (Cloudflare FLUX).
+        cf = _FakeConn("astra-gw-cloudflare", "cloudflare", image_models=[FLUX])
+        orc = _FakeConn("astra-gw-openrouter", "openrouter",
+                        image_models=[OR_FLUX],
+                        outcomes=[_http_error("u", 429)])
+        gw = self._gw_gateway(cf, orc, GW_IMAGE_GENERATION_PRIORITY=OR_FLUX
+                              + "," + FLUX)
+        out = gw.generate_image("a cat", discover=False)
+        self.assertTrue(out.startswith("data:image/png;base64,"))
+        self.assertEqual([m for m, _p in orc.image_calls], [OR_FLUX])
+        self.assertEqual([m for m, _p in cf.image_calls], [FLUX])
+        self.assertEqual(gw.last_model, FLUX)
+        self.assertEqual(gw.last_attempts, 2)
+
+
 class TestImageArtifactsAndFrontend(unittest.TestCase):
     def test_data_uri_becomes_a_validated_image_artifact(self):
         from astra.ai.artifact_extraction import extract_artifacts

@@ -70,7 +70,7 @@ FREE model.
 * Z.AI -- https://docs.z.ai/guides/overview/pricing prices GLM-Image at
   $0.015/image and CogView-4 at $0.01/image (no free tier) -> removed.
 
-* OpenRouter -- https://openrouter.ai/api/v1/models?output_modalities=image
+* OpenRouter -- https://openrouter.ai/api/v1/images/models
   The live catalog's ``:free`` variants all output text, and the image
   models it lists are paid (``google/gemini-2.5-flash-image`` etc.), so the
   strict audit found no free image model. EXCEPTION: the three ``:free``
@@ -164,13 +164,17 @@ FREE_FALSE = "false"
 FREE_UNKNOWN = "unknown"
 
 # API protocols this repository can actually speak for image generation.
+#: OpenAI-style ``POST /images/generations`` (Z.AI GLM-Image/CogView).
 PROTOCOL_OPENAI_IMAGES = "openai_images_generations"
+#: OpenRouter dedicated Images API: ``POST /api/v1/images``.
+PROTOCOL_OPENROUTER_IMAGES = "openrouter_images"
 PROTOCOL_GEMINI_CONTENT = "gemini_generate_content_image"
 PROTOCOL_CLOUDFLARE_RUN = "cloudflare_workers_ai_run"
 PROTOCOL_BEDROCK_INVOKE = "bedrock_invoke_model"
 
 SUPPORTED_PROTOCOLS = frozenset({
-    PROTOCOL_OPENAI_IMAGES, PROTOCOL_GEMINI_CONTENT,
+    PROTOCOL_OPENAI_IMAGES, PROTOCOL_OPENROUTER_IMAGES,
+    PROTOCOL_GEMINI_CONTENT,
     PROTOCOL_CLOUDFLARE_RUN, PROTOCOL_BEDROCK_INVOKE,
 })
 
@@ -339,9 +343,9 @@ _SPECS: tuple = (
               sizes=("1024x1024",),
               free_tier=FREE_TRUE, free_evidence=_USER_REQ_EVIDENCE,
               params=("prompt",)),
-    # ── OpenRouter Image API (POST /api/v1/images/generations) ────────────
+    # ── OpenRouter Image API (POST /api/v1/images) ────────────────────────
     ImageSpec("openrouter", "black-forest-labs/flux-1-schnell:free",
-              PROTOCOL_OPENAI_IMAGES,
+              PROTOCOL_OPENROUTER_IMAGES,
               "user request 2026-09-26 (force-added FREE candidate)",
               capabilities=(IMAGE_GENERATION,),
               input_modalities=("text",),
@@ -350,7 +354,7 @@ _SPECS: tuple = (
               free_tier=FREE_TRUE, free_evidence=_USER_REQ_EVIDENCE,
               params=("prompt",)),
     ImageSpec("openrouter", "google/gemini-2.5-flash-image-preview:free",
-              PROTOCOL_OPENAI_IMAGES,
+              PROTOCOL_OPENROUTER_IMAGES,
               "user request 2026-09-26 (force-added FREE candidate)",
               capabilities=(IMAGE_GENERATION,),
               input_modalities=("text", "image"),
@@ -359,7 +363,7 @@ _SPECS: tuple = (
               free_tier=FREE_TRUE, free_evidence=_USER_REQ_EVIDENCE,
               params=("prompt",)),
     ImageSpec("openrouter", "sourceful/riverflow-v2.5-pro:free",
-              PROTOCOL_OPENAI_IMAGES,
+              PROTOCOL_OPENROUTER_IMAGES,
               "user request 2026-09-26 (force-added FREE candidate)",
               capabilities=(IMAGE_GENERATION,),
               input_modalities=("text",),

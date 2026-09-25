@@ -766,7 +766,7 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
     # ── image generation: official discovery + Image API ──────────────────
     #: OpenRouter's documented image-model discovery endpoint. Its returned
     #: output modalities are authoritative for the exact model ids it lists.
-    IMAGE_MODELS_URL = "https://openrouter.ai/api/v1/models?output_modalities=image"
+    IMAGE_MODELS_URL = "https://openrouter.ai/api/v1/images/models"
 
     def __init__(self, config=None, events=None, pool=None):
         super().__init__(config, events, pool)
@@ -830,6 +830,41 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
             if mid not in ids:
                 ids.append(mid)
         return ids
+
+    def generate_image(self, prompt: str, model: str | None = None,
+                       size: str = "1024x1024", n: int = 1) -> str:
+        """Generate an image via OpenRouter's dedicated Images API.
+
+        ``POST {base}/images`` -- the current documented endpoint (NOT the
+        OpenAI-style ``/images/generations``). Only documented Image API
+        fields are sent (``model``, ``prompt``, ``n``, ``size``); the OpenAI
+        ``response_format`` field is deliberately omitted. The response's
+        ``data[].b64_json`` is normalized into ``data:<mime>;base64,...``,
+        and a 400/401/402/403/404/413/429/500/502/524/529 or network error
+        propagates as a ProviderError so the Gateway's global serial
+        fallback advances to the next eligible image model.
+        """
+        model = model or self._default_image_model()
+        if not model:
+            raise ProviderError(f"{self.name}: no image model configured")
+        body = {"model": model, "prompt": prompt, "n": max(1, int(n or 1))}
+        if size:
+            body["size"] = size
+
+        def once(cred):
+            data = self._post(f"{self._api_base()}/images", body, cred)
+            self._done(cred)
+            return data
+
+        data = self._run(once)
+        uri = image_result_to_data_uri(data)
+        if not uri:
+            err = ProviderError(
+                f"{self.name}: image generation returned no image data")
+            err.retryable = False
+            raise err
+        return uri
+
 
 class AstraGatewayMistral(_GatewayCompatibleConnection):
     """Astra AI Gateway / Mistral connection (independent of MistralAdapter)."""
@@ -1722,7 +1757,7 @@ class AstraAIGateway:
         discovery API; every other connection uses its configured list.
         Only models the evidence registry recognizes are included."""
         from astra.ai.gateway_routing import GATEWAY_PROVIDER_SHORT
-        from astra.ai.image_models import (FREE_TRUE, PROTOCOL_OPENAI_IMAGES,
+        from astra.ai.image_models import (FREE_TRUE, PROTOCOL_OPENROUTER_IMAGES,
                                            documented_image_models,
                                            image_spec, make_image_spec)
         from astra.ai.models import Model, metadata_for
@@ -1764,7 +1799,7 @@ class AstraAIGateway:
                     # (OpenRouter's ":free" variants); otherwise a paid model
                     # could sneak into the free pool.
                     spec = make_image_spec(
-                        short, mid, PROTOCOL_OPENAI_IMAGES,
+                        short, mid, PROTOCOL_OPENROUTER_IMAGES,
                         capabilities=("image_generation",),
                         input_modalities=("text", "image"),
                         free_tier=FREE_TRUE,

@@ -507,12 +507,33 @@ class TerminalSession:
                     f"echo %errorlevel% > \"%ASTRA_TERMINAL_RC%\"\r\n"
                     f"cd > \"%ASTRA_TERMINAL_PWD%\"\r\n")
         if kind == "powershell":
-            return (f"{command}\n"
-                    f"if ($null -eq $LASTEXITCODE) {{ 0 }} else "
-                    f"{{ $LASTEXITCODE }} | Out-File -Encoding ascii "
+            # NOTE: `if (...) { ... } else { ... } | Out-File ...` is NOT
+            # valid PowerShell - its parser rejects a statement used as a
+            # pipeline element ("An empty pipe element is not allowed"),
+            # which made EVERY command in a PowerShell session die before
+            # the user's command ever ran. Capture the exit code in a
+            # variable first, then pipe that.
+            #
+            # Output encodings are pinned to UTF-8 so a command's own output
+            # (and PowerShell's diagnostics) is not emitted in the OEM
+            # codepage and mangled on the way back. The cwd/env probes are
+            # written as BOM-less UTF-8 so non-ASCII paths/values survive.
+            # [Console]::OutputEncoding is guarded because assigning it
+            # throws when the child has no console handle.
+            return (f"try {{ [Console]::OutputEncoding = "
+                    f"[System.Text.Encoding]::UTF8 }} catch {{}}\n"
+                    f"$OutputEncoding = [System.Text.Encoding]::UTF8\n"
+                    f"{command}\n"
+                    f"$__astra_rc = if ($null -eq $LASTEXITCODE) {{ 0 }} "
+                    f"else {{ $LASTEXITCODE }}\n"
+                    f"$__astra_rc | Out-File -Encoding ascii "
                     f"$env:ASTRA_TERMINAL_RC\n"
-                    f"(Get-Location).Path | Out-File -Encoding ascii "
-                    f"$env:ASTRA_TERMINAL_PWD\n")
+                    f"[System.IO.File]::WriteAllText("
+                    f"$env:ASTRA_TERMINAL_PWD, (Get-Location).Path)\n"
+                    f"$__astra_env = (Get-ChildItem Env: | ForEach-Object "
+                    f"{{ $_.Name + '=' + $_.Value }}) -join [char]0\n"
+                    f"[System.IO.File]::WriteAllText("
+                    f"$env:ASTRA_TERMINAL_ENV, $__astra_env)\n")
         return (f"{command}\n"
                 f"__astra_rc=$?\n"
                 f"pwd > \"$ASTRA_TERMINAL_PWD\" 2>/dev/null\n"

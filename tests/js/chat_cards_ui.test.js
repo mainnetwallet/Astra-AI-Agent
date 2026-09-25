@@ -361,36 +361,3 @@ test("cards never carry an inline width and keep readable text", async () => {
     assert.ok(textOf(btn).length > 0);
   }
 });
-
-/* --------------------------------------------------------- image artifacts ---
- * The generated image must render as an image card (not a generic file card)
- * with Open + Download, driven by the artifact dict the server actually
- * sends (astra.core.artifacts.Artifact.to_dict: artifact_type / mime_type).
- */
-test("a generated image artifact renders as an image card with Open + Download", async () => {
-  const env = await makeEnvironment();
-  await env.submit("akta chobi banao");
-  await flush();
-  env.resolveChat({ ok: true, data: {
-    reply: "Image ta generate hoyeche - niche dekho.",
-    action: "none",
-    artifacts: [{ id: "img1", filename: "generated.png",
-                  artifact_type: "image", mime_type: "image/png",
-                  size: 208, validated: true }],
-  } });
-  await flush();
-
-  const cards = findAll(env.chatLog(), "artifact-card");
-  assert.strictEqual(cards.length, 1, "exactly one artifact card");
-  const html = cards[0].innerHTML;
-  const url = "/api/v1/artifacts/img1/generated.png";
-  assert.match(html, /<img class="artifact-image"/,
-               "the artifact renders as an <img>, not a file row");
-  assert.match(html, new RegExp('src="' + url + '"'));
-  assert.match(html, />Open</, "an Open link is offered");
-  assert.match(html, /target="_blank"/, "Open loads the full image in a new tab");
-  assert.match(html, new RegExp('href="' + url + '" download="generated\\.png"'),
-               "a Download link is offered");
-  // the reply bubble stays short: the payload is the artifact, not the text
-  assert.doesNotMatch(textOf(env.chatLog()), /base64/);
-});

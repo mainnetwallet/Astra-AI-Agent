@@ -751,9 +751,6 @@ a[class*="hl-"] { pointer-events: none; }
 .artifact-label {
   padding: 6px 10px; font-size: 12px; color: var(--muted);
 }
-.artifact-actions {
-  display: flex; gap: 8px; padding: 0 10px 10px;
-}
 .artifact-audio { width: 100%; display: block; padding: 10px; }
 .artifact-video {
   display: block; max-width: 100%; max-height: 320px; border-radius: 10px 10px 0 0;

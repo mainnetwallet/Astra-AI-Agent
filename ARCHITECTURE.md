@@ -313,47 +313,6 @@ own window — never a smaller generic budget. Terminal resource controls
 `CHAT_MAX_TOOL_STEPS`) are separately retained: those are resource safety,
 not AI context limits.
 
-### 1.5 Image generation (non-text output)
-
-An image request is the one non-text output Astra executes end to end:
-
-    user request -> ChatPipeline -> Router (hard modality gate)
-                 -> image-capable Provider -> adapter.generate_image()
-                 -> astra.core.artifacts -> /api/v1/artifacts/... -> chat UI
-
-- **Intent.** `astra.ai.router.classify()` returns `image_generation` for
-  English ("create an image of a sunset"), Banglish ("akta chobi banao",
-  "photo create koro") and Bengali script ("একটা ছবি বানাও"), in either word
-  order. `astra.ai.capabilities` and `astra.ai.artifact_extraction` use the
-  same matcher. `\b` is applied to the Latin alternation only, because
-  Python's `re` does not treat Bengali combining vowel signs as word
-  characters.
-- **Routing is a hard gate, not a hint.**
-  `ChatPipeline._route()` sends `required_output_modalities=["image"]` for
-  `image_generation`, and the router accepts a candidate only when **both**
-  halves pass: the *model* metadata declares image output
-  (`routing_policy.meets_hard_requirements`) **and** the *adapter* genuinely
-  implements it (`capabilities.ADAPTER_OUTPUT_MODALITIES` + a real
-  `generate_image()`). A text-only provider can therefore never be selected
-  for an image request — it fails honestly ("no eligible") instead of
-  answering with prose. An explicit provider/model preference is still
-  honoured, but only if it passes that gate.
-- **Execution.** `AstraRouter._attempt` dispatches to
-  `adapter.generate_image()` (the existing Bedrock Titan/Stability adapter
-  implementation; nothing new was added).
-- **Result.** The provider returns the image as a base64 data URI. The
-  pipeline turns it into a stored artifact through the existing artifact
-  pipeline (`astra.core.artifacts.store_artifact` into the same
-  `{tempdir}/astra/artifacts` directory the web layer serves from — no
-  parallel storage), returns a short chat line plus `artifacts`, and skips
-  the Gateway's *text* verification for that reply (verifying a base64 blob
-  as prose would corrupt it). `renderArtifact()` shows the image inline with
-  Open/Download. If no image-capable model is configured, the user gets an
-  explicit message rather than a text answer.
-
-Normal text chat is unchanged: no required output modality is set, and the
-agent tool loop still owns execution-shaped requests.
-
 ## 2. Directory map
 
 ```
@@ -907,12 +866,6 @@ server smoke test. Notable files:
 - `test_security.py`, `test_per_key_health.py`,
   `test_provider_error_isolation.py` — redaction, credential health,
   and failure-isolation guarantees.
-- `test_image_generation_flow.py` — the whole image chain (§1.5): intent
-  detection for English/Banglish/Bengali, the router's model **and** adapter
-  modality gate, `generate_image()` dispatch, the stored artifact, the chat
-  reply, and the `/api/v1/artifacts/...` serving route over real HTTP. The
-  UI half lives in `tests/js/chat_cards_ui.test.js` ("a generated image
-  artifact renders as an image card with Open + Download").
 
 Run the full suite with `python3 -m unittest discover -s tests -v`;
 `python3 -m pytest -q tests/test_fastapi_server.py` for the live smoke

@@ -97,13 +97,25 @@ from astra.terminal.manager import default_session_id_for
 # .TestImageGenerationEndToEndDispatch for the regression coverage.
 _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
                               "summarization", "research", "planning",
-                              "image_generation"})
+                              "image_generation", "image_editing"})
 
 # Plain-text replies for missing AI configuration. Shown as-is (no
 # markdown rendering in the chat UI — see the note on _run_turn's fail
 # branch and the pass-through branch below for where each applies.
 _NO_PROVIDER_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI provider-er API key set kora nei, tai reply dite parchi na."
+)
+
+# Shown when an image request cannot be served because no configured,
+# healthy model genuinely supports image generation. An image request is
+# NEVER downgraded to a text model -- a text model cannot make an image,
+# and a written description would be a false answer.
+_NO_IMAGE_MODEL_MESSAGE = (
+    "✕ No image-generation model is currently configured or available.\n\n"
+    "Image toiri korar jonno kono image-capable model (Gemini image, "
+    "Cloudflare FLUX, OpenRouter image, Bedrock Nova Canvas/Titan) "
+    "configured ba healthy nei. API key + image model list set kore "
+    "abar chesta korun."
 )
 _NO_GATEWAY_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI gateway-er API key set kora nei."
@@ -1228,40 +1240,80 @@ class ChatPipeline:
     # -- helpers -----------------------------------------------------------------
     @staticmethod
     def _task_type(text: str, attachments) -> str:
-        if _has_image(attachments):
-            return "vision"
         t = classify(text)
+        if _has_image(attachments):
+            # An attached image plus an edit instruction ("ei photo ta edit
+            # kore dao") is image EDITING, not plain vision -- a vision-only
+            # model cannot edit the image and must not be selected for it.
+            return "image_editing" if t == "image_editing" else "vision"
         return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
     def _route(self, task_type, messages, provider, model, vision, req=""):
-        # image_generation must only ever land on a model that genuinely
-        # supports image output AND exposes generate_image() — the router
-        # also derives this from task_type on its own (see
-        # AstraRouter._normalize_requirements), but it is set explicitly
-        # here too so the requirement is visible at the call site and
-        # survives even if a future router change narrows that inference.
-        # A caller-explicit provider/model (brief["provider"]/brief["model"]
-        # from the Gateway's understanding) stays a soft preference, not a
-        # hard filter — see routing_policy.PREFERENCE_MATCH_BONUS — so an
-        # image request assigned to a text-only model by the Gateway still
-        # gets routed to an actual image-capable model instead of being
-        # rejected outright.
-        out_mods = ["image"] if task_type == "image_generation" else None
+        # image_generation / image_editing must only ever land on a model that
+        # genuinely supports image output AND exposes a real image API. The
+        # router enforces that itself (see AstraRouter._normalize_requirements
+        # + TASK_HARD_CAPABILITIES), and out_mods is set explicitly here too
+        # so the requirement is visible at the call site.
+        is_image = task_type in ("image_generation", "image_editing")
+        # 1) Prefer the Gateway's own image path when it is usable: it builds
+        #    the eligible-image-target list, calls the real provider image
+        #    API and fails over across image models only.
+        if is_image:
+            rr = self._route_image(task_type, messages, model, req)
+            if rr is not None and rr.ok:
+                return rr
+            # 2) Otherwise fall back to the Provider router, which has its own
+            #    image-capable-only filter and per-(provider, model) failover.
+            return self.router.route_request(RoutingRequest(
+                task_type=task_type, messages=messages,
+                preferred_provider=provider or None,
+                preferred_model=model or None,
+                vision=vision, max_tokens=self.max_tokens, trace=req,
+                required_output_modalities=["image"]))
         rr = self.router.route_request(RoutingRequest(
             task_type=task_type, messages=messages,
             preferred_provider=provider or None,
             preferred_model=model or None,
-            vision=vision, max_tokens=self.max_tokens, trace=req,
-            required_output_modalities=out_mods))
+            vision=vision, max_tokens=self.max_tokens, trace=req))
         if (rr is None or not rr.ok) and task_type not in ("simple_chat", "vision") \
                 and "no eligible" in (getattr(rr, "error", "") or ""):
             # A hard capability filter (e.g. "coding") left nothing to run
-            # on — a plain chat turn can still be served by any model.
+            # on -- a plain chat turn can still be served by any model.
+            # Image tasks never take this path: downgrading an image request
+            # to a text model would produce a written description instead of
+            # an image, which is exactly what this must never do.
             rr = self.router.route_request(RoutingRequest(
                 task_type="simple_chat", messages=messages,
                 preferred_provider=provider or None,
                 preferred_model=model or None, max_tokens=self.max_tokens,
                 trace=req))
+        return rr
+
+    def _route_image(self, task_type, messages, model, req=""):
+        """Run an image request through the Gateway's image path.
+
+        Returns a RoutingResult on success, or None when the Gateway has no
+        image execution path / no eligible image model, so the caller can
+        fall back to the Provider router. Never returns a text answer.
+        """
+        fn = getattr(self.gateway, "generate_image", None)
+        if not callable(fn) or not self._gateway_usable():
+            return None
+        prompt = _last_user_text(messages)
+        if not prompt:
+            return None
+        try:
+            uri = fn(prompt, model=model or None,
+                     editing=(task_type == "image_editing"), trace=req)
+        except Exception as e:
+            self._emit("chat.pipeline.image_unavailable", error=str(e),
+                       op=f"chat:{req}", request=req, trace=req, terminal=False)
+            return None
+        if not uri:
+            return None
+        rr = RoutingResult(ok=True, text=uri, provider="astra_ai_gateway",
+                           model=(getattr(self.gateway, "last_model", "") or ""))
+        rr._port_kind = "gateway"
         return rr
 
     @staticmethod
@@ -1503,8 +1555,14 @@ class ChatPipeline:
         # results return to the SAME execution. Without it, the original
         # single provider call is used unchanged.
         tools_available = self._tools_available()
-        use_loop = self._tool_loop_usable() or (execution.required and
-                                                tools_available)
+        # An image request must never enter the agent tool loop: the loop's
+        # brain is a chat caller, so it would either ask a model to describe
+        # the picture or hand the tool protocol an image data URI. Image
+        # turns go straight to the image execution path instead.
+        is_image_task = task_type in ("image_generation", "image_editing")
+        use_loop = (not is_image_task and
+                    (self._tool_loop_usable() or (execution.required and
+                                                  tools_available)))
         if use_loop:
             rr = self._run_tool_loop(
                 brief, hist_turns, ctx_text, task_type, vision, scope,
@@ -1517,6 +1575,14 @@ class ChatPipeline:
             err = (trace.get("error") or getattr(rr, "error", "") or
                    "unknown error")
             trace["error"] = err
+            if task_type in ("image_generation", "image_editing"):
+                # NEVER downgrade an image request to a text model. Report
+                # honestly that no image model could serve it.
+                self._emit("chat.pipeline.finished", status="no_image_model",
+                           op=f"chat:{req}", request=req, trace=req,
+                           terminal=True)
+                return self._reply(_NO_IMAGE_MODEL_MESSAGE, False, trace,
+                                   {"stage": "image_generation", "error": err})
             if "no eligible" in err:
                 # No Provider key is configured (empty/missing plain
                 # *_API_KEYS in .env). This isn't a real runtime failure to
@@ -1541,6 +1607,18 @@ class ChatPipeline:
                 "Provider theke kono uttor pawa jayni. Kichukkhon pore abar "
                 f"try korun. (`{err}`)", False, trace)
         trace["served_by"] = f"{rr.provider}/{rr.model}"
+        if task_type in ("image_generation", "image_editing"):
+            # An image turn is done the moment the real image API
+            # returned image bytes. There is nothing to semantically
+            # verify, and the base64 payload must never be shipped to a
+            # verifier model; the artifact card IS the answer. The reply
+            # text is sanitized downstream (the data URI is stripped).
+            self._emit("chat.pipeline.finished", status="image_ready",
+                       op=f"chat:{req}", request=req, trace=req,
+                       terminal=True)
+            trace["verification"] = {"status": "not_applicable"}
+            return self._reply(rr.text, True, trace,
+                               self._artifacts(rr.text, raw))
         # Corrections go back through the loop's final message list (which
         # carries the tool exchanges), not just the opening prompt.
         supervised_messages = getattr(rr, "_loop_messages", None) or messages

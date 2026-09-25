@@ -741,7 +741,9 @@ class TestRealImageGeneration(unittest.TestCase):
         self.assertNotIn("image", meta.get("output_modalities", ["text"]))
 
     def test_stable_diffusion_model_has_image_output(self):
-        meta = metadata_for("stable-diffusion-xl-v1", "bedrock")
+        # The real Bedrock model id carries the provider prefix; capabilities
+        # come from the evidence registry, not from substring guessing.
+        meta = metadata_for("stability.stable-diffusion-xl-v1", "bedrock")
         self.assertIn("image", meta.get("output_modalities", []))
 
     def test_no_openai_adapter_so_tts_has_no_audio_output(self):

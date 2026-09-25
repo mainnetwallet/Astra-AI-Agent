@@ -57,6 +57,11 @@ GATEWAY_PROVIDER_SHORT = {
 REQUEST_CATEGORIES = (
     "simple", "general", "reasoning", "coding", "long_context",
     "structured_output", "tool_use", "vision",
+    # Image *production* — deliberately separate from "vision" (image
+    # *understanding*). A request in either category may only ever be served
+    # by a model whose (provider, model) entry in astra.ai.image_models
+    # proves it can produce image output. See CATEGORY_HARD_CAPS below.
+    "image_generation", "image_editing",
     # The Gateway's OWN control calls (chat pipeline: understand+assign and
     # verify). They must answer with one strict JSON object and sit on the
     # critical path of every chat turn, so they need a JSON-capable model and
@@ -73,7 +78,20 @@ CATEGORY_HARD_CAPS: dict[str, tuple[str, ...]] = {
     "structured_output": ("json",),
     "tool_use": ("tools",),
     "vision": ("vision",),
+    # Hard, not soft: a text-only or vision-only model must never be handed an
+    # image-generation request just because it is the fastest/healthiest one.
+    "image_generation": ("image_generation",),
+    "image_editing": ("image_editing",),
     "control": ("json",),
+}
+
+# Category → output modality the target MUST declare. This is the second,
+# independent half of the image gate: even a model that somehow carries the
+# `image_generation` capability label is rejected unless its output modality
+# really includes "image".
+CATEGORY_REQUIRED_OUTPUT_MODALITY: dict[str, str] = {
+    "image_generation": "image",
+    "image_editing": "image",
 }
 
 # Baseline latency estimate (ms), used only until a target has real
@@ -95,6 +113,31 @@ _STRUCT_RE = re.compile(
     r"\bjson\b|\btable\b|\bcsv\b|\bstructured\b|\bschema\b", re.I)
 _VISION_HINT_RE = re.compile(
     r"\bimage\b|\bphoto\b|\bpicture\b|\bscreenshot\b|\bvision\b", re.I)
+
+# Image *production* intent, English + Bangla/Banglish. The noun list carries
+# both Latin transliteration and Bengali script; the verb list carries the
+# inflected stems actually used in Banglish ("banao"/"banai"/"baniye"/"bana"/
+# "banate", "toiri", "create", "generate", "draw", "make", "design"). The
+# two orders (verb-first English, noun-first Banglish) are both matched.
+# Deliberately omitted: bare "image"/"photo"/"picture" (that alone is a
+# vision request — "what is in this photo?") and the word "vision".
+_IMG_NOUNS = (r"(?:image|picture|photo|photograph|illustration|diagram|logo|"
+              r"icon|art|artwork|chobi|chhobi|ছবি|ফটো|ফোটো)")
+_IMG_VERBS = (r"(?:generate|create|draw|make|design|render|paint|"
+              r"banao|banawo|banai|baniye|banate|bana|banan|toiri|"
+              r"বানাও|বানান|বানাতে|তৈরি|করো|তৈরী)")
+_IMAGE_GEN_RE = re.compile(
+    _IMG_VERBS + r"\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,3}" + _IMG_NOUNS +
+    r"|" + _IMG_NOUNS + r"[^\n]{0,24}?" + _IMG_VERBS, re.I)
+
+# Image *editing* of an existing image (inpaint / retouch / instruction edit).
+_IMG_EDIT_NOUNS = (r"(?:image|picture|photo|photograph|chobi|chhobi|"
+                   r"ছবি|ফটো|ফোটো)")
+_IMG_EDIT_VERBS = r"(?:edit|editing|modify|retouch|inpaint|outpaint|restyle|"\
+                  r"এডিট|পরিবর্তন|badle|badol|change)"
+_IMAGE_EDIT_RE = re.compile(
+    _IMG_EDIT_VERBS + r"\s+(?:this|the|my|ei|এই)?\s*" + _IMG_EDIT_NOUNS +
+    r"|" + _IMG_EDIT_NOUNS + r"[^\n]{0,24}?" + _IMG_EDIT_VERBS, re.I)
 
 SIMPLE_TEXT_MAX_CHARS = 40
 
@@ -118,12 +161,20 @@ def classify_gateway_request(text: str, *, vision: bool = False,
     text heuristics; text heuristics are a conservative fallback only.
     """
     text = str(text or "")
-    if vision or _VISION_HINT_RE.search(text):
-        return "vision"
     if structured_output or _STRUCT_RE.search(text):
         return "structured_output"
     if tools:
         return "tool_use"
+    # Image PRODUCTION is checked before the generic vision hint: "create a
+    # photo" contains the word "photo", but the user is asking Astra to make
+    # an image, not to look at one. "describe this screenshot" matches neither
+    # verb list and still classifies as `vision` below.
+    if _IMAGE_EDIT_RE.search(text):
+        return "image_editing"
+    if _IMAGE_GEN_RE.search(text):
+        return "image_generation"
+    if vision or _VISION_HINT_RE.search(text):
+        return "vision"
     if context_tokens and context_tokens >= long_context_tokens:
         return "long_context"
     if _COD_RE.search(text):
@@ -139,7 +190,9 @@ def classify_gateway_request(text: str, *, vision: bool = False,
 # 9/16. Model catalog — one Model per configured Gateway model, using only
 # explicit metadata/heuristics (astra.ai.models), never invented capabilities.
 # ═══════════════════════════════════════════════════════════════════════════
-def build_gateway_catalog(connections: list) -> list[tuple[object, Model]]:
+def build_gateway_catalog(connections: list, *,
+                          include_image_models: bool = False
+                          ) -> list[tuple[object, Model]]:
     """Flatten every connection's configured models into (connection, Model).
 
     Connection order and each connection's own model order are preserved —
@@ -148,6 +201,7 @@ def build_gateway_catalog(connections: list) -> list[tuple[object, Model]]:
     here assumes one model per provider.
     """
     out: list[tuple[object, Model]] = []
+    seen: set[tuple[str, str]] = set()
     for conn in connections:
         cname = getattr(conn, "name", "")
         short = GATEWAY_PROVIDER_SHORT.get(cname, cname)
@@ -155,6 +209,23 @@ def build_gateway_catalog(connections: list) -> list[tuple[object, Model]]:
             meta = metadata_for(mid, short)
             meta.pop("provider", None)
             out.append((conn, Model(short, mid, **meta)))
+            seen.add((short, mid))
+        # include_image_models=True: append this connection's separately
+        # configured image models. Default False, so the ordinary catalog is
+        # exactly the configured chat models and image models only ever enter
+        # an image request's decision.
+        if include_image_models:
+            for mid in (getattr(conn, "image_models", None) or []):
+                if (short, mid) in seen:
+                    continue
+                meta = metadata_for(mid, short)
+                meta.pop("provider", None)
+                if "image" not in meta.get("output_modalities", []):
+                    # The connection claims an image model the evidence table
+                    # does not recognize. Never invent the capability.
+                    continue
+                seen.add((short, mid))
+                out.append((conn, Model(short, mid, **meta)))
     return out
 
 
@@ -422,19 +493,79 @@ def meets_gateway_requirements(model: Model, *, category: str,
     hard = CATEGORY_HARD_CAPS.get(category, ())
     if hard and not set(hard).issubset(set(model.capabilities)):
         return False
+    need_mod = CATEGORY_REQUIRED_OUTPUT_MODALITY.get(category)
+    if need_mod and need_mod not in (model.output_modalities or ["text"]):
+        return False
     if context_tokens and model.context_window < context_tokens:
         return False
     return True
+
+
+def eligible_image_generation_targets(
+        catalog: list[tuple[object, Model]],
+        routing_state: "GatewayRoutingState", *, editing: bool = False,
+        context_tokens: int = 0
+        ) -> list[tuple[object, Model, GatewayModelHealth]]:
+    """The ONLY targets an image request may ever be sent to.
+
+    A target qualifies only when all of the following hold:
+
+    1. its connection is configured/healthy (`_connection_usable`),
+    2. its model declares the exact image capability for this category
+       (`image_generation`, or `image_editing` when editing an existing
+       image) — granted only by astra.ai.image_models,
+    3. its output modalities genuinely include "image",
+    4. its (provider, model) health entry is not in cooldown.
+
+    Returns (connection, model, health) triples, preserving configured
+    order (call `rank_targets` to score them).
+    """
+    category = "image_editing" if editing else "image_generation"
+    return eligible_targets(catalog, routing_state, category=category,
+                            context_tokens=context_tokens)
+
+
+#: Short alias (the explicit name is the one the Gateway's decision path
+#: uses, and the one tests assert against).
+eligible_image_targets = eligible_image_generation_targets
+
+
+def describe_image_targets(
+        targets: list[tuple[object, Model, GatewayModelHealth]],
+        ) -> list[dict]:
+    """Machine/human-readable inventory of eligible image targets, for the
+    Activity Log and for tests asserting exactly which models the Gateway
+    considered. Never contains credentials."""
+    return [
+        {
+            "provider": model.provider,
+            "model": model.model_id,
+            "capabilities": list(model.capabilities),
+            "output_modalities": list(model.output_modalities),
+            "healthy": health.healthy,
+            "latency_ms": round(health.average_latency_ms, 1),
+            "consecutive_failures": health.consecutive_failures,
+            "cost_class": model.cost_class,
+            "priority": idx,
+        }
+        for idx, (_conn, model, health) in enumerate(targets)
+    ]
 
 
 def eligible_targets(catalog: list[tuple[object, Model]],
                       routing_state: GatewayRoutingState, *, category: str,
                       context_tokens: int = 0
                       ) -> list[tuple[object, Model, GatewayModelHealth]]:
-    """Connection-usable + capability/context-suitable + not-in-cooldown."""
+    """Connection-usable + capability/context-suitable + enabled +
+    not-in-cooldown."""
     out = []
     for conn, model in catalog:
         if not _connection_usable(conn):
+            continue
+        # An explicitly disabled model is never selectable for any category
+        # (its score is also heavily penalised, but a hard filter is what
+        # spec section 5 requires for the image target list).
+        if getattr(model, "disabled", False):
             continue
         if not meets_gateway_requirements(model, category=category,
                                           context_tokens=context_tokens):
@@ -465,6 +596,12 @@ def score_target(model: Model, health: GatewayModelHealth, *, category: str,
         score += 3.0
     elif category == "long_context":
         score += min(2.0, model.context_window / 500000.0)
+    elif category in ("image_generation", "image_editing"):
+        # Every candidate here already passed the image hard filter, so this
+        # is an explicit capability-match bonus (never a way for a text-only
+        # model to rank in) plus a real recent-success tilt.
+        score += 3.0
+        score += 2.0 * health.success_rate()
 
     # health / recent success / recent failures
     score += 2.0 if health.healthy else -20.0

@@ -10,4 +10,5 @@ class ZAIAdapter(CompatibleAdapter):
     models_env = "ZAI_MODELS"
     base_url_env = "ZAI_BASE_URL"
     api_keys_env = "ZAI_API_KEYS"
+    image_models_env = "ZAI_IMAGE_MODELS"
     capabilities = ["chat", "stream", "tools", "json", "vision"]

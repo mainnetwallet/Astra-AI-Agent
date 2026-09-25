@@ -61,6 +61,10 @@ EVENT_KINDS = (
     # the Gateway specifically.
     "astra_gateway.request", "astra_gateway.success", "astra_gateway.error",
     "astra_gateway.stream_interrupted", "astra_gateway.test",
+    # Astra AI Gateway image generation: the per-target request/failure/
+    # fallback/success chain must be visible in the Activity Log (spec 8).
+    "astra_gateway.image_request", "astra_gateway.image_failure",
+    "astra_gateway.image_fallback", "astra_gateway.image_success",
     # Gateway-spec supervision (§9-12, §19): deterministic result
     # validation + bounded correction, layered on top of the existing
     # retry/verify pipeline — see astra.core.classification + correction.

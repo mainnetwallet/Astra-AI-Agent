@@ -21,11 +21,15 @@ import urllib.error
 import urllib.request
 
 from astra.ai.credentials import CredentialPool
+from astra.ai.image_payload import (image_result_to_data_uri,
+                                    _guess_image_mime)
 from astra.ai.provider import AIProvider, _read_sse, close_http_error
 from astra.core.exceptions import ProviderError, TimeoutError
 
 DEFAULT_TIMEOUT = 60
 STREAM_TIMEOUT = 120
+
+
 
 
 class CompatibleAdapter(AIProvider):
@@ -37,6 +41,8 @@ class CompatibleAdapter(AIProvider):
     capabilities: list[str] = ["chat", "stream", "tools", "json"]
     extra_headers: dict = {}                  # static headers e.g. api-key
     models_env: str = ""                      # env var holding the model list
+    image_models: list[str] = []               # configured image-gen model ids
+    image_models_env: str = ""                 # env var holding image model list
     api_keys_env: str = ""                    # env var holding the key list
     base_url_env: str = ""                    # env var overriding base_url
 
@@ -45,6 +51,7 @@ class CompatibleAdapter(AIProvider):
         self.events = events
         self.pool = pool or CredentialPool.from_env(config, self.api_keys_env, self.name)
         self.models = self._configured_models()
+        self.image_models = self._configured_image_models()
         self.base_url = self._configured_base_url()
         self._health = None
         self._health_at = 0.0
@@ -54,6 +61,17 @@ class CompatibleAdapter(AIProvider):
         if self.config and self.models_env:
             return self.config.getlist(self.models_env, default=[])
         return list(self.models)
+
+    def _configured_image_models(self) -> list[str]:
+        """Image-generation models are configured SEPARATELY from the chat
+        list (an image model is not a chat model). Never inferred from the
+        model id -- astra.ai.image_models decides what may run."""
+        if self.config and self.image_models_env:
+            return self.config.getlist(self.image_models_env, default=[])
+        return list(self.image_models)
+
+    def _default_image_model(self) -> str:
+        return (self.image_models[0] if self.image_models else "")
 
     def _configured_base_url(self) -> str:
         """Env override wins when set, else the class default. Normalises a
@@ -98,10 +116,19 @@ class CompatibleAdapter(AIProvider):
         return h
 
     def _post(self, url: str, body: dict, cred) -> dict:
+        return self._post_json(url, body, cred, headers=self._headers(cred))
+
+    def _post_json(self, url: str, body: dict, cred, *,
+                   headers: dict | None = None,
+                   timeout: int = DEFAULT_TIMEOUT) -> dict:
+        """POST JSON with explicit headers (non-OpenAI auth, e.g. Gemini's
+        x-goog-api-key) while keeping the SAME credential-health, rate-limit
+        and error classification every other call uses."""
         data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=self._headers(cred))
+        req = urllib.request.Request(
+            url, data=data, headers=headers or self._headers(cred))
         try:
-            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
             close_http_error(e)
@@ -239,14 +266,38 @@ class CompatibleAdapter(AIProvider):
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1) -> str:
-        """Generate an image via /v1/images/generations (OpenAI-compatible)."""
-        cred = self._pick()
+        """Generate an image through the provider's REAL image API.
+
+        Default implementation: the OpenAI-compatible
+        `POST /images/generations` endpoint, which is the documented image
+        API for OpenRouter's Image API and Z.AI's GLM-Image/CogView. Providers
+        whose image API is a different protocol override this method
+        (Gemini native `:generateContent`, Cloudflare Workers AI
+        `/ai/run/<model>`, Bedrock `InvokeModel`).
+
+        Returns a `data:<mime>;base64,<...>` string -- the exact shape
+        `astra.ai.artifact_extraction` turns into a real image artifact.
+        A 429/5xx/network failure propagates as ProviderError so the router
+        can cool this (provider, model) down and fail over to the next
+        eligible image target; it never silently degrades to chat().
+        """
+        model = model or self._default_image_model()
+        # Credential check FIRST, so "no usable key" stays a non-retryable
+        # fail-fast for every entry point (chat/stream/image/tts) -- see
+        # tests/test_no_credential_no_retry.py.
+        cred = self._pick(model)
         if cred is None:
             raise self._no_credential_error()
+        if not model:
+            # Nothing to route to and retrying cannot change that: a missing
+            # image model is a configuration error, not a transient one.
+            err = ProviderError(f"{self.name}: no image model configured")
+            err.retryable = False
+            raise err
         body = {
-            "model": model or (self.models[0] if self.models else "dall-e-3"),
+            "model": model,
             "prompt": prompt,
-            "n": n,
+            "n": max(1, int(n or 1)),
             "size": size,
             "response_format": "b64_json",
         }
@@ -254,11 +305,11 @@ class CompatibleAdapter(AIProvider):
         data = self._post(f"{self._api_base()}/images/generations", body, cred)
         self._done(cred)
         self._last_latency_ms = int((time.perf_counter() - t0) * 1000)
-        try:
-            b64_json = data["data"][0]["b64_json"]
-        except (KeyError, IndexError, TypeError):
-            raise ProviderError(f"{self.name}: image generation returned no data")
-        return f"data:image/png;base64,{b64_json}"
+        uri = image_result_to_data_uri(data)
+        if not uri:
+            raise ProviderError(
+                f"{self.name}: image generation returned no image data")
+        return uri
 
     def text_to_speech(self, text: str, model: str | None = None,
                        voice: str = "alloy") -> str:

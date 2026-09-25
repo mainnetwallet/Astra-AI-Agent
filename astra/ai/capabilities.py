@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from astra.ai.image_models import IMAGE_EDITING, is_image_model
+
 if TYPE_CHECKING:
     from astra.ai.models import Model
 
@@ -30,6 +32,11 @@ OUTPUT_IMAGE = "image_generation"
 OUTPUT_AUDIO = "audio_generation"
 OUTPUT_VIDEO = "video_generation"
 OUTPUT_DOCUMENT = "document_generation"
+
+# Image editing (inpainting / instruction-based edit of a supplied image) is
+# a distinct capability from image generation — a model can do one without
+# the other (see astra.ai.image_models).
+OUTPUT_IMAGE_EDITING = IMAGE_EDITING
 
 ALL_INPUT_CAPS = (INPUT_TEXT, INPUT_IMAGE, INPUT_AUDIO, INPUT_VIDEO, INPUT_DOCUMENT)
 ALL_OUTPUT_CAPS = (OUTPUT_TEXT, OUTPUT_IMAGE, OUTPUT_AUDIO, OUTPUT_VIDEO, OUTPUT_DOCUMENT)
@@ -89,14 +96,6 @@ KNOWN_CAPABILITIES: dict[str, frozenset[str]] = {
     "granite": _BASE,
 }
 
-# Models that support image generation (exact model_id substrings)
-# Only Bedrock families have a real adapter with generate_image()
-_IMAGE_GEN_MODELS = (
-    "stable-diffusion",
-    "stability",
-    "titan-image",
-)
-
 # Models that support audio input/transcription
 # Only Gemini families have a real adapter that passes audio to the API
 _AUDIO_INPUT_MODELS = (
@@ -131,7 +130,7 @@ def capabilities_for(provider: str, model_id: str) -> frozenset[str]:
     caps = set(KNOWN_CAPABILITIES.get(fam, _BASE))
     low = model_id.lower()
 
-    if any(m in low for m in _IMAGE_GEN_MODELS):
+    if is_image_model(provider, model_id):
         caps.add(OUTPUT_IMAGE)
     if any(m in low for m in _AUDIO_INPUT_MODELS):
         caps.add(INPUT_AUDIO)

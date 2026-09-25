@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 
 from astra.core.config import Config
+from astra.ai.image_models import (IMAGE_EDITING, IMAGE_GENERATION,
+                                   IMAGE_MODELS_ENV, image_spec)
 
 # families: (name, base_provider, caps, context, quality, cost_speed)
 # quality: high|mid|fast   cost_class: cheap|mid|premium
@@ -64,12 +66,6 @@ _MULTIMODAL_INPUT: dict[str, list[str]] = {
     "command": ["image"],
     "gpt":     ["image"],
 }
-_MULTIMODAL_OUTPUT: dict[str, list[str]] = {
-    "stable-diffusion": ["image"],
-    "stability": ["image"],
-    "titan-image": ["image"],
-}
-
 # Documented per-family OUTPUT token ceiling (how many tokens a model may
 # emit in one completion), where the provider publishes one. This is model
 # CAPABILITY metadata, not an Astra-imposed cap: it is used only when a
@@ -178,7 +174,8 @@ def _family_of(model_id: str) -> str:
     return ""
 
 
-def metadata_for(model_id: str, provider: str | None = None) -> dict:
+def metadata_for(model_id: str, provider: str | None = None, *,
+                 image_spec_override=None) -> dict:
     """Derive metadata for a model id from family heuristics.
 
     `provider`, when given, is the real adapter/provider identity — the
@@ -238,8 +235,29 @@ def metadata_for(model_id: str, provider: str | None = None) -> dict:
     output_mods = ["text"]
     if fam in _MULTIMODAL_INPUT:
         input_mods = ["text"] + [m for m in _MULTIMODAL_INPUT[fam] if m not in input_mods]
-    if fam in _MULTIMODAL_OUTPUT:
-        output_mods = ["text"] + [m for m in _MULTIMODAL_OUTPUT[fam] if m not in output_mods]
+    # Image generation/editing is granted ONLY by the explicit, evidence-backed
+    # capability registry (astra.ai.image_models) — never inferred from words
+    # like "image"/"vision"/"omni" in the model id, and never confused with
+    # vision *input*. A provider whose adapter cannot actually call an image
+    # API has no entry there, so its models stay text-only.
+    # A provider's LIVE discovery API (OpenRouter) is authoritative for
+    # the exact ids it reports, so it may pass a spec built from that
+    # response; otherwise consult the static evidence registry.
+    spec = image_spec_override or image_spec(
+        provider or base_provider or "", model_id)
+    if spec is not None:
+        for cap in spec.capabilities:
+            if cap not in caps:
+                caps.append(cap)
+        # The registry's own modalities are authoritative for an image model:
+        # do not also inherit the text family's (much broader) input set.
+        input_mods = ["text"]
+        for mod in spec.input_modalities:
+            if mod not in input_mods:
+                input_mods.append(mod)
+        for mod in spec.output_modalities:
+            if mod not in output_mods:
+                output_mods.append(mod)
     return {
         "provider": provider or base_provider or fam or "unknown",
         "capabilities": caps, "context_window": ctx,
@@ -268,6 +286,13 @@ class ModelRegistry:
     # -- seeding --------------------------------------------------------------
     def _seed_from_config(self) -> None:
         for provider, var in PROVIDER_VAR.items():
+            for mid in self.config.getlist(var, default=[]):
+                self.add(provider, mid)
+        # Optional per-provider image-model lists (never inferred): these are
+        # the models whose adapter has a real image API path. Configured
+        # separately from the chat list so adding an image model never
+        # changes which model answers ordinary chat.
+        for provider, var in IMAGE_MODELS_ENV.items():
             for mid in self.config.getlist(var, default=[]):
                 self.add(provider, mid)
 
@@ -328,6 +353,11 @@ class ModelRegistry:
 
     def require_capabilities(self, capabilities: list[str]) -> list[Model]:
         return self.filter(capabilities=capabilities)
+
+    def image_models(self) -> list[Model]:
+        """Models with a verified image-generation capability (never inferred
+        from a model id — see astra.ai.image_models)."""
+        return [m for m in self.all_models() if m.has(IMAGE_GENERATION)]
 
     def have_provider(self, provider: str) -> bool:
         return bool(self._models.get(provider))

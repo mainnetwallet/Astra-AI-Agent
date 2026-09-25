@@ -257,12 +257,15 @@ class ProviderToolCaller(ToolCaller):
 
     def chat(self, messages, *, max_tokens=None, trace=""):
         rr = self._request(messages, max_tokens, trace, self.task_type)
-        if (rr is None or not rr.ok) and self.task_type not in ("simple_chat",
-                                                                "vision") \
+        if (rr is None or not rr.ok) and self.task_type not in (
+                "simple_chat", "vision", "image_generation",
+                "image_editing") \
                 and "no eligible" in (getattr(rr, "error", "") or ""):
             # A hard capability filter left nothing to run on; a plain chat
             # turn can still be served by any model. Mirrors the pipeline's
             # own `_route` fallback so the loop never dies on a filter.
+            # Image tasks are excluded: downgrading an image request to a
+            # text model would answer with a description instead of an image.
             rr = self._request(messages, max_tokens, trace, "simple_chat")
         if rr is None or not rr.ok:
             from astra.core.exceptions import ProviderError

@@ -100,6 +100,11 @@ TASK_HARD_CAPABILITIES = {
     "structured_output": ("json",),
     "translation": ("translation",),
     "tool_selection": ("tools",),
+    # Image production is a hard capability, distinct from vision (image
+    # understanding): only a model whose (provider, model) entry in
+    # astra.ai.image_models proves it can produce image output is eligible.
+    "image_generation": ("image_generation",),
+    "image_editing": ("image_editing",),
 }
 
 def _now() -> str:
@@ -229,12 +234,21 @@ def classify(text: str) -> str:
     # useful work anyway — see test_multimodal.TestCapabilityRouting for
     # the exact phrases this must (and, for plain "কাজ করো"/"do work" with
     # no image noun in range, must not) match.
-    _img_nouns = (r"(image|picture|photo|photograph|illustration|diagram|"
-                 r"logo|icon|art|chobi|chhobi|ছবি|ফটো|ফোটো)")
-    _img_verbs = (r"(generate|create|draw|make|design|banao|banan|toiri|"
-                 r"বানাও|বানান|তৈরি|করো)")
-    if re.search(_img_verbs + r"\s+(an?\s+)?" + _img_nouns, low) or \
-       re.search(_img_nouns + r".{0,20}" + _img_verbs, low):
+    _img_nouns = (r"(?:image|picture|photo|photograph|illustration|diagram|"
+                 r"logo|icon|art|artwork|chobi|chhobi|ছবি|ফটো|ফোটো)")
+    _img_edit_verbs = (r"(?:edit|editing|modify|retouch|inpaint|outpaint|"
+                       r"restyle|এডিট|badle|badol|change)")
+    _img_verbs = (r"(?:generate|create|draw|make|design|render|paint|"
+                  r"banao|banawo|banai|baniye|banate|bana|banan|toiri|"
+                  r"বানাও|বানান|বানাতে|তৈরি|তৈরী|করো)")
+    # Editing an EXISTING image is its own task type, checked before both
+    # generation and "vision": "ei photo ta edit kore dao" must never be
+    # served by a model that only *understands* images.
+    if re.search(_img_edit_verbs + r"\s+(?:this|the|my|ei|এই)?\s*" + _img_nouns, low) or \
+       re.search(_img_nouns + r".{0,24}" + _img_edit_verbs, low):
+        return "image_editing"
+    if re.search(_img_verbs + r"\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,3}" + _img_nouns, low) or \
+       re.search(_img_nouns + r".{0,24}" + _img_verbs, low):
         return "image_generation"
     if re.search(r"generate\s+(an?\s+)?audio|create\s+(an?\s+)?audio|text.to.speech|tts\b", low):
         return "audio"
@@ -384,14 +398,56 @@ class AstraRouter:
         except Exception:
             return False
 
-    def _adapter_models(self, adapter) -> list[Model]:
+    def _adapter_models(self, adapter, *,
+                       discover_images: bool = False) -> list[Model]:
         mids = list(getattr(adapter, "models", []) or [])
         name = getattr(adapter, "name", "")
+        # Image-generation models are configured separately from the chat
+        # list; only ones the evidence registry recognizes are ever added, so
+        # a stray id can never become an image candidate.
+        from astra.ai.image_models import (PROTOCOL_OPENAI_IMAGES,
+                                           is_image_model, make_image_spec)
+        image_ids = []
+        # Live image-model discovery (OpenRouter) only runs for an actual
+        # image request -- an ordinary chat route must never pay for (or be
+        # stalled by) a discovery HTTP call.
+        list_fn = getattr(adapter, "list_image_models", None)
+        if callable(list_fn):
+            try:
+                image_ids = list(list_fn(discover=discover_images) or [])
+            except Exception:
+                image_ids = []
+        if not image_ids:
+            image_ids = list(getattr(adapter, "image_models", None) or [])
+        live = set()
+        live_fn = getattr(adapter, "live_image_models", None)
+        if discover_images and callable(live_fn):
+            try:
+                live = set(live_fn(discover=True) or [])
+            except Exception:
+                live = set()
+        image_overrides = {}
+        for mid in image_ids:
+            if mid in mids:
+                continue
+            if is_image_model(name, mid):
+                mids.append(mid)
+            elif mid in live:
+                # The provider's own API reported image output for this exact
+                # id (spec section 11) -- authoritative even when the static
+                # registry has no entry yet.
+                image_overrides[mid] = make_image_spec(
+                    name, mid, PROTOCOL_OPENAI_IMAGES,
+                    capabilities=("image_generation",),
+                    input_modalities=("text", "image"))
+                mids.append(mid)
         out = []
         for mid in mids:
             m = (self.registry.get(name, mid) if self.registry else None)
             if m is None:
-                meta = metadata_for(mid, name)
+                meta = metadata_for(
+                    mid, name,
+                    image_spec_override=image_overrides.get(mid))
                 meta.pop("provider", None)
                 m = Model(name, mid, **meta)
             if getattr(m, "disabled", False):
@@ -418,7 +474,10 @@ class AstraRouter:
                 self._emit("provider.health_changed", provider=name,
                            healthy=True, reason="recovered")
             adapter.health_info = self._provider_info(adapter)
-            for model in self._adapter_models(adapter) or []:
+            is_img = req.task_type in ("image_generation",
+                                      "image_editing")
+            for model in self._adapter_models(
+                    adapter, discover_images=is_img) or []:
                 out.append((adapter, model))
         return out
 
@@ -474,7 +533,8 @@ class AstraRouter:
         # one having to remember to set it. A caller that already set its
         # own required_output_modalities (e.g. an explicit audio/video
         # request layered on top) is never overridden.
-        if req.task_type == "image_generation" and not req.required_output_modalities:
+        if req.task_type in ("image_generation", "image_editing") \
+                and not req.required_output_modalities:
             req.required_output_modalities = ["image"]
 
     def _route_end(self, req: RoutingRequest, op: str, kind: str, **data) -> None:

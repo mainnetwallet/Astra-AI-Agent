@@ -28,6 +28,8 @@ import urllib.request
 from datetime import datetime, timezone
 
 from astra.ai.credentials import CredentialPool
+from astra.ai.image_models import is_image_model
+from astra.ai.adapters.base import image_result_to_data_uri
 from astra.ai.provider import AIProvider, close_http_error
 from astra.core.exceptions import ProviderError
 
@@ -105,11 +107,21 @@ class BedrockCredentialPool(CredentialPool):
         return super().add(f"{ak}:{sk}")
 
 
+def _stable_image_aspect(width: int, height: int) -> str:
+    """Closest aspect_ratio token for Bedrock Stable Image Core/Ultra."""
+    if width == height:
+        return "1:1"
+    if width > height:
+        return "16:9" if width / height >= 1.5 else "4:3"
+    return "9:16" if height / width >= 1.5 else "3:4"
+
+
 class BedrockAdapter(AIProvider):
     name = "bedrock"
     capabilities = ["chat", "stream", "tools", "json", "vision"]
 
     models_env = "BEDROCK_MODELS"
+    image_models_env = "BEDROCK_IMAGE_MODELS"
     base_url_env = "BEDROCK_BASE_URL"
     api_keys_env = "BEDROCK_API_KEYS"
     credentials_env = "BEDROCK_CREDENTIALS"
@@ -137,6 +149,8 @@ class BedrockAdapter(AIProvider):
         raw = (config.get(self.base_url_env) if config else None) or "https://bedrock-runtime.us-east-1.amazonaws.com"
         self.base_url = raw.rstrip("/")
         self.models = self._configured_models()
+        self.image_models = (self.config.getlist(self.image_models_env, default=[])
+                             if self.config else [])
 
     def _configured_models(self) -> list[str]:
         if self.config:
@@ -295,10 +309,22 @@ class BedrockAdapter(AIProvider):
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1) -> str:
-        """Generate an image via Bedrock InvokeModel (Titan/Stability)."""
-        model = model or (self.models[0] if self.models else "")
+        """Generate an image via Bedrock InvokeModel (Nova Canvas / Titan /
+        Stability).
+
+        The selected model is validated against astra.ai.image_models FIRST:
+        a Claude/Nova *text* model (or any chat model configured in
+        BEDROCK_MODELS) must never be handed a Titan/Stability/Nova-Canvas
+        image request body. Only documented image models reach the request
+        construction below.
+        """
+        model = model or (self.image_models[0] if self.image_models else "")
         if not model:
             raise ProviderError("bedrock: no model configured for image generation")
+        if not is_image_model("bedrock", model):
+            raise ProviderError(
+                f"bedrock: {model} is not an image-generation model "
+                f"(refusing to build an image request for it)")
         cred = self.pool.pick()
         if cred is None:
             raise ProviderError("bedrock: no healthy credential configured")
@@ -307,7 +333,17 @@ class BedrockAdapter(AIProvider):
         except (ValueError, AttributeError):
             w, h = 1024, 1024
         low = model.lower()
-        if "titan" in low:
+        if "nova-canvas" in low:
+            # Nova Canvas TEXT_IMAGE task (distinct from the Titan schema).
+            body = {
+                "taskType": "TEXT_IMAGE",
+                "textToImageParams": {"text": prompt},
+                "imageGenerationConfig": {
+                    "numberOfImages": 1, "width": w, "height": h,
+                    "quality": "standard", "cfgScale": 7.0,
+                },
+            }
+        elif "titan-image" in low:
             body = {
                 "taskType": "TEXT_IMAGE",
                 "textToImageParams": {"text": prompt},
@@ -316,7 +352,16 @@ class BedrockAdapter(AIProvider):
                     "width": w, "height": h,
                 },
             }
-        else:
+        elif "stable-image" in low:
+            # Stability "Stable Image" services (Core / Ultra) use their own
+            # schema, NOT SDXL's text_prompts/cfg_scale/steps.
+            body = {
+                "prompt": prompt,
+                "mode": "text-to-image",
+                "aspect_ratio": _stable_image_aspect(w, h),
+                "output_format": "png",
+            }
+        else:  # Stability SDXL
             body = {
                 "text_prompts": [{"text": prompt}],
                 "cfg_scale": 7, "steps": 30,
@@ -324,14 +369,10 @@ class BedrockAdapter(AIProvider):
             }
         url = f"{self.base_url}/model/{model}/invoke"
         data = self._post(url, body, cred)
-        b64 = ""
-        if "images" in data and data["images"]:
-            b64 = data["images"][0]
-        elif "artifacts" in data and data["artifacts"]:
-            b64 = data["artifacts"][0].get("base64", "")
-        if not b64:
+        uri = image_result_to_data_uri(data)
+        if not uri:
             raise ProviderError("bedrock: image generation returned no image data")
-        return f"data:image/png;base64,{b64}"
+        return uri
 
     def health_check(self) -> bool:
         return self.pool.healthy_count > 0

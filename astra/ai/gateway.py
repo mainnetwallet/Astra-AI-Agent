@@ -52,6 +52,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from astra.ai.credentials import CredentialPool
+from astra.ai.image_payload import image_result_to_data_uri
 from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError, TimeoutError
 from astra.core.events import new_op_id
@@ -177,8 +178,13 @@ class _GatewayCompatibleConnection:
     models_env: str = ""
     api_keys_env: str = ""
     base_url_env: str = ""
+    image_models_env: str = ""
     base_url: str = ""
     capabilities: list[str] = ["chat", "stream"]
+    #: Image-generation model ids, configured SEPARATELY from the chat list
+    #: (an image model is not a chat model). Never inferred from the id --
+    #: astra.ai.image_models + live discovery decide what may run.
+    image_models: list[str] = []
     # Static per-request headers a provider's API expects/accepts (e.g.
     # OpenRouter's optional attribution headers). Secret-free by construction —
     # credentials are always added by `_headers()` from the pool.
@@ -195,6 +201,9 @@ class _GatewayCompatibleConnection:
         self.pool = pool or CredentialPool.from_env(config, keys_env, self.name)
         self.models = (self._env_list(self.models_env) if config and self.models_env
                        else list(self.models if hasattr(self, "models") else []))
+        self.image_models = (self._env_list(self.image_models_env)
+                             if config and self.image_models_env
+                             else list(getattr(type(self), "image_models", []) or []))
         raw = self._env_str(self.base_url_env)
         self.base_url = (raw or self.base_url or "").rstrip("/")
         self._last_usage: dict = {}
@@ -283,6 +292,43 @@ class _GatewayCompatibleConnection:
             return json.loads(raw.decode("utf-8", errors="replace"))
         except ValueError as e:
             err = ProviderError(f"{self.name} bad json response")
+            err.retryable = False
+            raise err from e
+
+
+    def _post_with_headers(self, url, body, cred, headers):
+        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                     headers=headers)
+        return self._read_json(req, cred)
+
+    def _post_raw(self, url, body, cred) -> bytes:
+        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                     headers=self._headers(cred))
+        return self._read_raw(req, cred)
+
+    def _read_raw(self, req, cred) -> bytes:
+        try:
+            with urllib.request.urlopen(req, timeout=GW_DEFAULT_TIMEOUT) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            _close_http_error(e)
+            self._classify_http(e, cred)
+            raise
+        except OSError as e:
+            self._done(cred, True, reason="network: %s" % getattr(e, "reason", e))
+            if _is_timeout(e):
+                err = TimeoutError(self.name + " timed out")
+            else:
+                err = ProviderError(self.name + " network error")
+            err.retryable = True
+            raise err from e
+
+    def _read_json(self, req, cred) -> dict:
+        raw = self._read_raw(req, cred)
+        try:
+            return json.loads(raw.decode("utf-8", errors="replace"))
+        except ValueError as e:
+            err = ProviderError(self.name + " bad json response")
             err.retryable = False
             raise err from e
 
@@ -457,6 +503,48 @@ class _GatewayCompatibleConnection:
             self.events.emit("ai.completed", agent="gateway", provider=self.name,
                              length=len(full))
 
+    # -- image generation -----------------------------------------------------
+    def _default_image_model(self) -> str:
+        return (self.image_models[0] if self.image_models else "")
+
+    def list_image_models(self, *, discover: bool = True) -> list:
+        """Image-generation models this connection can serve.
+
+        Default: the configured list. Connections with an official image-model
+        discovery API (OpenRouter) override this to merge LIVE results, which
+        are authoritative for the exact model ids they return.
+        """
+        return list(self.image_models)
+
+    def generate_image(self, prompt: str, model: str | None = None,
+                       size: str = "1024x1024", n: int = 1) -> str:
+        """Generate an image via the OpenAI-compatible Images API
+        (`POST /images/generations`). Connections whose image API is a
+        different protocol override this (Gemini, Cloudflare, Bedrock).
+        Returns `data:<mime>;base64,<...>`; a 429/5xx/network error
+        propagates so the Gateway fails over to the next image target.
+        """
+        model = model or self._default_image_model()
+        if not model:
+            raise ProviderError(f"{self.name}: no image model configured")
+        body = {"model": model, "prompt": prompt, "n": max(1, int(n or 1)),
+                "size": size, "response_format": "b64_json"}
+
+        def once(cred):
+            data = self._post(f"{self._api_base()}/images/generations",
+                              body, cred)
+            self._done(cred)
+            return data
+
+        data = self._run(once)
+        uri = image_result_to_data_uri(data)
+        if not uri:
+            err = ProviderError(
+                f"{self.name}: image generation returned no image data")
+            err.retryable = False
+            raise err
+        return uri
+
     def health_check(self) -> bool:
         return bool(self.pool)
 
@@ -482,12 +570,71 @@ class _GatewayCompatibleConnection:
 class AstraGatewayGemini(_GatewayCompatibleConnection):
     """Astra AI Gateway / Gemini connection (independent of GeminiAdapter)."""
     name = "astra-gw-gemini"
+    image_models_env = "GW_GEMINI_IMAGE_MODELS"
     base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
     models_env = "GW_GEMINI_MODELS"
     api_keys_env = "GW_GEMINI_API_KEYS"
     base_url_env = "GW_GEMINI_BASE_URL"
     capabilities = ["chat", "stream", "tools", "json", "vision"]
 
+    # ── image generation (native :generateContent) ────────────────────────
+    native_base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+    def _native_base(self) -> str:
+        base = (self._api_base() or "").rstrip("/")
+        if base.endswith("/openai"):
+            return base[: -len("/openai")]
+        return base or self.native_base_url
+
+    @staticmethod
+    def _inline_image(data) -> str:
+        import base64 as _b64
+        try:
+            parts = data["candidates"][0]["content"]["parts"]
+        except (KeyError, IndexError, TypeError):
+            return ""
+        for part in parts or []:
+            if not isinstance(part, dict):
+                continue
+            inline = part.get("inlineData") or part.get("inline_data")
+            if not inline or not inline.get("data"):
+                continue
+            mime = inline.get("mimeType") or inline.get("mime_type") or "image/png"
+            try:
+                raw = _b64.b64decode(inline["data"])
+            except Exception:
+                continue
+            return f"data:{mime};base64," + _b64.b64encode(raw).decode("ascii")
+        return ""
+
+    def generate_image(self, prompt: str, model: str | None = None,
+                       size: str = "1024x1024", n: int = 1) -> str:
+        """Gemini image output is NOT available on the OpenAI-compatibility
+        layer, so this calls the native models/<id>:generateContent endpoint."""
+        model = model or self._default_image_model()
+        if not model:
+            raise ProviderError(f"{self.name}: no image model configured")
+        mods = ["TEXT", "IMAGE"] if "2.5" in model else ["IMAGE"]
+        body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {"responseModalities": mods}}
+        url = f"{self._native_base()}/models/{model}:generateContent"
+
+        def once(cred):
+            secret = self.pool.get_secret_for(cred)
+            headers = {"content-type": "application/json",
+                       "x-goog-api-key": secret}
+            data = self._post_with_headers(url, body, cred, headers)
+            self._done(cred)
+            return data
+
+        data = self._run(once)
+        uri = self._inline_image(data)
+        if not uri:
+            err = ProviderError(
+                f"{self.name}: image generation returned no image data")
+            err.retryable = False
+            raise err
+        return uri
 
 class AstraGatewayGroq(_GatewayCompatibleConnection):
     """Astra AI Gateway / Groq connection (independent of GroqAdapter)."""
@@ -505,6 +652,7 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
     independent GW_CLOUDFLARE_ACCOUNT_IDS list.
     """
     name = "astra-gw-cloudflare"
+    image_models_env = "GW_CLOUDFLARE_IMAGE_MODELS"
     base_url = "https://api.cloudflare.com/client/v4"
     models_env = "GW_CLOUDFLARE_MODELS"
     api_keys_env = "GW_CLOUDFLARE_API_KEYS"
@@ -540,10 +688,64 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
 # GW_* env names + the capabilities that provider actually supports. Auth,
 # timeouts, bounded retries, error/rate-limit classification, credential
 # rotation, health and usage capture are all inherited unchanged.
+
+    # ── image generation (Workers AI /ai/run/<model>) ─────────────────────
+    def generate_image(self, prompt: str, model: str | None = None,
+                       size: str = "1024x1024", n: int = 1) -> str:
+        """FLUX and friends are served by /accounts/<id>/ai/run/<model>, not
+        by the OpenAI-compatible chat path. The response is normally JSON
+        (`{"result": {"image": "<b64>"}}`); some models return raw image
+        bytes, and both are normalized to a data URI."""
+        model = model or self._default_image_model()
+        if not model:
+            raise ProviderError(f"{self.name}: no image model configured")
+        if not self._accounts:
+            raise ProviderError(
+                f"{self.name}: no account ids configured ({self.account_ids_env})")
+        body = {"prompt": prompt}
+        if "flux-1-schnell" in model.lower() or "flux-2" in model.lower():
+            try:
+                w, h = (int(x) for x in str(size).lower().split("x"))
+            except (ValueError, AttributeError):
+                w, h = 1024, 1024
+            body["width"] = max(256, min(w, 2048))
+            body["height"] = max(256, min(h, 2048))
+
+        def once(cred):
+            with self._aidx_lock:
+                acc = self._accounts[self._aidx % len(self._accounts)]
+                self._aidx += 1
+            url = f"{self.base_url}/accounts/{acc}/ai/run/{model}"
+            raw = self._post_raw(url, body, cred)
+            self._done(cred)
+            return raw
+
+        raw = self._run(once)
+        uri = ""
+        if raw[:1] == b"{":
+            try:
+                uri = image_result_to_data_uri(
+                    json.loads(raw.decode("utf-8", "replace")))
+            except ValueError:
+                uri = ""
+        if not uri and raw[:1] != b"{":
+            import base64 as _b64
+            mime = ("image/png" if raw[:8] == b"\x89PNG\r\n\x1a\n"
+                    else "image/jpeg" if raw[:3] == b"\xff\xd8\xff"
+                    else "image/png")
+            uri = f"data:{mime};base64," + _b64.b64encode(raw).decode("ascii")
+        if not uri:
+            err = ProviderError(
+                f"{self.name}: image generation returned no image data")
+            err.retryable = False
+            raise err
+        return uri
+
 class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
     """Astra AI Gateway / OpenRouter connection (independent of
     OpenRouterAdapter)."""
     name = "astra-gw-openrouter"
+    image_models_env = "GW_OPENROUTER_IMAGE_MODELS"
     base_url = "https://openrouter.ai/api/v1"
     models_env = "GW_OPENROUTER_MODELS"
     api_keys_env = "GW_OPENROUTER_API_KEYS"
@@ -555,10 +757,73 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
     }
     capabilities = ["chat", "stream", "tools", "json", "vision"]
 
+    # ── image generation: official discovery + Image API ──────────────────
+    #: OpenRouter's documented image-model discovery endpoint. Its returned
+    #: output modalities are authoritative for the exact model ids it lists.
+    IMAGE_MODELS_URL = "https://openrouter.ai/api/v1/models?output_modalities=image"
+
+    def __init__(self, config=None, events=None, pool=None):
+        super().__init__(config, events, pool)
+        self._discovered_image_models = None
+        self._discovered_at = 0.0
+
+    def _discover_image_models(self, *, discover: bool = True) -> list:
+        """LIVE discovery results only (empty when unreachable). Cached for
+        10 minutes; a failed discovery never invents models."""
+        now = time.time()
+        fresh = (self._discovered_image_models is not None
+                 and now - self._discovered_at < 600)
+        if discover and not fresh:
+            found = []
+            try:
+                req = urllib.request.Request(
+                    self.IMAGE_MODELS_URL,
+                    headers={"User-Agent": "astra-ai-agent"})
+                with urllib.request.urlopen(req, timeout=GW_DEFAULT_TIMEOUT) as resp:
+                    payload = json.loads(resp.read().decode("utf-8", "replace"))
+                for item in (payload.get("data") or []):
+                    mid = (item or {}).get("id")
+                    if not mid:
+                        continue
+                    arch = item.get("architecture") or {}
+                    outs = arch.get("output_modalities") or []
+                    if outs and "image" not in outs:
+                        continue
+                    found.append(mid)
+            except Exception:
+                found = []
+            # Cache failures too: an unreachable discovery API must not add a
+            # network timeout to every image request for the next 10 minutes.
+            self._discovered_image_models = found
+            self._discovered_at = now
+        return list(self._discovered_image_models or [])
+
+    def live_image_models(self, *, discover: bool = True) -> list:
+        """Ids the provider's OWN API reported as image-output models.
+
+        These are authoritative for image capability even when they are not
+        in the static registry (spec section 11) -- but only for a provider
+        whose image API this repo can actually call.
+        """
+        return self._discover_image_models(discover=discover)
+
+    def list_image_models(self, *, discover: bool = True) -> list:
+        """Configured image models plus LIVE discovery results.
+
+        OpenRouter's chat model list says nothing about image capability, so
+        the dedicated discovery API is consulted instead. A failed/blocked
+        discovery never invents models: it falls back to the configured list.
+        """
+        ids = list(self.image_models)
+        for mid in self._discover_image_models(discover=discover):
+            if mid not in ids:
+                ids.append(mid)
+        return ids
 
 class AstraGatewayMistral(_GatewayCompatibleConnection):
     """Astra AI Gateway / Mistral connection (independent of MistralAdapter)."""
     name = "astra-gw-mistral"
+    image_models_env = "GW_MISTRAL_IMAGE_MODELS"
     base_url = "https://api.mistral.ai/v1"
     models_env = "GW_MISTRAL_MODELS"
     api_keys_env = "GW_MISTRAL_API_KEYS"
@@ -607,6 +872,7 @@ class AstraGatewayCohere(_GatewayCompatibleConnection):
 class AstraGatewayZAI(_GatewayCompatibleConnection):
     """Astra AI Gateway / Z.AI (GLM) connection (independent of ZAIAdapter)."""
     name = "astra-gw-zai"
+    image_models_env = "GW_ZAI_IMAGE_MODELS"
     base_url = "https://api.z.ai/api/paas/v4"
     models_env = "GW_ZAI_MODELS"
     api_keys_env = "GW_ZAI_API_KEYS"
@@ -893,6 +1159,64 @@ def _build_connection(cls, config=None):
     except Exception:
         return None
 
+    # ── image generation (InvokeModel) ────────────────────────────────────
+    image_models_env = "GW_BEDROCK_IMAGE_MODELS"
+
+    def list_image_models(self, *, discover: bool = True) -> list:
+        return list(getattr(self, "image_models", []) or [])
+
+    def generate_image(self, prompt: str, model: str | None = None,
+                       size: str = "1024x1024", n: int = 1) -> str:
+        """Generate an image with a documented Bedrock image model.
+
+        The model is validated against astra.ai.image_models first: a
+        Claude/Nova text model must never be handed a Titan/Stability/
+        Nova-Canvas image request body (the Gateway's Converse path stays
+        strictly separate).
+        """
+        from astra.ai.image_models import is_image_model
+        model = model or (self.image_models[0] if self.image_models else "")
+        if not model:
+            raise ProviderError(f"{self.name}: no image model configured")
+        if not is_image_model("bedrock", model):
+            err = ProviderError(
+                f"{self.name}: {model} is not an image-generation model")
+            err.retryable = False
+            raise err
+        try:
+            w, h = (int(x) for x in str(size).split("x"))
+        except (ValueError, AttributeError):
+            w, h = 1024, 1024
+        low = model.lower()
+        if "nova-canvas" in low:
+            body = {"taskType": "TEXT_IMAGE",
+                    "textToImageParams": {"text": prompt},
+                    "imageGenerationConfig": {"numberOfImages": 1, "width": w,
+                                              "height": h, "quality": "standard",
+                                              "cfgScale": 7.0}}
+        elif "titan-image" in low:
+            body = {"taskType": "TEXT_IMAGE",
+                    "textToImageParams": {"text": prompt},
+                    "imageGenerationConfig": {"numberOfImages": min(n, 1),
+                                              "width": w, "height": h}}
+        else:
+            body = {"text_prompts": [{"text": prompt}], "cfg_scale": 7,
+                    "steps": 30, "width": w, "height": h}
+        url = f"{self.base_url}/model/{model}/invoke"
+
+        def once(cred):
+            data = self._post(url, body, cred)
+            self._done(cred)
+            return data
+
+        data = self._run(once)
+        uri = image_result_to_data_uri(data)
+        if not uri:
+            err = ProviderError(
+                f"{self.name}: image generation returned no image data")
+            err.retryable = False
+            raise err
+        return uri
 
 class AstraAIGateway:
     """Multi-provider, multi-model intelligent-routing gateway.
@@ -1372,6 +1696,162 @@ class AstraAIGateway:
     # failure` the instant it's known — one connection's slow/failed probe
     # never delays saving another connection's result.
     _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
+
+    # -- image generation: eligible targets + failover -----------------------
+    def _image_catalog(self, *, discover: bool = True) -> list:
+        """(connection, Model) for every image-generation model the live
+        connections can actually serve. OpenRouter merges its official
+        discovery API; every other connection uses its configured list.
+        Only models the evidence registry recognizes are included."""
+        from astra.ai.gateway_routing import GATEWAY_PROVIDER_SHORT
+        from astra.ai.image_models import (PROTOCOL_OPENAI_IMAGES, image_spec,
+                                           make_image_spec)
+        from astra.ai.models import Model, metadata_for
+        out = []
+        for conn in self.connections:
+            short = GATEWAY_PROVIDER_SHORT.get(getattr(conn, "name", ""),
+                                               getattr(conn, "name", ""))
+            mids = []
+            fn = getattr(conn, "list_image_models", None)
+            if callable(fn):
+                try:
+                    mids = fn(discover=discover) or []
+                except Exception:
+                    mids = []
+            if not mids:
+                mids = list(getattr(conn, "image_models", None) or [])
+            # A provider's LIVE discovery response is authoritative for the
+            # exact image model ids it returns, even when the static registry
+            # has no entry yet (spec section 11: OpenRouter).
+            live = set()
+            live_fn = getattr(conn, "live_image_models", None)
+            if discover and callable(live_fn):
+                try:
+                    live = set(live_fn(discover=discover) or [])
+                except Exception:
+                    live = set()
+            for mid in mids:
+                override = None
+                if image_spec(short, mid) is None and mid in live:
+                    override = make_image_spec(
+                        short, mid, PROTOCOL_OPENAI_IMAGES,
+                        capabilities=("image_generation",),
+                        input_modalities=("text", "image"))
+                meta = metadata_for(mid, short, image_spec_override=override)
+                meta.pop("provider", None)
+                if "image" not in (meta.get("output_modalities") or []):
+                    continue
+                out.append((conn, Model(short, mid, **meta)))
+        return out
+
+    def image_targets(self, *, editing: bool = False,
+                      discover: bool = True) -> list:
+        """The eligible image targets, already filtered to (configured +
+        healthy + genuinely image-capable) and ranked. A model in cooldown is
+        excluded (see eligible_image_generation_targets)."""
+        from astra.ai.gateway_routing import (
+            eligible_image_generation_targets, prefer_last_successful,
+            rank_targets)
+        catalog = self._image_catalog(discover=discover)
+        targets = eligible_image_generation_targets(
+            catalog, self.routing_state, editing=editing)
+        category = "image_editing" if editing else "image_generation"
+        ranked = rank_targets(targets, category=category)
+        if not editing:
+            ranked = prefer_last_successful(
+                ranked, self.routing_state.last_successful())
+        return ranked
+
+    @staticmethod
+    def _image_failure_reason(exc) -> str:
+        code = getattr(exc, "code", None)
+        text = str(getattr(exc, "message", "") or exc).lower()
+        if code == 429 or "rate limit" in text or "429" in text:
+            return "429 rate limit"
+        if isinstance(exc, TimeoutError) or "timed out" in text or "timeout" in text:
+            return "timeout"
+        if code in (500, 501, 502, 503, 504) or "temporary" in text:
+            return f"provider error ({code})" if code else "provider error"
+        if code in (401, 403) or "auth" in text:
+            return "authentication failed"
+        if code == 404 or "not found" in text:
+            return "model unavailable"
+        return text[:120] or "unknown error"
+
+    def generate_image(self, prompt: str, model: str | None = None,
+                       size: str = "1024x1024", n: int = 1, *,
+                       editing: bool = False, trace: str = "",
+                       discover: bool = True) -> str:
+        """Generate one image across the eligible image targets, with
+        per-(provider, model) failover.
+
+        A failure (429 / timeout / 5xx / model-unavailable / credential)
+        cools down ONLY that target and moves to the next eligible one; the
+        same target is never retried endlessly. Returns the image as a
+        `data:` URI, or raises a clear error when no image model is
+        available -- it NEVER answers an image request with text.
+        """
+        op = new_op_id()
+        category = "image_editing" if editing else "image_generation"
+        ranked = self.image_targets(editing=editing, discover=discover)
+        if model:
+            ranked = ([t for t in ranked if t[1].model_id == model] +
+                      [t for t in ranked if t[1].model_id != model])
+        self.last_attempts = 0
+        self.last_connection = ""
+        self.last_model = ""
+        self._emit("astra_gateway.image_request", category=category,
+                   candidates=len(ranked),
+                   targets=[t[1].model_id for t in ranked],
+                   op=op, trace=trace, input=_gw_log_cap(prompt))
+        if not ranked:
+            self._emit("astra_gateway.image_failure", provider="", model="",
+                       reason="no eligible image-generation model", op=op,
+                       trace=trace, terminal=True)
+            raise ProviderError(
+                "No image-generation model is currently configured or available.")
+        last_error = ""
+        attempts = 0
+        for idx, (conn, tmodel, _health) in enumerate(ranked):
+            attempts = idx + 1
+            self.last_attempts = attempts
+            start = time.perf_counter()
+            try:
+                uri = conn.generate_image(prompt, model=tmodel.model_id,
+                                          size=size, n=n)
+            except Exception as e:
+                reason = self._image_failure_reason(e)
+                last_error = f"{tmodel.provider}/{tmodel.model_id}: {reason}"
+                self.routing_state.record_failure(tmodel.provider,
+                                                  tmodel.model_id)
+                self._emit("astra_gateway.image_failure",
+                           provider=tmodel.provider, model=tmodel.model_id,
+                           reason=reason, attempt=attempts, op=op,
+                           trace=trace, terminal=False)
+                if idx + 1 < len(ranked):
+                    nxt = ranked[idx + 1][1]
+                    self._emit("astra_gateway.image_fallback",
+                               provider=tmodel.provider, model=tmodel.model_id,
+                               reason=reason, next_provider=nxt.provider,
+                               next_model=nxt.model_id, attempt=attempts,
+                               op=op, trace=trace)
+                continue
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            self.routing_state.record_success(tmodel.provider, tmodel.model_id,
+                                              latency_ms)
+            self.last_connection = conn.name
+            self.last_model = tmodel.model_id
+            self._emit("astra_gateway.image_success", provider=tmodel.provider,
+                       model=tmodel.model_id,
+                       latency_ms=round(latency_ms, 1), attempt=attempts,
+                       op=op, trace=trace, terminal=True)
+            return uri
+        self._emit("astra_gateway.image_failure", provider="", model="",
+                   reason=last_error or "all image-generation targets failed",
+                   attempts=attempts, op=op, trace=trace, terminal=True)
+        raise ProviderError(
+            "Astra AI Gateway: all image-generation targets failed -- "
+            + (last_error or "unknown error"))
 
     def test_connection_model(self, conn, model_id: str) -> dict:
         """Probe exactly ONE model of one connection and persist that one

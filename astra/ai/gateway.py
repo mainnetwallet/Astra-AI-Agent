@@ -390,20 +390,18 @@ class _GatewayCompatibleConnection:
         if code == 408:
             err = TimeoutError(f"{self.name} timed out")
             err.retryable = True
-        elif code == 429:
+            raise err
+        if code == 429:
             err = ProviderError(f"{self.name} rate limit reached")
             err.retryable = True
             err.rate_limited = True
-        elif code in (401, 403):
+            raise err
+        if code in (401, 403):
             err = ProviderError(f"{self.name} authentication failed")
             err.retryable = False
-        else:
-            err = ProviderError(f"{self.name} http {code}")
-            err.retryable = retryable
-        # Attach the real HTTP status so the Activity Log can report the
-        # provider API's status code without parsing the message text (the
-        # image-generation API-call logging reads `err.code`).
-        err.code = int(code)
+            raise err
+        err = ProviderError(f"{self.name} http {code}")
+        err.retryable = retryable
         raise err
 
     def _read_sse(self, resp) -> list[dict]:
@@ -1915,18 +1913,6 @@ class AstraAIGateway:
             self._emit("image.generation.attempt", provider=tmodel.provider,
                        model=tmodel.model_id, attempt=attempts, op=op,
                        trace=trace)
-            # Report the ACTUAL provider API request on the SAME existing
-            # "astra_gateway.*" API-call contract chat/text calls use, from the
-            # exact execution point (`conn.generate_image` -> the provider's
-            # HTTP API). Each attempt gets its own `op`, so a fallback chain
-            # shows one START/terminal pair PER attempted model instead of a
-            # single request-level row. The `image.generation.*` lifecycle
-            # events above stay unchanged.
-            call_op = new_op_id()
-            self._emit("astra_gateway.request", category=category,
-                       provider=tmodel.provider, model=tmodel.model_id,
-                       attempt=attempts, candidates=len(ranked),
-                       op=call_op, trace=trace, input=_gw_log_cap(prompt))
             start = time.perf_counter()
             try:
                 uri = conn.generate_image(prompt, model=tmodel.model_id,
@@ -1934,13 +1920,7 @@ class AstraAIGateway:
             except Exception as e:
                 reason = self._image_failure_reason(e)
                 duration_ms = round((time.perf_counter() - start) * 1000.0, 1)
-                status_code = int(getattr(e, "code", 0) or 0)
                 failures.append(f"{tmodel.provider}/{tmodel.model_id}: {reason}")
-                self._emit("astra_gateway.error", provider=tmodel.provider,
-                           model=tmodel.model_id, reason=reason,
-                           status_code=status_code, duration_ms=duration_ms,
-                           attempt=attempts, op=call_op, trace=trace,
-                           terminal=True)
                 self._emit("image.generation.failure",
                            provider=tmodel.provider, model=tmodel.model_id,
                            attempt=attempts, duration_ms=duration_ms,
@@ -1958,12 +1938,6 @@ class AstraAIGateway:
             latency_ms = (time.perf_counter() - start) * 1000.0
             self.last_connection = conn.name
             self.last_model = tmodel.model_id
-            self._emit("astra_gateway.success", provider=tmodel.provider,
-                       model=tmodel.model_id, status_code=200,
-                       latency_ms=round(latency_ms, 1),
-                       duration_ms=round(latency_ms, 1), attempt=attempts,
-                       op=call_op, trace=trace, terminal=True,
-                       output=f"<image data URI: {len(uri)} chars>")
             self._emit("image.generation.success", provider=tmodel.provider,
                        model=tmodel.model_id, attempt=attempts,
                        duration_ms=round(latency_ms, 1),

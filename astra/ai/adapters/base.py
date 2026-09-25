@@ -164,30 +164,24 @@ class CompatibleAdapter(AIProvider):
                    auth_failure=auth,
                    cooldown_s=(0.0 if request_level else 45 if rate_limited else 30))
         if code == 400:
-            err = ProviderError(f"{self.name} invalid request")
-        elif code == 401:
-            err = ProviderError(f"{self.name} authentication failed")
-        elif code == 403:
-            err = ProviderError(f"{self.name} authorization denied")
-        elif code in (404,):
-            err = ProviderError(f"{self.name} model not found")
-        elif code == 408:
-            err = TimeoutError(f"{self.name} timed out")
-        elif code == 409:
-            err = ProviderError(f"{self.name} conflict")
-        elif code == 429:
-            err = ProviderError(f"{self.name} rate limit reached")
-        elif code == 500:
-            err = ProviderError(f"{self.name} provider error")
-        elif code in (502, 503, 504):
-            err = ProviderError(f"{self.name} temporary provider error")
-        else:
-            err = ProviderError(f"{self.name} http {code}")
-        # Attach the real HTTP status so the Activity Log can report the
-        # provider API's status code without parsing the message text (the
-        # image-generation API-call logging reads `err.code`).
-        err.code = int(code)
-        raise err
+            raise ProviderError(f"{self.name} invalid request")
+        if code == 401:
+            raise ProviderError(f"{self.name} authentication failed")
+        if code == 403:
+            raise ProviderError(f"{self.name} authorization denied")
+        if code in (404,):
+            raise ProviderError(f"{self.name} model not found")
+        if code == 408:
+            raise TimeoutError(f"{self.name} timed out")
+        if code == 409:
+            raise ProviderError(f"{self.name} conflict")
+        if code == 429:
+            raise ProviderError(f"{self.name} rate limit reached")
+        if code == 500:
+            raise ProviderError(f"{self.name} provider error")
+        if code in (502, 503, 504):
+            raise ProviderError(f"{self.name} temporary provider error")
+        raise ProviderError(f"{self.name} http {code}")
 
     # -- interface ------------------------------------------------------------
     def chat(self, messages, model=None, max_tokens=None,

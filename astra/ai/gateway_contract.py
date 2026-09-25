@@ -337,6 +337,112 @@ class ProviderExecutionDecision:
         return "\n".join(lines)
 
 
+# ── Gateway routing decision: task type + output modality ────────────────────
+# The Gateway's UNDERSTAND step decides, from the ACTUAL user request and the
+# live system/capability context, WHAT KIND of job this is (`task_type`) and
+# what non-text output it must produce (`output_modalities`). This is the
+# machine-readable half of that decision; the pipeline no longer guesses the
+# task primarily from regexes. `astra.ai.router.classify()` is demoted to a
+# lightweight FALLBACK, used only when the Gateway is unavailable or returns
+# no usable decision — it may never override an AI-understood intent.
+TASK_TYPES = frozenset({
+    # served as an ordinary single AI call
+    "simple_chat", "coding", "translation", "summarization", "research",
+    "planning",
+    # a real non-text output the Provider system can execute end-to-end
+    "image_generation",
+})
+
+# Output modalities a request may name. "text" is the default and is never
+# carried as a requirement.
+OUTPUT_MODALITIES = frozenset({"text", "image", "audio", "video"})
+
+# The subset of modalities the Provider system can REALLY execute today
+# (`astra.ai.capabilities` gates the adapter half; the router fails honestly
+# when nothing configured is capable). Anything else degrades to text.
+EXECUTABLE_OUTPUT_MODALITIES = frozenset({"image"})
+
+
+@dataclass
+class ProviderRoutingDecision:
+    """The Gateway's structured routing decision for ONE user request.
+
+    Shape of the `routing` object the Gateway returns (all fields optional —
+    an older/simpler Gateway reply degrades to "no decision", which is
+    exactly today's behaviour):
+
+        {"task_type": "image_generation",
+         "output_modalities": ["image"],
+         "reason": "the user asked for a generated picture"}
+
+    Rules enforced by `normalized()` (never trust an unverified model claim):
+
+      - `task_type` is kept only when it is one of `TASK_TYPES`; anything
+        else becomes "" (no decision), so routing falls back to the
+        lightweight classifier instead of acting on an invented task.
+      - `output_modalities` keeps only known, non-text modalities.
+      - The two halves of the SAME decision are made consistent: a reply
+        that names an image output (or the image_generation task) resolves
+        to `task_type="image_generation"` AND requests the image modality,
+        so the router always enforces it as a hard requirement.
+    """
+    task_type: str = ""
+    output_modalities: tuple = ()
+    reason: str = ""
+
+    def normalized(self) -> "ProviderRoutingDecision":
+        task = (self.task_type or "").strip().lower()
+        if task not in TASK_TYPES:
+            task = ""
+        mods = []
+        for m in (self.output_modalities or ()):
+            mm = str(m).strip().lower()
+            if mm in OUTPUT_MODALITIES and mm != "text" and mm not in mods:
+                mods.append(mm)
+        if "image" in mods or task == "image_generation":
+            task = "image_generation"
+            if "image" not in mods:
+                mods.append("image")
+        return ProviderRoutingDecision(
+            task_type=task, output_modalities=tuple(mods),
+            reason=(self.reason or "").strip())
+
+    @property
+    def required_output_modalities(self) -> tuple:
+        """Only the non-text modalities the Provider system can really
+        execute (the rest degrade to text — see `_CHAT_TASK_TYPES`)."""
+        return tuple(m for m in self.output_modalities
+                     if m in EXECUTABLE_OUTPUT_MODALITIES)
+
+    @classmethod
+    def from_dict(cls, data) -> "ProviderRoutingDecision":
+        """Parse the Gateway's `routing` object, tolerating any shape. A
+        missing/None/non-dict value, or a wrong-typed field, degrades to "no
+        decision" rather than raising — an old or malformed Gateway reply
+        must never break a turn."""
+        if not isinstance(data, dict):
+            return cls()
+        task = data.get("task_type", data.get("type", ""))
+        if isinstance(task, (list, tuple)):
+            task = next((str(x) for x in task if str(x).strip()), "")
+        raw_mods = data.get(
+            "output_modalities",
+            data.get("output_modality",
+                     data.get("modalities", data.get("modality", ()))))
+        if isinstance(raw_mods, str):
+            raw_mods = [raw_mods]
+        elif not isinstance(raw_mods, (list, tuple, set, frozenset)):
+            raw_mods = []
+        return cls(task_type=str(task or ""),
+                   output_modalities=tuple(str(m) for m in raw_mods),
+                   reason=str(data.get("reason", "") or ""))
+
+    def to_dict(self) -> dict:
+        return {"task_type": self.task_type,
+                "output_modalities": list(self.output_modalities),
+                "reason": self.reason}
+
+
 @dataclass
 class ProviderExecutionResult:
     """Sanitized outcome of one `ProviderExecutionPort.execute()` call (§6).

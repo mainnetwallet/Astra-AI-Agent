@@ -62,8 +62,10 @@ from astra.ai.capability_context import (RuntimeCapabilities,
                                          execution_policy_block)
 from astra.ai.gateway_contract import (ENVIRONMENT_HOST_FALLBACK,
                                        ENVIRONMENT_RUNTIME,
+                                       TASK_TYPES,
                                        ProviderExecutionDecision,
                                        ProviderExecutionPort,
+                                       ProviderRoutingDecision,
                                        ProviderExecutionResult,
                                        ProviderExecutionTarget)
 from astra.ai.gateway_task_completion import (COMPLETE, FAILED, INCOMPLETE,
@@ -78,19 +80,24 @@ from astra.core.exceptions import ProviderError
 from astra.core.events import new_op_id
 from astra.terminal.manager import default_session_id_for
 
-# Task types that are safe to hand the router for a plain chat turn.
-# Everything else `classify()` can return (audio/video generation,
-# structured_output -> forced JSON mode, browser/web3 -> tool territory)
-# is served as ordinary chat here.
+# Task types the pipeline can route: exactly the set the Gateway's structured
+# routing decision may name (astra.ai.gateway_contract.TASK_TYPES). Everything
+# else `classify()` can return (audio/video generation, structured_output ->
+# forced JSON mode, browser/web3 -> tool territory) is served as ordinary chat
+# here.
+#
+# The task type comes from the Gateway's UNDERSTAND decision, which reads the
+# ACTUAL request + the live system context; `classify()` is only a fallback for
+# when the Gateway is unavailable or returns no usable decision. The AI
+# decision always wins — the regex may never override it (see
+# `_resolve_task_type`).
 #
 # `image_generation` IS routed (not downgraded to simple_chat): it is the one
 # non-text output the router can really execute end-to-end, so the pipeline
 # passes `required_output_modalities=["image"]` and the router selects an
 # image-capable (adapter, model) pair that actually implements
 # generate_image() — see `_route` and astra.ai.capabilities.
-_CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
-                              "summarization", "research", "planning",
-                              "image_generation"})
+_CHAT_TASK_TYPES = TASK_TYPES
 
 # Plain-text replies for missing AI configuration. Shown as-is (no
 # markdown rendering in the chat UI — see the note on _run_turn's fail
@@ -178,6 +185,21 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "short, incomplete, or written in Bengali/Banglish/English). You do four "
     "things and reply with ONE JSON object and nothing else.\n\n"
 
+    "WHAT ASTRA CAN DO, AND THE EXECUTION PATHS. Astra answers in normal "
+    "conversation; writes, reviews and fixes code; translates; summarises; "
+    "researches; and plans. It can also DO real work in this runtime "
+    "through its live tools (terminal/shell, browser, files, web3/wallet, "
+    "memory/tasks, ...) — exactly what the live capability catalog below "
+    "lists, nothing more. Output is normally text, but Astra can also "
+    "produce a real non-text artifact: today a GENERATED IMAGE, made by an "
+    "image-generation model through the provider's image API. The "
+    "execution paths are: (1) plain chat/reasoning when no tool is needed; "
+    "(2) the Agent Runtime tool loop for real actions (shell, files, "
+    "browser, web3); (3) the approval-gated host terminal as a fallback "
+    "only; and, independently of those, (4) the image-generation path when "
+    "the user wants an image produced. Pick the path the user's ACTUAL "
+    "request needs — never force a request down a path it does not need.\n\n"
+
     "0) INSPECT THE LIVE RUNTIME CAPABILITIES. You are given the runtime's "
     "LIVE capability catalog, derived from the actual tool registry of this "
     "running process right now. Treat it as authoritative:\n"
@@ -207,7 +229,39 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "instructions telling the user how to do the task themselves, and never "
     "a description of what you decided.\n\n"
 
-    "2) DECIDE EXECUTION + ENVIRONMENT. Decide whether the request requires "
+    "2) DECIDE THE TASK TYPE + OUTPUT MODALITY. From the ACTUAL request "
+    "(prior conversation only to resolve references), decide what kind of "
+    "job this is and what output the user must receive. Put it in the "
+    "`routing` object:\n"
+    "   - \"task_type\" MUST be exactly one of:\n"
+    "       * \"simple_chat\" -> ordinary conversation, questions, "
+    "explanation, advice, general knowledge or writing; the answer is "
+    "normal chat text.\n"
+    "       * \"coding\" -> writing, fixing, debugging, refactoring or "
+    "explaining code.\n"
+    "       * \"translation\" -> translating text between languages.\n"
+    "       * \"summarization\" -> condensing text the user gave you.\n"
+    "       * \"research\" -> gathering, comparing or investigating "
+    "information.\n"
+    "       * \"planning\" -> plans, roadmaps, strategies, task breakdowns.\n"
+    "       * \"image_generation\" -> the user wants a NEW image / picture / "
+    "photo / illustration / logo / icon / artwork CREATED and shown to "
+    "them. Recognise this in any language or register, including English "
+    "(\"create an image\"), Banglish (\"chobi banao\", \"photo create "
+    "koro\") and Bengali (\"একটা ছবি বানাও\"). It is about PRODUCING an "
+    "image, never about analysing, describing or reading one.\n"
+    "   - \"output_modalities\": the non-text outputs this request must "
+    "produce. Use [] for a normal text answer, or [\"image\"] when a "
+    "generated image must come back. Name a modality only when the user "
+    "really wants that output produced: do NOT name \"image\" for a "
+    "question ABOUT images, for reading/summarising an attached image, or "
+    "when the user says they do not want one.\n"
+    "   - If \"task_type\" is \"image_generation\" then "
+    "\"output_modalities\" MUST be [\"image\"]. If you are unsure, prefer "
+    "\"simple_chat\" with [] over inventing an image or coding task.\n"
+    "   - \"intent\": one short line of what the user actually wants.\n\n"
+
+    "3) DECIDE EXECUTION + ENVIRONMENT. Decide whether the request requires "
     "real tool execution, which capability category, and — when it needs the "
     "terminal — WHERE that execution happens. Put all of it in the "
     "`execution` object:\n"
@@ -246,10 +300,11 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "perform it; you must not turn the task into instructions for the user, "
     "and you must not ask the Provider merely to explain how.\n\n"
 
-    "3) ASSIGN. From the provider/model list you are given, pick the single "
+    "4) ASSIGN. From the provider/model list you are given, pick the single "
     "best provider+model for this job (coding -> a coding-capable model, "
     "hard reasoning -> a high-quality model, simple chat -> a fast one, "
-    "images -> a vision model). Each entry shows a `health` value "
+    "an image request -> a model that can actually GENERATE images, not "
+    "one that merely reads them). Each entry shows a `health` value "
     "('ok' or 'unknown' — already-failing models are never listed here); "
     "prefer health=ok over health=unknown when both otherwise fit equally. "
     "Copy provider and model EXACTLY from the list. If nothing in the "
@@ -257,12 +312,16 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "\"\" for both — automatic routing will handle it, including trying "
     "a currently-unhealthy model as a last resort if it must.\n\n"
 
-    "4) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
+    "5) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
     "answer must satisfy (for an execution task, the criteria must require "
     "the real action to have been performed and its result reported).\n\n"
 
     "Reply with exactly this JSON shape:\n"
     "{\"final_request\": \"...\", \"was_incomplete\": true|false, "
+    "\"routing\": {\"task_type\": \"simple_chat\"|\"coding\"|"
+    "\"translation\"|\"summarization\"|\"research\"|\"planning\"|"
+    "\"image_generation\", \"output_modalities\": [], "
+    "\"intent\": \"<one short line of what the user actually wants>\"}, "
     "\"provider\": \"...\", \"model\": \"...\", "
     "\"criteria\": [\"...\"], \"reason\": \"<one short line>\", "
     "\"execution\": {\"required\": true|false, \"capability\": \"\", "
@@ -698,6 +757,7 @@ class ChatPipeline:
         caps = (capabilities if capabilities is not None
                 else collect_runtime_capabilities(self.registry))
         fallback = {"final_request": message, "was_incomplete": False,
+                    "routing": ProviderRoutingDecision(),
                     "provider": "", "model": "", "criteria": [],
                     "reason": "", "execution": ProviderExecutionDecision(),
                     "ok": False}
@@ -750,16 +810,11 @@ class ChatPipeline:
         att = _describe_attachments(attachments)
         if att:
             parts.append("Attachments sent with the message: " + att)
-        # Make the required output modality explicit to the Gateway so its
-        # "assign the work" pick prefers an image-capable model instead of a
-        # text one. Not a trust boundary: routing enforces the modality as a
-        # hard gate regardless of what the Gateway assigns (see _route).
-        if classify(message) == "image_generation":
-            parts.append(
-                "This request asks for a GENERATED IMAGE. Assign a "
-                "provider/model whose output is an image (image generation). "
-                "If no such model is listed, leave provider/model empty and "
-                "let automatic routing choose an image-capable model.")
+        # The ORIGINAL user request goes to the Gateway verbatim. The task
+        # type and output modality are decided by the Gateway from this
+        # request + the live system context (see UNDERSTAND_SYSTEM_PROMPT) —
+        # never by a hint injected here, and never by rewriting the user's
+        # own words.
         parts.append("User message:\n" + message)
         try:
             raw = self.gateway.chat(
@@ -794,9 +849,16 @@ class ChatPipeline:
             data.get("execution")).normalized(
                 caps.categories,
                 host_fallback_available=self._host_fallback_available())
+        # The Gateway's structured ROUTING decision (task type + output
+        # modality), from the SAME reply. `normalized()` drops an unknown or
+        # absent task to "no decision", so routing falls back to the
+        # lightweight classifier instead of acting on an invented task.
+        routing = ProviderRoutingDecision.from_dict(
+            data.get("routing")).normalized()
         return {"final_request": _clean(data["final_request"]) if rewrote
                 else message,
                 "was_incomplete": rewrote,
+                "routing": routing,
                 "provider": provider, "model": model, "criteria": criteria,
                 "reason": _clean(data.get("reason")), "execution": execution,
                 "ok": True}
@@ -1251,6 +1313,26 @@ class ChatPipeline:
         return rr
 
     # -- helpers -----------------------------------------------------------------
+    def _resolve_task_type(self, brief: dict, attachments, raw: str) -> str:
+        """The task type for this turn.
+
+        Priority: the Gateway's structured routing decision (it read the
+        ACTUAL request + the live system context) -> the lightweight regex
+        `classify()` fallback (only when the Gateway was unavailable or
+        returned no usable decision) -> plain chat. A live image attachment
+        always means `vision`: that is a fact about the turn, not an intent.
+        """
+        if _has_image(attachments):
+            return "vision"
+        routing = brief.get("routing")
+        ai_type = (getattr(routing, "task_type", "") or "").strip().lower()
+        if ai_type in _CHAT_TASK_TYPES:
+            return ai_type
+        # No usable AI decision — fall back to the lightweight classifier.
+        # This may only ever break a TIE; it never overrides the AI's intent.
+        return self._task_type(brief.get("final_request") or raw,
+                               attachments, raw=raw)
+
     @staticmethod
     def _task_type(text: str, attachments, raw: str = "") -> str:
         if _has_image(attachments):
@@ -1264,7 +1346,8 @@ class ChatPipeline:
             t = classify(raw)
         return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
-    def _route(self, task_type, messages, provider, model, vision, req=""):
+    def _route(self, task_type, messages, provider, model, vision, req="",
+               output_modalities=None):
         # Non-text output is a HARD router requirement, not a hint: for an
         # image request the router must select only a model whose metadata
         # declares image output AND whose adapter really implements
@@ -1272,7 +1355,16 @@ class ChatPipeline:
         # AstraRouter.route_request). A preferred provider/model is still
         # honoured, but only if it passes that gate — never substituted in
         # for a model that cannot actually produce the image.
-        out_mods = (["image"] if task_type == "image_generation" else [])
+        #
+        # The modalities come from the Gateway's structured routing decision
+        # (`ProviderRoutingDecision.required_output_modalities`). The
+        # task_type is a backstop, so a decision that named the image task
+        # always carries the image requirement even if it omitted the list.
+        out_mods = list(output_modalities if output_modalities is not None
+                        else (["image"] if task_type == "image_generation"
+                              else []))
+        if task_type == "image_generation" and "image" not in out_mods:
+            out_mods.append("image")
         rr = self.router.route_request(RoutingRequest(
             task_type=task_type, messages=messages,
             preferred_provider=provider or None,
@@ -1469,20 +1561,28 @@ class ChatPipeline:
                                      capabilities=caps)
         else:
             brief = {"final_request": raw, "was_incomplete": False,
+                     "routing": ProviderRoutingDecision(),
                      "provider": "", "model": "", "criteria": [],
                      "reason": "", "ok": False,
                      "execution": ProviderExecutionDecision()}
+        # The Gateway's structured routing decision, and the task type it
+        # resolves to. The AI decision wins; the regex classifier is only a
+        # fallback (see `_resolve_task_type`).
+        routing = (brief.get("routing") or ProviderRoutingDecision())
+        task_type = self._resolve_task_type(brief, attachments, raw)
         assigned = (f"{brief['provider']}/{brief['model']}" if brief["model"]
                     else brief["provider"])
         execution = (brief.get("execution") or ProviderExecutionDecision())
         trace.update({"understood": brief["final_request"],
                       "was_incomplete": brief["was_incomplete"],
+                      "routing": routing.to_dict(), "task_type": task_type,
                       "assigned": assigned, "criteria": brief["criteria"],
                       "assign_reason": brief["reason"],
                       "execution": execution.to_dict(),
                       "runtime_capabilities": caps.to_dict()})
         self._emit("chat.pipeline.assigned", provider=brief["provider"],
                    model=brief["model"], was_incomplete=brief["was_incomplete"],
+                   task_type=task_type, routing=routing.to_dict(),
                    execution_required=execution.required,
                    execution_capability=execution.capability,
                    request=req, trace=req)
@@ -1526,8 +1626,6 @@ class ChatPipeline:
                 "Recent conversation (for reference):\n" + ctx_text +
                 "\n\nCurrent request:\n" + brief["final_request"], attachments)
         messages.append({"role": "user", "content": content})
-        task_type = self._task_type(brief["final_request"], attachments,
-                                  raw=raw)
 
         # The Provider is the AI that does the work. With the shared
         # Terminal/tool surface wired, that work is a real multi-step agent
@@ -1549,7 +1647,8 @@ class ChatPipeline:
                 messages, content)
         else:
             rr = self._route(task_type, messages, brief["provider"],
-                             brief["model"], vision, req=req)
+                             brief["model"], vision, req=req,
+                             output_modalities=routing.required_output_modalities)
         if rr is None or not rr.ok:
             err = (trace.get("error") or getattr(rr, "error", "") or
                    "unknown error")

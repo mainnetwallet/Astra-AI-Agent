@@ -55,6 +55,12 @@ class CompatibleAdapter(AIProvider):
         self.base_url = self._configured_base_url()
         self._health = None
         self._health_at = 0.0
+        # Most recent CREDENTIAL-level rejection (HTTP 401/403) from this
+        # provider. A dead API key is a property of the PROVIDER, not of any
+        # one model, so later calls that find no usable key re-report this
+        # real error (with its real status code) instead of inventing a
+        # fresh per-model failure. See `_no_credential_error`.
+        self._last_auth_error: ProviderError | None = None
 
     # -- configuration --------------------------------------------------------
     def _configured_models(self) -> list[str]:
@@ -93,6 +99,16 @@ class CompatibleAdapter(AIProvider):
         backoff cannot change that, so it is marked NON-retryable: the router
         moves straight to the next candidate instead of sleeping through
         pointless retries (the Gateway's own connections already do this)."""
+        cached = getattr(self, "_last_auth_error", None)
+        if cached is not None:
+            count = getattr(self.pool, "count", 0)
+            if count and not self.pool:
+                # Every configured key was REJECTED (401/403) by this
+                # provider: report that real error, not a generic "no
+                # credential" — and keep it non-retryable so a dead key
+                # never costs the router a retry/backoff cycle.
+                cached.retryable = False
+                return cached
         err = ProviderError(f"{self.name}: no healthy credential configured")
         err.retryable = False
         return err
@@ -187,6 +203,8 @@ class CompatibleAdapter(AIProvider):
         # provider API's status code without parsing the message text (the
         # image-generation API-call logging reads `err.code`).
         err.code = int(code)
+        if code in (401, 403):
+            self._last_auth_error = err
         raise err
 
     # -- interface ------------------------------------------------------------

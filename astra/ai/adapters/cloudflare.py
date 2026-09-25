@@ -102,10 +102,13 @@ class CloudflareAdapter(CompatibleAdapter):
                 raw = resp.read()
                 ctype = (resp.headers.get("Content-Type") or "") if hasattr(resp, "headers") else ""
         except urllib.error.HTTPError as e:
-            code = e.code
             close_http_error(e)
+            # `_classify_http` ALWAYS raises (it maps the status to a
+            # categorized ProviderError/TimeoutError and attaches the real
+            # `.code`), so the previous trailing
+            # `raise ProviderError(f"cloudflare image http {code}")` was
+            # unreachable dead code that could never shape the error.
             self._classify_http(e, cred)
-            raise ProviderError(f"cloudflare image http {code}")
         except urllib.error.URLError as e:
             self._done(cred, True, reason=f"network: {getattr(e, 'reason', e)}")
             raise ProviderError(

@@ -208,6 +208,13 @@ class _GatewayCompatibleConnection:
         self.base_url = (raw or self.base_url or "").rstrip("/")
         self._last_usage: dict = {}
         self._last_usage_stream: dict = {}
+        # The most recent CREDENTIAL-level rejection (HTTP 401/403) seen by
+        # this connection. A dead token is a property of the CONNECTION, not
+        # of any one model: once the pool has no usable key left, every later
+        # call re-reports this real error (with its real status code) instead
+        # of inventing a fresh per-model "failure" for models that were never
+        # actually sent to the provider. See `_credential_error` / `_run`.
+        self._last_auth_error: ProviderError | None = None
         self.max_retries = max(0, int(
             config.getint("GW_MAX_RETRIES", GW_MAX_RETRIES)
             if config is not None and hasattr(config, "getint") else GW_MAX_RETRIES))
@@ -249,6 +256,26 @@ class _GatewayCompatibleConnection:
     # -- credentials ------------------------------------------------------
     def _pick(self):
         return self.pool.pick()
+
+    def _credential_error(self):
+        """The REAL credential rejection for this connection, when the pool
+        has keys but none is usable — else None.
+
+        A rejected/revoked API token (HTTP 401/403) is a CONNECTION-level
+        failure, not a per-model one: returning the cached error keeps its
+        true status code and message, so the Activity Log never reports a
+        model as "failed" for a call that was never made. Falls back to None
+        (the caller's generic "no healthy credential" error) when the pool is
+        empty or the keys are merely cooling down after a transient error —
+        there is no real credential rejection to report then.
+        """
+        cached = getattr(self, "_last_auth_error", None)
+        if cached is None:
+            return None
+        count = getattr(self.pool, "count", 0)
+        if not count or bool(self.pool):
+            return None
+        return cached
 
     def _done(self, cred=None, errored=False, reason="", *, rate_limited=False,
               auth_failure=False, cooldown_s: float = 30.0) -> None:
@@ -355,6 +382,9 @@ class _GatewayCompatibleConnection:
             if cred is None:
                 if last is not None:
                     raise last
+                auth = self._credential_error()
+                if auth is not None:
+                    raise auth
                 err = ProviderError(
                     f"{self.name}: no healthy credential configured")
                 err.retryable = False
@@ -404,6 +434,8 @@ class _GatewayCompatibleConnection:
         # provider API's status code without parsing the message text (the
         # image-generation API-call logging reads `err.code`).
         err.code = int(code)
+        if code in (401, 403):
+            self._last_auth_error = err
         raise err
 
     def _read_sse(self, resp) -> list[dict]:

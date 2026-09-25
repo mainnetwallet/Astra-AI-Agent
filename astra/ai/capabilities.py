@@ -115,6 +115,82 @@ _VIDEO_INPUT_MODELS = (
     "gemini-1.5",
 )
 
+# ── adapter (execution) capability gate ────────────────────────────────────
+# Model metadata (above) describes what a MODEL can do. That is necessary but
+# not sufficient for generation: the provider ADAPTER wired to the model must
+# also have a real implementation of the corresponding method
+# (generate_image / text_to_speech). Selecting a model whose adapter cannot
+# execute it would either raise deep inside the call or - worse - silently
+# fall back to a plain text-chat reply for an image request. This map is the
+# adapter-side half of the gate: a provider not listed for a modality is
+# never selected for it, whatever its model metadata claims.
+#
+# `bedrock` is the only adapter with a real provider-specific implementation
+# (BedrockAdapter.generate_image -> Titan / Stability InvokeModel). The
+# OpenAI-compatible `CompatibleAdapter.generate_image` targets
+# `/images/generations`, which none of the configured OpenAI-compatible
+# providers (groq, gemini, mistral, ...) actually expose, so they are
+# deliberately not listed here.
+ADAPTER_OUTPUT_MODALITIES: dict[str, frozenset[str]] = {
+    "bedrock": frozenset({"image"}),
+}
+
+# output modality -> the adapter method that must exist to execute it
+_OUTPUT_MODALITY_METHODS = {
+    "image": "generate_image",
+    "audio": "text_to_speech",
+}
+
+
+def adapter_supports_output(provider: str, modality: str) -> bool:
+    """True when the adapter for `provider` declares it can produce
+    `modality` (non-text output only)."""
+    return modality in ADAPTER_OUTPUT_MODALITIES.get(
+        (provider or "").lower(), frozenset())
+
+
+def adapter_can_generate(adapter, modality: str) -> bool:
+    """Adapter-side execution gate for one output modality.
+
+    Requires BOTH the provider declaration (which a real provider
+    integration opts into) AND the method actually existing, so a
+    declaration can never outrun the implementation.
+    """
+    mod = str(modality or "").lower()
+    if mod in ("", "text"):
+        return True
+    if not adapter_supports_output(getattr(adapter, "name", ""), mod):
+        return False
+    method = _OUTPUT_MODALITY_METHODS.get(mod)
+    if method is None:
+        return False
+    return callable(getattr(adapter, method, None))
+
+
+def filter_candidates_by_output_modalities(candidates: list,
+                                           modalities) -> list:
+    """Keep only (adapter, model) pairs whose ADAPTER can produce every
+    requested non-text output modality.
+
+    The model-metadata half of the same requirement is enforced separately by
+    `routing_policy.meets_hard_requirements` (via
+    `RoutingRequest.required_output_modalities`); this is the other half, so
+    a text-only provider can never be selected for an image request just
+    because a model id happens to be paired with it.
+    """
+    required = {str(m).lower() for m in (modalities or [])
+                if str(m).lower() not in ("", "text")}
+    if not required:
+        return candidates
+    out = []
+    for candidate in candidates:
+        if not (isinstance(candidate, tuple) and len(candidate) >= 2):
+            continue
+        adapter = candidate[0]
+        if all(adapter_can_generate(adapter, m) for m in required):
+            out.append(candidate)
+    return out
+
 
 def _family_of(model_id: str) -> str:
     """Pick the capability family that best matches a model id string."""
@@ -162,14 +238,26 @@ def detect_required_input_capabilities(attachments: list) -> list[str]:
     return sorted(caps)
 
 
+# Image-generation intent in either word order, matching
+# astra.ai.router.classify(): English puts the verb first ("create an
+# image"); Banglish/Bangla often puts the noun first ("photo create koro",
+# "একটা ছবি বানাও"). `\b` is applied to the Latin alternation only — Python's
+# `re` does not treat Bengali combining vowel signs (ি া ৌ …) as word
+# characters, so a trailing `\b` after "ছবি" or "তৈরি" can never match.
+_IMAGE_NOUNS_LATIN = (r"(?:image|picture|photo|photograph|illustration|diagram"
+                      r"|logo|icon|art|chobi|chhobi)")
+_IMAGE_VERBS_LATIN = r"(?:generate|create|draw|make|design|banao|banan|toiri)"
+_IMAGE_NOUNS_BN = r"(?:ছবি|চিত্র|পিকচার)"
+_IMAGE_VERBS_BN = r"(?:বানাও|বানান|বানাতে|বানিয়ে|তৈরি|আঁকো|এঁকে|ডিজাইন)"
+_IMAGE_NOUNS = r"(?:\b" + _IMAGE_NOUNS_LATIN + r"\b|" + _IMAGE_NOUNS_BN + r")"
+_IMAGE_VERBS = r"(?:\b" + _IMAGE_VERBS_LATIN + r"\b|" + _IMAGE_VERBS_BN + r")"
+
+
 _OUTPUT_PATTERNS = {
     OUTPUT_IMAGE: re.compile(
-        r"\b(generate|create|draw|make|design)\s+(an?\s+)?"
-        r"(image|picture|photo|illustration|diagram|logo|icon|art)\b"
-        r"|\b(image|picture|photo|photograph|illustration|logo|icon|art|"
-        r"chobi|chhobi)\b"
-        r".{0,20}\b(generate|create|draw|make|design|banao|banan|toiri)\b",
-        re.IGNORECASE,
+        _IMAGE_VERBS + r"\s+(?:an?\s+)?" + _IMAGE_NOUNS
+        + "|" + _IMAGE_NOUNS + r".{0,20}" + _IMAGE_VERBS,
+        re.IGNORECASE | re.UNICODE,
     ),
     OUTPUT_AUDIO: re.compile(
         r"\b(generate|create|make|produce)\s+(an?\s+)?(audio|sound|music|song|speech|voice|tts|narrat)\b",

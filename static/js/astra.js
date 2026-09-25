@@ -2739,10 +2739,20 @@ function renderArtifact(a) {
   const el = document.createElement("div");
   el.className = "artifact-card";
   const url = `/api/v1/artifacts/${encodeURIComponent(a.id)}/${encodeURIComponent(a.filename)}`;
-  const type = (a.type || a.mime || "").split("/")[0];
+  // The server's artifact dict (astra.core.artifacts.Artifact.to_dict) uses
+  // artifact_type / mime_type. Reading only the short aliases here meant
+  // every image fell through to the generic "file" card and never rendered.
+  const mime = a.mime_type || a.mime || "";
+  const type = String(a.artifact_type || a.type || mime.split("/")[0] || "")
+    .toLowerCase();
   if (type === "image") {
+    // Open (full size in a new tab) + Download, alongside the inline preview.
     el.innerHTML = `<img class="artifact-image" src="${esc(url)}" alt="${esc(a.filename)}">
-      <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>`;
+      <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>
+      <div class="artifact-actions">
+        <a class="btn mini" href="${esc(url)}" target="_blank" rel="noopener">Open</a>
+        <a class="btn mini" href="${esc(url)}" download="${esc(a.filename)}">Download</a>
+      </div>`;
   } else if (type === "audio") {
     el.innerHTML = `<audio class="artifact-audio" controls src="${esc(url)}"></audio>
       <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>`;

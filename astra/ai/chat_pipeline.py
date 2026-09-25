@@ -79,11 +79,18 @@ from astra.core.events import new_op_id
 from astra.terminal.manager import default_session_id_for
 
 # Task types that are safe to hand the router for a plain chat turn.
-# Everything else `classify()` can return (image/audio/video generation,
+# Everything else `classify()` can return (audio/video generation,
 # structured_output -> forced JSON mode, browser/web3 -> tool territory)
 # is served as ordinary chat here.
+#
+# `image_generation` IS routed (not downgraded to simple_chat): it is the one
+# non-text output the router can really execute end-to-end, so the pipeline
+# passes `required_output_modalities=["image"]` and the router selects an
+# image-capable (adapter, model) pair that actually implements
+# generate_image() — see `_route` and astra.ai.capabilities.
 _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
-                              "summarization", "research", "planning"})
+                              "summarization", "research", "planning",
+                              "image_generation"})
 
 # Plain-text replies for missing AI configuration. Shown as-is (no
 # markdown rendering in the chat UI — see the note on _run_turn's fail
@@ -98,6 +105,28 @@ _NO_PROVIDER_AND_GATEWAY_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI provider ba gateway-er API key set kora nei, tai reply "
     "dite parchi na."
 )
+# Shown when an image request cannot be served because nothing configured can
+# actually generate images (no adapter with a real generate_image() + a
+# healthy credential). Never downgraded to a text answer — that would
+# misrepresent a failed image request as a successful chat reply.
+_NO_IMAGE_MODEL_MESSAGE = (
+    "⚠️ Ei image request serve korar moto kono image-generation capable "
+    "provider/model configure kora nei. Ekta image model (e.g. Bedrock "
+    "Titan/Stability) add kore abar try korun."
+)
+
+
+def _image_reply_text(count: int) -> str:
+    """Short chat line that accompanies a generated-image artifact.
+
+    A provider returns the image itself as a base64 data URI. That must never
+    become the reply bubble: the image goes through the existing artifact
+    pipeline (`store_artifact` -> `/api/v1/artifacts/...` ->
+    `renderArtifact()`), and this is the line shown above the card."""
+    if count <= 1:
+        return "🎨 Image ta generate hoyeche — niche dekho."
+    return f"🎨 {count} ta image generate hoyeche — niche dekho."
+
 
 # The two user-facing texts the host-terminal fallback approval card uses.
 # Kept here (not in the static Core prompt) because they describe a LIVE
@@ -721,6 +750,16 @@ class ChatPipeline:
         att = _describe_attachments(attachments)
         if att:
             parts.append("Attachments sent with the message: " + att)
+        # Make the required output modality explicit to the Gateway so its
+        # "assign the work" pick prefers an image-capable model instead of a
+        # text one. Not a trust boundary: routing enforces the modality as a
+        # hard gate regardless of what the Gateway assigns (see _route).
+        if classify(message) == "image_generation":
+            parts.append(
+                "This request asks for a GENERATED IMAGE. Assign a "
+                "provider/model whose output is an image (image generation). "
+                "If no such model is listed, leave provider/model empty and "
+                "let automatic routing choose an image-capable model.")
         parts.append("User message:\n" + message)
         try:
             raw = self.gateway.chat(
@@ -1213,22 +1252,42 @@ class ChatPipeline:
 
     # -- helpers -----------------------------------------------------------------
     @staticmethod
-    def _task_type(text: str, attachments) -> str:
+    def _task_type(text: str, attachments, raw: str = "") -> str:
         if _has_image(attachments):
             return "vision"
         t = classify(text)
+        if t == "simple_chat" and raw:
+            # The Gateway may rewrite the request; if the rewrite no longer
+            # carries the words the classifier keys on ("chobi banao",
+            # "photo create koro"), fall back to the user's original wording
+            # so a real image request is not silently served as chat.
+            t = classify(raw)
         return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
     def _route(self, task_type, messages, provider, model, vision, req=""):
+        # Non-text output is a HARD router requirement, not a hint: for an
+        # image request the router must select only a model whose metadata
+        # declares image output AND whose adapter really implements
+        # generate_image() (the adapter half is enforced in
+        # AstraRouter.route_request). A preferred provider/model is still
+        # honoured, but only if it passes that gate — never substituted in
+        # for a model that cannot actually produce the image.
+        out_mods = (["image"] if task_type == "image_generation" else [])
         rr = self.router.route_request(RoutingRequest(
             task_type=task_type, messages=messages,
             preferred_provider=provider or None,
             preferred_model=model or None,
+            required_output_modalities=out_mods,
             vision=vision, max_tokens=self.max_tokens, trace=req))
         if (rr is None or not rr.ok) and task_type not in ("simple_chat", "vision") \
                 and "no eligible" in (getattr(rr, "error", "") or ""):
             # A hard capability filter (e.g. "coding") left nothing to run
             # on — a plain chat turn can still be served by any model.
+            # image_generation is deliberately NOT in this fallback: if no
+            # image-capable model exists, answering with text would silently
+            # misrepresent a failed image request as a chat reply.
+            if task_type == "image_generation":
+                return rr
             rr = self.router.route_request(RoutingRequest(
                 task_type="simple_chat", messages=messages,
                 preferred_provider=provider or None,
@@ -1467,7 +1526,8 @@ class ChatPipeline:
                 "Recent conversation (for reference):\n" + ctx_text +
                 "\n\nCurrent request:\n" + brief["final_request"], attachments)
         messages.append({"role": "user", "content": content})
-        task_type = self._task_type(brief["final_request"], attachments)
+        task_type = self._task_type(brief["final_request"], attachments,
+                                  raw=raw)
 
         # The Provider is the AI that does the work. With the shared
         # Terminal/tool surface wired, that work is a real multi-step agent
@@ -1475,8 +1535,13 @@ class ChatPipeline:
         # results return to the SAME execution. Without it, the original
         # single provider call is used unchanged.
         tools_available = self._tools_available()
-        use_loop = self._tool_loop_usable() or (execution.required and
-                                                tools_available)
+        # Image generation is one provider-API call, never a multi-step tool
+        # task: run it on the single-call route even when the runtime/tool
+        # loop is wired, otherwise a text tool-loop brain would answer the
+        # image prompt with prose instead of calling generate_image().
+        use_loop = task_type != "image_generation" and (
+            self._tool_loop_usable() or (execution.required and
+                                         tools_available))
         if use_loop:
             rr = self._run_tool_loop(
                 brief, hist_turns, ctx_text, task_type, vision, scope,
@@ -1502,7 +1567,12 @@ class ChatPipeline:
                 self._emit("chat.pipeline.finished", status="no_provider",
                            op=f"chat:{req}", request=req, trace=req,
                            terminal=True)
-                if gateway_ok:
+                if task_type == "image_generation":
+                    # Keys exist, but nothing can actually generate an
+                    # image — say that, instead of the generic "no AI
+                    # provider configured" text.
+                    msg = _NO_IMAGE_MODEL_MESSAGE
+                elif gateway_ok:
                     msg = _NO_PROVIDER_CONFIGURED_MESSAGE
                 else:
                     msg = _NO_PROVIDER_AND_GATEWAY_CONFIGURED_MESSAGE
@@ -1513,6 +1583,23 @@ class ChatPipeline:
                 "Provider theke kono uttor pawa jayni. Kichukkhon pore abar "
                 f"try korun. (`{err}`)", False, trace)
         trace["served_by"] = f"{rr.provider}/{rr.model}"
+        # An image request's provider reply IS the image (a base64 data URI),
+        # not prose. It goes through the existing artifact pipeline and is
+        # shown as an image card — never handed to the text verifier (which
+        # would "correct" a base64 blob) and never rendered as a wall of
+        # base64 in the reply bubble. No artifact => the model returned
+        # actual text (e.g. an explanation/refusal), so fall through to the
+        # normal verified-chat path and show it as-is.
+        if task_type == "image_generation":
+            arts = self._artifacts(rr.text, raw)
+            if arts:
+                trace["verification"] = {"status": "not_applicable"}
+                trace["artifacts"] = len(arts)
+                self._emit("chat.pipeline.finished", status="complete",
+                           op=f"chat:{req}", request=req, trace=req,
+                           terminal=True)
+                return self._reply(_image_reply_text(len(arts)), True, trace,
+                                   arts)
         # Corrections go back through the loop's final message list (which
         # carries the tool exchanges), not just the opening prompt.
         supervised_messages = getattr(rr, "_loop_messages", None) or messages

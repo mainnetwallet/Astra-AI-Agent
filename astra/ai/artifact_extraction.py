@@ -123,10 +123,32 @@ def _extract_code_artifacts(text: str, artifact_dir: str,
     return artifacts
 
 
+# Same word order + script tolerance as astra.ai.router.classify(): English
+# puts the verb first ("create an image"), while Banglish/Bangla often puts
+# the noun first ("photo create koro", "একটা ছবি বানাও"). `\b` is applied to
+# the Latin alternation only — Python's `re` does not treat Bengali combining
+# vowel signs (ি া ৌ …) as word characters, so `\b` after "ছবি"/"তৈরি" cannot
+# match.
+_IMAGE_NOUNS_LATIN = (r"(?:image|picture|photo|photograph|illustration|diagram"
+                      r"|logo|icon|art|chobi|chhobi)")
+_IMAGE_VERBS_LATIN = r"(?:generate|create|draw|make|design|banao|banan|toiri)"
+_IMAGE_NOUNS_BN = r"(?:ছবি|চিত্র|পিকচার)"
+_IMAGE_VERBS_BN = r"(?:বানাও|বানান|বানাতে|বানিয়ে|তৈরি|আঁকো|এঁকে|ডিজাইন)"
+_IMAGE_OUTPUT = re.compile(
+    r"(?:\b" + _IMAGE_VERBS_LATIN + r"\b|" + _IMAGE_VERBS_BN + r")"
+    r"\s+(?:an?\s+)?"
+    r"(?:\b" + _IMAGE_NOUNS_LATIN + r"\b|" + _IMAGE_NOUNS_BN + r")"
+    r"|(?:\b" + _IMAGE_NOUNS_LATIN + r"\b|" + _IMAGE_NOUNS_BN + r")"
+    r".{0,20}"
+    r"(?:\b" + _IMAGE_VERBS_LATIN + r"\b|" + _IMAGE_VERBS_BN + r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
 def detect_output_type(message_text: str) -> str:
     """Detect what kind of output the user is requesting."""
     low = message_text.lower()
-    if re.search(r"\b(generate|create|draw|make)\s+(an?\s+)?(image|picture|photo|illustration)", low):
+    if _IMAGE_OUTPUT.search(low):
         return "image"
     if re.search(r"\b(generate|create|make)\s+(an?\s+)?(audio|sound|music|speech)", low):
         return "audio"

@@ -38,10 +38,13 @@ returns `(provider, model, reply)` exactly as before.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from datetime import datetime
 
+from astra.ai.capabilities import (adapter_can_generate,
+                                   filter_candidates_by_output_modalities)
 from astra.ai.gateway_contract import ProviderExecutionPort
 from astra.ai.models import Model, metadata_for
 from astra.ai.token_limits import resolve_output_tokens
@@ -203,24 +206,48 @@ class RoutingResult:
                 "completion_status": self.completion_status}
 
 
+# Image-generation intent, in BOTH word orders and BOTH scripts.
+#
+# Order: English usually puts the verb first ("create an image"), while
+# Banglish/Bangla written in Latin script often puts the noun first ("photo
+# create koro", "akta chobi banao") — and Bengali script does the same
+# ("একটা ছবি বানাও"). Matching only the first order silently fell through to
+# the "vision" branch in classify(), which sets
+# required_capabilities=["vision"] (image *understanding* — the wrong
+# capability axis for an image *generation* request) and hard-filters out
+# every text-only model.
+#
+# `\b` boundaries are applied ONLY to the Latin alternation: Python's `re`
+# does not treat Bengali combining vowel signs (ি া ৌ …) as word
+# characters, so a trailing `\b` after "ছবি" or "তৈরি" can never match. The
+# Bengali alternation is therefore matched without boundaries, which is safe
+# because Bengali words are far more specific than the short Latin ones
+# ("art", "icon") that need the boundary to avoid matching inside e.g.
+# "start".
+_IMAGE_NOUNS_LATIN = (r"(?:image|picture|photo|photograph|illustration|diagram"
+                      r"|logo|icon|art|chobi|chhobi)")
+_IMAGE_VERBS_LATIN = r"(?:generate|create|draw|make|design|banao|banan|toiri)"
+_IMAGE_NOUNS_BN = r"(?:ছবি|চিত্র|পিকচার)"
+_IMAGE_VERBS_BN = r"(?:বানাও|বানান|বানাতে|বানিয়ে|তৈরি|আঁকো|এঁকে|ডিজাইন)"
+
+# Latin words carry `\b`; Bengali ones do not (see above). Mixing the two
+# scripts in one sentence ("একটা futuristic city photo তৈরি করো") therefore
+# works in either order without a boundary on the Bengali side.
+_IMAGE_NOUNS = r"(?:\b" + _IMAGE_NOUNS_LATIN + r"\b|" + _IMAGE_NOUNS_BN + r")"
+_IMAGE_VERBS = r"(?:\b" + _IMAGE_VERBS_LATIN + r"\b|" + _IMAGE_VERBS_BN + r")"
+
+_IMAGE_GENERATION_RE = re.compile(
+    _IMAGE_VERBS + r"\s+(?:an?\s+)?" + _IMAGE_NOUNS
+    + "|" + _IMAGE_NOUNS + r".{0,20}" + _IMAGE_VERBS,
+    re.IGNORECASE | re.UNICODE,
+)
+
+
 def classify(text: str) -> str:
     """Task-type classification for a user message (deterministic)."""
     import re
     low = text.lower()
-    # Image-generation intent, in either word order: English tends to put
-    # the verb first ("create an image"), but Banglish/Bangla phrasing
-    # written in Latin script often puts the noun first ("photo create
-    # koro", "akta chobi banao"). Matching only the first order was
-    # silently falling through to the "vision" branch below, which sets
-    # required_capabilities=["vision"] (image *understanding*) — the wrong
-    # capability axis entirely for an image *generation* request — and
-    # that hard-filters out every text-only model, failing the request
-    # for a reason that has nothing to do with what the user actually
-    # asked for.
-    _img_nouns = r"(image|picture|photo|photograph|illustration|diagram|logo|icon|art|chobi|chhobi)"
-    _img_verbs = r"(generate|create|draw|make|design|banao|banan|toiri)"
-    if re.search(_img_verbs + r"\s+(an?\s+)?" + _img_nouns, low) or \
-       re.search(_img_nouns + r"\b.{0,20}\b" + _img_verbs, low):
+    if _IMAGE_GENERATION_RE.search(low):
         return "image_generation"
     if re.search(r"generate\s+(an?\s+)?audio|create\s+(an?\s+)?audio|text.to.speech|tts\b", low):
         return "audio"
@@ -487,6 +514,14 @@ class AstraRouter:
                 requested_provider=req.preferred_provider or "",
                 requested_model=req.preferred_model or "")
         candidates = self._candidates(req)
+        # Adapter-side output gate (the model-metadata half is enforced by
+        # meets_hard_requirements via required_output_modalities): an image
+        # request can only ever land on a provider whose adapter genuinely
+        # implements generate_image(). Without this, a model whose metadata
+        # claims image output but whose adapter cannot execute it would be
+        # selected and either raise or answer with prose.
+        candidates = filter_candidates_by_output_modalities(
+            candidates, req.required_output_modalities)
         if not candidates:
             return self._route_failed(
                 req, op, ok=False, error="no eligible provider/model available",
@@ -1109,7 +1144,11 @@ class AstraRouter:
                 # for non-chat output modalities (image generation, TTS)
                 # before falling through to the normal chat path.
                 out_mods = req.required_output_modalities or []
-                if "image" in out_mods and hasattr(adapter, "generate_image"):
+                if "image" in out_mods:
+                    if not adapter_can_generate(adapter, "image"):
+                        raise ProviderError(
+                            f"{name}: adapter cannot generate images for "
+                            f"{model.model_id}")
                     prompt = self._extract_prompt(req.messages)
                     text = adapter.generate_image(prompt, model=model.model_id)
                 elif "audio" in out_mods and hasattr(adapter, "text_to_speech"):

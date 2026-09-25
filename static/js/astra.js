@@ -2739,7 +2739,7 @@ function renderArtifact(a) {
   const el = document.createElement("div");
   el.className = "artifact-card";
   const url = `/api/v1/artifacts/${encodeURIComponent(a.id)}/${encodeURIComponent(a.filename)}`;
-  const type = (a.type || a.mime || "").split("/")[0];
+  const type = (a.artifact_type || a.type || a.mime_type || a.mime || "").split("/")[0];
   if (type === "image") {
     el.innerHTML = `<img class="artifact-image" src="${esc(url)}" alt="${esc(a.filename)}">
       <div class="artifact-label">${_fileIcon(a.filename)} ${esc(a.filename)}</div>

@@ -1261,7 +1261,7 @@ class ChatPipeline:
         return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
     def _route(self, task_type, messages, provider, model, vision,
-               req="", source_image=None):
+               req="", source_image=None, mask_image=None):
         # image_generation / image_editing are owned EXCLUSIVELY by the
         # Gateway's ImageRouter (see `_route_image`): it is the only image
         # execution path, so these tasks never reach the Provider router's
@@ -1269,7 +1269,8 @@ class ChatPipeline:
         is_image = task_type in ("image_generation", "image_editing")
         if is_image:
             rr = self._route_image(task_type, messages, model, req,
-                                   source_image=source_image)
+                                   source_image=source_image,
+                                   mask_image=mask_image)
             if rr is not None:
                 # Either the real image was produced, or ImageRouter
                 # attempted every eligible FREE model and the whole pool
@@ -1307,7 +1308,7 @@ class ChatPipeline:
         return rr
 
     def _route_image(self, task_type, messages, model, req="",
-                     source_image=None):
+                     source_image=None, mask_image=None):
         """Run an image request through the dedicated Image Provider/Model
         Router (astra.ai.image_router.ImageRouter), NOT through
         `Gateway.generate_image()`. The Gateway is only ever the
@@ -1598,7 +1599,7 @@ class ChatPipeline:
                 "Recent conversation (for reference):\n" + ctx_text +
                 "\n\nCurrent request:\n" + brief["final_request"], attachments)
         messages.append({"role": "user", "content": content})
-        task_type = self._task_type(brief["final_request"], attachments)
+        task_type = self.gateway.classify_image_operation(brief["final_request"], attachments) if self.gateway else self._task_type(brief["final_request"], attachments)
 
         # The Provider is the AI that does the work. With the shared
         # Terminal/tool surface wired, that work is a real multi-step agent

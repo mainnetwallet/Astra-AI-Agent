@@ -210,10 +210,15 @@ class FreshnessTests(_Base):
         calls = []
         self._patched(calls)
         router, gateway, provider, conn = _stack()
-        router.test_provider_model("groq", "m1")
+        provider_result = router.test_provider_model("groq", "m1")
         self.assertEqual(len(calls), 1)
-        gateway.test_connection_model(conn, "m1")   # same identity, still fresh
+        self.assertEqual(provider_result["key"], "key 1")
+        self.assertEqual(provider_result["key_label"], "key 1")
+        gateway_result = gateway.test_connection_model(conn, "m1")   # same identity, still fresh
         self.assertEqual(len(calls), 1)              # no new upstream call
+        self.assertEqual(gateway_result["key"], "key 1")
+        self.assertEqual(gateway_result["key_label"], "key 1")
+        self.assertTrue(gateway_result["reused"])
 
     def test_expired_result_triggers_a_new_call(self):
         calls = []

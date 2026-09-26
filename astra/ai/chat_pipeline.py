@@ -123,6 +123,16 @@ _NO_IMAGE_MODEL_MESSAGE = (
     "Kono eligible free image model configured ba available nei. "
     "Required image-provider credentials/configuration check kore abar chesta korun."
 )
+_NO_SOURCE_IMAGE_MESSAGE = (
+    "✕ Edit korar jonno ekta chobi attach korte hobe.\n\n"
+    "Kono reusable image attachment paoa jayni is message-e. Ekta chobi "
+    "attach kore abar try korun."
+)
+_NO_MASK_IMAGE_MESSAGE = (
+    "✕ Inpainting korar jonno ekta mask image attach korte hobe.\n\n"
+    "Kono reusable mask image paoa jayni is message-e. Mask image attach "
+    "kore abar try korun."
+)
 _NO_GATEWAY_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI gateway-er API key set kora nei."
 )
@@ -1670,13 +1680,27 @@ class ChatPipeline:
                 session_id, terminal_context, exec_context, req, trace,
                 messages, content)
         else:
+            def _path_of(a):
+                # Public attachment dicts (astra.core.attachments.Attachment
+                # .to_dict()) deliberately omit filesystem paths and carry
+                # only the internal `_storage_path` (see web.py
+                # ._process_uploads); a re-attached prior image from
+                # ChatLog.latest_image_attachment() carries the public
+                # `storage_path` instead. Accept either so a freshly
+                # uploaded edit/inpaint source image is not mistaken for
+                # "no image attached".
+                return str(a.get("storage_path") or a.get("_storage_path") or "")
             source_image = next(
                 (a for a in (attachments or [])
                  if isinstance(a, dict) and a.get("family") == "image"
-                 and a.get("role") != "mask" and a.get("storage_path")), None)
+                 and a.get("role") != "mask" and _path_of(a)), None)
             mask_image = next((a for a in (attachments or [])
                                if isinstance(a, dict) and a.get("family") == "image"
-                               and a.get("role") == "mask" and a.get("storage_path")), None)
+                               and a.get("role") == "mask" and _path_of(a)), None)
+            if source_image is not None and not source_image.get("storage_path"):
+                source_image = dict(source_image, storage_path=_path_of(source_image))
+            if mask_image is not None and not mask_image.get("storage_path"):
+                mask_image = dict(mask_image, storage_path=_path_of(mask_image))
             rr = self._route(task_type, messages, brief["provider"],
                              brief["model"], vision, req=req,
                              source_image=source_image, mask_image=mask_image)
@@ -1690,8 +1714,16 @@ class ChatPipeline:
                 # from "every eligible FREE model was attempted and failed".
                 exhausted = (IMAGE_EXHAUSTED_MESSAGE in (err or "")
                              or bool(getattr(rr, "attempts", 0)))
-                message = (_ALL_IMAGE_MODELS_FAILED_MESSAGE if exhausted
-                           else _NO_IMAGE_MODEL_MESSAGE)
+                needs_source = "reusable source image" in (err or "")
+                needs_mask = "reusable mask image" in (err or "")
+                if needs_source:
+                    message = _NO_SOURCE_IMAGE_MESSAGE
+                elif needs_mask:
+                    message = _NO_MASK_IMAGE_MESSAGE
+                elif exhausted:
+                    message = _ALL_IMAGE_MODELS_FAILED_MESSAGE
+                else:
+                    message = _NO_IMAGE_MODEL_MESSAGE
                 self._emit("chat.pipeline.finished", status="no_image_model",
                            op=f"chat:{req}", request=req, trace=req,
                            terminal=True)

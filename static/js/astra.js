@@ -1935,6 +1935,22 @@ function _healthKeyLabel(kind, name) {
   return key ? key.label : "Key 1";
 }
 
+function _renderHealthKeyPicker() {
+  const panel = $("#health-key-selector");
+  if (!panel) return;
+  const rows = [];
+  for (const [name, keys] of Object.entries(PROVIDER_KEYS || {})) {
+    if (!keys.length) continue;
+    const selected = _selectedHealthKey("provider", name);
+    rows.push(`<div class="health-key-row"><b>Provider · ${esc(name)}</b><select data-health-key-kind="provider" data-health-key-name="${esc(name)}">${keys.map(k => `<option value="${esc(k.key_id)}" ${k.key_id === selected ? "selected" : ""}>${esc(k.label)}</option>`).join("")}</select></div>`);
+  }
+  for (const [name, keys] of Object.entries(GATEWAY_KEYS || {})) {
+    if (!keys.length) continue;
+    const selected = _selectedHealthKey("gateway", name);
+    rows.push(`<div class="health-key-row"><b>Gateway · ${esc(GATEWAY_LABELS[name] || name)}</b><select data-health-key-kind="gateway" data-health-key-name="${esc(name)}">${keys.map(k => `<option value="${esc(k.key_id)}" ${k.key_id === selected ? "selected" : ""}>${esc(k.label)}</option>`).join("")}</select></div>`);
+  }
+  panel.innerHTML = `<div class="health-key-presets"><button class="btn mini" data-health-key-preset="first">First key</button><button class="btn mini" data-health-key-preset="last">Last key</button></div>${rows.join("")}`;
+}
 function _initHealthKeyPicker() {
   const btn = $("#btn-health-key-selector"), panel = $("#health-key-selector");
   if (!btn || !panel || btn.dataset.hooked) return;

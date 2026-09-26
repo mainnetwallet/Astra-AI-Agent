@@ -351,14 +351,12 @@ _SPECS: tuple = (
               free_tier=FREE_TRUE, free_evidence=_CF_FREE,
               params=("prompt", "width", "height")),
     # ── Google Gemini (native models/<id>:generateContent) ────────────────
-    # Text -> image via `responseModalities: [TEXT, IMAGE]`. Editing is NOT
-    # advertised: no Astra adapter forwards a source image to Gemini yet, so
-    # claiming image_editing would be false (see the code base's editing
-    # rule). The exact id is preserved.
+    # Text -> image and source-image editing both use the native content API.
+    # The adapter forwards an uploaded/generated image as inlineData.
     ImageSpec("gemini", "gemini-2.5-flash-image",
               PROTOCOL_GEMINI_CONTENT,
               "user request 2026-09-26 (force-added FREE candidate)",
-              capabilities=(IMAGE_GENERATION,),
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING),
               input_modalities=("text", "image"),
               output_modalities=("text", "image"),
               sizes=("1024x1024",),

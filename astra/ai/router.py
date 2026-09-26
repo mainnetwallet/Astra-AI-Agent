@@ -1102,7 +1102,9 @@ class AstraRouter:
                        "latency_ms": round(rr.latency_ms, 1)}
 
             result, reused = self.shared_health.run(identity, _probe_fn)
-            cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
+            # The shared identity already resolved the exact credential. Use it
+            # for display so concurrent key selection cannot mislabel the test.
+            cred = id_cred or (pool.last_key() if pool is not None and hasattr(pool, "last_key") else None)
             if reused:
                 # No real upstream call was made by this caller — the
                 # Gateway-side probe owns it. Local Provider health state
@@ -1115,7 +1117,9 @@ class AstraRouter:
                         "latency_ms": round(result["latency_ms"], 1),
                         "error": result["error"],
                         "key_id": cred.key_id if cred else (key_id or ""),
-                        "key": cred.label if cred else ""}
+                        "key": cred.label if cred else (key_id or ""),
+                        "key_label": cred.label if cred else (key_id or ""),
+                        "reused": True}
             rr = holder["rr"]
             return {
                 "model": rr.model or model_id,
@@ -1316,6 +1320,10 @@ class AstraRouter:
                             req.max_tokens, provider=name, model_meta=model))
                 ms = duration_ms(t0)
                 cost = self._estimate_cost_adapter(adapter, text)
+                test_cred = (adapter.pool.last_key()
+                              if getattr(adapter, "pool", None) is not None
+                              and hasattr(adapter.pool, "last_key") else None)
+                key_label = test_cred.label if test_cred else ""
                 self._latency[name].append(ms)
                 self._calls[name] += 1
                 self._cost_est[name] = self._cost_est.get(name, 0.0) + cost
@@ -1330,7 +1338,9 @@ class AstraRouter:
                                    _reason=("matched preference" if not attempt else
                                             f"retry #{attempt}"))
                 self._emit("ai.completed", provider=name, model=model.model_id,
-                           latency_ms=ms, op=op, trace=req.trace, terminal=True)
+                           latency_ms=ms, op=op, trace=req.trace, terminal=True,
+                           key_id=test_cred.key_id if test_cred else "",
+                           key_label=key_label)
                 self._record_key_model(adapter, model.model_id, True, ms, "", req)
                 return rr
             except (ProviderError, TimeoutError) as e:
@@ -1341,9 +1351,15 @@ class AstraRouter:
                 # per-key test: one attempt, on that key only -> terminal.
                 retry = (not self._pinned(adapter) and attempt <= retries
                          and getattr(e, "retryable", True))
+                test_cred = (adapter.pool.last_key()
+                              if getattr(adapter, "pool", None) is not None
+                              and hasattr(adapter.pool, "last_key") else None)
+                key_label = test_cred.label if test_cred else ""
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt, op=op,
-                           trace=req.trace, terminal=not retry, retrying=retry)
+                           trace=req.trace, terminal=not retry, retrying=retry,
+                           key_id=test_cred.key_id if test_cred else "",
+                           key_label=key_label)
                 if self._pinned(adapter):
                     break
                 # A NON-retryable error (e.g. "no healthy credential

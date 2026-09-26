@@ -120,6 +120,7 @@ class _FakeConn:
         self.pool = True
         self._outcomes = list(outcomes or [])
         self.image_calls = []
+        self.image_kwargs = []
         self.chat_calls = 0
 
     def health_check(self):
@@ -139,8 +140,9 @@ class _FakeConn:
         return "text answer"
 
     def generate_image(self, prompt, model=None, size="1024x1024", n=1,
-                       source_image=None):
-        self.image_calls.append((model, prompt, source_image))
+                       source_image=None, mask_image=None):
+        self.image_calls.append((model, prompt))
+        self.image_kwargs.append({"source_image": source_image, "mask_image": mask_image})
         outcome = self._outcomes.pop(0) if self._outcomes else "ok"
         if isinstance(outcome, Exception):
             raise outcome
@@ -515,6 +517,13 @@ class TestImageRequestClassification(unittest.TestCase):
             self.assertNotIn(classify(text),
                              ("image_generation", "image_editing"), text)
 
+    def test_gateway_classifies_edit_and_inpaint_from_modalities(self):
+        self.assertEqual(classify_gateway_request(
+            "ei photo ta cinematic kore dao", image_input=True), "image_editing")
+        self.assertEqual(classify_gateway_request(
+            "ei photo ta inpaint kore dao", image_input=True, mask_input=True),
+            "image_inpainting")
+
     def test_image_production_never_becomes_simple_chat(self):
         for text in self.GEN + self.EDIT:
             self.assertNotEqual(classify(text), "simple_chat", text)
@@ -754,8 +763,7 @@ class TestForceAddedGeminiImageModel(unittest.TestCase):
         self.assertEqual([m.model_id for m in rows], [GEMINI_IMG])
         self.assertIn("image_generation", rows[0].capabilities)
         self.assertIn("image", rows[0].output_modalities)
-        # editing is NOT advertised: no adapter forwards a source image yet
-        self.assertNotIn("image_editing", rows[0].capabilities)
+        self.assertIn("image_editing", rows[0].capabilities)
 
     def test_gemini_dispatch_uses_the_image_api_not_chat(self):
         gem = self._gemini()
@@ -1540,6 +1548,32 @@ class TestProviderImageAdapterMechanics(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_cloudflare_img2img_and_mask_are_sent_as_bytes(self):
+        from astra.ai.gateway import AstraGatewayCloudflare
+        fd, source = tempfile.mkstemp(suffix=".png")
+        fd2, mask = tempfile.mkstemp(suffix=".png")
+        try:
+            with os.fdopen(fd, "wb") as fh: fh.write(PNG)
+            with os.fdopen(fd2, "wb") as fh: fh.write(PNG)
+            conn = AstraGatewayCloudflare(config=_cfg(
+                IMAGE_CLOUDFLARE_API_KEY="k",
+                IMAGE_CLOUDFLARE_ACCOUNT_ID="acct",
+                CLOUDFLARE_IMAGE_MODELS=SDXL))
+            seen = {}
+            def side(req, timeout=None):
+                seen["body"] = json.loads(req.data.decode())
+                return _resp(_cf_ok())
+            with mock.patch("urllib.request.urlopen", side):
+                conn.generate_image("cinematic", model=SDXL,
+                                    source_image={"storage_path": source},
+                                    mask_image={"storage_path": mask})
+            self.assertEqual(base64.b64decode(seen["body"]["image_b64"]), PNG)
+            self.assertEqual(seen["body"]["mask"], list(PNG))
+        finally:
+            for p in (source, mask):
+                try: os.unlink(p)
+                except OSError: pass
+
     def test_openai_images_protocol_mechanics(self):
         from astra.ai.gateway import AstraGatewayZAI
         conn = AstraGatewayZAI(config=_cfg(GW_ZAI_API_KEYS="k",
@@ -1912,7 +1946,8 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
             self._gw = gw
 
         def generate(self, prompt, model=None, size="1024x1024", n=1, *,
-                     editing=False, trace="", discover=True):
+                     editing=False, source_image=None, mask_image=None,
+                     operation=None, trace="", discover=True):
             self._gw.image_calls.append((prompt, model, editing))
             self._gw.last_model = FLUX
             return DATA_URI
@@ -1928,6 +1963,13 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
 
         def is_usable(self):
             return self.usable
+
+        def classify_image_operation(self, message, attachments=None):
+            from astra.ai.gateway_routing import classify_gateway_request
+            has_image = any(isinstance(a, dict) and a.get("family") == "image"
+                            for a in (attachments or []))
+            return classify_gateway_request(message, vision=has_image,
+                                            image_input=has_image)
 
         def chat(self, messages, max_tokens=None, category=None, trace=""):
             self.calls.append(messages)

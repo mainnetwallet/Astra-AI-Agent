@@ -758,7 +758,8 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1,
-                       source_image: dict | None = None) -> str:
+                       source_image: dict | None = None,
+                       mask_image: dict | None = None) -> str:
         """Generate or edit an image through Gemini's native content API.
 
         Editing is capability-gated by ImageRouter, so a source image is only
@@ -767,6 +768,8 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
+        if mask_image is not None:
+            raise ProviderError(f"{self.name}: inpainting is not supported")
         parts = [{"text": prompt}]
         if source_image:
             path = str(source_image.get("storage_path") or "")
@@ -911,13 +914,12 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
 # timeouts, bounded retries, error/rate-limit classification, credential
 # rotation, health and usage capture are all inherited unchanged.
 
-    # ── image generation (Workers AI /ai/run/<model>) ─────────────────────
+    # ── image generation/editing/inpainting (Workers AI /ai/run/<model>)
     def generate_image(self, prompt: str, model: str | None = None,
-                       size: str = "1024x1024", n: int = 1) -> str:
-        """FLUX and friends are served by /accounts/<id>/ai/run/<model>, not
-        by the OpenAI-compatible chat path. The response is normally JSON
-        (`{"result": {"image": "<b64>"}}`); some models return raw image
-        bytes, and both are normalized to a data URI."""
+                       size: str = "1024x1024", n: int = 1, *,
+                       source_image: dict | None = None,
+                       mask_image: dict | None = None) -> str:
+        """Run a verified Cloudflare image model with optional img2img/mask."""
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
@@ -925,10 +927,8 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
             raise ProviderError(
                 f"{self.name}: no account ids configured "
                 f"({self.image_account_ids_env})")
-        # Only send parameters the model's published schema accepts, so a
-        # model like flux-1-schnell (prompt/steps only) never gets a 400 for
-        # an unsupported width/height.
-        from astra.ai.image_models import image_spec
+        from astra.ai.image_models import (
+            image_spec, IMAGE_EDITING, IMAGE_INPAINTING)
         spec = image_spec("cloudflare", model)
         allowed = set(spec.params) if spec else {"prompt"}
         body = {"prompt": prompt}
@@ -939,6 +939,33 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
                 w, h = 1024, 1024
             body["width"] = max(256, min(w, 2048))
             body["height"] = max(256, min(h, 2048))
+
+        def _read_bytes(source: dict, label: str) -> bytes:
+            path = str(source.get("storage_path") or "")
+            if not path or not os.path.isfile(path):
+                raise ProviderError(f"{self.name}: {label} is unavailable")
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            if not raw:
+                raise ProviderError(f"{self.name}: {label} is empty")
+            return raw
+
+        if source_image is not None:
+            if not spec or IMAGE_EDITING not in spec.capabilities:
+                raise ProviderError(
+                    f"{self.name}: model {model} does not support image editing")
+            import base64 as _b64
+            body["image_b64"] = _b64.b64encode(
+                _read_bytes(source_image, "source image")).decode("ascii")
+            if "strength" in allowed:
+                body["strength"] = 0.75
+
+        if mask_image is not None:
+            if not spec or IMAGE_INPAINTING not in spec.capabilities:
+                raise ProviderError(
+                    f"{self.name}: model {model} does not support inpainting")
+            raw_mask = _read_bytes(mask_image, "mask image")
+            body["mask"] = list(raw_mask)
 
         def once(cred):
             acc = self._image_account()
@@ -1061,7 +1088,9 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
         return ids
 
     def generate_image(self, prompt: str, model: str | None = None,
-                       size: str = "1024x1024", n: int = 1) -> str:
+                       size: str = "1024x1024", n: int = 1,
+                       source_image: dict | None = None,
+                       mask_image: dict | None = None) -> str:
         """Generate an image via OpenRouter's dedicated Images API.
 
         ``POST {base}/images`` -- the current documented endpoint (NOT the
@@ -1076,6 +1105,8 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
+        if source_image is not None or mask_image is not None:
+            raise ProviderError(f"{self.name}: image editing is not supported")
         body = {"model": model, "prompt": prompt, "n": max(1, int(n or 1))}
         if size:
             body["size"] = size
@@ -2005,6 +2036,21 @@ class AstraAIGateway:
     # never delays saving another connection's result.
     _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
 
+    def classify_image_operation(self, message: str, attachments=None) -> str:
+        """Gateway-owned deterministic modality/operation decision."""
+        from astra.ai.gateway_routing import classify_gateway_request
+        has_image = any(
+            isinstance(a, dict) and a.get("family") == "image"
+            and a.get("role") != "mask"
+            for a in (attachments or []))
+        has_mask = any(
+            isinstance(a, dict) and a.get("family") == "image"
+            and a.get("role") == "mask"
+            for a in (attachments or []))
+        return classify_gateway_request(
+            message, vision=has_image, image_input=has_image,
+            mask_input=has_mask)
+
     # -- image generation: eligible targets + failover -----------------------
     #
     # NOTE: image-model-pool construction is OWNED by `ImageRouter` (see
@@ -2018,9 +2064,10 @@ class AstraAIGateway:
         return self.image_router._catalog(discover=discover)
 
     def image_targets(self, *, editing: bool = False,
+                      operation: str | None = None,
                       discover: bool = True) -> list:
-        return self.image_router.build_targets(editing=editing,
-                                               discover=discover)
+        return self.image_router.build_targets(
+            editing=editing, operation=operation, discover=discover)
 
     @staticmethod
     def _image_failure_reason(exc) -> str:
@@ -2043,6 +2090,8 @@ class AstraAIGateway:
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1, *,
                        editing: bool = False, source_image: dict | None = None,
+                       mask_image: dict | None = None,
+                       operation: str | None = None,
                        trace: str = "", discover: bool = True) -> str:
         """Backward-compatible delegating wrapper -- NOT an execution path.
 
@@ -2058,7 +2107,8 @@ class AstraAIGateway:
         """
         return self.image_router.generate(
             prompt, model=model, size=size, n=n, editing=editing,
-            source_image=source_image, trace=trace, discover=discover)
+            source_image=source_image, mask_image=mask_image,
+            operation=operation, trace=trace, discover=discover)
 
     def test_connection_model(self, conn, model_id: str) -> dict:
         """Probe exactly ONE model of one connection and persist that one

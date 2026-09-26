@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Dedicated image-generation credentials (IMAGE_* env vars).
 
-Image generation now reads its OWN credentials/base URL/account id, entirely
-separate from the connection's normal chat GW_* pool:
+Image generation reads its OWN credentials/base URL/account id, ISOLATED
+from the connection's normal chat GW_* pool:
 
   IMAGE_CLOUDFLARE_API_KEY / IMAGE_CLOUDFLARE_ACCOUNT_ID / IMAGE_CLOUDFLARE_BASE_URL
   IMAGE_OPENROUTER_API_KEY / IMAGE_OPENROUTER_BASE_URL
@@ -11,9 +11,10 @@ separate from the connection's normal chat GW_* pool:
 These tests pin:
   * when an IMAGE_* var IS set, the actual HTTP request uses it (never the
     chat GW_* value);
-  * when an IMAGE_* var is left unset, image generation explicitly falls
-    back to the connection's chat GW_* credential/base URL/account id
-    (documented fallback, not a crash / not "unavailable");
+  * when an IMAGE_* var is left unset, image generation for that provider is
+    SKIPPED (not eligible, and a direct call raises a clean configuration
+    error) -- it never falls back to the connection's chat GW_* credential/
+    account id;
   * the two credential pools are isolated: a rejected (401) dedicated image
     key does not mark the connection's chat pool unhealthy, and vice versa.
 
@@ -133,21 +134,21 @@ class TestCloudflareDedicatedImageCredentials(unittest.TestCase):
         self.assertEqual(r["headers"].get("authorization"),
                          "Bearer image-token")
 
-    def test_missing_image_vars_fall_back_to_chat_credentials(self):
-        gw = build_astra_ai_gateway(_cfg(
+    def test_missing_image_vars_skip_provider_not_fall_back(self):
+        conn = AstraGatewayCloudflare(_cfg(
             GW_CLOUDFLARE_API_KEYS="chat-token",
             GW_CLOUDFLARE_ACCOUNT_IDS="chat-acct",
             CLOUDFLARE_IMAGE_MODELS=FLUX))
+        # Not eligible: no dedicated IMAGE_CLOUDFLARE_* credential/account.
+        self.assertFalse(conn.image_credentials_configured())
+        # A direct call (bypassing routing) must fail cleanly -- never use
+        # the chat GW_CLOUDFLARE_API_KEYS/ACCOUNT_IDS pool.
         behavior = lambda req, n: _Resp(json.dumps(
             {"result": {"image": B64}, "success": True}))
         with _Capture(behavior) as cap:
-            gw.generate_image("a cat", model=FLUX, discover=False)
-        r = cap.requests[0]
-        self.assertEqual(
-            r["url"],
-            "https://api.cloudflare.com/client/v4/accounts/chat-acct"
-            "/ai/run/@cf/black-forest-labs/flux-1-schnell")
-        self.assertEqual(r["headers"].get("authorization"), "Bearer chat-token")
+            with self.assertRaises(ProviderError):
+                conn.generate_image("a cat", model=FLUX)
+        self.assertEqual(cap.count, 0, "no HTTP request should be attempted")
 
     def test_rejected_dedicated_image_key_does_not_degrade_the_chat_pool(self):
         conn = AstraGatewayCloudflare(_cfg(
@@ -184,17 +185,20 @@ class TestGeminiDedicatedImageCredentials(unittest.TestCase):
                       "gemini-2.5-flash-image:generateContent", r["url"])
         self.assertEqual(r["headers"].get("x-goog-api-key"), "image-key")
 
-    def test_missing_image_vars_fall_back_to_chat_key(self):
-        gw = build_astra_ai_gateway(_cfg(
-            GW_GEMINI_API_KEYS="chat-key",
-            GEMINI_IMAGE_MODELS=GEMINI_IMG))
+    def test_missing_image_vars_skip_provider_not_fall_back(self):
+        conn = AstraGatewayGemini(_cfg(
+            GW_GEMINI_API_KEYS="chat-key", GEMINI_IMAGE_MODELS=GEMINI_IMG))
+        # Not eligible: no dedicated IMAGE_GEMINI_API_KEY.
+        self.assertFalse(conn.image_credentials_configured())
+        # A direct call (bypassing routing) must fail cleanly -- never use
+        # the chat GW_GEMINI_API_KEYS pool.
         behavior = lambda req, n: _Resp(json.dumps({"candidates": [{
             "content": {"parts": [{"inlineData": {
                 "mimeType": "image/png", "data": B64}}]}}]}))
         with _Capture(behavior) as cap:
-            gw.generate_image("a cat", model=GEMINI_IMG, discover=False)
-        self.assertEqual(cap.requests[0]["headers"].get("x-goog-api-key"),
-                         "chat-key")
+            with self.assertRaises(ProviderError):
+                conn.generate_image("a cat", model=GEMINI_IMG)
+        self.assertEqual(cap.count, 0, "no HTTP request should be attempted")
 
 
 class TestOpenRouterDedicatedImageCredentials(unittest.TestCase):
@@ -216,35 +220,47 @@ class TestOpenRouterDedicatedImageCredentials(unittest.TestCase):
         self.assertEqual(r["url"], "https://image.example.com/api/v1/images")
         self.assertEqual(r["headers"].get("authorization"), "Bearer image-key")
 
-    def test_missing_image_vars_fall_back_to_chat_key_and_base_url(self):
+    def test_missing_image_vars_skip_provider_not_fall_back(self):
         conn = self._conn(GW_OPENROUTER_API_KEYS="chat-key")
+        # Not eligible: no dedicated IMAGE_OPENROUTER_API_KEY.
+        self.assertFalse(conn.image_credentials_configured())
+        # A direct call (bypassing routing) must fail cleanly -- never use
+        # the chat GW_OPENROUTER_API_KEYS pool.
         behavior = lambda req, n: _Resp(json.dumps(
             {"data": [{"b64_json": B64}]}))
         with _Capture(behavior) as cap:
-            conn.generate_image("a cat", model=OR_LIVE_FREE)
-        r = cap.requests[-1]
-        self.assertEqual(r["url"], "https://openrouter.ai/api/v1/images")
-        self.assertEqual(r["headers"].get("authorization"), "Bearer chat-key")
+            with self.assertRaises(ProviderError):
+                conn.generate_image("a cat", model=OR_LIVE_FREE)
+        self.assertEqual(cap.count, 0, "no HTTP request should be attempted")
 
 
-class TestImagePoolFallsBackToChatPoolObject(unittest.TestCase):
-    """When no IMAGE_* credential is configured, `image_pool` IS the chat
-    pool object (not a copy) -- confirms there is truly no separate,
-    silently-empty pool masking the fallback."""
+class TestImagePoolNeverFallsBackToChatPoolObject(unittest.TestCase):
+    """When no IMAGE_* credential is configured, `image_pool` is an empty,
+    isolated pool of its own -- NEVER the chat pool object (not even as a
+    'shared until proven otherwise' convenience). This is what makes
+    `image_credentials_configured()` (and `_run`'s explicit `is not None`
+    pool handling) correctly report "not eligible" instead of silently
+    inheriting the chat GW_* credential's health."""
 
-    def test_cloudflare_image_pool_is_chat_pool_without_image_key(self):
+    def test_cloudflare_image_pool_is_isolated_and_empty_without_image_key(self):
         conn = AstraGatewayCloudflare(_cfg(
             GW_CLOUDFLARE_API_KEYS="chat-token",
             GW_CLOUDFLARE_ACCOUNT_IDS="chat-acct"))
-        self.assertIs(conn.image_pool, conn.pool)
+        self.assertIsNot(conn.image_pool, conn.pool)
+        self.assertFalse(bool(conn.image_pool))
+        self.assertFalse(conn.image_credentials_configured())
 
-    def test_gemini_image_pool_is_chat_pool_without_image_key(self):
+    def test_gemini_image_pool_is_isolated_and_empty_without_image_key(self):
         conn = AstraGatewayGemini(_cfg(GW_GEMINI_API_KEYS="chat-key"))
-        self.assertIs(conn.image_pool, conn.pool)
+        self.assertIsNot(conn.image_pool, conn.pool)
+        self.assertFalse(bool(conn.image_pool))
+        self.assertFalse(conn.image_credentials_configured())
 
-    def test_openrouter_image_pool_is_chat_pool_without_image_key(self):
+    def test_openrouter_image_pool_is_isolated_and_empty_without_image_key(self):
         conn = AstraGatewayOpenRouter(_cfg(GW_OPENROUTER_API_KEYS="chat-key"))
-        self.assertIs(conn.image_pool, conn.pool)
+        self.assertIsNot(conn.image_pool, conn.pool)
+        self.assertFalse(bool(conn.image_pool))
+        self.assertFalse(conn.image_credentials_configured())
 
 
 if __name__ == "__main__":

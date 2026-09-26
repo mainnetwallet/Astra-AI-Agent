@@ -179,13 +179,14 @@ class _GatewayCompatibleConnection:
     api_keys_env: str = ""
     base_url_env: str = ""
     image_models_env: str = ""
-    #: Image generation prefers its OWN dedicated credentials/base URL,
-    #: separate from the connection's normal chat pool (``api_keys_env``/
+    #: Image generation uses its OWN dedicated credentials/base URL,
+    #: ISOLATED from the connection's normal chat pool (``api_keys_env``/
     #: ``base_url_env``). Set per-connection to the documented ``IMAGE_*``
     #: env names (e.g. ``IMAGE_GEMINI_API_KEY``). When the dedicated
-    #: ``IMAGE_*`` credential is not configured, image generation falls back
-    #: to the connection's normal chat ``GW_*`` credential/base URL (see
-    #: `image_pool` in `__init__`) rather than being unavailable.
+    #: ``IMAGE_*`` credential is not configured, image generation for this
+    #: provider is SKIPPED (see `image_pool` in `__init__` /
+    #: `image_credentials_configured`) -- it never borrows the connection's
+    #: chat ``GW_*`` credential/base URL.
     image_api_keys_env: str = ""
     image_base_url_env: str = ""
     base_url: str = ""
@@ -219,17 +220,17 @@ class _GatewayCompatibleConnection:
         # A dedicated IMAGE_* key gets its OWN CredentialPool, isolated from
         # the connection's normal chat `self.pool` (a rejected image key
         # never marks the chat pool unhealthy, and vice versa). When no
-        # dedicated IMAGE_* key is configured, `self.image_pool` IS
-        # `self.pool` (the same object, not a copy) -- the documented
-        # fallback to the connection's normal chat credentials.
+        # dedicated IMAGE_* key is configured, `self.image_pool` is an EMPTY
+        # pool (never `self.pool`): image generation for this provider must
+        # be SKIPPED, not silently run on the chat GW_* credential. See
+        # `image_credentials_configured()` / `_run`'s `pool` handling, which
+        # treats an explicitly-empty pool as "no image credential" rather
+        # than falling through to the chat pool.
         img_secrets = (self._env_list(self.image_api_keys_env)
                        if config and self.image_api_keys_env else [])
-        if img_secrets:
-            img_label = (self._first_env(self.image_api_keys_env)
-                        or f"{self.name}-image")
-            self.image_pool = CredentialPool(img_label, img_secrets)
-        else:
-            self.image_pool = self.pool
+        img_label = (self._first_env(self.image_api_keys_env)
+                    or f"{self.name}-image")
+        self.image_pool = CredentialPool(img_label, img_secrets)
         raw_img_base = (self._env_str(self.image_base_url_env)
                         if self.image_base_url_env else None)
         self.image_base_url = (raw_img_base or "").rstrip("/")
@@ -289,9 +290,16 @@ class _GatewayCompatibleConnection:
     # -- credentials ------------------------------------------------------
     def _active_pool(self):
         """The pool THIS thread's current `_run()` call is using — the
-        dedicated image pool while an image-generation call is in flight,
-        else the normal chat pool. See `image_pool` in `__init__`."""
-        return getattr(self._tl_pool, "pool", None) or self.pool
+        dedicated image pool (even when it is empty, i.e. no IMAGE_*
+        credential configured) while an image-generation call is in
+        flight, else the normal chat pool. See `image_pool` in `__init__`.
+
+        Deliberately an ``is not None`` check, NOT ``... or self.pool``: an
+        explicitly-empty image pool must stay empty here, or a falsy-but-
+        real pool object would silently resolve back to the chat pool --
+        exactly the IMAGE_*→GW_* fallback this isolation forbids."""
+        tl = getattr(self._tl_pool, "pool", None)
+        return tl if tl is not None else self.pool
 
     def _pick(self):
         return self._active_pool().pick()
@@ -426,11 +434,16 @@ class _GatewayCompatibleConnection:
 
         ``pool``: which CredentialPool `_pick()`/`_done()` should use for the
         duration of this call (defaults to the connection's normal chat
-        pool). Image generation passes `self.image_pool` so a dedicated
-        IMAGE_* credential never borrows/consumes the chat pool's health
-        state, and vice versa."""
+        pool when ``None``). Image generation passes `self.image_pool` so a
+        dedicated IMAGE_* credential never borrows/consumes the chat pool's
+        health state, and vice versa -- including when `self.image_pool` is
+        an EMPTY pool (no IMAGE_* configured): that must raise "no healthy
+        credential" below, not fall through to the chat pool, so this uses
+        ``pool if pool is not None else self.pool`` rather than
+        ``pool or self.pool`` (an empty pool is falsy but still a real,
+        deliberate choice, not "unset")."""
         prev = getattr(self._tl_pool, "pool", None)
-        self._tl_pool.pool = pool or self.pool
+        self._tl_pool.pool = pool if pool is not None else self.pool
         try:
             attempts = 1 if single_attempt else self._attempt_count()
             last = None
@@ -667,9 +680,13 @@ class _GatewayCompatibleConnection:
         """True only when this connection's OWN dedicated IMAGE_* credential
         is configured. Used by `astra.ai.gateway_routing.
         eligible_image_generation_targets` to decide provider eligibility for
-        image generation — the normal chat `self.pool` is never consulted
-        here (see `image_api_keys_env`/`image_pool` above). Connections with
-        an additional required credential (e.g. Cloudflare's account id)
+        image generation, BEFORE any API call is attempted — the normal chat
+        `self.pool` is never consulted here (see `image_api_keys_env`/
+        `image_pool` above: `image_pool` is an empty, falsy pool when no
+        IMAGE_* key is configured, never a copy of `self.pool`). Missing
+        IMAGE_* credentials mean this provider is SKIPPED for image
+        generation, never routed to the chat GW_* pool. Connections with an
+        additional required credential (e.g. Cloudflare's account id)
         override this."""
         return bool(self.image_pool)
 
@@ -787,8 +804,9 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
     account_ids_env = "GW_CLOUDFLARE_ACCOUNT_IDS"
     image_api_keys_env = "IMAGE_CLOUDFLARE_API_KEY"
     image_base_url_env = "IMAGE_CLOUDFLARE_BASE_URL"
-    #: Dedicated account id(s) for image generation. Falls back to the
-    #: chat `account_ids_env` (`GW_CLOUDFLARE_ACCOUNT_IDS`) when unset (see
+    #: Dedicated account id(s) for image generation. ISOLATED from the chat
+    #: `account_ids_env` (`GW_CLOUDFLARE_ACCOUNT_IDS`) -- when unset, image
+    #: generation is SKIPPED, it never borrows the chat account id (see
     #: `_image_accounts` in `__init__` / `image_credentials_configured()`).
     image_account_ids_env = "IMAGE_CLOUDFLARE_ACCOUNT_ID"
     capabilities = ["chat", "stream", "tools", "json"]
@@ -799,19 +817,22 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
         self._accounts = accounts or []
         image_accounts = (config.getlist(self.image_account_ids_env)
                           if config else []) or []
-        # Dedicated image account id(s) when configured; else the documented
-        # fallback to the chat `GW_CLOUDFLARE_ACCOUNT_IDS` pool.
-        self._image_accounts = image_accounts or list(self._accounts)
+        # Dedicated image account id(s) ONLY -- no fallback to the chat
+        # `GW_CLOUDFLARE_ACCOUNT_IDS` pool. Missing IMAGE_CLOUDFLARE_ACCOUNT_ID
+        # means Cloudflare image generation is skipped (see
+        # `image_credentials_configured`), not run against the chat account.
+        self._image_accounts = list(image_accounts)
         self._aidx = 0
         self._aidx_lock = threading.Lock()
         self._image_aidx = 0
         self._image_aidx_lock = threading.Lock()
 
     def image_credentials_configured(self) -> bool:
-        """Cloudflare image eligibility requires a usable key AND account
-        id — each is the dedicated ``IMAGE_CLOUDFLARE_*`` value when
-        configured, else the documented fallback to the chat GW_* pool/
-        account ids (see `image_pool` / `_image_accounts`)."""
+        """Cloudflare image eligibility requires a usable dedicated key AND
+        a dedicated account id — each is ONLY the ``IMAGE_CLOUDFLARE_*``
+        value; neither falls back to the chat GW_* pool/account ids (see
+        `image_pool` / `_image_accounts`). Missing either means Cloudflare
+        image generation is skipped, not run against chat credentials."""
         return bool(self.image_pool) and bool(self._image_accounts)
 
     def _api_base(self) -> str:

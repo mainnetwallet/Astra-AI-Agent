@@ -221,10 +221,12 @@
   <section id="tab-providers" class="tabview">
     <div class="panel">
       <h3>🔌 AI Providers health</h3>
-      <div class="row" style="margin-bottom:8px">
+      <div class="row" style="margin-bottom:8px;align-items:center">
         <button class="btn" id="btn-providers-toggle-models">🙈 Hide models</button>
+        <button class="btn" id="btn-health-key-selector" type="button">🔑 Test key: Key 1</button>
         <button class="btn primary" id="btn-providers-test-all">⚡ Test all (providers + gateway)</button>
       </div>
+      <div id="health-key-selector" class="health-key-selector" hidden></div>
       <div id="providers-list" class="list"><div class="empty">Loading…</div></div>
 
       <h3 style="margin-top:16px">🌐 Astra AI Gateway</h3>

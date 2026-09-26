@@ -2202,6 +2202,13 @@ class WebApp:
                                            "task": r.task_stats(),
                                            "last_route": r.last_route()}},
                                  rid=req.rid)
+        if path == ["api", "providers", "reset-all-health"] and method == "POST":
+            router = self.site.router()
+            if router is None:
+                return error_response("providers unavailable", 400,
+                                      "provider_unavailable", req.rid)
+            router.reset_all_health()
+            return json_response({"ok": True, "data": {"reset": True}}, rid=req.rid)
         # provider admin: /api/v1/providers/<name>/refresh|enable|disable|test|reset-health
         # (fixed off-by-one: "api"+"providers"+<name>+<action> is 4 segments,
         # not 5 — the old `len(path) == 5` check meant this route, including

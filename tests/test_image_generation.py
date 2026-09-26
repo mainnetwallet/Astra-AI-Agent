@@ -120,6 +120,7 @@ class _FakeConn:
         self.pool = True
         self._outcomes = list(outcomes or [])
         self.image_calls = []
+        self.image_kwargs = []
         self.chat_calls = 0
 
     def health_check(self):
@@ -140,7 +141,8 @@ class _FakeConn:
 
     def generate_image(self, prompt, model=None, size="1024x1024", n=1,
                        source_image=None, mask_image=None):
-        self.image_calls.append((model, prompt, source_image, mask_image))
+        self.image_calls.append((model, prompt))
+        self.image_kwargs.append({"source_image": source_image, "mask_image": mask_image})
         outcome = self._outcomes.pop(0) if self._outcomes else "ok"
         if isinstance(outcome, Exception):
             raise outcome
@@ -754,8 +756,7 @@ class TestForceAddedGeminiImageModel(unittest.TestCase):
         self.assertEqual([m.model_id for m in rows], [GEMINI_IMG])
         self.assertIn("image_generation", rows[0].capabilities)
         self.assertIn("image", rows[0].output_modalities)
-        # editing is NOT advertised: no adapter forwards a source image yet
-        self.assertNotIn("image_editing", rows[0].capabilities)
+        self.assertIn("image_editing", rows[0].capabilities)
 
     def test_gemini_dispatch_uses_the_image_api_not_chat(self):
         gem = self._gemini()

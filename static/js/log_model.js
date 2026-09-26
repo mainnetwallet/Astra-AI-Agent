@@ -299,14 +299,15 @@
   }
 
   // Which data keys become the expanded "details" grid (order matters).
-  var FIELD_ORDER = ["provider", "model", "tool", "category", "status",
+  var FIELD_ORDER = ["provider", "model", "key_label", "tool", "category", "status",
                      "task", "workflow", "step", "tx", "tx_id", "network",
                      "attempt", "attempts", "verdict", "reason", "error",
                      "op", "trace", "request", "route"];
   // Friendlier labels for the identifier fields (op/trace are the lifecycle
   // correlation ids; showing them makes "one operation = one row" auditable).
   var FIELD_LABELS = { op: "Operation", trace: "Trace", request: "Request",
-                       tx_id: "Tx", run_id: "Run", error: "Error" };
+                       tx_id: "Tx", run_id: "Run", error: "Error",
+                       key_label: "Key" };
 
   function fieldValue(v) {
     if (v == null || v === "") return "";

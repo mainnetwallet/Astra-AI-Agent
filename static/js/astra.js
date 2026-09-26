@@ -2420,7 +2420,6 @@ async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
 
 async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey, tableEl, onResult, resumeRows) {
   const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
-  const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
   const rows = resumeRows || models.map((m) => ({
     model: m,
     keys: keys.map((k) => ({
@@ -2593,6 +2592,7 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
         if (!row) return;
         row.keys.forEach((slot) => Object.assign(slot, {
           pending: false,
+          waiting: false,
           ok: !!result.ok,
           latency_ms: result.latency_ms,
           error: result.error,

@@ -247,6 +247,14 @@ def _connection_usable(conn, *, use_image_pool: bool = False) -> bool:
             except Exception:
                 return False
         pool = getattr(conn, "image_pool", None)
+        if pool is not None:
+            return bool(pool)
+        # No dedicated image-credential plumbing at all (e.g. a connection
+        # double without `image_pool`/`image_credentials_configured`): fall
+        # back to the connection's normal chat pool -- same documented
+        # fallback `_GatewayCompatibleConnection.image_pool` applies when a
+        # real connection has no dedicated IMAGE_* credential configured.
+        pool = getattr(conn, "pool", None)
         return bool(pool) if pool is not None else False
     pool = getattr(conn, "pool", None)
     if pool is not None:

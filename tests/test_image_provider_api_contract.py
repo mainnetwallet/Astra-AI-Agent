@@ -120,7 +120,7 @@ class _Capture:
 
 CF_ENV = dict(GW_CLOUDFLARE_API_KEYS="cf-token-under-test",
               GW_CLOUDFLARE_ACCOUNT_IDS="acct-1111",
-              GW_CLOUDFLARE_IMAGE_MODELS=FLUX + "," + LUCID)
+              CLOUDFLARE_IMAGE_MODELS=FLUX + "," + LUCID)
 GEMINI_ENV = dict(GW_GEMINI_API_KEYS="gem-key-under-test",
                   GW_GEMINI_IMAGE_MODELS=GEMINI_IMG)
 OR_ENV = dict(GW_OPENROUTER_API_KEYS="or-key-under-test")

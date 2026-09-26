@@ -179,14 +179,13 @@ class _GatewayCompatibleConnection:
     api_keys_env: str = ""
     base_url_env: str = ""
     image_models_env: str = ""
-    #: Image generation gets its OWN dedicated credentials/base URL, separate
-    #: from the connection's normal chat pool (``api_keys_env``/
+    #: Image generation prefers its OWN dedicated credentials/base URL,
+    #: separate from the connection's normal chat pool (``api_keys_env``/
     #: ``base_url_env``). Set per-connection to the documented ``IMAGE_*``
-    #: env names (e.g. ``IMAGE_GEMINI_API_KEY``). There is NO fallback to the
-    #: connection's normal GW_* chat credentials/base URL: image generation
-    #: is only ever eligible when its own dedicated ``IMAGE_*`` credential is
-    #: configured (see `image_credentials_configured()` /
-    #: `astra.ai.gateway_routing.eligible_image_generation_targets`).
+    #: env names (e.g. ``IMAGE_GEMINI_API_KEY``). When the dedicated
+    #: ``IMAGE_*`` credential is not configured, image generation falls back
+    #: to the connection's normal chat ``GW_*`` credential/base URL (see
+    #: `image_pool` in `__init__`) rather than being unavailable.
     image_api_keys_env: str = ""
     image_base_url_env: str = ""
     base_url: str = ""
@@ -217,17 +216,20 @@ class _GatewayCompatibleConnection:
         raw = self._env_str(self.base_url_env)
         self.base_url = (raw or self.base_url or "").rstrip("/")
         # -- dedicated image-generation credentials/base URL (see class doc) --
-        # ImageRouter is the only component allowed to check image-provider
-        # credentials, and it must use ONLY the dedicated IMAGE_* pool below —
-        # never the connection's normal chat `self.pool`. When no dedicated
-        # IMAGE_* key is configured, `self.image_pool` is an empty pool (not
-        # a fallback to `self.pool`), so `image_credentials_configured()`
-        # correctly reports this provider as ineligible for image generation.
+        # A dedicated IMAGE_* key gets its OWN CredentialPool, isolated from
+        # the connection's normal chat `self.pool` (a rejected image key
+        # never marks the chat pool unhealthy, and vice versa). When no
+        # dedicated IMAGE_* key is configured, `self.image_pool` IS
+        # `self.pool` (the same object, not a copy) -- the documented
+        # fallback to the connection's normal chat credentials.
         img_secrets = (self._env_list(self.image_api_keys_env)
                        if config and self.image_api_keys_env else [])
-        img_label = (self._first_env(self.image_api_keys_env)
-                    or f"{self.name}-image")
-        self.image_pool = CredentialPool(img_label, img_secrets)
+        if img_secrets:
+            img_label = (self._first_env(self.image_api_keys_env)
+                        or f"{self.name}-image")
+            self.image_pool = CredentialPool(img_label, img_secrets)
+        else:
+            self.image_pool = self.pool
         raw_img_base = (self._env_str(self.image_base_url_env)
                         if self.image_base_url_env else None)
         self.image_base_url = (raw_img_base or "").rstrip("/")
@@ -785,10 +787,9 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
     account_ids_env = "GW_CLOUDFLARE_ACCOUNT_IDS"
     image_api_keys_env = "IMAGE_CLOUDFLARE_API_KEY"
     image_base_url_env = "IMAGE_CLOUDFLARE_BASE_URL"
-    #: Dedicated account id(s) for image generation. NO fallback to the
-    #: chat `account_ids_env` (`GW_CLOUDFLARE_ACCOUNT_IDS`) — ImageRouter
-    #: must use ONLY this dedicated credential (see
-    #: `image_credentials_configured()` below).
+    #: Dedicated account id(s) for image generation. Falls back to the
+    #: chat `account_ids_env` (`GW_CLOUDFLARE_ACCOUNT_IDS`) when unset (see
+    #: `_image_accounts` in `__init__` / `image_credentials_configured()`).
     image_account_ids_env = "IMAGE_CLOUDFLARE_ACCOUNT_ID"
     capabilities = ["chat", "stream", "tools", "json"]
 
@@ -798,18 +799,19 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
         self._accounts = accounts or []
         image_accounts = (config.getlist(self.image_account_ids_env)
                           if config else []) or []
-        # Dedicated image account id(s) ONLY — never inherited from the
-        # chat `GW_CLOUDFLARE_ACCOUNT_IDS` pool.
-        self._image_accounts = image_accounts or []
+        # Dedicated image account id(s) when configured; else the documented
+        # fallback to the chat `GW_CLOUDFLARE_ACCOUNT_IDS` pool.
+        self._image_accounts = image_accounts or list(self._accounts)
         self._aidx = 0
         self._aidx_lock = threading.Lock()
         self._image_aidx = 0
         self._image_aidx_lock = threading.Lock()
 
     def image_credentials_configured(self) -> bool:
-        """Cloudflare image eligibility requires BOTH the dedicated
-        ``IMAGE_CLOUDFLARE_API_KEY`` and ``IMAGE_CLOUDFLARE_ACCOUNT_ID`` —
-        neither falls back to the chat GW_* credentials/account ids."""
+        """Cloudflare image eligibility requires a usable key AND account
+        id — each is the dedicated ``IMAGE_CLOUDFLARE_*`` value when
+        configured, else the documented fallback to the chat GW_* pool/
+        account ids (see `image_pool` / `_image_accounts`)."""
         return bool(self.image_pool) and bool(self._image_accounts)
 
     def _api_base(self) -> str:
@@ -831,8 +833,9 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
         return (self.image_base_url or self.base_url or "").rstrip("/")
 
     def _image_account(self) -> str:
-        """Per-request account pick from the dedicated image account pool
-        (`IMAGE_CLOUDFLARE_ACCOUNT_ID` only — no chat-credential fallback)."""
+        """Per-request account pick from the image account pool
+        (`IMAGE_CLOUDFLARE_ACCOUNT_ID` when configured, else the chat
+        `GW_CLOUDFLARE_ACCOUNT_IDS` fallback -- see `_image_accounts`)."""
         if not self._image_accounts:
             raise ProviderError(
                 f"{self.name}: no account ids configured "

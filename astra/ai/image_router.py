@@ -319,6 +319,8 @@ class ImageRouter:
                          latency_ms=round(latency_ms, 1),
                          duration_ms=round(latency_ms, 1), attempt=attempts,
                          op=call_op, trace=trace, terminal=True,
+                         key_id=img_pool.last_key().key_id if img_pool and img_pool.last_key() else "",
+                         key_label=img_pool.last_key().label if img_pool and img_pool.last_key() else "",
                          output=f"<image data URI: {len(uri)} chars>")
                 gw._emit("image.generation.success", provider=tmodel.provider,
                          model=tmodel.model_id, attempt=attempts,

@@ -1643,15 +1643,18 @@ class ChatPipeline:
             source_image = next(
                 (a for a in (attachments or [])
                  if isinstance(a, dict) and a.get("family") == "image"
-                 and a.get("storage_path")), None)
+                 and a.get("role") != "mask" and a.get("storage_path")), None)
+            mask_image = next((a for a in (attachments or [])
+                               if isinstance(a, dict) and a.get("family") == "image"
+                               and a.get("role") == "mask" and a.get("storage_path")), None)
             rr = self._route(task_type, messages, brief["provider"],
                              brief["model"], vision, req=req,
-                             source_image=source_image)
+                             source_image=source_image, mask_image=mask_image)
         if rr is None or not rr.ok:
             err = (trace.get("error") or getattr(rr, "error", "") or
                    "unknown error")
             trace["error"] = err
-            if task_type in ("image_generation", "image_editing"):
+            if task_type in ("image_generation", "image_editing", "image_inpainting"):
                 # NEVER downgrade an image request to a text model. Report
                 # honestly, and distinguish "nothing eligible was configured"
                 # from "every eligible FREE model was attempted and failed".

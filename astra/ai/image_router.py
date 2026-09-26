@@ -272,6 +272,9 @@ class ImageRouter:
                         prompt, model=tmodel.model_id, size=size, n=n,
                         source_image=source_image, mask_image=mask_image)
                 except Exception as e:
+                    cred = (img_pool.last_key()
+                            if img_pool is not None and hasattr(img_pool, "last_key")
+                            else None)
                     reason = gw._image_failure_reason(e)
                     duration_ms = round((time.perf_counter() - start) * 1000.0, 1)
                     status_code = int(getattr(e, "code", 0) or 0)
@@ -282,19 +285,25 @@ class ImageRouter:
                              model=tmodel.model_id, reason=reason,
                              status_code=status_code, duration_ms=duration_ms,
                              attempt=attempts, op=call_op, trace=trace,
-                             terminal=True)
+                             terminal=True,
+                             key_id=cred.key_id if cred else "",
+                             key_label=cred.label if cred else "")
                     gw._emit("image.generation.failure",
                              provider=tmodel.provider, model=tmodel.model_id,
                              attempt=attempts, duration_ms=duration_ms,
                              reason=reason, failure_category=reason, op=op,
-                             trace=trace, terminal=False)
+                             trace=trace, terminal=False,
+                             key_id=cred.key_id if cred else "",
+                             key_label=cred.label if cred else "")
                     rate_limited = status_code == 429 or "rate limit" in reason
                     more_keys = bool(img_pool) and img_pool.healthy_count >= 1
                     if rate_limited and more_keys:
                         gw._emit("image.generation.key_retry",
                                  provider=tmodel.provider, model=tmodel.model_id,
                                  reason=reason, attempt=attempts, op=op,
-                                 trace=trace)
+                                 trace=trace,
+                                 key_id=cred.key_id if cred else "",
+                                 key_label=cred.label if cred else "")
                         continue   # SAME model -- pool hands out the next key
                     break          # give up on this model's keys entirely
                 else:
@@ -315,7 +324,11 @@ class ImageRouter:
                          model=tmodel.model_id, attempt=attempts,
                          duration_ms=round(latency_ms, 1),
                          latency_ms=round(latency_ms, 1), op=op, trace=trace,
-                         terminal=True)
+                         terminal=True,
+                         key_id=(img_pool.last_key().key_id
+                                 if img_pool is not None and img_pool.last_key() else ""),
+                         key_label=(img_pool.last_key().label
+                                    if img_pool is not None and img_pool.last_key() else ""))
                 return uri
             # Every key for this model is exhausted -- move to the next
             # DIFFERENT model, exactly as before.

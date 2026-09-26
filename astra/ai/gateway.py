@@ -757,14 +757,36 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
         return ""
 
     def generate_image(self, prompt: str, model: str | None = None,
-                       size: str = "1024x1024", n: int = 1) -> str:
-        """Gemini image output is NOT available on the OpenAI-compatibility
-        layer, so this calls the native models/<id>:generateContent endpoint."""
+                       size: str = "1024x1024", n: int = 1,
+                       source_image: dict | None = None) -> str:
+        """Generate or edit an image through Gemini's native content API.
+
+        Editing is capability-gated by ImageRouter, so a source image is only
+        accepted here for a model explicitly marked as image-edit capable.
+        """
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
+        parts = [{"text": prompt}]
+        if source_image:
+            path = str(source_image.get("storage_path") or "")
+            if not path or not os.path.isfile(path):
+                raise ProviderError(f"{self.name}: source image is unavailable")
+            try:
+                with open(path, "rb") as fh:
+                    raw = fh.read()
+                if not raw:
+                    raise ValueError("empty image")
+            except Exception as exc:
+                raise ProviderError(
+                    f"{self.name}: unable to read source image: {exc}") from exc
+            import base64 as _b64
+            mime = str(source_image.get("mime_type") or "image/png")
+            parts.insert(0, {"inlineData": {
+                "mimeType": mime,
+                "data": _b64.b64encode(raw).decode("ascii")}})
         mods = ["TEXT", "IMAGE"] if "2.5" in model else ["IMAGE"]
-        body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        body = {"contents": [{"role": "user", "parts": parts}],
                 "generationConfig": {"responseModalities": mods}}
         url = f"{self._native_base()}/models/{model}:generateContent"
 
@@ -2020,8 +2042,8 @@ class AstraAIGateway:
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1, *,
-                       editing: bool = False, trace: str = "",
-                       discover: bool = True) -> str:
+                       editing: bool = False, source_image: dict | None = None,
+                       trace: str = "", discover: bool = True) -> str:
         """Backward-compatible delegating wrapper -- NOT an execution path.
 
         AstraAIGateway is the entry/classification/handoff layer; it must
@@ -2036,7 +2058,7 @@ class AstraAIGateway:
         """
         return self.image_router.generate(
             prompt, model=model, size=size, n=n, editing=editing,
-            trace=trace, discover=discover)
+            source_image=source_image, trace=trace, discover=discover)
 
     def test_connection_model(self, conn, model_id: str) -> dict:
         """Probe exactly ONE model of one connection and persist that one

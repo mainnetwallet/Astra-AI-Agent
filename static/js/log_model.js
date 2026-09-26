@@ -71,6 +71,21 @@
     // render a second synthetic health-test row for the same shared result.
     if (kind === "astra_gateway.test" && d.reused === true) return false;
 
+    // Health probes emit router-level retry/fallback lifecycle events as
+    // bookkeeping around the actual provider call. The provider result row
+    // is the real API activity, so do not render the router control-plane
+    // duplicate for health_check operations.
+    if (d.task === "health_check" &&
+        (kind === "router.retry" || kind === "router.fallback")) return false;
+
+    // A health probe can also emit an aggregate ai.failed before the
+    // key-specific provider failure. When no key/attempt identity is present,
+    // that row is only the router summary; the keyed ai.failed below is the
+    // actual provider call/result and should be the single visible failure.
+    if (kind === "ai.failed" && d.task === "health_check" &&
+        (d.provider || d.model) &&
+        !d.key_label && !d.key && !d.key_id) return false;
+
     // A routing health check can fail before selecting any provider/model.
     // Attempts: 0 + this exact "no eligible" result means there was no
     // upstream API call to report, so keeping it in Activity Log is noise.

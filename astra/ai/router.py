@@ -1102,7 +1102,9 @@ class AstraRouter:
                        "latency_ms": round(rr.latency_ms, 1)}
 
             result, reused = self.shared_health.run(identity, _probe_fn)
-            cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
+            # The shared identity already resolved the exact credential. Use it
+            # for display so concurrent key selection cannot mislabel the test.
+            cred = id_cred or (pool.last_key() if pool is not None and hasattr(pool, "last_key") else None)
             if reused:
                 # No real upstream call was made by this caller — the
                 # Gateway-side probe owns it. Local Provider health state
@@ -1115,7 +1117,9 @@ class AstraRouter:
                         "latency_ms": round(result["latency_ms"], 1),
                         "error": result["error"],
                         "key_id": cred.key_id if cred else (key_id or ""),
-                        "key": cred.label if cred else ""}
+                        "key": cred.label if cred else (key_id or ""),
+                        "key_label": cred.label if cred else (key_id or ""),
+                        "reused": True}
             rr = holder["rr"]
             return {
                 "model": rr.model or model_id,

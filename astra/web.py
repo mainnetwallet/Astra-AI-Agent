@@ -1011,7 +1011,9 @@ class WebApp:
             try:
                 from .core.attachments import process_upload
                 att = process_upload(f["data"], f["filename"], upload_dir)
-                attachments.append(att.to_dict())
+                item = att.to_dict()
+                item["_storage_path"] = att.storage_path
+                attachments.append(item)
             except Exception as e:
                 attachments.append({
                     "filename": f.get("filename", "unknown"),

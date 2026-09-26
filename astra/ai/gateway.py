@@ -2057,9 +2057,10 @@ class AstraAIGateway:
         return self.image_router._catalog(discover=discover)
 
     def image_targets(self, *, editing: bool = False,
+                      operation: str | None = None,
                       discover: bool = True) -> list:
-        return self.image_router.build_targets(editing=editing,
-                                               discover=discover)
+        return self.image_router.build_targets(
+            editing=editing, operation=operation, discover=discover)
 
     @staticmethod
     def _image_failure_reason(exc) -> str:
@@ -2099,7 +2100,8 @@ class AstraAIGateway:
         """
         return self.image_router.generate(
             prompt, model=model, size=size, n=n, editing=editing,
-            source_image=source_image, trace=trace, discover=discover)
+            source_image=source_image, mask_image=mask_image,
+            operation=operation, trace=trace, discover=discover)
 
     def test_connection_model(self, conn, model_id: str) -> dict:
         """Probe exactly ONE model of one connection and persist that one

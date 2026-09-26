@@ -2635,9 +2635,13 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
     const node = $(`[data-model-row="${CSS.escape(row.model)}"]`, tableEl);
     if (node) node.outerHTML = modelHealthRowsHtml([row]);
   };
+  // A shared/waiting model is display-only: its Provider probe is the
+  // authoritative call. Never call the Gateway endpoint for that row.
+  // Waiting rows are flushed by _flushBulkGatewayResult() when the matching
+  // Provider result is saved. Only a genuinely pending Gateway row may issue
+  // a Gateway API request.
   const probeModels = rows.filter((r) =>
-    r.keys.some((k) => k.pending) || (bulk && _bulkGatewayShouldWait(key, r.model)))
-    .map((r) => r.model);
+    r.keys.some((k) => k.pending)).map((r) => r.model);
   const probes = probeModels.map((modelId) =>
     post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
       .then((res) => (res.ok && res.data) ? res.data :

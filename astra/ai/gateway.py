@@ -2244,10 +2244,14 @@ class AstraAIGateway:
             self.routing_state.record_success(conn.name, model_id, latency_ms)
         else:
             self.routing_state.record_failure(conn.name, model_id)
-        self._emit("astra_gateway.test", connection=conn.name, model=model_id,
-                   ok=ok, latency_ms=round(latency_ms, 1), reason=error,
-                   reused=reused, key_id=cred.key_id if cred else "",
-                   key_label=key_label)
+        # A reused/shared result did not perform an upstream API call in
+        # this Gateway worker, so it must not create a fake "test" log entry.
+        # The local health result is still persisted above.
+        if not reused:
+            self._emit("astra_gateway.test", connection=conn.name, model=model_id,
+                       ok=ok, latency_ms=round(latency_ms, 1), reason=error,
+                       reused=False, key_id=cred.key_id if cred else "",
+                       key_label=key_label)
         return {"model": model_id, "ok": ok, "error": error,
                 "latency_ms": round(latency_ms, 1),
                 "key_id": cred.key_id if cred else "",

@@ -575,7 +575,11 @@ class AstraRouter:
     def route_request(self, req: RoutingRequest) -> RoutingResult:
         self._normalize_requirements(req)
         op = new_op_id()
-        self._emit("router.request", task=req.task_type, op=op, trace=req.trace)
+        # Health probes log the real provider API attempt from `_attempt`.
+        # Do not create a route-level log before we know an upstream call will
+        # happen; shared/reused or ineligible probes must stay invisible.
+        if req.task_type != "health_check":
+            self._emit("router.request", task=req.task_type, op=op, trace=req.trace)
         # Strict mandatory-Gateway enforcement (Gap 1 defense-in-depth):
         # `req.task_contract` is how a caller (the chat pipeline, or any
         # post-execution final-verification pass) declares

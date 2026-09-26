@@ -1856,8 +1856,6 @@ function _syncRunningUi() {
   };
   setBusy($("#btn-providers-test-all"), "⏳ Testing all…",
           (pendingCount + liveCount) > 0 && !!st.testAll);
-  setBusy($("#btn-gateway-test"), "⏳ Testing gateway…",
-          (RESTORED_GATEWAY_PENDING.size + LIVE_GATEWAY_TESTS.size) > 0 && !!(st.gatewayAll || st.testAll));
   clearTimeout(_runningPollTimer);
   _runningPollTimer = null;
   if (pendingCount > 0) _runningPollTimer = setTimeout(() => loaders.providers(), 2000);
@@ -2283,7 +2281,7 @@ loaders.providers = async function () {
     testAllBtn.onclick = async () => {
       testAllBtn.disabled = true;
       testAllBtn.dataset.live = "1";
-      _runningUpdate((st) => { st.testAll = Date.now(); st.gatewayAll = Date.now(); });
+      _runningUpdate((st) => { st.testAll = Date.now(); });
       const prevLabel = testAllBtn.dataset.restored ? testAllBtn.dataset.orig : testAllBtn.textContent;
       // Same streaming UI as a single provider/connection Test click, just
       // fired for every provider AND every Gateway connection at once, all
@@ -2321,7 +2319,7 @@ loaders.providers = async function () {
         }
       } finally {
         delete testAllBtn.dataset.live;
-        _runningUpdate((st) => { st.testAll = 0; st.gatewayAll = 0; });
+        _runningUpdate((st) => { st.testAll = 0; });
         testAllBtn.disabled = false;
         testAllBtn.textContent = prevLabel;
         loaders.providers();

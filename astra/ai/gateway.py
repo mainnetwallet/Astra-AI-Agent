@@ -911,13 +911,12 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
 # timeouts, bounded retries, error/rate-limit classification, credential
 # rotation, health and usage capture are all inherited unchanged.
 
-    # ── image generation (Workers AI /ai/run/<model>) ─────────────────────
+    # ── image generation/editing/inpainting (Workers AI /ai/run/<model>)
     def generate_image(self, prompt: str, model: str | None = None,
-                       size: str = "1024x1024", n: int = 1) -> str:
-        """FLUX and friends are served by /accounts/<id>/ai/run/<model>, not
-        by the OpenAI-compatible chat path. The response is normally JSON
-        (`{"result": {"image": "<b64>"}}`); some models return raw image
-        bytes, and both are normalized to a data URI."""
+                       size: str = "1024x1024", n: int = 1, *,
+                       source_image: dict | None = None,
+                       mask_image: dict | None = None) -> str:
+        """Run a verified Cloudflare image model with optional img2img/mask."""
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
@@ -925,10 +924,8 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
             raise ProviderError(
                 f"{self.name}: no account ids configured "
                 f"({self.image_account_ids_env})")
-        # Only send parameters the model's published schema accepts, so a
-        # model like flux-1-schnell (prompt/steps only) never gets a 400 for
-        # an unsupported width/height.
-        from astra.ai.image_models import image_spec
+        from astra.ai.image_models import (
+            image_spec, IMAGE_EDITING, IMAGE_INPAINTING)
         spec = image_spec("cloudflare", model)
         allowed = set(spec.params) if spec else {"prompt"}
         body = {"prompt": prompt}
@@ -939,6 +936,33 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
                 w, h = 1024, 1024
             body["width"] = max(256, min(w, 2048))
             body["height"] = max(256, min(h, 2048))
+
+        def _read_bytes(source: dict, label: str) -> bytes:
+            path = str(source.get("storage_path") or "")
+            if not path or not os.path.isfile(path):
+                raise ProviderError(f"{self.name}: {label} is unavailable")
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            if not raw:
+                raise ProviderError(f"{self.name}: {label} is empty")
+            return raw
+
+        if source_image is not None:
+            if not spec or IMAGE_EDITING not in spec.capabilities:
+                raise ProviderError(
+                    f"{self.name}: model {model} does not support image editing")
+            import base64 as _b64
+            body["image_b64"] = _b64.b64encode(
+                _read_bytes(source_image, "source image")).decode("ascii")
+            if "strength" in allowed:
+                body["strength"] = 0.75
+
+        if mask_image is not None:
+            if not spec or IMAGE_INPAINTING not in spec.capabilities:
+                raise ProviderError(
+                    f"{self.name}: model {model} does not support inpainting")
+            raw_mask = _read_bytes(mask_image, "mask image")
+            body["mask"] = list(raw_mask)
 
         def once(cred):
             acc = self._image_account()

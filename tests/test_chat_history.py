@@ -30,6 +30,27 @@ class ChatLogUnit(unittest.TestCase):
         first = h["messages"][0]["id"]
         self.assertEqual([m["text"] for m in self.log.history(after_id=first)["messages"]], ["hi"])
 
+    def test_latest_image_attachment_reuses_upload_and_generated_artifact(self):
+        self.log.add_user(
+            "make an edit", files=["source.png"],
+            attachments=[{"family": "image", "storage_path": "/tmp/source.png",
+                          "mime_type": "image/png"}])
+        self.assertEqual(
+            self.log.latest_image_attachment()["storage_path"], "/tmp/source.png")
+
+        self.log.add_reply({
+            "reply": "generated",
+            "ok": True,
+            "artifacts": [{
+                "id": "abc123", "filename": "generated.png",
+                "mime_type": "image/png", "artifact_type": "image",
+                "_storage_path": "/tmp/generated.png",
+            }],
+        })
+        latest = self.log.latest_image_attachment()
+        self.assertEqual(latest["storage_path"], "/tmp/generated.png")
+        self.assertNotIn("_storage_path", self.log.history()["messages"][-1]["artifacts"])
+
     def test_pending_lifecycle(self):
         self.assertFalse(self.log.history()["pending"])
         t = self.log.begin()

@@ -2251,11 +2251,15 @@ loaders.providers = async function () {
         testAllBtn.textContent = `⏳ Testing all (${done}/${total})…`;
       };
       try {
+        // Reset previous saved/shared health once for this whole run.
+        // Individual workers deliberately skip reset so Provider↔Gateway
+        // probes can share the same in-flight/fresh result.
+        await post("/api/v1/providers/reset-all-health");
         await Promise.allSettled([
           ...providerNames.map((name) =>
-            testProviderStreaming(name).then(bumpProgress)),
+            testProviderStreaming(name, undefined, false, true).then(bumpProgress)),
           ...connectionKeys.map((key) =>
-            testGatewayConnectionStreaming(key).then(bumpProgress)),
+            testGatewayConnectionStreaming(key, undefined, false, true).then(bumpProgress)),
         ]);
       } finally {
         delete testAllBtn.dataset.live;

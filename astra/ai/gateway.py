@@ -1441,6 +1441,14 @@ class AstraAIGateway:
         self.last_model = ""
         self.last_attempts = 0
         self.last_category = ""       # classification of the most recent request
+        # Dedicated image-generation execution owner (see
+        # astra/ai/image_router.py). The Gateway itself performs NO provider
+        # image-API HTTP call -- it only classifies/hands off. Imported
+        # lazily here (rather than at module scope) to avoid a circular
+        # import, since ImageRouter only needs the Gateway instance at call
+        # time.
+        from astra.ai.image_router import ImageRouter
+        self.image_router = ImageRouter(self)
         if connections is not None:
             self.connections = list(connections)
         elif config is not None:
@@ -1989,113 +1997,21 @@ class AstraAIGateway:
                        size: str = "1024x1024", n: int = 1, *,
                        editing: bool = False, trace: str = "",
                        discover: bool = True) -> str:
-        """Generate one image with a SIMPLE SERIAL FALLBACK.
+        """Backward-compatible delegating wrapper -- NOT an execution path.
 
-        The eligible FREE image models are tried one after another in the
-        deterministic priority order. Each model gets at most ONE attempt per
-        request (an in-request attempted set), and the ACTUAL generation call
-        -- never a proactive health probe -- decides success/failure. No
-        health/cooldown state is written, so a failure here never disables the
-        model for a later request.
-
-        Returns a `data:` URI on the first success and stops immediately, or
-        raises ProviderError(IMAGE_EXHAUSTED_MESSAGE) when every eligible FREE
-        model failed. It NEVER falls back to a paid image model, a text model,
-        a vision-only model or simple_chat.
+        AstraAIGateway is the entry/classification/handoff layer; it must
+        never perform a provider image-API HTTP call itself. All image
+        selection, provider-adapter dispatch, serial fallback and lifecycle
+        logging is owned by `ImageRouter` (see astra/ai/image_router.py).
+        This method exists only for callers that still hold a Gateway
+        reference and expect `gateway.generate_image(...)` to work; it does
+        nothing but hand the request straight to `self.image_router`. New
+        callers (ChatPipeline included) should call
+        `gateway.image_router.generate(...)` directly.
         """
-        from astra.ai.image_models import IMAGE_EXHAUSTED_MESSAGE
-        op = new_op_id()
-        category = "image_editing" if editing else "image_generation"
-        ranked = self.image_targets(editing=editing, discover=discover)
-        if model:
-            ranked = ([t for t in ranked if t[1].model_id == model] +
-                      [t for t in ranked if t[1].model_id != model])
-        self.last_attempts = 0
-        self.last_connection = ""
-        self.last_model = ""
-        self._emit("image.generation.start", category=category,
-                   candidates=len(ranked),
-                   targets=[t[1].model_id for t in ranked], op=op,
-                   trace=trace, input=_gw_log_cap(prompt))
-        if not ranked:
-            self._emit("image.generation.exhausted", provider="", model="",
-                       attempts=0, reason="no eligible FREE image model",
-                       op=op, trace=trace, terminal=True)
-            raise ProviderError(
-                "No image-generation model is currently configured or available.")
-        attempted = set()
-        failures = []
-        attempts = 0
-        for idx, (conn, tmodel, _health) in enumerate(ranked):
-            key = (tmodel.provider, tmodel.model_id)
-            if key in attempted:
-                continue                      # one attempt per model per request
-            attempted.add(key)
-            attempts += 1
-            self.last_attempts = attempts
-            self._emit("image.generation.attempt", provider=tmodel.provider,
-                       model=tmodel.model_id, attempt=attempts, op=op,
-                       trace=trace)
-            # Report the ACTUAL provider API request on the SAME existing
-            # "astra_gateway.*" API-call contract chat/text calls use, from the
-            # exact execution point (`conn.generate_image` -> the provider's
-            # HTTP API). Each attempt gets its own `op`, so a fallback chain
-            # shows one START/terminal pair PER attempted model instead of a
-            # single request-level row. The `image.generation.*` lifecycle
-            # events above stay unchanged.
-            call_op = new_op_id()
-            self._emit("astra_gateway.request", category=category,
-                       provider=tmodel.provider, model=tmodel.model_id,
-                       attempt=attempts, candidates=len(ranked),
-                       op=call_op, trace=trace, input=_gw_log_cap(prompt))
-            start = time.perf_counter()
-            try:
-                uri = conn.generate_image(prompt, model=tmodel.model_id,
-                                          size=size, n=n)
-            except Exception as e:
-                reason = self._image_failure_reason(e)
-                duration_ms = round((time.perf_counter() - start) * 1000.0, 1)
-                status_code = int(getattr(e, "code", 0) or 0)
-                failures.append(f"{tmodel.provider}/{tmodel.model_id}: {reason}")
-                self._emit("astra_gateway.error", provider=tmodel.provider,
-                           model=tmodel.model_id, reason=reason,
-                           status_code=status_code, duration_ms=duration_ms,
-                           attempt=attempts, op=call_op, trace=trace,
-                           terminal=True)
-                self._emit("image.generation.failure",
-                           provider=tmodel.provider, model=tmodel.model_id,
-                           attempt=attempts, duration_ms=duration_ms,
-                           reason=reason, failure_category=reason, op=op,
-                           trace=trace, terminal=False)
-                nxt = next((m for _c, m, _h in ranked[idx + 1:]
-                            if (m.provider, m.model_id) not in attempted), None)
-                if nxt is not None:
-                    self._emit("image.generation.fallback",
-                               provider=tmodel.provider, model=tmodel.model_id,
-                               reason=reason, next_provider=nxt.provider,
-                               next_model=nxt.model_id, attempt=attempts,
-                               op=op, trace=trace)
-                continue
-            latency_ms = (time.perf_counter() - start) * 1000.0
-            self.last_connection = conn.name
-            self.last_model = tmodel.model_id
-            self._emit("astra_gateway.success", provider=tmodel.provider,
-                       model=tmodel.model_id, status_code=200,
-                       latency_ms=round(latency_ms, 1),
-                       duration_ms=round(latency_ms, 1), attempt=attempts,
-                       op=call_op, trace=trace, terminal=True,
-                       output=f"<image data URI: {len(uri)} chars>")
-            self._emit("image.generation.success", provider=tmodel.provider,
-                       model=tmodel.model_id, attempt=attempts,
-                       duration_ms=round(latency_ms, 1),
-                       latency_ms=round(latency_ms, 1), op=op, trace=trace,
-                       terminal=True)
-            return uri
-        self._emit("image.generation.exhausted", provider="", model="",
-                   attempts=attempts,
-                   reason="; ".join(failures) or "all image models failed",
-                   op=op, trace=trace, terminal=True)
-        raise ProviderError(IMAGE_EXHAUSTED_MESSAGE)
+        return self.image_router.generate(
+            prompt, model=model, size=size, n=n, editing=editing,
+            trace=trace, discover=discover)
 
     def test_connection_model(self, conn, model_id: str) -> dict:
         """Probe exactly ONE model of one connection and persist that one

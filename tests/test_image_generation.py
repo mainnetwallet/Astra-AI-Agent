@@ -1760,7 +1760,24 @@ class _TempArtifactDirMixin:
 
 
 class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
-    """Real ChatPipeline with a scripted Gateway + scripted router."""
+    """Real ChatPipeline with a scripted Gateway + scripted router.
+
+    The Gateway double deliberately has NO `generate_image` execution
+    method of its own -- per the required architecture, ChatPipeline must
+    talk to `gateway.image_router.generate(...)`, never to
+    `gateway.generate_image(...)`. `_ImageRouterDouble` stands in for the
+    dedicated Image Provider/Model Router (astra.ai.image_router).
+    """
+
+    class _ImageRouterDouble:
+        def __init__(self, gw):
+            self._gw = gw
+
+        def generate(self, prompt, model=None, size="1024x1024", n=1, *,
+                     editing=False, trace="", discover=True):
+            self._gw.image_calls.append((prompt, model, editing))
+            self._gw.last_model = FLUX
+            return DATA_URI
 
     class _Gateway:
         def __init__(self, usable=True):
@@ -1769,6 +1786,7 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
             self.categories = []
             self.last_model = ""
             self.image_calls = []
+            self.image_router = TestPipelineImageWiring._ImageRouterDouble(self)
 
         def is_usable(self):
             return self.usable
@@ -1785,11 +1803,10 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
         def supervise_task(self, *a, **kw):  # pragma: no cover
             raise AssertionError("image turns must not be semantically verified")
 
-        def generate_image(self, prompt, model=None, size="1024x1024", n=1, *,
-                           editing=False, trace=""):
-            self.image_calls.append((prompt, model, editing))
-            self.last_model = FLUX
-            return DATA_URI
+        def generate_image(self, *a, **kw):  # pragma: no cover
+            raise AssertionError(
+                "ChatPipeline must call gateway.image_router.generate(), "
+                "never gateway.generate_image()")
 
     class _Router:
         def __init__(self, text="should not be used"):
@@ -1824,7 +1841,7 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
 
     def test_gateway_without_image_path_falls_back_to_the_router(self):
         gw, rt = self._Gateway(), self._Router()
-        gw.generate_image = None                   # no Gateway image path
+        gw.image_router = None                      # no Image Router at all
         out = self._pipeline(gw, rt).run("photo generate koro")
         self.assertTrue(out["ok"])
         self.assertEqual(len(rt.requests), 1)
@@ -1841,7 +1858,7 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
                                  error="no eligible provider/model available")
 
         rt.route_request = fail
-        gw.generate_image = None
+        gw.image_router = None
         out = self._pipeline(gw, rt).run("akta cat photo create kore dao")
         self.assertFalse(out["ok"])
         self.assertIn("No currently available FREE image-generation model",
@@ -1856,7 +1873,7 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
             raise ProviderError("No image-generation model is currently "
                                 "configured or available.")
 
-        gw.generate_image = boom
+        gw.image_router.generate = boom
         self._pipeline(gw, rt).run("akta cat photo create kore dao")
         self.assertEqual(len(rt.requests), 1)
         self.assertEqual(rt.requests[0].task_type, "image_generation")
@@ -1878,6 +1895,13 @@ class TestEndToEndImageTurn(_TempArtifactDirMixin, unittest.TestCase):
         real = AstraAIGateway(connections=list(conns))
 
         class Gw:
+            """Entry/classification-only Gateway double: it exposes NO
+            `generate_image` execution path of its own. The real image
+            execution below goes through `real.image_router.generate(...)`
+            -- the actual `ImageRouter` -- never through `real.generate_image`
+            directly (which is now only a backward-compat wrapper) nor
+            through this `Gw` double."""
+
             def __init__(self):
                 self.image_calls = []
                 self.last_model = ""
@@ -1891,17 +1915,31 @@ class TestEndToEndImageTurn(_TempArtifactDirMixin, unittest.TestCase):
             def supervise_task(self, *a, **kw):  # pragma: no cover
                 raise AssertionError("image turns must not be verified")
 
-            def generate_image(self, prompt, model=None, size="1024x1024",
-                               n=1, *, editing=False, trace=""):
-                self.image_calls.append((prompt, model, editing))
-                uri = real.generate_image(prompt, model=model, size=size, n=n,
-                                          editing=editing, trace=trace,
-                                          discover=False)
-                self.last_model = real.last_model
+            def generate_image(self, *a, **kw):  # pragma: no cover
+                raise AssertionError(
+                    "ChatPipeline must use gateway.image_router.generate(), "
+                    "never gateway.generate_image()")
+
+        gw = Gw()
+
+        class ImageRouterProxy:
+            """Stands in for `gw.image_router` and forwards to the REAL
+            `ImageRouter` instance owned by the real Gateway (`real`), so
+            this end-to-end test still exercises the actual provider-adapter
+            dispatch / serial-fallback code, not a re-implementation."""
+
+            def generate(self, prompt, model=None, size="1024x1024", n=1, *,
+                         editing=False, trace="", discover=True):
+                gw.image_calls.append((prompt, model, editing))
+                uri = real.image_router.generate(
+                    prompt, model=model, size=size, n=n, editing=editing,
+                    trace=trace, discover=False)
+                gw.last_model = real.last_model
                 return uri
 
+        gw.image_router = ImageRouterProxy()
+
         rt = TestPipelineImageWiring._Router()
-        gw = Gw()
         out = self._pipeline(gw, rt).run(text)
         return out, gw, real, rt
 

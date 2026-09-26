@@ -1309,15 +1309,23 @@ class ChatPipeline:
         return rr
 
     def _route_image(self, task_type, messages, model, req=""):
-        """Run an image request through the Gateway's image path.
+        """Run an image request through the dedicated Image Provider/Model
+        Router (astra.ai.image_router.ImageRouter), NOT through
+        `Gateway.generate_image()`. The Gateway is only ever the
+        entry/classification layer here: it hands off to
+        `gateway.image_router`, which is the sole owner of image-provider
+        selection, dispatch, serial fallback and lifecycle logging. This
+        method must never call `self.gateway.generate_image(...)` -- see
+        tests/test_image_execution_boundary.py.
 
-        Returns a successful RoutingResult, a FAILED one when the Gateway
-        attempted every eligible FREE image model and all of them failed (so
-        the caller stops rather than re-running the identical FREE pool), or
-        None when the Gateway simply has no image execution path / no eligible
-        image model. Never returns a text answer.
+        Returns a successful RoutingResult, a FAILED one when the Image
+        Router attempted every eligible FREE image model and all of them
+        failed (so the caller stops rather than re-running the identical
+        FREE pool), or None when there is simply no image execution path /
+        no eligible image model. Never returns a text answer.
         """
-        fn = getattr(self.gateway, "generate_image", None)
+        image_router = getattr(self.gateway, "image_router", None)
+        fn = getattr(image_router, "generate", None)
         if not callable(fn) or not self._gateway_usable():
             return None
         prompt = _last_user_text(messages)

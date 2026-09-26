@@ -2172,7 +2172,8 @@ class AstraAIGateway:
             source_image=source_image, mask_image=mask_image,
             operation=operation, trace=trace, discover=discover)
 
-    def test_connection_model(self, conn, model_id: str) -> dict:
+    def test_connection_model(self, conn, model_id: str,
+                              key_id: str | None = None) -> dict:
         """Probe exactly ONE model of one connection and persist that one
         result immediately — same idea as AstraRouter.test_provider_model,
         so the UI can fire one request per model and show each result the
@@ -2187,7 +2188,16 @@ class AstraAIGateway:
         request — see astra/ai/shared_health.py. Only this manual-test
         path is affected: normal chat routing/fallback is untouched."""
         pool = getattr(conn, "pool", None)
-        identity, cred = (resolve_identity(pool, conn.name, model_id)
+        if not key_id and pool is not None and hasattr(pool, "keys"):
+            key_meta = pool.keys()
+            if key_meta:
+                key_id = key_meta[0].get("key_id")
+        if key_id and pool is not None and hasattr(pool, "keys"):
+            if key_id not in {k["key_id"] for k in pool.keys()}:
+                return {"model": model_id, "ok": False, "error": f"unknown key {key_id!r}",
+                        "latency_ms": 0.0, "key_id": key_id, "key": key_id,
+                        "key_label": key_id, "reused": False}
+        identity, cred = (resolve_identity(pool, conn.name, model_id, key_id)
                           if self.shared_health is not None else (None, None))
 
         def _probe() -> dict:
@@ -2259,6 +2269,15 @@ class AstraAIGateway:
         return {"connection": conn.name, "ok": any(r["ok"] for r in results),
                 "models": results, "error": ""}
 
+    def reset_connection_health(self, name: str) -> None:
+        """Start a fresh manual test run for one Gateway connection."""
+        if self.shared_health is None:
+            return
+        conn = next((c for c in self.connections if c.name == name), None)
+        if conn is not None:
+            from astra.ai.shared_health import canonical_provider
+            self.shared_health.invalidate(canonical_provider(conn.name))
+
     def test_connection_by_name(self, name: str) -> dict:
         """Probe exactly one connection by its name (e.g. 'astra-gw-gemini'),
         or every model of every connection sharing that name."""
@@ -2268,14 +2287,15 @@ class AstraAIGateway:
                     "error": "unknown gateway connection"}
         return self.test_connection(conn)
 
-    def test_connection_model_by_name(self, name: str, model_id: str) -> dict:
+    def test_connection_model_by_name(self, name: str, model_id: str,
+                                      key_id: str | None = None) -> dict:
         """Probe exactly one (connection, model) pair by connection name —
         backs the per-model UI test call."""
         conn = next((c for c in self.connections if c.name == name), None)
         if conn is None:
             return {"model": model_id, "ok": False, "latency_ms": 0,
                     "error": "unknown gateway connection"}
-        return self.test_connection_model(conn, model_id)
+        return self.test_connection_model(conn, model_id, key_id)
 
     def test_all_connections(self) -> list:
         """Probe every configured connection's every model, one at a time.
@@ -2303,6 +2323,7 @@ class AstraAIGateway:
                 "state": state,
                 "models": list(c.models or []),
                 "base_url": getattr(c, "base_url", ""),
+                "keys": (pool.keys() if pool is not None and hasattr(pool, "keys") else []),
                 "model_health": model_health_by_conn.get(c.name, {}),
             }
         return out

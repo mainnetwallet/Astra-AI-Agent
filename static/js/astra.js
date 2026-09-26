@@ -1683,6 +1683,20 @@ const PROVIDER_MODELS = {};
 // {key_id, label:"key 1", healthy, in_cooldown, last_error}). Read by the
 // per-key test so it knows which keys to fire every model through.
 const PROVIDER_KEYS = {};
+const HEALTH_KEY_SELECTION_KEY = "astra_health_test_key_selection";
+const HEALTH_KEY_SELECTION = { providers: {}, gateway: {} };
+function _loadHealthKeySelection() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HEALTH_KEY_SELECTION_KEY) || "{}");
+    Object.assign(HEALTH_KEY_SELECTION.providers, saved.providers || {});
+    Object.assign(HEALTH_KEY_SELECTION.gateway, saved.gateway || {});
+  } catch (_) {}
+}
+function _saveHealthKeySelection() {
+  try { localStorage.setItem(HEALTH_KEY_SELECTION_KEY, JSON.stringify(HEALTH_KEY_SELECTION)); }
+  catch (_) {}
+}
+_loadHealthKeySelection();
 // Providers/connections temporarily revealed by their own Test click while
 // the main Hide/Show toggle is set to hidden — session-only (never saved to
 // localStorage), so a real page refresh drops back to fully hidden per the
@@ -1855,6 +1869,7 @@ function _syncRunningUi() {
 function keyChipHtml(k) {
   const id = `data-key="${esc(k.key_id)}"`;
   if (k.pending) return `<span class="key-chip pending" ${id}>⏳ ${esc(k.label)}</span>`;
+  if (k.waiting) return `<span class="key-chip pending" ${id}>⏳ ${esc(k.label)} · waiting</span>`;
   if (k.ok === undefined || k.ok === null)
     return `<span class="key-chip none" ${id}>${esc(k.label)} · not tested</span>`;
   const when = k.tested_at ? ` title="${esc(k.tested_at)}"` : "";
@@ -1899,6 +1914,94 @@ function savedGatewayModelRows(models, modelHealth) {
       : { model: modelId, ok: false, error: "last test failed" };
   });
   return any ? rows : [];
+}
+
+function _healthKeys(kind, name) {
+  return kind === "gateway" ? (GATEWAY_KEYS[name] || []) : (PROVIDER_KEYS[name] || []);
+}
+function _ensureHealthKey(kind, name) {
+  const keys = _healthKeys(kind, name);
+  if (!keys.length) return "";
+  const map = kind === "gateway" ? HEALTH_KEY_SELECTION.gateway : HEALTH_KEY_SELECTION.providers;
+  if (map[name] && keys.some((k) => k.key_id === map[name])) return map[name];
+  map[name] = keys[0].key_id;
+  _saveHealthKeySelection();
+  return map[name];
+}
+function _selectedHealthKey(kind, name) { return _ensureHealthKey(kind, name); }
+function _healthKeyLabel(kind, name) {
+  const id = _selectedHealthKey(kind, name);
+  const key = _healthKeys(kind, name).find((k) => k.key_id === id);
+  return key ? key.label : "Key 1";
+}
+function _setAllHealthKeys(position) {
+  for (const [name, keys] of Object.entries(PROVIDER_KEYS)) {
+    if (keys.length) HEALTH_KEY_SELECTION.providers[name] =
+      position === "last" ? keys[keys.length - 1].key_id : keys[0].key_id;
+  }
+  for (const [name, keys] of Object.entries(GATEWAY_KEYS)) {
+    if (keys.length) HEALTH_KEY_SELECTION.gateway[name] =
+      position === "last" ? keys[keys.length - 1].key_id : keys[0].key_id;
+  }
+  _saveHealthKeySelection();
+  renderHealthKeySelector();
+}
+function renderHealthKeySelector() {
+  const panel = $("#health-key-selector");
+  const button = $("#btn-health-key-selector");
+  if (!panel || !button) return;
+  const providers = Object.entries(PROVIDER_KEYS).filter(([, keys]) => keys.length);
+  const gateways = Object.entries(GATEWAY_KEYS).filter(([, keys]) => keys.length);
+  const all = providers.concat(gateways);
+  if (!all.length) { button.textContent = "🔑 Test key"; panel.hidden = true; return; }
+  const labels = providers.map(([n]) => _healthKeyLabel("provider", n))
+    .concat(gateways.map(([n]) => _healthKeyLabel("gateway", n)));
+  const same = labels.length > 0 && labels.every((x) => x === labels[0]);
+  button.textContent = "🔑 Test key: " + (same ? labels[0] : "Custom");
+  const row = (kind, name, keys) => {
+    const selected = _selectedHealthKey(kind, name);
+    const label = kind === "gateway" ? (GATEWAY_LABELS[name] || name) : name;
+    return '<div class="health-key-selector-row"><span>' + esc(label) +
+      '</span><select data-health-key-kind="' + kind +
+      '" data-health-key-name="' + esc(name) + '">' +
+      keys.map((k) => '<option value="' + esc(k.key_id) + '"' +
+        (k.key_id === selected ? ' selected' : '') + '>' +
+        esc(k.label) + '</option>').join("") +
+      '</select></div>';
+  };
+  panel.innerHTML =
+    '<div class="health-key-selector-head"><b>Select test key</b>' +
+    '<button type="button" class="btn mini" data-health-key-shortcut="first">1st key</button>' +
+    '<button type="button" class="btn mini" data-health-key-shortcut="last">Last key</button>' +
+    '<span class="muted">Only the selected key makes the real call; other key rows reuse the result.</span></div>' +
+    '<div class="health-key-selector-grid">' +
+    providers.map(([n, keys]) => row("provider", n, keys)).join("") +
+    gateways.map(([n, keys]) => row("gateway", n, keys)).join("") +
+    '</div>';
+  if (!panel.dataset.hooked) {
+    panel.dataset.hooked = "1";
+    panel.addEventListener("change", (ev) => {
+      const sel = ev.target.closest("[data-health-key-kind]");
+      if (!sel) return;
+      const map = sel.dataset.healthKeyKind === "gateway"
+        ? HEALTH_KEY_SELECTION.gateway : HEALTH_KEY_SELECTION.providers;
+      map[sel.dataset.healthKeyName] = sel.value;
+      _saveHealthKeySelection();
+      renderHealthKeySelector();
+    });
+    panel.addEventListener("click", (ev) => {
+      const b = ev.target.closest("[data-health-key-shortcut]");
+      if (b) _setAllHealthKeys(b.dataset.healthKeyShortcut);
+    });
+  }
+}
+if ($("#btn-health-key-selector")) {
+  $("#btn-health-key-selector").addEventListener("click", () => {
+    const panel = $("#health-key-selector");
+    if (!panel) return;
+    renderHealthKeySelector();
+    panel.hidden = !panel.hidden;
+  });
 }
 
 function modelHealthRowsHtml(results) {
@@ -2026,6 +2129,7 @@ loaders.providers = async function () {
     const modelCount = p.models ? p.models.length : 0;
     PROVIDER_MODELS[n] = p.models || [];
     PROVIDER_KEYS[n] = p.keys || [];
+    _ensureHealthKey("provider", n);
     LAST_PROVIDER_DATA[n] = p;
     // First paint after a reload: show the last saved per-key results.
     if (!(PROVIDER_MODEL_RESULTS[n] || []).length && (p.keys || []).length) {
@@ -2060,7 +2164,7 @@ loaders.providers = async function () {
       `${modelCount} model(s) · ${keyCount} key(s) · ${p.calls || 0} calls · ${p.errors || 0} err</span>` +
       `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}"${busy ? " disabled" : ""}>` +
       (busy ? "⏳ Testing…"
-            : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"}${keyCount > 1 ? ` × ${keyCount} keys` : ""})`) +
+            : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"} · ${keyCount ? _healthKeyLabel("provider", n) : "direct"})`) +
       `</button>` +
       `</div>` +
       `<div class="model-health-table" data-role="model-table">` +
@@ -2148,11 +2252,15 @@ loaders.providers = async function () {
         testAllBtn.textContent = `⏳ Testing all (${done}/${total})…`;
       };
       try {
+        // Reset previous saved/shared health once for this whole run.
+        // Individual workers deliberately skip reset so Provider↔Gateway
+        // probes can share the same in-flight/fresh result.
+        await post("/api/v1/providers/reset-all-health");
         await Promise.allSettled([
           ...providerNames.map((name) =>
-            testProviderStreaming(name).then(bumpProgress)),
+            testProviderStreaming(name, undefined, false, true).then(bumpProgress)),
           ...connectionKeys.map((key) =>
-            testGatewayConnectionStreaming(key).then(bumpProgress)),
+            testGatewayConnectionStreaming(key, undefined, false, true).then(bumpProgress)),
         ]);
       } finally {
         delete testAllBtn.dataset.live;
@@ -2164,6 +2272,7 @@ loaders.providers = async function () {
     };
   }
   renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
+  renderHealthKeySelector();
   _maybeResumeRuns();
   _syncRunningUi();
 };
@@ -2174,7 +2283,7 @@ loaders.providers = async function () {
 // (optional) gets its label updated while this provider's own test runs;
 // omit it when called as part of a bulk Test All (the bulk button owns
 // its own progress label instead).
-async function testProviderStreaming(name, btn, resume) {
+async function testProviderStreaming(name, btn, resume, bulk = false) {
   const models = PROVIDER_MODELS[name] || [];
   if (models.length && resume) {
     LIVE_PROVIDER_TESTS.add(name);
@@ -2190,13 +2299,13 @@ async function testProviderStreaming(name, btn, resume) {
     _runningUpdate((st) => { st.providers[name] = entry; });
   }
   try {
-    await _testProviderStreamingInner(name, btn, resume);
+    await _testProviderStreamingInner(name, btn, resume, bulk);
   } finally {
     if (LIVE_PROVIDER_TESTS.delete(name)) _runningUpdate((st) => { delete st.providers[name]; });
   }
 }
 
-async function _testProviderStreamingInner(name, btn, resume) {
+async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
   const models = PROVIDER_MODELS[name] || [];
   const tableEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="model-table"]`);
   if (!models.length) {
@@ -2217,7 +2326,7 @@ async function _testProviderStreamingInner(name, btn, resume) {
     countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ` +
       `${countsEl.dataset.keycount || 0} key(s) · ${calls} calls · ${errors} err`;
   };
-  if (!resume) {
+  if (!resume && !bulk) {
     try {
       const reset = await post(`/api/v1/providers/${encodeURIComponent(name)}/reset-health`);
       renderCounts((reset.ok && reset.data && reset.data.calls) || 0,
@@ -2241,8 +2350,11 @@ async function _testProviderStreamingInner(name, btn, resume) {
   // the server saves it against (provider, key, model).
   const keys = PROVIDER_KEYS[name] || [];
   if (keys.length) {
-    await testProviderKeysStreaming(name, models, keys, tableEl, (r) => bumpCounts(r.ok),
-                                    resume ? PROVIDER_MODEL_RESULTS[name] : null);
+    const selectedKey = _selectedHealthKey("provider", name);
+    await testProviderSelectedKeyStreaming(
+      name, models, keys, selectedKey, tableEl,
+      (r) => bumpCounts(r.ok),
+      resume ? PROVIDER_MODEL_RESULTS[name] : null);
     return;
   }
 
@@ -2257,37 +2369,50 @@ async function _testProviderStreamingInner(name, btn, resume) {
     (result) => { bumpCounts(result.ok); _runningNoteLocal(name, result); }, !!resume);
 }
 
-async function testProviderKeysStreaming(name, models, keys, tableEl, onResult, resumeRows) {
-  // resumeRows: rows restored after a refresh — only their still-pending chips
-  // are (re)fired; finished chips keep the result the server saved.
+async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey, tableEl, onResult, resumeRows) {
+  const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
+  const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
   const rows = resumeRows || models.map((m) => ({
     model: m,
-    keys: keys.map((k) => ({ key_id: k.key_id, label: k.label, pending: true })),
+    keys: keys.map((k) => ({
+      key_id: k.key_id,
+      label: k.label,
+      pending: k.key_id === chosen,
+      waiting: k.key_id !== chosen,
+    })),
   }));
   PROVIDER_MODEL_RESULTS[name] = rows;
   if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(rows);
   const repaint = (row) => {
     if (!tableEl) return;
-    const el = $(`[data-model-row="${CSS.escape(row.model)}"]`, tableEl);
-    if (el) el.outerHTML = modelHealthRowsHtml([row]);
+    const el = `[data-model-row="${CSS.escape(row.model)}"]`;
+    const node = $(el, tableEl);
+    if (node) node.outerHTML = modelHealthRowsHtml([row]);
   };
-  const probes = [];
-  rows.forEach((row) => row.keys.forEach((slot) => {
-    if (!slot.pending) return;
-    probes.push(
-      post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(row.model)}` +
-           `?key=${encodeURIComponent(slot.key_id)}`)
-        .then((res) => (res.ok && res.data) ? res.data
-          : { ok: false, latency_ms: 0, error: res.error || "test failed" })
-        .catch((e) => ({ ok: false, latency_ms: 0, error: String(e) }))
-        .then((r) => {
-          Object.assign(slot, { pending: false, ok: !!r.ok, latency_ms: r.latency_ms,
-                                error: r.error, tested_at: new Date().toLocaleString() });
-          repaint(row);
-          if (onResult) onResult(r);
+  const pendingModels = rows.filter((row) =>
+    row.keys.some((slot) => slot.pending)).map((row) => row.model);
+  const probes = pendingModels.map((modelId) =>
+    post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
+      .then((res) => (res.ok && res.data) ? res.data
+        : { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" })
+      .catch((e) => ({ model: modelId, ok: false, latency_ms: 0, error: String(e) }))
+      .then((result) => {
+        const row = rows.find((r) => r.model === modelId);
+        if (!row) return;
+        row.keys.forEach((slot) => Object.assign(slot, {
+          pending: false,
+          waiting: false,
+          ok: !!result.ok,
+          latency_ms: result.latency_ms,
+          error: result.error,
+          tested_at: new Date().toLocaleString(),
+          selected: slot.key_id === chosen,
+          shared: slot.key_id !== chosen
         }));
-  }));
-  // allSettled: one key/model failing never stops the rest from finishing.
+        repaint(row);
+        if (onResult) onResult(result);
+      })
+  );
   return Promise.allSettled(probes);
 }
 
@@ -2311,6 +2436,7 @@ const GATEWAY_MODEL_RESULTS = {};   // connection name -> [{model, ok, latency_m
 // role as PROVIDER_MODELS, read by the per-model test instead of
 // re-fetching.
 const GATEWAY_MODELS = {};
+const GATEWAY_KEYS = {};
 
 // Best-average-latency across a connection's tracked models — used purely
 // to *display* connections fastest/healthiest first, mirroring how the
@@ -2329,7 +2455,7 @@ function _connAvgLatency(c) {
 // uses for providers, so a single connection's "🧪 Test" and the bulk
 // Test All look and behave identically. `btn` (optional) gets its label
 // updated while this connection's own test runs.
-async function testGatewayConnectionStreaming(key, btn, resume) {
+async function testGatewayConnectionStreaming(key, btn, resume, bulk = false) {
   const models = GATEWAY_MODELS[key] || [];
   if (models.length && resume) {
     LIVE_GATEWAY_TESTS.add(key);
@@ -2342,13 +2468,13 @@ async function testGatewayConnectionStreaming(key, btn, resume) {
     _runningUpdate((st) => { st.gateway[key] = entry; });
   }
   try {
-    await _testGatewayConnectionStreamingInner(key, btn, resume);
+    await _testGatewayConnectionStreamingInner(key, btn, resume, bulk);
   } finally {
     if (LIVE_GATEWAY_TESTS.delete(key)) _runningUpdate((st) => { delete st.gateway[key]; });
   }
 }
 
-async function _testGatewayConnectionStreamingInner(key, btn, resume) {
+async function _testGatewayConnectionStreamingInner(key, btn, resume, bulk = false) {
   const models = GATEWAY_MODELS[key] || [];
   const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`);
   if (!models.length) {
@@ -2357,14 +2483,78 @@ async function _testGatewayConnectionStreamingInner(key, btn, resume) {
   }
   if (btn) btn.textContent = `⏳ Testing ${models.length} model${models.length === 1 ? "" : "s"}…`;
   GATEWAY_MODEL_RESULTS[key] = GATEWAY_MODEL_RESULTS[key] || [];
+  if (!resume && !bulk) {
+    await post(`/api/v1/gateway/${encodeURIComponent(key)}/reset-health`);
+  }
   const toRun = resume
     ? GATEWAY_MODEL_RESULTS[key].filter((r) => r.pending).map((r) => r.model)
     : models;
-  await streamModelTests(toRun, tableEl, GATEWAY_MODEL_RESULTS[key],
-    (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
+  const keys = GATEWAY_KEYS[key] || [];
+  if (!keys.length) {
+    await streamModelTests(toRun, tableEl, GATEWAY_MODEL_RESULTS[key],
+      (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
+        .then((res) => (res.ok && res.data) ? res.data :
+          { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
+      undefined, !!resume);
+    return;
+  }
+  await testGatewaySelectedKeyStreaming(
+    key, toRun, keys, _selectedHealthKey("gateway", key),
+    tableEl, GATEWAY_MODEL_RESULTS[key], !!resume);
+}
+
+async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, tableEl, resultsArray, resume) {
+  const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
+  const existing = Object.fromEntries(resultsArray.map((r) => [r.model, r]));
+  const rows = models.map((modelId) => {
+    const prior = existing[modelId];
+    if (resume && prior && Array.isArray(prior.keys)) return prior;
+    return {
+      model: modelId,
+      keys: keys.map((k) => ({
+        key_id: k.key_id,
+        label: k.label,
+        pending: !(resume && prior && prior.pending === false) && k.key_id === chosen,
+        waiting: !(resume && prior && prior.pending === false) && k.key_id !== chosen,
+        ...(resume && prior && prior.pending === false ? {
+          ok: !!prior.ok,
+          latency_ms: prior.latency_ms || 0,
+          error: prior.error || ""
+        } : {})
+      })),
+    };
+  });
+  resultsArray.length = 0;
+  rows.forEach((r) => resultsArray.push(r));
+  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(resultsArray);
+  const repaint = (row) => {
+    if (!tableEl) return;
+    const node = $(`[data-model-row="${CSS.escape(row.model)}"]`, tableEl);
+    if (node) node.outerHTML = modelHealthRowsHtml([row]);
+  };
+  const pendingModels = rows.filter((r) => r.keys.some((k) => k.pending))
+    .map((r) => r.model);
+  const probes = pendingModels.map((modelId) =>
+    post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
       .then((res) => (res.ok && res.data) ? res.data :
-        { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
-    undefined, !!resume);
+        { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" })
+      .catch((e) => ({ model: modelId, ok: false, latency_ms: 0, error: String(e) }))
+      .then((result) => {
+        const row = rows.find((r) => r.model === modelId);
+        if (!row) return;
+        row.keys.forEach((slot) => Object.assign(slot, {
+          pending: false,
+          ok: !!result.ok,
+          latency_ms: result.latency_ms,
+          error: result.error,
+          tested_at: new Date().toLocaleString(),
+          selected: slot.key_id === chosen,
+          shared: slot.key_id !== chosen
+        }));
+        repaint(row);
+      })
+  );
+  return Promise.allSettled(probes);
 }
 
 async function runGatewayConnectionTest(key, btn, card) {
@@ -2421,6 +2611,8 @@ function renderGatewayCard(core) {
     const modelCount = (c.models || []).length;
     const models = modelCount ? `${modelCount} model(s)` : "no models";
     GATEWAY_MODELS[key] = c.models || [];
+    GATEWAY_KEYS[key] = c.keys || [];
+    _ensureHealthKey("gateway", key);
     // First paint after a reload: show the last saved per-model results
     // (same idea as PROVIDER_MODEL_RESULTS restoration in loaders.providers),
     // instead of leaving this connection's table empty until someone
@@ -2456,7 +2648,7 @@ function renderGatewayCard(core) {
       `<span class="status-dot ${dot}"></span><b>${esc(label)}</b>` +
       `<span class="grow muted">${esc(c.state)} · ${models}</span>` +
       `<button class="btn mini" data-role="gw-test" data-conn="${esc(key)}"${busy ? " disabled" : ""}>` +
-      (busy ? "⏳ Testing…" : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})`) +
+      (busy ? "⏳ Testing…" : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"} · ${(c.keys || []).length ? _healthKeyLabel("gateway", key) : "direct"})`) +
       `</button>` +
       `</div>` +
       `<div class="model-health-table" data-role="gw-model-table">` +
@@ -2490,7 +2682,7 @@ function renderGatewayCard(core) {
       testBtn.textContent = `⏳ Testing gateway (0/${total})…`;
       try {
         await Promise.allSettled(keys.map((key) =>
-          testGatewayConnectionStreaming(key).then(() => {
+          testGatewayConnectionStreaming(key, undefined, false, true).then(() => {
             done += 1;
             testBtn.textContent = `⏳ Testing gateway (${done}/${total})…`;
           })));

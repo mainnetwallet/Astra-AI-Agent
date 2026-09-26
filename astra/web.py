@@ -2202,6 +2202,13 @@ class WebApp:
                                            "task": r.task_stats(),
                                            "last_route": r.last_route()}},
                                  rid=req.rid)
+        if path == ["api", "providers", "reset-all-health"] and method == "POST":
+            router = self.site.router()
+            if router is None:
+                return error_response("providers unavailable", 400,
+                                      "provider_unavailable", req.rid)
+            router.reset_all_health()
+            return json_response({"ok": True, "data": {"reset": True}}, rid=req.rid)
         # provider admin: /api/v1/providers/<name>/refresh|enable|disable|test|reset-health
         # (fixed off-by-one: "api"+"providers"+<name>+<action> is 4 segments,
         # not 5 — the old `len(path) == 5` check meant this route, including
@@ -2224,6 +2231,9 @@ class WebApp:
         if path == ["api", "gateway", "test"] and method == "POST":
             return self._gateway_test(req)
         # single-connection Gateway test: /api/v1/gateway/<connection>/test
+        if (len(path) == 4 and path[:2] == ["api", "gateway"]
+                and path[3] == "reset-health" and method == "POST"):
+            return self._gateway_reset_health(req, path[2])
         if (len(path) == 4 and path[:2] == ["api", "gateway"]
                 and path[3] == "test" and method == "POST"):
             return self._gateway_test_one(req, path[2])
@@ -2369,6 +2379,17 @@ class WebApp:
         return json_response({"ok": True,
                               "data": {"connections": gw.test_all_connections()}},
                              rid=req.rid)
+
+    def _gateway_reset_health(self, req: Request, name) -> Response:
+        """Clear one Gateway connection's saved manual-test/shared-health state."""
+        router = self.site.router()
+        gw = getattr(router, "gateway", None) if router else None
+        if gw is None:
+            return error_response("Astra AI Gateway not configured", 400,
+                                  "gateway_unavailable", req.rid)
+        gw.reset_connection_health(name)
+        return json_response({"ok": True, "data": {"connection": name,
+                                                    "reset": True}}, rid=req.rid)
 
     def _gateway_test_one(self, req: Request, name) -> Response:
         """Test one Astra AI Gateway connection (e.g. 'astra-gw-gemini') —

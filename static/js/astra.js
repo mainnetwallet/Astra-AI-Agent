@@ -2517,8 +2517,8 @@ const GATEWAY_MODELS = {};
 const GATEWAY_KEYS = {};
 
 // Bulk Test All keeps matching Gateway rows in Waiting until the Provider
-// result for the same provider+model has been saved. The Gateway probe
-// may run in parallel and reuse the shared result, but its UI waits.
+// result for the same provider+model has been saved. Matching Gateway rows
+// never make their own upstream health call; the Provider result is reused.
 const BULK_HEALTH_RUN = {
   active: false,
   providerModels: new Set(),

@@ -1324,39 +1324,29 @@ class AstraRouter:
 
     def _attempt(self, adapter, model: Model, req: RoutingRequest) -> RoutingResult | None:
         name = getattr(adapter, "name", "")
-        op = new_op_id()
-        self._emit("ai.started", provider=name, model=model.model_id,
-                   op=op, trace=req.trace)
-        t0 = ms_now()
         last_error = ""
-        # per-credential + per-model retries: a failed key rolls to the next
-        # key on the same model, then same provider's next model, then provider.
+        # Each retry is a separate upstream API attempt. Keep router/control
+        # events separate from the Activity Log's real API-call lifecycle.
         retries = self.max_retries
         for attempt in range(1, retries + 2):
             if attempt > 1:
                 self._emit("credential.rotation", provider=name, model=model.model_id,
-                           attempt=attempt, op=op, trace=req.trace)
+                           attempt=attempt, trace=req.trace)
                 self._emit("router.retry", provider=name, model=model.model_id,
-                           attempt=attempt, op=op, trace=req.trace)
+                           attempt=attempt, trace=req.trace)
             try:
-                messages = self._fit_messages(req.messages, model,
-                                              req.max_tokens)
-                # Multimodal dispatch: use a specialized adapter method for
-                # the non-chat TTS output modality before falling through to
-                # the normal chat path. Image generation is deliberately NOT
-                # dispatched here: it is owned exclusively by the Gateway's
-                # ImageRouter (see route_request's fail-closed guard).
+                messages = self._fit_messages(req.messages, model, req.max_tokens)
+                # Everything above this point is routing/preparation. Create
+                # the AI lifecycle only at the adapter call boundary.
+                op = new_op_id()
+                t0 = ms_now()
+                self._emit("ai.started", provider=name, model=model.model_id,
+                           op=op, trace=req.trace, attempt=attempt)
                 out_mods = req.required_output_modalities or []
                 if "audio" in out_mods and hasattr(adapter, "text_to_speech"):
                     prompt = self._extract_prompt(req.messages)
                     text = adapter.text_to_speech(prompt, model=model.model_id)
                 elif req.required_tools or req.structured_output or req.task_contract is not None:
-                    # §JSON mode: ask the provider API to enforce JSON, not
-                    # just the prompt text. No invented token floor: an
-                    # explicit budget is honoured, otherwise the field is
-                    # omitted (or derived from the model for providers whose
-                    # API requires it) so a reasoning model gets its real
-                    # maximum instead of a small Astra cap.
                     text = adapter.chat(
                         messages, model=model.model_id,
                         max_tokens=resolve_output_tokens(
@@ -1376,11 +1366,6 @@ class AstraRouter:
                 self._latency[name].append(ms)
                 self._calls[name] += 1
                 self._cost_est[name] = self._cost_est.get(name, 0.0) + cost
-                # Manual health probes must not mutate aggregate provider
-                # availability. Test-all intentionally probes many models/keys
-                # concurrently; one model's auth/rate-limit result must not
-                # make the whole provider "down" or generate misleading
-                # recovered/down flapping in the Activity Log.
                 if req.task_type != "health_check" and name in self._down:
                     self._down.discard(name)
                 self._last = {"provider": name, "model": model.model_id,
@@ -1389,45 +1374,36 @@ class AstraRouter:
                                    latency_ms=ms, estimated_cost_usd=cost,
                                    attempts=attempt, ok=True,
                                    usage=getattr(adapter, "_last_usage", None) or {},
-                                   _reason=("matched preference" if not attempt else
+                                   _reason=("matched preference" if attempt == 1 else
                                             f"retry #{attempt}"))
                 self._emit("ai.completed", provider=name, model=model.model_id,
                            latency_ms=ms, op=op, trace=req.trace, terminal=True,
                            key_id=test_cred.key_id if test_cred else "",
-                           key_label=key_label)
+                           key_label=key_label, attempt=attempt)
                 self._record_key_model(adapter, model.model_id, True, ms, "", req)
                 return rr
             except (ProviderError, TimeoutError) as e:
                 last_error = e.message or getattr(e, "category", type(e).__name__)
                 self._errors[name] = self._errors.get(name, 0) + 1
-                self._record_key_model(adapter, model.model_id, False,
-                                       duration_ms(t0), last_error, req)
-                # per-key test: one attempt, on that key only -> terminal.
                 retry = (not self._pinned(adapter) and attempt <= retries
                          and getattr(e, "retryable", True))
                 test_cred = (adapter.pool.last_key()
                               if getattr(adapter, "pool", None) is not None
                               and hasattr(adapter.pool, "last_key") else None)
                 key_label = test_cred.label if test_cred else ""
-                self._emit("ai.failed", provider=name, model=model.model_id,
-                           error=last_error, attempt=attempt, op=op,
-                           trace=req.trace, terminal=not retry, retrying=retry,
-                           key_id=test_cred.key_id if test_cred else "",
-                           key_label=key_label)
-                if self._pinned(adapter):
+                if "op" in locals():
+                    self._emit("ai.failed", provider=name, model=model.model_id,
+                               error=last_error, attempt=attempt, op=op,
+                               trace=req.trace, terminal=not retry, retrying=retry,
+                               key_id=test_cred.key_id if test_cred else "",
+                               key_label=key_label)
+                self._record_key_model(adapter, model.model_id, False,
+                                       duration_ms(t0) if "t0" in locals() else 0,
+                                       last_error, req)
+                if self._pinned(adapter) or not retry:
                     break
-                # A NON-retryable error (e.g. "no healthy credential
-                # configured": no key to try, and cooldowns outlast our 1-2s
-                # backoff) or the last allowed attempt ends this candidate
-                # now — falling through would re-call it for nothing and let
-                # the router move on to the next provider immediately.
-                if not retry:
-                    break
-                # the adapter's credential pool has already cooled the bad key;
-                # a fresh key on the same model may succeed, so keep retrying up
-                # to max_retries, respecting backoff only for transient errors.
                 time.sleep(min(self.backoff_s * attempt, 8))
-            except Exception as e:           # never let a provider kill routing
+            except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
                 self._errors[name] = self._errors.get(name, 0) + 1
                 retry = (not self._pinned(adapter) and attempt <= retries)
@@ -1435,19 +1411,15 @@ class AstraRouter:
                               if getattr(adapter, "pool", None) is not None
                               and hasattr(adapter.pool, "last_key") else None)
                 key_label = test_cred.label if test_cred else ""
-                self._emit("ai.failed", provider=name, model=model.model_id,
-                           error=last_error, attempt=attempt, op=op,
-                           trace=req.trace, terminal=not retry, retrying=retry,
-                           key_id=test_cred.key_id if test_cred else "",
-                           key_label=key_label)
-                if self._pinned(adapter):
+                if "op" in locals():
+                    self._emit("ai.failed", provider=name, model=model.model_id,
+                               error=last_error, attempt=attempt, op=op,
+                               trace=req.trace, terminal=not retry, retrying=retry,
+                               key_id=test_cred.key_id if test_cred else "",
+                               key_label=key_label)
+                if self._pinned(adapter) or not retry:
                     break
-                if retry:
-                    time.sleep(min(self.backoff_s * attempt, 8))
-        # A manual health probe records its per-key/model result but must
-        # not change aggregate provider availability. The probe is only a
-        # diagnostic observation; normal routing failures are still allowed
-        # to mark the provider down and trigger recovery/cooldown behavior.
+                time.sleep(min(self.backoff_s * attempt, 8))
         if req.task_type != "health_check":
             self._mark_down(name, last_error)
         return RoutingResult(ok=False, error=f"{name}: {last_error}",

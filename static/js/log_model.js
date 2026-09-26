@@ -533,7 +533,7 @@
    * higher-level request/run that owns it, so a request that ends can resolve
    * any child it left running. */
   var START_SUFFIX = /\.(started|request)$/;
-  var TERMINAL_SUFFIX = /\.(completed|succeeded|failed|error|timeout|cancelled|rejected|confirmed|done|finished|exhausted)$/;
+  var TERMINAL_SUFFIX = /\.(completed|succeeded|recovered|failed|error|timeout|cancelled|rejected|confirmed|done|finished|exhausted)$/;
   var WEB3_TERMINAL = /^web3\.transaction\.(confirmed|failed|rejected)$/;
   var UPDATE_KINDS = /^(router\.(retry|fallback|gateway_task_completion|gateway_supervision)|credential\.rotation|gateway\.(target_cooldown|execution_completed|execution_recovered|execution_failed))$/;
 

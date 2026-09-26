@@ -1333,8 +1333,9 @@ class ChatPipeline:
             return None
         try:
             uri = fn(prompt, model=model or None,
-                     editing=(task_type == "image_editing"),
-                     source_image=source_image, trace=req)
+                     editing=(task_type in ("image_editing", "image_inpainting")),
+                     source_image=source_image, mask_image=mask_image,
+                     operation=task_type, trace=req)
         except Exception as e:
             err = getattr(e, "message", None) or str(e)
             self._emit("chat.pipeline.image_unavailable", error=err,

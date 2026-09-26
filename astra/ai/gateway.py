@@ -758,7 +758,8 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1,
-                       source_image: dict | None = None) -> str:
+                       source_image: dict | None = None,
+                       mask_image: dict | None = None) -> str:
         """Generate or edit an image through Gemini's native content API.
 
         Editing is capability-gated by ImageRouter, so a source image is only
@@ -767,6 +768,8 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
+        if mask_image is not None:
+            raise ProviderError(f"{self.name}: inpainting is not supported")
         parts = [{"text": prompt}]
         if source_image:
             path = str(source_image.get("storage_path") or "")

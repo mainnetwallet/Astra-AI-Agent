@@ -182,10 +182,11 @@ class _GatewayCompatibleConnection:
     #: Image generation gets its OWN dedicated credentials/base URL, separate
     #: from the connection's normal chat pool (``api_keys_env``/
     #: ``base_url_env``). Set per-connection to the documented ``IMAGE_*``
-    #: env names (e.g. ``IMAGE_GEMINI_API_KEY``). When unset/empty, image
-    #: generation explicitly falls back to the connection's normal GW_*
-    #: credentials/base URL — an intentional, documented fallback, never an
-    #: accidental reuse.
+    #: env names (e.g. ``IMAGE_GEMINI_API_KEY``). There is NO fallback to the
+    #: connection's normal GW_* chat credentials/base URL: image generation
+    #: is only ever eligible when its own dedicated ``IMAGE_*`` credential is
+    #: configured (see `image_credentials_configured()` /
+    #: `astra.ai.gateway_routing.eligible_image_generation_targets`).
     image_api_keys_env: str = ""
     image_base_url_env: str = ""
     base_url: str = ""
@@ -216,16 +217,17 @@ class _GatewayCompatibleConnection:
         raw = self._env_str(self.base_url_env)
         self.base_url = (raw or self.base_url or "").rstrip("/")
         # -- dedicated image-generation credentials/base URL (see class doc) --
+        # ImageRouter is the only component allowed to check image-provider
+        # credentials, and it must use ONLY the dedicated IMAGE_* pool below —
+        # never the connection's normal chat `self.pool`. When no dedicated
+        # IMAGE_* key is configured, `self.image_pool` is an empty pool (not
+        # a fallback to `self.pool`), so `image_credentials_configured()`
+        # correctly reports this provider as ineligible for image generation.
         img_secrets = (self._env_list(self.image_api_keys_env)
                        if config and self.image_api_keys_env else [])
-        if img_secrets:
-            img_label = self._first_env(self.image_api_keys_env)
-            self.image_pool = CredentialPool(f"{img_label}", img_secrets)
-        else:
-            # No dedicated IMAGE_* credentials configured: fall back to this
-            # connection's normal pool. Explicit and documented (see class
-            # doc), never an accident of shared state.
-            self.image_pool = self.pool
+        img_label = (self._first_env(self.image_api_keys_env)
+                    or f"{self.name}-image")
+        self.image_pool = CredentialPool(img_label, img_secrets)
         raw_img_base = (self._env_str(self.image_base_url_env)
                         if self.image_base_url_env else None)
         self.image_base_url = (raw_img_base or "").rstrip("/")
@@ -659,6 +661,16 @@ class _GatewayCompatibleConnection:
     def credential_summary(self) -> dict:
         return self.pool.summary()
 
+    def image_credentials_configured(self) -> bool:
+        """True only when this connection's OWN dedicated IMAGE_* credential
+        is configured. Used by `astra.ai.gateway_routing.
+        eligible_image_generation_targets` to decide provider eligibility for
+        image generation — the normal chat `self.pool` is never consulted
+        here (see `image_api_keys_env`/`image_pool` above). Connections with
+        an additional required credential (e.g. Cloudflare's account id)
+        override this."""
+        return bool(self.image_pool)
+
     def supports(self, capability: str) -> bool:
         return capability in self.capabilities
 
@@ -671,7 +683,11 @@ class _GatewayCompatibleConnection:
 class AstraGatewayGemini(_GatewayCompatibleConnection):
     """Astra AI Gateway / Gemini connection (independent of GeminiAdapter)."""
     name = "astra-gw-gemini"
-    image_models_env = "GW_GEMINI_IMAGE_MODELS"
+    #: Canonical, non-``GW_``-prefixed image-model list — shared with the
+    #: Provider/ModelRegistry system's own catalog seed (astra/ai/models.py),
+    #: since both hold the identical documented FREE model id. There is no
+    #: separate ``GW_GEMINI_IMAGE_MODELS`` any more.
+    image_models_env = "GEMINI_IMAGE_MODELS"
     base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
     models_env = "GW_GEMINI_MODELS"
     api_keys_env = "GW_GEMINI_API_KEYS"
@@ -757,7 +773,11 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
     independent GW_CLOUDFLARE_ACCOUNT_IDS list.
     """
     name = "astra-gw-cloudflare"
-    image_models_env = "GW_CLOUDFLARE_IMAGE_MODELS"
+    #: Canonical, non-``GW_``-prefixed image-model list — shared with the
+    #: Provider/ModelRegistry system's own catalog seed (astra/ai/models.py),
+    #: since both hold the identical documented FREE model ids. There is no
+    #: separate ``GW_CLOUDFLARE_IMAGE_MODELS`` any more.
+    image_models_env = "CLOUDFLARE_IMAGE_MODELS"
     base_url = "https://api.cloudflare.com/client/v4"
     models_env = "GW_CLOUDFLARE_MODELS"
     api_keys_env = "GW_CLOUDFLARE_API_KEYS"
@@ -765,8 +785,10 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
     account_ids_env = "GW_CLOUDFLARE_ACCOUNT_IDS"
     image_api_keys_env = "IMAGE_CLOUDFLARE_API_KEY"
     image_base_url_env = "IMAGE_CLOUDFLARE_BASE_URL"
-    #: Dedicated account id(s) for image generation. Falls back to
-    #: `account_ids_env` when unset — an explicit, documented fallback.
+    #: Dedicated account id(s) for image generation. NO fallback to the
+    #: chat `account_ids_env` (`GW_CLOUDFLARE_ACCOUNT_IDS`) — ImageRouter
+    #: must use ONLY this dedicated credential (see
+    #: `image_credentials_configured()` below).
     image_account_ids_env = "IMAGE_CLOUDFLARE_ACCOUNT_ID"
     capabilities = ["chat", "stream", "tools", "json"]
 
@@ -776,11 +798,19 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
         self._accounts = accounts or []
         image_accounts = (config.getlist(self.image_account_ids_env)
                           if config else []) or []
-        self._image_accounts = image_accounts or self._accounts
+        # Dedicated image account id(s) ONLY — never inherited from the
+        # chat `GW_CLOUDFLARE_ACCOUNT_IDS` pool.
+        self._image_accounts = image_accounts or []
         self._aidx = 0
         self._aidx_lock = threading.Lock()
         self._image_aidx = 0
         self._image_aidx_lock = threading.Lock()
+
+    def image_credentials_configured(self) -> bool:
+        """Cloudflare image eligibility requires BOTH the dedicated
+        ``IMAGE_CLOUDFLARE_API_KEY`` and ``IMAGE_CLOUDFLARE_ACCOUNT_ID`` —
+        neither falls back to the chat GW_* credentials/account ids."""
+        return bool(self.image_pool) and bool(self._image_accounts)
 
     def _api_base(self) -> str:
         # Per-request account pick; never mutates self.base_url (shared by
@@ -802,11 +832,11 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
 
     def _image_account(self) -> str:
         """Per-request account pick from the dedicated image account pool
-        (`IMAGE_CLOUDFLARE_ACCOUNT_ID`, else `GW_CLOUDFLARE_ACCOUNT_IDS`)."""
+        (`IMAGE_CLOUDFLARE_ACCOUNT_ID` only — no chat-credential fallback)."""
         if not self._image_accounts:
             raise ProviderError(
                 f"{self.name}: no account ids configured "
-                f"({self.image_account_ids_env} or {self.account_ids_env})")
+                f"({self.image_account_ids_env})")
         with self._image_aidx_lock:
             acc = self._image_accounts[self._image_aidx % len(self._image_accounts)]
             self._image_aidx += 1
@@ -836,7 +866,7 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
         if not self._image_accounts:
             raise ProviderError(
                 f"{self.name}: no account ids configured "
-                f"({self.image_account_ids_env} or {self.account_ids_env})")
+                f"({self.image_account_ids_env})")
         # Only send parameters the model's published schema accepts, so a
         # model like flux-1-schnell (prompt/steps only) never gets a 400 for
         # an unsupported width/height.
@@ -884,7 +914,12 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
     """Astra AI Gateway / OpenRouter connection (independent of
     OpenRouterAdapter)."""
     name = "astra-gw-openrouter"
-    image_models_env = "GW_OPENROUTER_IMAGE_MODELS"
+    #: Canonical, non-``GW_``-prefixed image-model list — shared with the
+    #: Provider/ModelRegistry system's own catalog seed (astra/ai/models.py).
+    #: Left empty by default: OpenRouter's live discovery
+    #: (`_discover_image_models`) is authoritative for its FREE image ids.
+    #: There is no separate ``GW_OPENROUTER_IMAGE_MODELS`` any more.
+    image_models_env = "OPENROUTER_IMAGE_MODELS"
     base_url = "https://openrouter.ai/api/v1"
     models_env = "GW_OPENROUTER_MODELS"
     api_keys_env = "GW_OPENROUTER_API_KEYS"
@@ -1313,11 +1348,21 @@ GATEWAY_CONNECTIONS = (
 
 
 def _build_connection(cls, config=None):
-    """Build one gateway connection iff its own credentials are configured.
+    """Build one gateway connection iff EITHER its chat credentials OR its
+    dedicated image credentials are configured.
 
-    Returns None when the connection's GW_*_API_KEYS / GW_*_CREDENTIALS are
+    Returns None when the connection's GW_*_API_KEYS / GW_*_CREDENTIALS AND
+    its dedicated IMAGE_* API key (when the class declares one) are all
     unset/blank, so an unconfigured connection simply drops out of the
     fallback chain — same convention as every provider adapter.
+
+    A connection built ONLY from its dedicated IMAGE_* credential (no
+    GW_*_API_KEYS at all) is still excluded from ordinary chat routing,
+    since `_connection_usable()` checks the chat `pool`, which stays empty —
+    it only ever becomes eligible for image generation, via
+    `image_credentials_configured()` / `eligible_image_generation_targets()`.
+    This is what lets ImageRouter use IMAGE_* credentials completely
+    independently of whether the matching GW_* chat credentials exist.
     """
     if config is None:
         return None
@@ -1333,7 +1378,8 @@ def _build_connection(cls, config=None):
     keys = _vals(cls.api_keys_env)
     if not keys:
         keys = _vals(getattr(cls, "credentials_env", None))
-    if not keys:
+    image_keys = _vals(getattr(cls, "image_api_keys_env", None))
+    if not keys and not image_keys:
         return None
     try:
         return cls(config=config)

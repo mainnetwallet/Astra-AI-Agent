@@ -229,8 +229,25 @@ def build_gateway_catalog(connections: list, *,
     return out
 
 
-def _connection_usable(conn) -> bool:
-    """Provider-level (connection-level) health — never model-level (§6)."""
+def _connection_usable(conn, *, use_image_pool: bool = False) -> bool:
+    """Provider-level (connection-level) health — never model-level (§6).
+
+    ``use_image_pool=True`` (image generation only) checks the connection's
+    OWN dedicated image-provider credentials
+    (`conn.image_credentials_configured()`) instead of its normal chat
+    `pool` — ImageRouter must never treat a connection as image-eligible
+    just because its chat GW_* credentials are configured (see
+    `eligible_image_generation_targets`).
+    """
+    if use_image_pool:
+        fn = getattr(conn, "image_credentials_configured", None)
+        if callable(fn):
+            try:
+                return bool(fn())
+            except Exception:
+                return False
+        pool = getattr(conn, "image_pool", None)
+        return bool(pool) if pool is not None else False
     pool = getattr(conn, "pool", None)
     if pool is not None:
         return bool(pool)
@@ -535,7 +552,7 @@ def eligible_image_generation_targets(
     category = "image_editing" if editing else "image_generation"
     return eligible_targets(catalog, routing_state, category=category,
                             context_tokens=context_tokens,
-                            require_health=False)
+                            require_health=False, use_image_pool=True)
 
 
 #: Short alias (the explicit name is the one the Gateway's decision path
@@ -572,7 +589,8 @@ def describe_image_targets(
 def eligible_targets(catalog: list[tuple[object, Model]],
                       routing_state: GatewayRoutingState, *, category: str,
                       context_tokens: int = 0,
-                      require_health: bool = True
+                      require_health: bool = True,
+                      use_image_pool: bool = False
                       ) -> list[tuple[object, Model, GatewayModelHealth]]:
     """Connection-usable + capability/context-suitable + enabled.
 
@@ -581,10 +599,14 @@ def eligible_targets(catalog: list[tuple[object, Model]],
     (provider, model) entry is in cooldown. Image generation passes
     `require_health=False`: there is no proactive image health check, so a
     model is never excluded before the real generation request was attempted.
+
+    `use_image_pool=True` (image generation only) makes `_connection_usable`
+    check the connection's dedicated image-provider credentials instead of
+    its normal chat pool (see `_connection_usable`).
     """
     out = []
     for conn, model in catalog:
-        if not _connection_usable(conn):
+        if not _connection_usable(conn, use_image_pool=use_image_pool):
             continue
         # An explicitly disabled model is never selectable for any category
         # (its score is also heavily penalised, but a hard filter is what

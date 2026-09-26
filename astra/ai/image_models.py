@@ -210,14 +210,15 @@ IMAGE_MODELS_ENV = {
     "zai": "ZAI_IMAGE_MODELS",
 }
 
-# Gateway (GW_*) equivalents — the Gateway keeps its own, fully independent
-# model lists, read directly by each connection class's own
-# ``image_models_env`` attribute (see astra/ai/gateway.py, e.g.
-# ``AstraGatewayCloudflare.image_models_env = "GW_CLOUDFLARE_IMAGE_MODELS"``).
-# There is deliberately no dict mirroring those names here: a
-# provider-name -> env-var mapping like ``IMAGE_MODELS_ENV`` below would be
-# dead weight for the Gateway, since each connection class is already the
-# single source of truth for its own env var name.
+# The Gateway's own connection classes (astra/ai/gateway.py) read these
+# EXACT SAME canonical env vars via each connection's own ``image_models_env``
+# attribute (e.g. ``AstraGatewayCloudflare.image_models_env =
+# "CLOUDFLARE_IMAGE_MODELS"``) -- there is no separate ``GW_*_IMAGE_MODELS``
+# variable any more. The two systems intentionally share one variable per
+# provider rather than each defining its own, so a deployment configures the
+# image-model list once. A provider-name -> env-var mapping is not
+# duplicated here for the Gateway since each connection class already is the
+# single source of truth for its own ``image_models_env``.
 #
 #: CANONICAL env var for the deterministic, comma-separated serial-fallback
 #: priority order used by the Gateway's ImageRouter (the in-repo

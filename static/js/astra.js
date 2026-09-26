@@ -2529,13 +2529,22 @@ const BULK_HEALTH_RUN = {
   providerResults: new Map(),
   deferredGatewayResults: new Map()
 };
-function _bulkProviderNameForGateway(key) { return String(key || "").replace(/^astra-gw-/, ""); }
+function _bulkProviderNameForGateway(key) {
+  const short = String(key || "").replace(/^astra-gw-/, "");
+  // Gateway connection names are canonical short-provider ids, while the
+  // Provider UI may expose the same id with different casing/formatting.
+  // Resolve against the actual loaded Provider catalog instead of assuming
+  // a byte-for-byte property-name match.
+  const normalize = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const wanted = normalize(short);
+  return Object.keys(PROVIDER_MODELS).find((name) => normalize(name) === wanted) || short;
+}
 function _bulkModelToken(provider, model) { return provider + "\0" + model; }
 function _bulkGatewayShouldWait(key, modelId) {
   if (!BULK_HEALTH_RUN.active) return false;
   const provider = _bulkProviderNameForGateway(key);
-  return Array.isArray(PROVIDER_MODELS[provider]) &&
-    PROVIDER_MODELS[provider].includes(modelId) &&
+  const models = PROVIDER_MODELS[provider] || [];
+  return models.includes(modelId) &&
     !BULK_HEALTH_RUN.providerModels.has(_bulkModelToken(provider, modelId));
 }
 function _applyGatewayBulkResult(key, modelId, result) {

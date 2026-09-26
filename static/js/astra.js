@@ -1934,6 +1934,38 @@ function _healthKeyLabel(kind, name) {
   const key = _healthKeys(kind, name).find((k) => k.key_id === id);
   return key ? key.label : "Key 1";
 }
+
+function _initHealthKeyPicker() {
+  const btn = $("#btn-health-key-selector"), panel = $("#health-key-selector");
+  if (!btn || !panel || btn.dataset.hooked) return;
+  btn.dataset.hooked = "1";
+  btn.onclick = () => {
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) _renderHealthKeyPicker();
+  };
+  panel.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-health-key-preset]");
+    if (!b) return;
+    const last = b.dataset.healthKeyPreset === "last";
+    for (const kind of ["provider", "gateway"]) {
+      const src = kind === "provider" ? PROVIDER_KEYS : GATEWAY_KEYS;
+      const dst = kind === "provider" ? HEALTH_KEY_SELECTION.providers : HEALTH_KEY_SELECTION.gateway;
+      for (const [name, keys] of Object.entries(src || {})) {
+        if (keys.length) dst[name] = (last ? keys[keys.length - 1] : keys[0]).key_id;
+      }
+    }
+    _saveHealthKeySelection();
+    _renderHealthKeyPicker();
+  });
+  panel.addEventListener("change", (e) => {
+    const sel = e.target.closest("[data-health-key-kind]");
+    if (!sel) return;
+    const dst = sel.dataset.healthKeyKind === "provider"
+      ? HEALTH_KEY_SELECTION.providers : HEALTH_KEY_SELECTION.gateway;
+    dst[sel.dataset.healthKeyName] = sel.value;
+    _saveHealthKeySelection();
+  });
+}
 function _setAllHealthKeys(position) {
   for (const [name, keys] of Object.entries(PROVIDER_KEYS)) {
     if (keys.length) HEALTH_KEY_SELECTION.providers[name] =

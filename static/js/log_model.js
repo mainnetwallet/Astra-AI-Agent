@@ -75,6 +75,9 @@
     // The Activity Log should show the actual Provider/Gateway operation
     // instead of a misleading generic "Agent Router" row.
     if (kind.indexOf("router.") === 0) return false;
+    // Gateway recovery is an internal post-call bookkeeping event, not a
+    // separate upstream API call. Keep the Activity Log provider-centric.
+    if (kind === "gateway.execution_recovery") return false;
 
     // Gateway events are internal lifecycle records, except for a
     // Gateway-only model test. When the model is absent from the Provider

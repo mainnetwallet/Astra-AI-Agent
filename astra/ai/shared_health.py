@@ -8,7 +8,7 @@ execution paths). The ONLY thing this module coordinates is the manual
 "test connection" HTTP probe itself, for the specific case where both
 systems would otherwise send an identical real upstream request:
 
-    same canonical upstream provider + same credential + same model
+    same canonical upstream provider + same model
 
     Provider Router                     Gateway Router
          |                                    |
@@ -22,7 +22,7 @@ systems would otherwise send an identical real upstream request:
                         /            \\
               Provider local state   Gateway local state
 
-Anything less specific than that triple (different key, different model, or
+Anything less specific than that pair (different model or
 a different canonical provider) is never shared -- see `resolve_identity` /
 `SharedHealthIdentity`. Only the manual health-check entry points
 (`AstraRouter.test_provider_model`, `AstraAIGateway.test_connection_model`)
@@ -37,7 +37,6 @@ Authorization header.
 """
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from datetime import datetime
@@ -77,50 +76,29 @@ def canonical_provider(name: str) -> str:
     return GATEWAY_PROVIDER_SHORT.get(name, name)
 
 
-def credential_fingerprint(provider: str, secret: str) -> str:
-    """Deterministic, one-way, secret-free identity for one credential
-    against one canonical provider. Never logged, never returned to any
-    caller, never stored anywhere except as this fingerprint."""
-    return hashlib.sha256(
-        f"{_FINGERPRINT_NAMESPACE}\0{provider}\0{secret}".encode("utf-8")
-    ).hexdigest()[:16]
-
-
 class SharedHealthIdentity(tuple):
-    """(canonical_provider, credential_fingerprint, model) -- a hashable,
-    secret-free identity for one manual health-check target. Two probes
-    share a result if and only if all three match."""
+    """(canonical_provider, model) -- the manual health-check sharing
+    identity. Credentials are deliberately NOT part of this identity."""
     __slots__ = ()
 
-    def __new__(cls, provider: str, fingerprint: str, model: str):
-        return super().__new__(cls, (provider, fingerprint, model))
+    def __new__(cls, provider: str, model: str):
+        return super().__new__(cls, (provider, model))
 
     @property
     def provider(self) -> str:
         return self[0]
 
     @property
-    def fingerprint(self) -> str:
-        return self[1]
-
-    @property
     def model(self) -> str:
-        return self[2]
+        return self[1]
 
 
 def resolve_identity(pool, provider_name: str, model_id: str,
                      key_id: str | None = None):
-    """Resolve the (SharedHealthIdentity, Credential) a manual health probe
-    against `pool` (a `CredentialPool`, Provider- or Gateway-owned -- both
-    are the same class) would use, or (None, None) when it can't be
-    determined (no pool, no usable credential, or `key_id` doesn't name a
-    key in this pool). Callers must treat (None, None) as "skip sharing,
-    probe directly" -- exactly what happened before this module existed.
+    """Resolve shared provider+model identity plus this caller's owner key.
 
-    When `key_id` is given, resolution is pinned to that exact key (mirrors
-    the manual per-key test UI); this never fails table lookups the caller
-    hasn't already validated -- see `AstraRouter.test_provider_model`, which
-    checks `key_id` against `pool.keys()` before calling this.
+    key_id controls only the credential used if this caller owns the probe;
+    it is deliberately excluded from SharedHealthIdentity.
     """
     if pool is None or not hasattr(pool, "pick") or not hasattr(pool, "pinned"):
         return None, None
@@ -134,10 +112,7 @@ def resolve_identity(pool, provider_name: str, model_id: str,
     secret = pool.get_secret_for(cred) if hasattr(pool, "get_secret_for") else None
     if not secret:
         return None, None
-    provider = canonical_provider(provider_name)
-    fp = credential_fingerprint(provider, secret)
-    return SharedHealthIdentity(provider, fp, model_id), cred
-
+    return SharedHealthIdentity(canonical_provider(provider_name), model_id), cred
 
 def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")

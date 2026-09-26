@@ -1351,7 +1351,15 @@ class AstraRouter:
                 # per-key test: one attempt, on that key only -> terminal.
                 retry = (not self._pinned(adapter) and attempt <= retries
                          and getattr(e, "retryable", True))
-                self._emit("ai.failed", provider=name, model=model.model_id,
+                 test_cred = (adapter.pool.last_key()
+                               if getattr(adapter, "pool", None) is not None
+                               and hasattr(adapter.pool, "last_key") else None)
+                 key_label = test_cred.label if test_cred else ""
+                 self._emit("ai.failed", provider=name, model=model.model_id,
+                            error=last_error, attempt=attempt, op=op,
+                            trace=req.trace, terminal=not retry, retrying=retry,
+                            key_id=test_cred.key_id if test_cred else "",
+                            key_label=key_label)
                            error=last_error, attempt=attempt, op=op,
                            trace=req.trace, terminal=not retry, retrying=retry)
                 if self._pinned(adapter):

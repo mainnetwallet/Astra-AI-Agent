@@ -2458,12 +2458,6 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
       .then((result) => {
         const row = rows.find((r) => r.model === modelId);
         if (!row) return;
-        if (bulk && _bulkGatewayShouldWait(key, modelId)) {
-          BULK_HEALTH_RUN.deferredGatewayResults.set(key, {
-            token: _bulkModelToken(_bulkProviderNameForGateway(key), modelId), result
-          });
-          return;
-        }
         row.keys.forEach((slot) => Object.assign(slot, {
           pending: false,
           waiting: false,
@@ -2537,10 +2531,10 @@ function _applyGatewayBulkResult(key, modelId, result) {
 }
 function _flushBulkGatewayResult(provider, modelId, result) {
   const token = _bulkModelToken(provider, modelId);
-  for (const [key, deferred] of BULK_HEALTH_RUN.deferredGatewayResults) {
+  for (const [deferredKey, deferred] of BULK_HEALTH_RUN.deferredGatewayResults) {
     if (deferred.token !== token) continue;
-    _applyGatewayBulkResult(key, modelId, result);
-    BULK_HEALTH_RUN.deferredGatewayResults.delete(key);
+    _applyGatewayBulkResult(deferred.key, deferred.modelId, result);
+    BULK_HEALTH_RUN.deferredGatewayResults.delete(deferredKey);
   }
 }
 
@@ -2650,6 +2644,16 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
       .then((result) => {
         const row = rows.find((r) => r.model === modelId);
         if (!row) return;
+        // Bulk Test All: keep Gateway UI in Waiting until the matching
+        // Provider result has been applied. The Gateway probe itself may
+        // still run in parallel and reuse the shared upstream result.
+        if (bulk && _bulkGatewayShouldWait(key, modelId)) {
+          BULK_HEALTH_RUN.deferredGatewayResults.set(
+            key + "\0" + modelId,
+            { token: _bulkModelToken(_bulkProviderNameForGateway(key), modelId), key, modelId, result }
+          );
+          return;
+        }
         row.keys.forEach((slot) => Object.assign(slot, {
           pending: false,
           waiting: false,

@@ -37,6 +37,16 @@ test("normalize: gateway call carries provider and model", () => {
   assert.strictEqual(m.detail, "2.83s");
 });
 
+test("normalize: explicit failed health-test outcome is an error", () => {
+  const m = Log.normalize(ev("astra_gateway.test", {
+    connection: "astra-gw-cloudflare", model: "@cf/test", ok: false,
+    latency_ms: 0, reason: "authentication failed", key_label: "key 2"
+  }));
+  assert.strictEqual(m.status, "err");
+  assert.strictEqual(m.detail, "authentication failed");
+  assert.match(JSON.stringify(Log.detailFields(m)), /Key.*key 2/);
+});
+
 test("normalize: failures are errors with the reason", () => {
   const m = Log.normalize(ev("tool.failed",
     { tool: "fetch_url", error: "blocked private host" }));
@@ -1199,6 +1209,18 @@ test("normalize: long input/output are shown in full (no 280-char clip)", () => 
     { provider: "groq", model: "m", input: big, output: big }));
   assert.strictEqual(m.input.length, 5000);
   assert.strictEqual(m.output.length, 5000);
+});
+
+test("mergeLifecycle: terminal key label is retained on the Agent Router row", () => {
+  const start = Log.normalize(ev("router.request", {
+    op: "rt-key", provider: "cloudflare", model: "@cf/test"
+  }));
+  const done = Log.normalize(ev("ai.completed", {
+    op: "rt-key", provider: "cloudflare", model: "@cf/test",
+    key_label: "key 2", terminal: true, latency_ms: 123
+  }));
+  const merged = Log.mergeLifecycle(start, done);
+  assert.match(JSON.stringify(merged.fields), /Key.*key 2/);
 });
 
 test("mergeLifecycle: request Input survives the success row, Output is added", () => {

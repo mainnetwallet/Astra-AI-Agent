@@ -263,6 +263,7 @@ class ChatLog:
                 "storage_path": str(att.get("storage_path") or att.get("_storage_path") or ""),
                 "mime_type": str(att.get("detected_type") or att.get("mime_type") or "image/png"),
                 "original_filename": str(att.get("original_filename") or att.get("filename") or "image"),
+                "role": str(att.get("role") or "image"),
             })
         self._insert(cid, "user", redacted,
                      files=[str(f) for f in (files or [])][:20],

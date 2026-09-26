@@ -2328,11 +2328,21 @@ class AstraAIGateway:
             # has no local probe row yet, expose the fresh shared result as
             # its saved model health too. This makes a browser refresh show
             # the same result instead of "not tested yet".
-            if (health["success_count"] + health["failure_count"] == 0
-                    and self.shared_health is not None):
+            if self.shared_health is not None:
                 shared = self.shared_health.get_fresh(
                     SharedHealthIdentity(model.provider, model.model_id))
-                if shared is not None:
+                # A matching Provider probe is the authoritative shared
+                # result for this exact provider+model. Prefer it whenever it
+                # is newer than the Gateway's local row, even if the Gateway
+                # had an older direct probe saved previously. Without this,
+                # Test All can correctly share in-page results but a browser
+                # refresh resurrects the old Gateway result.
+                local_last = max(
+                    str(health.get("last_success") or ""),
+                    str(health.get("last_failure") or ""),
+                )
+                shared_last = str((shared or {}).get("tested_at") or "")
+                if shared is not None and (not local_last or shared_last >= local_last):
                     if shared.get("ok"):
                         health.update({
                             "success_count": 1,
@@ -2340,7 +2350,7 @@ class AstraAIGateway:
                             "consecutive_failures": 0,
                             "average_latency_ms": round(
                                 float(shared.get("latency_ms") or 0.0), 1),
-                            "last_success": shared.get("tested_at") or "",
+                            "last_success": shared_last,
                             "last_failure": "",
                             "cooldown_until": 0.0,
                         })
@@ -2351,7 +2361,7 @@ class AstraAIGateway:
                             "consecutive_failures": 1,
                             "average_latency_ms": 0.0,
                             "last_success": "",
-                            "last_failure": shared.get("tested_at") or "",
+                            "last_failure": shared_last,
                         })
             model_health_by_conn.setdefault(conn.name, {})[model.model_id] = health
         out = {}

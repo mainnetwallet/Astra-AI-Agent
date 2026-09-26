@@ -306,5 +306,24 @@ class TestGatewayRoutingPolicyUnits(unittest.TestCase):
             small, category="general", context_tokens=1000))
 
 
+class TestGatewayManualHealthPersistence(unittest.TestCase):
+    def test_manual_health_result_survives_refresh(self):
+        from astra.ai.gateway import AstraAIGateway
+        d = tempfile.mkdtemp()
+        db_path = os.path.join(d, "manual-health.db")
+        store1 = Store(db_path)
+        conn1 = _FakeMultiModelConn("astra-gw-groq", ["model-a"])
+        gw1 = AstraAIGateway(connections=[conn1], store=store1)
+        result = gw1.test_connection_model(conn1, "model-a")
+        self.assertTrue(result["ok"])
+        store1.close()
+        store2 = Store(db_path)
+        conn2 = _FakeMultiModelConn("astra-gw-groq", ["model-a"])
+        gw2 = AstraAIGateway(connections=[conn2], store=store2)
+        health = gw2.health()["astra-gw-groq"]["model_health"]["model-a"]
+        self.assertEqual(health["success_count"], 1)
+        self.assertNotEqual(health["last_success"], "")
+        store2.close()
+
 if __name__ == "__main__":
     unittest.main()

@@ -240,6 +240,37 @@ class SharedHealthCoordinator:
                 pass
         return row
 
+    def invalidate(self, provider: str | None = None,
+                 model: str | None = None) -> None:
+        """Drop fresh shared results for a new explicit health-test run.
+
+        This never cancels an in-flight probe: callers use it before starting
+        a run. The next callers then share the first new upstream probe.
+        """
+        with self._lock:
+            doomed = [
+                identity for identity in self._cache
+                if (provider is None or identity.provider == provider)
+                and (model is None or identity.model == model)
+            ]
+            for identity in doomed:
+                self._cache.pop(identity, None)
+                self._inflight_result.pop(identity, None)
+                if self.store:
+                    try:
+                        if model is None:
+                            self.store.exec(
+                                "DELETE FROM shared_health_result "
+                                "WHERE canonical_provider=?",
+                                (identity.provider,))
+                        else:
+                            self.store.exec(
+                                "DELETE FROM shared_health_result "
+                                "WHERE canonical_provider=? AND model=?",
+                                (identity.provider, identity.model))
+                    except Exception:
+                        pass
+
     # -- the coordinated probe ------------------------------------------------
     def run(self, identity: SharedHealthIdentity, probe_fn):
         """Return (result, reused) for `identity`.

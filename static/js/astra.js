@@ -2820,12 +2820,15 @@ function renderGatewayCard(core) {
     GATEWAY_MODELS[key] = c.models || [];
     GATEWAY_KEYS[key] = c.keys || [];
     _ensureHealthKey("gateway", key);
-    // First paint after a reload: show the last saved per-model results
-    // (same idea as PROVIDER_MODEL_RESULTS restoration in loaders.providers),
-    // instead of leaving this connection's table empty until someone
-    // clicks Test again.
-    if (!(GATEWAY_MODEL_RESULTS[key] || []).length) {
-      GATEWAY_MODEL_RESULTS[key] = savedGatewayModelRows(c.models || [], c.model_health || {});
+    // The server is the durable source of truth for Gateway model health.
+    // Rebuild these rows on every non-live render. A completed bulk Test All
+    // can leave a client-only "waiting" row in GATEWAY_MODEL_RESULTS; if we
+    // only restored when the array was empty, the final loaders.providers()
+    // refresh would paint that stale waiting row back over the saved result.
+    // This also makes a real browser refresh deterministic.
+    if (!LIVE_GATEWAY_TESTS.has(key)) {
+      const saved = savedGatewayModelRows(c.models || [], c.model_health || {});
+      if (saved.length) GATEWAY_MODEL_RESULTS[key] = saved;
     }
     LAST_GATEWAY_DATA[key] = c;
     // Test still running when the page was refreshed: models whose saved

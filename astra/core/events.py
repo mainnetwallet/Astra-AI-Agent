@@ -108,6 +108,13 @@ EVENT_KINDS = (
     "chat.pipeline.understand_failed", "chat.pipeline.verified",
     "chat.pipeline.verify_error", "chat.pipeline.finished",
     "chat.pipeline.failed",
+    # The Gateway's OWN classification/handoff event for an
+    # image_generation/image_editing turn -- emitted once, BEFORE the real
+    # provider API call, so it never collapses into (or is confused with)
+    # the astra_gateway.* row ImageRouter reports for the actual HTTP
+    # request (see astra/ai/image_router.py and
+    # static/js/log_model.js::titleOf's image-category special case).
+    "chat.pipeline.image_dispatch",
     # Shared Terminal capability (astra/terminal/): one persistent session
     # implementation the AI Gateway and every Provider/model drive through
     # the ToolRegistry. Output events are capped snippets, never raw

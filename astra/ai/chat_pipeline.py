@@ -1596,6 +1596,24 @@ class ChatPipeline:
         # the picture or hand the tool protocol an image data URI. Image
         # turns go straight to the image execution path instead.
         is_image_task = task_type in ("image_generation", "image_editing")
+        if is_image_task:
+            # The Gateway's OWN event: classification/handoff only. The
+            # actual provider HTTP call (Gemini/Cloudflare/OpenRouter) is a
+            # SEPARATE event emitted by ImageRouter itself
+            # (astra_gateway.request/.success/.error with
+            # category=task_type, rendered by the Activity Log as "Image API
+            # Call" -- see static/js/log_model.js::titleOf). Keeping these
+            # two distinct stops the Gateway's handoff from being confused
+            # with, or double-counted against, the real per-model API call.
+            #
+            # Deliberately no `op=` here: this event must stay a standalone
+            # row (see log_model.js::lifecycleOf), not merge into the
+            # `op:chat:<req>` turn-lifecycle row that
+            # chat.pipeline.started/finished already own -- Object.assign in
+            # mergeLifecycle would otherwise overwrite that row's title with
+            # this one's until the terminal event redraws it.
+            self._emit("chat.pipeline.image_dispatch", task=task_type,
+                       route="ImageRouter", request=req, trace=req)
         use_loop = (not is_image_task and
                     (self._tool_loop_usable() or (execution.required and
                                                   tools_available)))

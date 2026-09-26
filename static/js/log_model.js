@@ -190,17 +190,38 @@
     "gateway.execution_failed":    ["🔁", "Gateway execution failed"],
     "gateway.target_cooldown":     ["🔁", "Target cooldown"],
     "gateway.recovery_target_selected": ["🔁", "Recovery target"],
+    // The Gateway's OWN event when it detects an image_generation /
+    // image_editing turn and hands it off to ImageRouter. This is
+    // classification/handoff ONLY -- the real provider API call that
+    // follows is a separate astra_gateway.* row (see the image-category
+    // special case in titleOf below), so the two never collapse into one
+    // line the way "Gateway call" used to cover both.
+    "chat.pipeline.image_dispatch": ["🧭", "Gateway → ImageRouter handoff"],
     // Emitted by the backend when the app starts and finds an operation
     // that began in a previous run and can never finish — it keeps the
     // original title so the row still reads as the operation it was.
     "operation.interrupted": ["⚠️", "Interrupted"],
   };
 
+  // astra_gateway.request/.success/.error is a SHARED api-call contract used
+  // for both ordinary chat/text completions and real provider image-API
+  // calls (Gemini/Cloudflare/OpenRouter, owned by ImageRouter -- see
+  // astra/ai/image_router.py). Labeling every one of them "Gateway
+  // call"/"Gateway error" hid which provider call was actually an image
+  // generation attempt. ImageRouter always sets category to
+  // "image_generation"/"image_editing" on these events, so that field (not
+  // the event kind) is what distinguishes the two here.
+  var IMAGE_CATEGORIES = { image_generation: 1, image_editing: 1 };
+
   function titleOf(kind, data) {
     var k = String(kind == null ? "" : kind);
     var d = data || {};
     if (k === "operation.interrupted" && d.original_kind &&
         TITLES[d.original_kind]) return TITLES[d.original_kind];
+    if ((k === "astra_gateway.request" || k === "astra_gateway.success" ||
+         k === "astra_gateway.error") && IMAGE_CATEGORIES[d.category]) {
+      return ["🖼️", "Image API Call"];
+    }
     if (TITLES[k]) return TITLES[k];
     if (/^gateway\.(task_completion|supervision)\.correction_/.test(k)) {
       return ["🔁", "Result supervision"];

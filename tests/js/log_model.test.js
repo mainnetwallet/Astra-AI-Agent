@@ -1239,8 +1239,16 @@ test("rowsToText: rows are separated by a blank line and gaps are skipped", () =
  * the chat/text calls use. The backend emits these on the existing
  * "astra_gateway.*" contract; the presentation model below is what proves the
  * existing Logs panel renders them without any UI change.
+ *
+ * These rows must read as "Image API Call", never the generic "Gateway
+ * call"/"Gateway error" a plain chat/text completion gets on the SAME
+ * astra_gateway.* contract -- that generic label previously hid which
+ * provider call was actually an image-generation attempt. ImageRouter
+ * (astra/ai/image_router.py) sets `category` to "image_generation" /
+ * "image_editing" on all three of a call's events (request/success/error),
+ * which is what titleOf keys off below.
  */
-test("image api call: START renders as a running gateway row", () => {
+test("image api call: START renders as a running Image API Call row", () => {
   const start = ev("astra_gateway.request", {
     op: "img1", category: "image_generation", provider: "cloudflare",
     model: "@cf/black-forest-labs/flux-1-schnell", attempt: 1,
@@ -1250,19 +1258,19 @@ test("image api call: START renders as a running gateway row", () => {
   const m = Log.normalize(start);
   assert.strictEqual(m.category, "ai");
   assert.strictEqual(m.status, "running");
-  assert.strictEqual(m.title, "Gateway routing");
+  assert.strictEqual(m.title, "Image API Call");
   assert.strictEqual(
     m.subject, "cloudflare · @cf/black-forest-labs/flux-1-schnell");
 });
 
 test("image api call: SUCCESS carries provider, model, duration and status", () => {
   const m = Log.normalize(ev("astra_gateway.success", {
-    op: "img1", provider: "cloudflare", terminal: true,
-    model: "@cf/leonardo/phoenix-1.0", status_code: 200,
+    op: "img1", category: "image_generation", provider: "cloudflare",
+    terminal: true, model: "@cf/leonardo/phoenix-1.0", status_code: 200,
     duration_ms: 8400, attempt: 2,
   }));
   assert.strictEqual(m.status, "ok");
-  assert.strictEqual(m.title, "Gateway call");
+  assert.strictEqual(m.title, "Image API Call");
   assert.strictEqual(m.subject, "cloudflare · @cf/leonardo/phoenix-1.0");
   assert.strictEqual(m.detail, "8.4s");
   const fields = Log.detailFields(m);
@@ -1272,14 +1280,74 @@ test("image api call: SUCCESS carries provider, model, duration and status", () 
 
 test("image api call: FAILED renders the status code and safe reason", () => {
   const m = Log.normalize(ev("astra_gateway.error", {
-    op: "img1", provider: "cloudflare", terminal: true,
-    model: "@cf/black-forest-labs/flux-1-schnell",
+    op: "img1", category: "image_generation", provider: "cloudflare",
+    terminal: true, model: "@cf/black-forest-labs/flux-1-schnell",
     status_code: 429, duration_ms: 1200, reason: "429 rate limit",
   }));
   assert.strictEqual(m.status, "err");
-  assert.strictEqual(m.title, "Gateway error");
+  assert.strictEqual(m.title, "Image API Call");
   assert.strictEqual(m.detail, "429 rate limit");
   assert.match(JSON.stringify(Log.detailFields(m)), /429/);
+});
+
+test("image editing api call also renders as Image API Call", () => {
+  const m = Log.normalize(ev("astra_gateway.success", {
+    op: "img-e1", category: "image_editing", provider: "gemini",
+    terminal: true, model: "gemini-2.5-flash-image", status_code: 200,
+  }));
+  assert.strictEqual(m.title, "Image API Call");
+});
+
+test("ordinary chat/text gateway calls keep the generic Gateway labels", () => {
+  // A plain text completion on the SAME astra_gateway.* contract has no
+  // image category, so it must NOT be relabeled -- only image_generation /
+  // image_editing calls get the "Image API Call" treatment.
+  const start = Log.normalize(ev("astra_gateway.request",
+    { category: "general", provider: "groq", model: "llama-3.3-70b" }));
+  assert.strictEqual(start.title, "Gateway routing");
+  const ok = Log.normalize(ev("astra_gateway.success",
+    { category: "general", provider: "groq", model: "llama-3.3-70b" }));
+  assert.strictEqual(ok.title, "Gateway call");
+  const err = Log.normalize(ev("astra_gateway.error",
+    { category: "general", provider: "groq", model: "llama-3.3-70b" }));
+  assert.strictEqual(err.title, "Gateway error");
+  // Same when no category is present at all (e.g. explicit-model calls).
+  const noCategory = Log.normalize(ev("astra_gateway.success",
+    { provider: "groq", model: "llama-3.3-70b" }));
+  assert.strictEqual(noCategory.title, "Gateway call");
+});
+
+test("gateway image handoff is its own row, distinct from the api call", () => {
+  const m = Log.normalize(ev("chat.pipeline.image_dispatch",
+    { task: "image_generation", route: "ImageRouter", request: "req-9",
+      trace: "req-9" }));
+  assert.strictEqual(m.title, "Gateway → ImageRouter handoff");
+  assert.notStrictEqual(m.title, "Image API Call");
+});
+
+test("gateway image handoff never merges into the turn's start/finish row", () => {
+  // The handoff must not share the `op:chat:<req>` lifecycle key that
+  // chat.pipeline.started/finished use, or it would overwrite that row's
+  // title instead of appending its own (mergeLifecycle takes ALL of the
+  // newer event's display fields).
+  const { state, rows } = simulate([
+    lifeEvent("chat.pipeline.started", { op: "chat:req-9", request: "req-9",
+      trace: "req-9" }, 1),
+    lifeEvent("chat.pipeline.image_dispatch",
+      { task: "image_generation", route: "ImageRouter", request: "req-9",
+        trace: "req-9" }, 2),
+    lifeEvent("chat.pipeline.finished",
+      { op: "chat:req-9", request: "req-9", trace: "req-9", terminal: true,
+        status: "image_ready" }, 3),
+  ]);
+  assert.strictEqual(rows.length, 2);
+  // Row 0 is the turn's own op:chat:<req> row: started -> finished merges
+  // into ONE row (title becomes the terminal event's, "Response
+  // generated"). Row 1 is the handoff, placed independently right after it
+  // and never touched by that merge.
+  assert.deepStrictEqual(rows.map((r) => r.model.title),
+    ["Response generated", "Gateway → ImageRouter handoff"]);
+  assert.strictEqual(state.active.size, 0);
 });
 
 test("image api call: each fallback model is its own lifecycle row", () => {

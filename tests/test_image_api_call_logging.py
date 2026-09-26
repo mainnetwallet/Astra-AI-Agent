@@ -195,6 +195,68 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
                        "x-api-key", DATA_URI[-40:]):
             self.assertNotIn(secret, blob)
 
+    def test_success_and_error_events_carry_category_for_ui_labeling(self):
+        # The Activity Log (static/js/log_model.js) can only render an image
+        # API call as "Image API Call" -- instead of the generic "Gateway
+        # call"/"Gateway error" a plain chat/text completion gets on the SAME
+        # astra_gateway.* contract -- if `category` is present on the
+        # SUCCESS/ERROR event, not just the START. Regression for the bug
+        # where only astra_gateway.request carried it.
+        cf = _FakeConn(CLOUDFLARE[0], CLOUDFLARE[1],
+                       image_models=[FLUX, LIGHTNING],
+                       outcomes=[_http_error("u", 429)])
+        gw, bus = self._gw(cf)
+        gw.generate_image("a cat", discover=False, editing=False)
+
+        for kind in ("astra_gateway.request", "astra_gateway.error",
+                     "astra_gateway.success"):
+            rows = _data(bus, kind)
+            self.assertTrue(rows, kind)
+            for d in rows:
+                self.assertEqual(d.get("category"), "image_generation", kind)
+
+    def test_image_editing_events_carry_the_editing_category(self):
+        # Nothing in the current model registry advertises image_editing
+        # (see tests.test_image_generation
+        # ::test_no_pool_model_advertises_image_editing), so this drives
+        # ImageRouter directly against a minimal Gateway-shaped host that
+        # supplies one eligible target regardless of capability -- the same
+        # pattern tests.test_image_provider_api_contract uses -- to prove
+        # the *editing* category specifically (not just image_generation)
+        # reaches the success event.
+        from astra.ai.image_router import ImageRouter
+
+        cf = _FakeConn(CLOUDFLARE[0], CLOUDFLARE[1], image_models=[FLUX])
+        bus = _bus()
+        from astra.ai.models import Model
+        target = Model("cloudflare", FLUX, capabilities=["chat"],
+                       input_modalities=["text"],
+                       output_modalities=["text", "image"])
+
+        class _Host:
+            last_attempts = 0
+            last_connection = ""
+            last_model = ""
+
+            @staticmethod
+            def image_targets(*, editing=False, discover=True):
+                return [(cf, target, None)]
+
+            @staticmethod
+            def _image_failure_reason(exc):
+                return str(exc)
+
+            @staticmethod
+            def _emit(kind, **data):
+                bus.emit(kind, **data)
+
+        ImageRouter(_Host()).generate("edit this photo", editing=True)
+        for kind in ("astra_gateway.request", "astra_gateway.success"):
+            rows = _data(bus, kind)
+            self.assertTrue(rows, kind)
+            for d in rows:
+                self.assertEqual(d.get("category"), "image_editing", kind)
+
     def test_existing_image_lifecycle_events_are_unchanged(self):
         cf = _FakeConn(CLOUDFLARE[0], CLOUDFLARE[1],
                        image_models=[FLUX, LIGHTNING],

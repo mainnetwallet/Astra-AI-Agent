@@ -117,6 +117,14 @@ class ImageRouter:
             # single request-level row. The `image.generation.*` lifecycle
             # events above stay unchanged.
             call_op = new_op_id()
+            # `category` is carried on ALL THREE of this call's events
+            # (request/success/error), not just the START. The Activity Log
+            # (static/js/log_model.js) uses it to render this row as
+            # "Image API Call" instead of the generic "Gateway
+            # call"/"Gateway error" a plain chat/text completion gets on the
+            # same astra_gateway.* contract -- omitting it on the
+            # success/error side (as this used to) left the SUCCESS/FAILED
+            # rows mislabeled even though the START row was correct.
             gw._emit("astra_gateway.request", category=category,
                      provider=tmodel.provider, model=tmodel.model_id,
                      attempt=attempts, candidates=len(ranked),
@@ -130,7 +138,8 @@ class ImageRouter:
                 duration_ms = round((time.perf_counter() - start) * 1000.0, 1)
                 status_code = int(getattr(e, "code", 0) or 0)
                 failures.append(f"{tmodel.provider}/{tmodel.model_id}: {reason}")
-                gw._emit("astra_gateway.error", provider=tmodel.provider,
+                gw._emit("astra_gateway.error", category=category,
+                         provider=tmodel.provider,
                          model=tmodel.model_id, reason=reason,
                          status_code=status_code, duration_ms=duration_ms,
                          attempt=attempts, op=call_op, trace=trace,
@@ -152,7 +161,8 @@ class ImageRouter:
             latency_ms = (time.perf_counter() - start) * 1000.0
             gw.last_connection = conn.name
             gw.last_model = tmodel.model_id
-            gw._emit("astra_gateway.success", provider=tmodel.provider,
+            gw._emit("astra_gateway.success", category=category,
+                     provider=tmodel.provider,
                      model=tmodel.model_id, status_code=200,
                      latency_ms=round(latency_ms, 1),
                      duration_ms=round(latency_ms, 1), attempt=attempts,

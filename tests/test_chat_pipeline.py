@@ -655,6 +655,52 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
             raw = f.read()
         self.assertTrue(raw.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_image_task_emits_a_gateway_handoff_event_distinct_from_the_turn(self):
+        """The Gateway's OWN classification/handoff step
+        (chat.pipeline.image_dispatch) must be visible in the Activity Log
+        as its own row, separate from the real provider API call ImageRouter
+        reports (astra_gateway.* with category=image_generation) and from
+        the turn's own op:chat:<req> started/finished row -- see
+        static/js/log_model.js::titleOf and the "Gateway image handoff"
+        tests in tests/js/log_model.test.js."""
+        from astra.core.events import EventBus
+        from astra.store import Store
+
+        bus = EventBus(Store(":memory:"))
+        gw = FakeGateway([understand(), verdict("complete")])
+        rt = FakeRouter([])
+        gw.image_router = FakeImageRouter(self._PNG_DATA_URI)
+        pipe = ChatPipeline(gw, rt, events=bus, max_tokens=800,
+                            artifact_dir=self.artifact_dir)
+        pipe.run("generate an image of a sunset over the mountains")
+
+        rows = [e for e in bus.history(limit=200)
+               if e["kind"] == "chat.pipeline.image_dispatch"]
+        self.assertEqual(len(rows), 1)
+        d = rows[0]["data"]
+        self.assertEqual(d["task"], "image_generation")
+        self.assertEqual(d["route"], "ImageRouter")
+        # Deliberately NOT sharing the turn's own `op:chat:<req>` key (see
+        # chat_pipeline.py comment at the emit site): merging into that
+        # lifecycle row would let this event's title overwrite "Request
+        # received"/"Response generated" instead of appending its own row.
+        self.assertNotIn("op", d)
+
+    def test_non_image_task_never_emits_the_image_handoff_event(self):
+        from astra.core.events import EventBus
+        from astra.store import Store
+
+        bus = EventBus(Store(":memory:"))
+        gw = FakeGateway([understand(), verdict("complete")])
+        rt = FakeRouter(["def reverse(s): return s[::-1]"])
+        gw.image_router = FakeImageRouter(self._PNG_DATA_URI)
+        pipe = ChatPipeline(gw, rt, events=bus, max_tokens=800,
+                            artifact_dir=self.artifact_dir)
+        pipe.run("python code likhe dao")
+
+        kinds = {e["kind"] for e in bus.history(limit=200)}
+        self.assertNotIn("chat.pipeline.image_dispatch", kinds)
+
     def test_raw_base64_never_leaks_into_the_visible_reply(self):
         """The image is delivered via `artifacts`; the visible `reply` text
         must never contain the raw data URI (see

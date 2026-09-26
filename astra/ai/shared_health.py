@@ -256,20 +256,22 @@ class SharedHealthCoordinator:
             for identity in doomed:
                 self._cache.pop(identity, None)
                 self._inflight_result.pop(identity, None)
-                if self.store:
-                    try:
-                        if model is None:
-                            self.store.exec(
-                                "DELETE FROM shared_health_result "
-                                "WHERE canonical_provider=?",
-                                (identity.provider,))
-                        else:
-                            self.store.exec(
-                                "DELETE FROM shared_health_result "
-                                "WHERE canonical_provider=? AND model=?",
-                                (identity.provider, identity.model))
-                    except Exception:
-                        pass
+            if self.store:
+                try:
+                    if provider is None:
+                        self.store.exec("DELETE FROM shared_health_result")
+                    elif model is None:
+                        self.store.exec(
+                            "DELETE FROM shared_health_result "
+                            "WHERE canonical_provider=?",
+                            (provider,))
+                    else:
+                        self.store.exec(
+                            "DELETE FROM shared_health_result "
+                            "WHERE canonical_provider=? AND model=?",
+                            (provider, model))
+                except Exception:
+                    pass
 
     # -- the coordinated probe ------------------------------------------------
     def run(self, identity: SharedHealthIdentity, probe_fn):

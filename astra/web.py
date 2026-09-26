@@ -2225,6 +2225,9 @@ class WebApp:
             return self._gateway_test(req)
         # single-connection Gateway test: /api/v1/gateway/<connection>/test
         if (len(path) == 4 and path[:2] == ["api", "gateway"]
+                and path[3] == "reset-health" and method == "POST"):
+            return self._gateway_reset_health(req, path[2])
+        if (len(path) == 4 and path[:2] == ["api", "gateway"]
                 and path[3] == "test" and method == "POST"):
             return self._gateway_test_one(req, path[2])
         # single-model Gateway test: /api/v1/gateway/<connection>/test/<model>
@@ -2369,6 +2372,17 @@ class WebApp:
         return json_response({"ok": True,
                               "data": {"connections": gw.test_all_connections()}},
                              rid=req.rid)
+
+    def _gateway_reset_health(self, req: Request, name) -> Response:
+        """Clear one Gateway connection's saved manual-test/shared-health state."""
+        router = self.site.router()
+        gw = getattr(router, "gateway", None) if router else None
+        if gw is None:
+            return error_response("Astra AI Gateway not configured", 400,
+                                  "gateway_unavailable", req.rid)
+        gw.reset_connection_health(name)
+        return json_response({"ok": True, "data": {"connection": name,
+                                                    "reset": True}}, rid=req.rid)
 
     def _gateway_test_one(self, req: Request, name) -> Response:
         """Test one Astra AI Gateway connection (e.g. 'astra-gw-gemini') —

@@ -155,7 +155,7 @@ class ImageRouter:
         catalog = self._catalog(discover=discover)
         category = operation or ("image_editing" if editing else "image_generation")
         targets = eligible_image_generation_targets(
-            catalog, gw.routing_state, category=category)
+            catalog, gw.routing_state, editing=editing, operation=operation)
         preferred = []
         if gw.config is not None:
             try:

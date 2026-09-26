@@ -2278,7 +2278,7 @@ loaders.providers = async function () {
 // (optional) gets its label updated while this provider's own test runs;
 // omit it when called as part of a bulk Test All (the bulk button owns
 // its own progress label instead).
-async function testProviderStreaming(name, btn, resume) {
+async function testProviderStreaming(name, btn, resume, bulk = false) {
   const models = PROVIDER_MODELS[name] || [];
   if (models.length && resume) {
     LIVE_PROVIDER_TESTS.add(name);
@@ -2294,13 +2294,13 @@ async function testProviderStreaming(name, btn, resume) {
     _runningUpdate((st) => { st.providers[name] = entry; });
   }
   try {
-    await _testProviderStreamingInner(name, btn, resume);
+    await _testProviderStreamingInner(name, btn, resume, bulk);
   } finally {
     if (LIVE_PROVIDER_TESTS.delete(name)) _runningUpdate((st) => { delete st.providers[name]; });
   }
 }
 
-async function _testProviderStreamingInner(name, btn, resume) {
+async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
   const models = PROVIDER_MODELS[name] || [];
   const tableEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="model-table"]`);
   if (!models.length) {
@@ -2321,7 +2321,7 @@ async function _testProviderStreamingInner(name, btn, resume) {
     countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ` +
       `${countsEl.dataset.keycount || 0} key(s) · ${calls} calls · ${errors} err`;
   };
-  if (!resume) {
+  if (!resume && !bulk) {
     try {
       const reset = await post(`/api/v1/providers/${encodeURIComponent(name)}/reset-health`);
       renderCounts((reset.ok && reset.data && reset.data.calls) || 0,
@@ -2345,8 +2345,11 @@ async function _testProviderStreamingInner(name, btn, resume) {
   // the server saves it against (provider, key, model).
   const keys = PROVIDER_KEYS[name] || [];
   if (keys.length) {
-    await testProviderKeysStreaming(name, models, keys, tableEl, (r) => bumpCounts(r.ok),
-                                    resume ? PROVIDER_MODEL_RESULTS[name] : null);
+    const selectedKey = _selectedHealthKey("provider", name);
+    await testProviderSelectedKeyStreaming(
+      name, models, keys, selectedKey, tableEl,
+      (r) => bumpCounts(r.ok),
+      resume ? PROVIDER_MODEL_RESULTS[name] : null);
     return;
   }
 
@@ -2361,9 +2364,8 @@ async function _testProviderStreamingInner(name, btn, resume) {
     (result) => { bumpCounts(result.ok); _runningNoteLocal(name, result); }, !!resume);
 }
 
-async function testProviderKeysStreaming(name, models, keys, tableEl, onResult, resumeRows) {
-  // resumeRows: rows restored after a refresh — only their still-pending chips
-  // are (re)fired; finished chips keep the result the server saved.
+async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey, tableEl, onResult, resumeRows) {
+  const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
   const rows = resumeRows || models.map((m) => ({
     model: m,
     keys: keys.map((k) => ({ key_id: k.key_id, label: k.label, pending: true })),
@@ -2372,26 +2374,33 @@ async function testProviderKeysStreaming(name, models, keys, tableEl, onResult, 
   if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(rows);
   const repaint = (row) => {
     if (!tableEl) return;
-    const el = $(`[data-model-row="${CSS.escape(row.model)}"]`, tableEl);
-    if (el) el.outerHTML = modelHealthRowsHtml([row]);
+    const el = `[data-model-row="${CSS.escape(row.model)}"]`;
+    const node = $(el, tableEl);
+    if (node) node.outerHTML = modelHealthRowsHtml([row]);
   };
-  const probes = [];
-  rows.forEach((row) => row.keys.forEach((slot) => {
-    if (!slot.pending) return;
-    probes.push(
-      post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(row.model)}` +
-           `?key=${encodeURIComponent(slot.key_id)}`)
-        .then((res) => (res.ok && res.data) ? res.data
-          : { ok: false, latency_ms: 0, error: res.error || "test failed" })
-        .catch((e) => ({ ok: false, latency_ms: 0, error: String(e) }))
-        .then((r) => {
-          Object.assign(slot, { pending: false, ok: !!r.ok, latency_ms: r.latency_ms,
-                                error: r.error, tested_at: new Date().toLocaleString() });
-          repaint(row);
-          if (onResult) onResult(r);
+  const pendingModels = rows.filter((row) =>
+    row.keys.some((slot) => slot.pending)).map((row) => row.model);
+  const probes = pendingModels.map((modelId) =>
+    post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
+      .then((res) => (res.ok && res.data) ? res.data
+        : { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" })
+      .catch((e) => ({ model: modelId, ok: false, latency_ms: 0, error: String(e) }))
+      .then((result) => {
+        const row = rows.find((r) => r.model === modelId);
+        if (!row) return;
+        row.keys.forEach((slot) => Object.assign(slot, {
+          pending: false,
+          ok: !!result.ok,
+          latency_ms: result.latency_ms,
+          error: result.error,
+          tested_at: new Date().toLocaleString(),
+          selected: slot.key_id === chosen,
+          shared: slot.key_id !== chosen
         }));
-  }));
-  // allSettled: one key/model failing never stops the rest from finishing.
+        repaint(row);
+        if (onResult) onResult(result);
+      })
+  );
   return Promise.allSettled(probes);
 }
 

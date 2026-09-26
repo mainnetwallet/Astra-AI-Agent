@@ -1088,7 +1088,9 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
         return ids
 
     def generate_image(self, prompt: str, model: str | None = None,
-                       size: str = "1024x1024", n: int = 1) -> str:
+                       size: str = "1024x1024", n: int = 1,
+                       source_image: dict | None = None,
+                       mask_image: dict | None = None) -> str:
         """Generate an image via OpenRouter's dedicated Images API.
 
         ``POST {base}/images`` -- the current documented endpoint (NOT the
@@ -1103,6 +1105,8 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
+        if source_image is not None or mask_image is not None:
+            raise ProviderError(f"{self.name}: image editing is not supported")
         body = {"model": model, "prompt": prompt, "n": max(1, int(n or 1))}
         if size:
             body["size"] = size

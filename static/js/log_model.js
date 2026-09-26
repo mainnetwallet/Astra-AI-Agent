@@ -554,7 +554,7 @@
    * higher-level request/run that owns it, so a request that ends can resolve
    * any child it left running. */
   var START_SUFFIX = /\.(started|request)$/;
-  var TERMINAL_SUFFIX = /\.(completed|succeeded|recovered|failed|error|timeout|cancelled|rejected|confirmed|done|finished|exhausted)$/;
+  var TERMINAL_SUFFIX = /\.(completed|succeeded|success|recovered|failed|error|timeout|cancelled|rejected|confirmed|done|finished|exhausted)$/;
   var WEB3_TERMINAL = /^web3\.transaction\.(confirmed|failed|rejected)$/;
   var UPDATE_KINDS = /^(router\.(retry|fallback|gateway_task_completion|gateway_supervision)|credential\.rotation|gateway\.(target_cooldown|execution_completed|execution_recovered|execution_failed))$/;
 
@@ -642,20 +642,47 @@
     return state;
   }
 
+  // A model is countable once, at the moment its operation resolves: an ai
+  // row only at its real API-call terminal (isApiCallTerminal -- a "started"
+  // placeholder is never counted), and every other category (tools,
+  // browser, web3, agents) once it leaves "running". This is the single
+  // predicate both count() (new row) and recount() (lifecycle merge:
+  // started -> completed/failed) key off of, so a row is counted exactly
+  // once no matter which path it took.
+  function isCountable(model) {
+    if (!model) return false;
+    if (model.category === "ai") return isApiCallTerminal(model);
+    return model.status !== "running";
+  }
+
+  // The {total, ai/tools/browser/web3/agents, errors} deltas ONE instance of
+  // a countable model contributes. `ai` only counts a success (matching the
+  // pre-existing behavior); every other category counts on resolution
+  // regardless of ok/err (a failed tool run is still one tool operation);
+  // `errors` counts an "err" status in ANY category, not just ai.
+  function countDelta(model) {
+    const out = { total: 1 };
+    const cat = model.category;
+    if (cat === "ai") {
+      if (model.status === "ok") out.ai = 1;
+    } else if (cat === "tools" || cat === "browser" || cat === "web3" ||
+               cat === "agents") {
+      out[cat] = 1;
+    }
+    if (model.status === "err") out.errors = 1;
+    return out;
+  }
+
+  function applyDelta(counts, delta, sign) {
+    Object.keys(delta).forEach(function (k) {
+      counts[k] = (counts[k] || 0) + sign * delta[k];
+    });
+  }
+
   // Adjust category/error counters when a row changes status (running -> ok/err).
   function recount(state, oldModel, newModel) {
-    const oldApi = isApiCallTerminal(oldModel);
-    const newApi = isApiCallTerminal(newModel);
-    if (oldApi) {
-      state.counts.total--;
-      if (oldModel.status === "ok") state.counts.ai--;
-      if (oldModel.status === "err") state.counts.errors--;
-    }
-    if (newApi) {
-      state.counts.total++;
-      if (newModel.status === "ok") state.counts.ai++;
-      if (newModel.status === "err") state.counts.errors++;
-    }
+    if (isCountable(oldModel)) applyDelta(state.counts, countDelta(oldModel), -1);
+    if (isCountable(newModel)) applyDelta(state.counts, countDelta(newModel), 1);
     return state.counts;
   }
 
@@ -857,13 +884,7 @@
   }
 
   function count(state, model) {
-    if (isApiCallTerminal(model)) {
-      state.counts.total++;
-      if (model.status === "ok") state.counts.ai++;
-      if (model.status === "err") state.counts.errors++;
-    } else if (model.category === "tools" && model.status !== "running") {
-      state.counts.tools++;
-    }
+    if (isCountable(model)) applyDelta(state.counts, countDelta(model), 1);
     return state.counts;
   }
 

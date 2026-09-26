@@ -1975,7 +1975,7 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
             self.calls.append(messages)
             self.categories.append(category)
             return ('{"final_request": "x", "was_incomplete": false, '
-                    '"provider": "", "model": "", "criteria": [], "reason": "", '
+                    '"task_type": "image_generation", "provider": "", "model": "", "criteria": [], "reason": "", '
                     '"execution": {"required": false, "capability": "", '
                     '"environment": "agent_runtime", "approval_required": '
                     'false, "intent": ""}}')
@@ -2060,7 +2060,7 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 class TestEndToEndImageTurn(_TempArtifactDirMixin, unittest.TestCase):
     _BRIEF = ('{"final_request": "x", "was_incomplete": false, '
-              '"provider": "", "model": "", "criteria": [], "reason": "", '
+              '"task_type": "image_generation", "provider": "", "model": "", "criteria": [], "reason": "", '
               '"execution": {"required": false, "capability": "", '
               '"environment": "agent_runtime", "approval_required": false, '
               '"intent": ""}}')
@@ -2104,7 +2104,7 @@ class TestEndToEndImageTurn(_TempArtifactDirMixin, unittest.TestCase):
             dispatch / serial-fallback code, not a re-implementation."""
 
             def generate(self, prompt, model=None, size="1024x1024", n=1, *,
-                         editing=False, trace="", discover=True):
+                         editing=False, source_images=None, trace="", discover=True):
                 gw.image_calls.append((prompt, model, editing))
                 uri = real.image_router.generate(
                     prompt, model=model, size=size, n=n, editing=editing,

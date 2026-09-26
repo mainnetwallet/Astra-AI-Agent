@@ -1377,9 +1377,15 @@ class AstraRouter:
                 last_error = f"{type(e).__name__}: {e}"
                 self._errors[name] = self._errors.get(name, 0) + 1
                 retry = (not self._pinned(adapter) and attempt <= retries)
+                test_cred = (adapter.pool.last_key()
+                              if getattr(adapter, "pool", None) is not None
+                              and hasattr(adapter.pool, "last_key") else None)
+                key_label = test_cred.label if test_cred else ""
                 self._emit("ai.failed", provider=name, model=model.model_id,
                            error=last_error, attempt=attempt, op=op,
-                           trace=req.trace, terminal=not retry, retrying=retry)
+                           trace=req.trace, terminal=not retry, retrying=retry,
+                           key_id=test_cred.key_id if test_cred else "",
+                           key_label=key_label)
                 if self._pinned(adapter):
                     break
                 if retry:

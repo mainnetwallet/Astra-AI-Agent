@@ -99,7 +99,7 @@ from astra.terminal.manager import default_session_id_for
 # tests.test_multimodal.TestProviderRouterImageRefusal for the coverage.
 _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
                               "summarization", "research", "planning",
-                              "image_generation", "image_editing"})
+                              "image_generation", "image_editing", "image_inpainting"})
 
 # Plain-text replies for missing AI configuration. Shown as-is (no
 # markdown rendering in the chat UI — see the note on _run_turn's fail
@@ -1261,15 +1261,16 @@ class ChatPipeline:
         return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
     def _route(self, task_type, messages, provider, model, vision,
-               req="", source_image=None):
+               req="", source_image=None, mask_image=None):
         # image_generation / image_editing are owned EXCLUSIVELY by the
         # Gateway's ImageRouter (see `_route_image`): it is the only image
         # execution path, so these tasks never reach the Provider router's
         # own image dispatch below.
-        is_image = task_type in ("image_generation", "image_editing")
+        is_image = task_type in ("image_generation", "image_editing", "image_inpainting")
         if is_image:
             rr = self._route_image(task_type, messages, model, req,
-                                   source_image=source_image)
+                                   source_image=source_image,
+                                   mask_image=mask_image)
             if rr is not None:
                 # Either the real image was produced, or ImageRouter
                 # attempted every eligible FREE model and the whole pool
@@ -1307,7 +1308,7 @@ class ChatPipeline:
         return rr
 
     def _route_image(self, task_type, messages, model, req="",
-                     source_image=None):
+                     source_image=None, mask_image=None):
         """Run an image request through the dedicated Image Provider/Model
         Router (astra.ai.image_router.ImageRouter), NOT through
         `Gateway.generate_image()`. The Gateway is only ever the
@@ -1332,8 +1333,9 @@ class ChatPipeline:
             return None
         try:
             uri = fn(prompt, model=model or None,
-                     editing=(task_type == "image_editing"),
-                     source_image=source_image, trace=req)
+                     editing=(task_type in ("image_editing", "image_inpainting")),
+                     source_image=source_image, mask_image=mask_image,
+                     operation=task_type, trace=req)
         except Exception as e:
             err = getattr(e, "message", None) or str(e)
             self._emit("chat.pipeline.image_unavailable", error=err,
@@ -1364,13 +1366,12 @@ class ChatPipeline:
             # public payload. Keep an internal-only path so a generated image
             # can become the source image for a later conversational edit.
             for art in artifacts:
-                if art.get("artifact_type") == "image" and art.get("id"):
-                    filename = str(art.get("filename") or "")
-                    path = os.path.join(
-                        self.artifact_dir,
-                        f"{art['id']}_{os.path.basename(filename)}")
-                    if os.path.isfile(path):
+                if art.get("artifact_type") == "image":
+                    path = str(art.get("_storage_path") or "")
+                    if path and os.path.isfile(path):
                         art["_storage_path"] = path
+                    else:
+                        art.pop("_storage_path", None)
             return artifacts
         except Exception:
             return []
@@ -1598,7 +1599,7 @@ class ChatPipeline:
                 "Recent conversation (for reference):\n" + ctx_text +
                 "\n\nCurrent request:\n" + brief["final_request"], attachments)
         messages.append({"role": "user", "content": content})
-        task_type = self._task_type(brief["final_request"], attachments)
+        task_type = self.gateway.classify_image_operation(brief["final_request"], attachments) if self.gateway else self._task_type(brief["final_request"], attachments)
 
         # The Provider is the AI that does the work. With the shared
         # Terminal/tool surface wired, that work is a real multi-step agent
@@ -1641,15 +1642,18 @@ class ChatPipeline:
             source_image = next(
                 (a for a in (attachments or [])
                  if isinstance(a, dict) and a.get("family") == "image"
-                 and a.get("storage_path")), None)
+                 and a.get("role") != "mask" and a.get("storage_path")), None)
+            mask_image = next((a for a in (attachments or [])
+                               if isinstance(a, dict) and a.get("family") == "image"
+                               and a.get("role") == "mask" and a.get("storage_path")), None)
             rr = self._route(task_type, messages, brief["provider"],
                              brief["model"], vision, req=req,
-                             source_image=source_image)
+                             source_image=source_image, mask_image=mask_image)
         if rr is None or not rr.ok:
             err = (trace.get("error") or getattr(rr, "error", "") or
                    "unknown error")
             trace["error"] = err
-            if task_type in ("image_generation", "image_editing"):
+            if task_type in ("image_generation", "image_editing", "image_inpainting"):
                 # NEVER downgrade an image request to a text model. Report
                 # honestly, and distinguish "nothing eligible was configured"
                 # from "every eligible FREE model was attempted and failed".

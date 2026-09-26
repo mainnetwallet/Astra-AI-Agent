@@ -62,6 +62,12 @@
     var e = event || {};
     var d = e.data && typeof e.data === "object" ? e.data : {};
     var kind = String(e.kind == null ? "" : e.kind);
+    // Event task metadata can live either on the normalized event itself or
+    // inside data. Resolve both shapes so health-control-plane filtering does
+    // not depend on which endpoint produced the event.
+    var task = d.task != null ? String(d.task) :
+               (e.task != null ? String(e.task) :
+               (e.task_type != null ? String(e.task_type) : ""));
     if (!kind) return false;
     if (NOISE_KINDS[kind]) return false;
 
@@ -75,16 +81,16 @@
     // bookkeeping around the actual provider call. The provider result row
     // is the real API activity, so do not render the router control-plane
     // duplicate for health_check operations.
-    if (d.task === "health_check" &&
+    if (task === "health_check" &&
         (kind === "router.retry" || kind === "router.fallback")) return false;
 
     // A health probe can also emit an aggregate ai.failed before the
     // key-specific provider failure. When no key/attempt identity is present,
     // that row is only the router summary; the keyed ai.failed below is the
     // actual provider call/result and should be the single visible failure.
-    if (kind === "ai.failed" && d.task === "health_check" &&
-        (d.provider || d.model) &&
-        !d.key_label && !d.key && !d.key_id) return false;
+    if (kind === "ai.failed" && task === "health_check" &&
+        (d.provider || d.model || e.provider || e.model) &&
+        !d.key_label && !d.key && !d.key_id && !e.key_label && !e.key && !e.key_id) return false;
 
     // A routing health check can fail before selecting any provider/model.
     // Attempts: 0 + this exact "no eligible" result means there was no

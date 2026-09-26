@@ -1067,6 +1067,10 @@ class AstraRouter:
         adapter = next((p for p in self.providers
                         if getattr(p, "name", "?") == name), None)
         pool = getattr(adapter, "pool", None)
+        if not key_id and pool is not None and hasattr(pool, "keys"):
+            key_meta = pool.keys()
+            if key_meta:
+                key_id = key_meta[0].get("key_id")
         if key_id and pool is not None and hasattr(pool, "pinned"):
             if key_id not in {k["key_id"] for k in pool.keys()}:
                 return {"model": model_id, "ok": False, "latency_ms": 0,
@@ -1102,8 +1106,18 @@ class AstraRouter:
                        "latency_ms": round(rr.latency_ms, 1)}
 
             result, reused = self.shared_health.run(identity, _probe_fn)
-            # The shared identity already resolved the exact credential. Use it
-            # for display so concurrent key selection cannot mislabel the test.
+            # The shared provider+model result is also written into every
+            # local key slot without making any additional upstream call.
+            if pool is not None and hasattr(pool, "keys"):
+                for key_meta in pool.keys():
+                    try:
+                        with pool.pinned(key_meta["key_id"]):
+                            self._record_key_model(
+                                adapter, model_id, result["ok"],
+                                result["latency_ms"], result["error"],
+                                req=RoutingRequest(task_type="health_check"))
+                    except Exception:
+                        pass
             cred = id_cred or (pool.last_key() if pool is not None and hasattr(pool, "last_key") else None)
             if reused:
                 # No real upstream call was made by this caller — the

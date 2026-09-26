@@ -87,15 +87,16 @@ from astra.terminal.manager import default_session_id_for
 # "image_generation" is deliberately included (unlike audio/video
 # generation, which stay out of scope here): classify() already detects it
 # correctly, in English and Bangla/Banglish alike ("akta chobi banao",
-# "photo create koro"), and AstraRouter already knows how to hard-filter to
-# an image-capable model and dispatch generate_image() for it (see
-# AstraRouter._normalize_requirements/_attempt) — but none of that ever
-# actually ran, because this exact line coerced task_type down to
-# "simple_chat" before _route() ever saw it, so every image request was
-# quietly handed to a plain text model that just described an image in
-# words instead of generating one. See tests.test_chat_pipeline
-# .TestImageGenerationPipelineWiring and tests.test_multimodal
-# .TestImageGenerationEndToEndDispatch for the regression coverage.
+# "photo create koro"), and _route() hands those task types straight to the
+# Gateway's ImageRouter — the sole image execution owner. They must never
+# reach AstraRouter, which now refuses image task types outright (there is
+# no second image execution path). Previously this exact line coerced
+# task_type down to "simple_chat" before _route() ever saw it, so every
+# image request was quietly handed to a plain text model that just described
+# an image in words instead of generating one. See tests.test_chat_pipeline
+# .TestImageGenerationPipelineWiring,
+# tests.test_image_execution_boundary and
+# tests.test_multimodal.TestProviderRouterImageRefusal for the coverage.
 _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
                               "summarization", "research", "planning",
                               "image_generation", "image_editing"})

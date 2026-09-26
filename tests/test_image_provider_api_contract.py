@@ -417,25 +417,53 @@ class TestProviderAdapterCredentialFailure(unittest.TestCase):
             self.assertFalse(second.exception.retryable)
         self.assertEqual(cap.count, 1)   # the 2nd call never hit the network
 
-    def test_router_image_path_logs_the_credential_failure_per_model(self):
-        from astra.ai.router import AstraRouter, RoutingRequest
+    def test_image_router_logs_the_credential_failure_per_model(self):
+        """ImageRouter is the sole image execution owner, so the per-model
+        attribution of a dead Cloudflare token must appear on ITS own
+        astra_gateway.error contract -- and the second model must not re-hit
+        the network once the shared pool is known-unusable."""
+        from astra.ai.gateway import AstraAIGateway
+        from astra.ai.image_router import ImageRouter
+        from astra.ai.models import Model
         a = self._adapter(CLOUDFLARE_API_KEYS="rejected",
                           CLOUDFLARE_ACCOUNT_IDS="acct-1111",
                           CLOUDFLARE_IMAGE_MODELS=FLUX + "," + LUCID)
         bus = _bus()
-        router = AstraRouter([a], max_retries=0)
-        router.attach_events(bus)
+        targets = [Model("cloudflare", FLUX, capabilities=["chat"],
+                         input_modalities=["text"],
+                         output_modalities=["text", "image"]),
+                   Model("cloudflare", LUCID, capabilities=["chat"],
+                         input_modalities=["text"],
+                         output_modalities=["text", "image"])]
+
+        class _Host:
+            """Minimal Gateway-shaped host: supplies the eligible image
+            targets and the event sink, but performs no HTTP itself."""
+            last_attempts = 0
+            last_connection = ""
+            last_model = ""
+
+            @staticmethod
+            def image_targets(*, editing=False, discover=True):
+                return [(a, m, None) for m in targets]
+
+            @staticmethod
+            def _image_failure_reason(exc):
+                return AstraAIGateway._image_failure_reason(exc)
+
+            @staticmethod
+            def _emit(kind, **data):
+                bus.emit(kind, **data)
+
         behavior = lambda req, n: _http_error(req.full_url, 401)
         with _Capture(behavior) as cap:
-            rr = router.route_request(RoutingRequest(
-                task_type="image_generation",
-                messages=[{"role": "user", "content": "akta cat photo banao"}]))
-        self.assertFalse(rr.ok)
+            with self.assertRaises(ProviderError):
+                ImageRouter(_Host()).generate("akta cat photo banao")
         self.assertEqual(cap.count, 1)
-        failed = [d for d in _data(bus, "ai.failed")
-                  if not d.get("aggregate")]
-        self.assertEqual(len(failed), 2)
-        for d in failed:
+        errs = _data(bus, "astra_gateway.error")
+        self.assertEqual(len(errs), 2)
+        self.assertEqual([d["model"] for d in errs], [FLUX, LUCID])
+        for d in errs:
             self.assertEqual(d["status_code"], 401)
             self.assertEqual(d["reason"],
                              "provider authentication/credential failure")

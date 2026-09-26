@@ -28,14 +28,16 @@ from astra.security import redact_text
 # JSON blob is internal protocol, not legitimate content.
 _PROTOCOL_KEYS = ("action", "tool", "args", "session_id", "thought")
 
-# A generated image/audio response (astra.ai.router._attempt's
-# generate_image()/text_to_speech() dispatch) comes back from the adapter as
-# a raw `data:image/png;base64,<...>` (or audio/*) string — often hundreds of
-# KB. astra.ai.artifact_extraction.extract_artifacts() already turns that
-# same string into a real, downloadable artifact (see ChatPipeline._artifacts
-# and the Chat UI's renderArtifact()), so it must never ALSO be dumped into
-# the visible chat bubble as a wall of base64 text — that used to be exactly
-# what happened, since nothing stripped it before it reached `reply`.
+# A generated image/audio response comes back from the adapter as a raw
+# `data:image/png;base64,<...>` (or audio/*) string — often hundreds of KB.
+# Images are produced by the Gateway's ImageRouter
+# (astra/ai/image_router.py) and audio by astra.ai.router._attempt's
+# text_to_speech() dispatch; either way astra.ai.artifact_extraction.
+# extract_artifacts() already turns that same string into a real,
+# downloadable artifact (see ChatPipeline._artifacts and the Chat UI's
+# renderArtifact()), so it must never ALSO be dumped into the visible chat
+# bubble as a wall of base64 text — that used to be exactly what happened,
+# since nothing stripped it before it reached `reply`.
 _DATA_URI_MEDIA_RE = re.compile(
     r"data:(?:image|audio)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+")
 

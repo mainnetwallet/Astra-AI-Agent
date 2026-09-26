@@ -67,9 +67,8 @@ EVENT_KINDS = (
     "astra_gateway.image_fallback", "astra_gateway.image_success",
     # FREE image generation uses a simple SERIAL FALLBACK (no proactive
     # health probing): the actual generation request is the availability
-    # signal, and each attempt is visible here. See
-    # astra/ai/gateway.py::generate_image and
-    # astra/ai/router.py::_route_image_serial.
+    # signal, and each attempt is visible here. The Gateway's ImageRouter
+    # (astra/ai/image_router.py) is the single owner of that fallback.
     "image.generation.start", "image.generation.attempt",
     "image.generation.failure", "image.generation.fallback",
     "image.generation.success", "image.generation.exhausted",

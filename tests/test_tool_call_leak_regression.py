@@ -244,11 +244,11 @@ class SanitizeFinalResponseUnitTests(unittest.TestCase):
         self.assertIsNone(sanitize_final_response(None))
 
     def test_strips_embedded_base64_image_and_leaves_fallback_text(self):
-        """A generate_image() response IS the raw data URI (see
-        AstraRouter._attempt) — it must never be dumped into the visible
-        chat bubble as a wall of base64 (it's already delivered as a real
-        artifact; see ChatPipeline._artifacts + astra.ai.artifact_extraction
-        + the Chat UI's renderArtifact())."""
+        """A generate_image() response IS the raw data URI (see the Gateway's
+        ImageRouter, astra/ai/image_router.py) — it must never be dumped into
+        the visible chat bubble as a wall of base64 (it's already delivered
+        as a real artifact; see ChatPipeline._artifacts +
+        astra.ai.artifact_extraction + the Chat UI's renderArtifact())."""
         import base64
         from astra.ai.response_boundary import MEDIA_FALLBACK_TEXT
         img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200

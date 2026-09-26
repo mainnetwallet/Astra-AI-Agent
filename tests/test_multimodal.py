@@ -975,7 +975,11 @@ class TestGatewayZeroBypass(unittest.TestCase):
         import inspect
         from astra.ai.router import AstraRouter
         src = inspect.getsource(AstraRouter._attempt)
-        self.assertIn("generate_image", src)
+        # The Provider router has NO image dispatch left: image execution is
+        # owned exclusively by the Gateway's ImageRouter, so `_attempt` must
+        # never call `adapter.generate_image()` (see AstraRouter.route_request
+        # and tests/test_image_generation.py::TestProviderRouterRefusesImageExecution).
+        self.assertNotIn("generate_image", src)
         self.assertNotIn("ProviderRegistry", src)
 
 
@@ -1015,12 +1019,14 @@ class TestNormalizeRequirementsImageGeneration(unittest.TestCase):
                              f"task_type={t!r} must not require image output")
 
 
-class TestImageGenerationEndToEndDispatch(unittest.TestCase):
-    """The wiring fix end to end through the REAL AstraRouter (routing_policy
-    + _normalize_requirements + _attempt) — not a scripted fake router — so
-    an image request is hard-filtered to an image-capable model and
-    dispatched through generate_image(), never handed to a text-only chat
-    model that would just hallucinate a description."""
+class TestProviderRouterImageRefusal(unittest.TestCase):
+    """The Provider router (AstraRouter) must NOT be a second image execution
+    owner. Image generation is owned exclusively by the Gateway's ImageRouter
+    (astra/ai/image_router.py), so an image_generation/image_editing request
+    is REFUSED by `route_request()` before any candidate is ranked. The old
+    serial image loop (`_route_image_serial`) and `_attempt`'s
+    `adapter.generate_image()` dispatch have been removed -- see
+    tests/test_image_execution_boundary.py for the ImageRouter-owned hops."""
 
     class _TextOnlyAdapter:
         name = "groq"
@@ -1070,75 +1076,49 @@ class TestImageGenerationEndToEndDispatch(unittest.TestCase):
         router = AstraRouter([text_adapter, image_adapter], max_retries=0)
         return router, text_adapter, image_adapter
 
-    def test_image_generation_routes_to_image_capable_model_only(self):
+    def test_image_request_is_refused_not_dispatched(self):
         router, text_adapter, image_adapter = self._router()
         req = RoutingRequest(
             task_type="image_generation",
             messages=[{"role": "user",
-                      "content": "generate an image of a sunset over mountains"}])
+                       "content": "generate an image of a sunset over mountains"}])
         rr = router.route_request(req)
-        self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "cloudflare")
-        self.assertTrue(rr.text.startswith("data:image/png;base64,"))
+        self.assertFalse(rr.ok)
+        self.assertIn("ImageRouter", rr.error or "")
+        # Neither the image adapter nor a text model was asked to do anything.
         self.assertEqual(text_adapter.chat_calls, 0)
-        self.assertEqual(len(image_adapter.generate_calls), 1)
-        self.assertIn("sunset over mountains", image_adapter.generate_calls[0])
+        self.assertEqual(image_adapter.chat_calls, 0)
+        self.assertEqual(image_adapter.generate_calls, [])
 
-    def test_banglish_image_request_routes_the_same_way(self):
-        router, text_adapter, image_adapter = self._router()
-        text = "akta chobi banao - ekta cyberpunk city"
-        task_type = classify(text)
-        self.assertEqual(task_type, "image_generation")
-        req = RoutingRequest(task_type=task_type,
-                             messages=[{"role": "user", "content": text}])
-        rr = router.route_request(req)
-        self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "cloudflare")
-        self.assertEqual(text_adapter.chat_calls, 0)
+    def test_banglish_and_bangla_image_requests_are_refused_too(self):
+        for text in ("akta chobi banao - ekta cyberpunk city",
+                     "\u098f\u0995\u099f\u09be cyberpunk city-\u098f\u09b0 \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993",
+                     "photo create koro of a rainy street"):
+            task_type = classify(text)
+            self.assertEqual(task_type, "image_generation")
+            router, text_adapter, image_adapter = self._router()
+            rr = router.route_request(RoutingRequest(
+                task_type=task_type,
+                messages=[{"role": "user", "content": text}]))
+            self.assertFalse(rr.ok)
+            self.assertIn("ImageRouter", rr.error or "")
+            self.assertEqual(text_adapter.chat_calls, 0)
+            self.assertEqual(image_adapter.generate_calls, [])
 
-    def test_bangla_script_image_request_routes_the_same_way(self):
-        """Real Bengali script, not just Latin-script Banglish."""
+    def test_image_editing_is_refused_too(self):
         router, text_adapter, image_adapter = self._router()
-        text = "\u098f\u0995\u099f\u09be cyberpunk city-\u098f\u09b0 \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993"
-        task_type = classify(text)
-        self.assertEqual(task_type, "image_generation")
-        req = RoutingRequest(task_type=task_type,
-                             messages=[{"role": "user", "content": text}])
-        rr = router.route_request(req)
-        self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "cloudflare")
-        self.assertEqual(text_adapter.chat_calls, 0)
-        self.assertEqual(len(image_adapter.generate_calls), 1)
-        self.assertEqual(len(image_adapter.generate_calls), 1)
+        rr = router.route_request(RoutingRequest(
+            task_type="image_editing",
+            messages=[{"role": "user", "content": "ei photo ta edit kore dao"}]))
+        self.assertFalse(rr.ok)
+        self.assertEqual(image_adapter.generate_calls, [])
 
-    def test_banglish_photo_create_koro_routes_the_same_way(self):
-        router, text_adapter, image_adapter = self._router()
-        text = "photo create koro of a rainy street"
-        task_type = classify(text)
-        self.assertEqual(task_type, "image_generation")
-        req = RoutingRequest(task_type=task_type,
-                             messages=[{"role": "user", "content": text}])
-        rr = router.route_request(req)
-        self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "cloudflare")
-        self.assertEqual(text_adapter.chat_calls, 0)
-
-    def test_explicit_text_provider_preference_is_soft_not_hard(self):
-        """An explicit provider/model preference for image generation is a
-        scoring bonus (routing_policy.PREFERENCE_MATCH_BONUS), never a hard
-        override of the capability gate — so a Gateway/UI that names a
-        text-only model for an image request still gets routed to a real
-        image-capable model instead of failing or silently hallucinating a
-        text description."""
-        router, text_adapter, image_adapter = self._router()
-        req = RoutingRequest(task_type="image_generation",
-                             preferred_provider="groq",
-                             preferred_model="llama-70b",
-                             messages=[{"role": "user", "content": "draw a cat"}])
-        rr = router.route_request(req)
-        self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "cloudflare")
-        self.assertEqual(text_adapter.chat_calls, 0)
+    def test_source_has_no_image_dispatch_left(self):
+        import inspect
+        from astra.ai.router import AstraRouter
+        src = inspect.getsource(AstraRouter)
+        self.assertNotIn("generate_image", src)
+        self.assertNotIn("_route_image_serial", src)
 
     def test_normal_text_chat_is_unaffected(self):
         """Regression guard: an ordinary chat request (no output-modality

@@ -1456,10 +1456,20 @@ class TestProviderImageAdapterMechanics(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 6. Provider router: image dispatch only, with failover
+# 6. Provider router: image requests are REFUSED (ImageRouter owns execution)
 # ═══════════════════════════════════════════════════════════════════════════
-class TestRouterImageDispatch(unittest.TestCase):
-    def test_router_routes_an_image_request_to_a_free_image_model(self):
+class TestProviderRouterRefusesImageExecution(unittest.TestCase):
+    """AstraRouter must NOT be a second image execution owner.
+
+    Image generation is owned EXCLUSIVELY by the Gateway's ImageRouter
+    (astra/ai/image_router.py), so the Provider router refuses an
+    image_generation/image_editing task instead of dispatching it. The old
+    serial image loop (`_route_image_serial`) and the `_attempt()`-level
+    `adapter.generate_image()` dispatch were a duplicate execution path and
+    have been removed.
+    """
+
+    def test_router_refuses_an_image_task_without_calling_any_adapter(self):
         text = _FakeConn("groq", "groq", models=["llama-70b"])
         img = _FakeConn("cloudflare", "cloudflare", image_models=[FLUX])
         router = AstraRouter([text, img], max_retries=0)
@@ -1467,75 +1477,57 @@ class TestRouterImageDispatch(unittest.TestCase):
             task_type="image_generation",
             messages=[{"role": "user",
                        "content": "akta cat photo create kore dao"}]))
-        self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.provider, "cloudflare")
-        self.assertEqual(rr.model, FLUX)
-        self.assertTrue(rr.text.startswith("data:image/png;base64,"))
+        self.assertFalse(rr.ok)
+        self.assertIn("ImageRouter", rr.error or "")
+        # No provider was asked to generate an image, and no text model was
+        # asked to describe one.
+        self.assertEqual(img.image_calls, [])
+        self.assertEqual(img.chat_calls, 0)
         self.assertEqual(text.chat_calls, 0)
         self.assertEqual(text.image_calls, [])
 
-    def test_router_image_failover_to_the_next_free_image_model(self):
-        img = _FakeConn("cloudflare", "cloudflare",
-                        image_models=[LIGHTNING, FLUX],
-                        outcomes=[_http_error("u", 429)])
+    def test_router_refuses_image_editing_too(self):
+        img = _FakeConn("cloudflare", "cloudflare", image_models=[FLUX])
         router = AstraRouter([img], max_retries=0)
         rr = router.route_request(RoutingRequest(
-            task_type="image_generation",
-            messages=[{"role": "user", "content": "photo generate koro"}]))
-        self.assertTrue(rr.ok, rr.error)
-        # FLUX is first in the deterministic serial order and 429s, so the
-        # next eligible FREE model -- LIGHTNING -- serves the request.
-        self.assertEqual(rr.model, LIGHTNING)
-
-    def test_router_image_failure_never_marks_the_provider_down(self):
-        # The serial fallback keeps no permanent unhealthy state: a 429 on
-        # one model must not take the whole provider out of rotation.
-        img = _FakeConn("cloudflare", "cloudflare",
-                        image_models=[FLUX, LIGHTNING],
-                        outcomes=[_http_error("u", 429)])
-        router = AstraRouter([img], max_retries=0)
-        rr = router.route_request(RoutingRequest(
-            task_type="image_generation",
-            messages=[{"role": "user", "content": "photo banao"}]))
-        self.assertTrue(rr.ok, rr.error)
-        self.assertNotIn("cloudflare", router._down)
-
-    def test_router_only_calls_generate_image_with_the_user_prompt(self):
-        # No synthetic probe image/prompt is ever sent: every provider call is
-        # one real generation attempt carrying the user's own prompt.
-        img = _FakeConn("cloudflare", "cloudflare",
-                        image_models=[FLUX, LIGHTNING],
-                        outcomes=[_http_error("u", 429)])
-        router = AstraRouter([img], max_retries=0)
-        rr = router.route_request(RoutingRequest(
-            task_type="image_generation",
-            messages=[{"role": "user", "content": "akta cat photo banao"}]))
-        self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(img.chat_calls, 0)
-        self.assertEqual([m for m, _p in img.image_calls], [FLUX, LIGHTNING])
-        self.assertEqual([p for _m, p in img.image_calls],
-                         ["akta cat photo banao", "akta cat photo banao"])
-
-    def test_router_never_routes_an_image_request_to_a_paid_image_model(self):
-        paid = _FakeConn("gemini", "gemini",
-                         image_models=["gemini-3.1-flash-image"])
-        router = AstraRouter([paid], max_retries=0)
-        rr = router.route_request(RoutingRequest(
-            task_type="image_generation",
-            messages=[{"role": "user", "content": "generate an image"}]))
+            task_type="image_editing",
+            messages=[{"role": "user", "content": "ei photo ta edit koro"}]))
         self.assertFalse(rr.ok)
-        self.assertIn("no eligible", rr.error or "")
-        self.assertEqual(paid.image_calls, [])
+        self.assertIn("ImageRouter", rr.error or "")
+        self.assertEqual(img.image_calls, [])
 
-    def test_router_never_answers_an_image_request_with_a_text_model(self):
+    def test_router_refuses_an_image_output_modality_requirement(self):
+        # Defense in depth: even without the image task_type, a request that
+        # REQUIRES an image output must never be executed by the Provider
+        # router -- it has no image dispatch left to serve it.
+        img = _FakeConn("cloudflare", "cloudflare", image_models=[FLUX])
+        router = AstraRouter([img], max_retries=0)
+        rr = router.route_request(RoutingRequest(
+            task_type="simple_chat",
+            required_output_modalities=["image"],
+            messages=[{"role": "user", "content": "draw a cat"}]))
+        self.assertFalse(rr.ok)
+        self.assertEqual(img.image_calls, [])
+
+    def test_provider_router_has_no_image_dispatch_left(self):
+        # Static proof: the duplicate image execution path is gone.
+        import inspect
+        import astra.ai.router as router_mod
+        src = inspect.getsource(router_mod)
+        self.assertNotIn("generate_image", src)
+        self.assertNotIn("_route_image_serial", src)
+        self.assertNotIn("_image_failure_category", src)
+        self.assertFalse(hasattr(AstraRouter, "_route_image_serial"))
+        self.assertFalse(hasattr(AstraRouter, "_image_failure_category"))
+
+    def test_router_still_serves_normal_chat(self):
         text = _FakeConn("groq", "groq", models=["llama-70b"])
         router = AstraRouter([text], max_retries=0)
         rr = router.route_request(RoutingRequest(
-            task_type="image_generation",
-            messages=[{"role": "user", "content": "create a photo"}]))
-        self.assertFalse(rr.ok)
-        self.assertEqual(text.chat_calls, 0)
-        self.assertEqual(text.image_calls, [])
+            task_type="simple_chat",
+            messages=[{"role": "user", "content": "hello"}]))
+        self.assertTrue(rr.ok, rr.error)
+        self.assertEqual(text.chat_calls, 1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1581,30 +1573,6 @@ class TestOpenRouterLiveDiscovery(unittest.TestCase):
         self.assertEqual([m.model_id for _c, m in cat], [self.FREE_ID])
         self.assertIn("image_generation", cat[0][1].capabilities)
         self.assertIn("image", cat[0][1].output_modalities)
-
-    def test_router_dispatches_to_a_live_free_image_model(self):
-        from astra.ai.adapters.openrouter import OpenRouterAdapter
-        conn = OpenRouterAdapter(config=_cfg(OPENROUTER_API_KEYS="k"))
-        seen = {}
-
-        def side(req, timeout=None):
-            url = req.full_url
-            if "/images/models" in url:
-                return _resp(self._payload([self.FREE_ID, self.PAID_ID]))
-            seen["url"] = url
-            seen["body"] = json.loads(req.data.decode())
-            return _resp(_openai_images_ok())
-
-        with mock.patch("urllib.request.urlopen", side):
-            router = AstraRouter([conn], max_retries=0)
-            rr = router.route_request(RoutingRequest(
-                task_type="image_generation",
-                messages=[{"role": "user", "content": "photo generate koro"}]))
-        self.assertTrue(rr.ok, rr.error)
-        self.assertEqual(rr.model, self.FREE_ID)
-        self.assertEqual(seen["body"]["model"], self.FREE_ID)
-        self.assertTrue(seen["url"].endswith("/images"))
-        self.assertNotIn("/images/generations", seen["url"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════

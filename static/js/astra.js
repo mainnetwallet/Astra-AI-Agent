@@ -1889,7 +1889,10 @@ function savedKeyRows(models, keys, keyResults) {
                : { key_id: k.key_id, label: k.label };
     }),
   }));
-  return any ? rows : [];
+  // Always return one row per configured model. A provider can have
+  // valid models/credentials before any health result has been saved; in
+  // that case the UI must still render those models as "not tested yet".
+  return rows;
 }
 
 // Saved (server-side) per-model Gateway health -> the same row shape a
@@ -1910,7 +1913,10 @@ function savedGatewayModelRows(models, modelHealth) {
       ? { model: modelId, ok: true, latency_ms: Math.round(h.average_latency_ms || 0) }
       : { model: modelId, ok: false, error: "last test failed" };
   });
-  return any ? rows : [];
+  // Always return one row per configured model. Without this, a Gateway
+  // connection with no saved health result renders an empty model table,
+  // making the Hide/Show models control appear broken for that connection.
+  return rows;
 }
 
 function _healthKeys(kind, name) {

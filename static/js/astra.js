@@ -1163,9 +1163,8 @@ const LOGS_MAX_BUFFER = 300;   // bounded DOM: oldest rows drop off the top
 
 // Compact breakdown shown above the timeline (matches the filter chips).
 const LOG_STAT_DEFS = [
-  { key: "total", label: "Total" },
-  { key: "agents", label: "Agents" },
-  { key: "ai", label: "AI" },
+  { key: "total", label: "Total API Calls" },
+  { key: "ai", label: "AI Call Success" },
   { key: "tools", label: "Tools" },
   { key: "errors", label: "Errors" },
 ];
@@ -1176,7 +1175,7 @@ function renderLogStats() {
     `<div class="card"><div class="card-v">${LOGS.counts[d.key] || 0}</div>` +
     `<div class="card-k">${esc(d.label)}</div></div>`).join("");
   const count = $("#logs-count");
-  if (count) count.textContent = `${LOGS.counts.total} events`;
+  if (count) count.textContent = `${LOGS.counts.total} API calls`;
 }
 
 // header live state: ● LIVE | ○ RECONNECTING | Ⅱ PAUSED

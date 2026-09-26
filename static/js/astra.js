@@ -1869,6 +1869,7 @@ function _syncRunningUi() {
 function keyChipHtml(k) {
   const id = `data-key="${esc(k.key_id)}"`;
   if (k.pending) return `<span class="key-chip pending" ${id}>⏳ ${esc(k.label)}</span>`;
+  if (k.waiting) return `<span class="key-chip pending" ${id}>⏳ ${esc(k.label)} · waiting</span>`;
   if (k.ok === undefined || k.ok === null)
     return `<span class="key-chip none" ${id}>${esc(k.label)} · not tested</span>`;
   const when = k.tested_at ? ` title="${esc(k.tested_at)}"` : "";
@@ -2370,9 +2371,15 @@ async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
 
 async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey, tableEl, onResult, resumeRows) {
   const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
+  const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
   const rows = resumeRows || models.map((m) => ({
     model: m,
-    keys: keys.map((k) => ({ key_id: k.key_id, label: k.label, pending: true })),
+    keys: keys.map((k) => ({
+      key_id: k.key_id,
+      label: k.label,
+      pending: k.key_id === chosen,
+      waiting: k.key_id !== chosen,
+    })),
   }));
   PROVIDER_MODEL_RESULTS[name] = rows;
   if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(rows);
@@ -2394,6 +2401,7 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
         if (!row) return;
         row.keys.forEach((slot) => Object.assign(slot, {
           pending: false,
+          waiting: false,
           ok: !!result.ok,
           latency_ms: result.latency_ms,
           error: result.error,
@@ -2506,7 +2514,8 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
       keys: keys.map((k) => ({
         key_id: k.key_id,
         label: k.label,
-        pending: !(resume && prior && prior.pending === false),
+        pending: !(resume && prior && prior.pending === false) && k.key_id === chosen,
+        waiting: !(resume && prior && prior.pending === false) && k.key_id !== chosen,
         ...(resume && prior && prior.pending === false ? {
           ok: !!prior.ok,
           latency_ms: prior.latency_ms || 0,

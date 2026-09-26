@@ -473,10 +473,14 @@ class _GatewayCompatibleConnection:
 
     def _image_api_base(self) -> str:
         """Base URL for an image-generation request: the dedicated
-        ``IMAGE_*_BASE_URL`` when configured, else this connection's normal
-        base URL (documented, intentional fallback — see `image_base_url_env`
-        on the class)."""
-        return (self.image_base_url or self._api_base() or "").rstrip("/")
+        ``IMAGE_*_BASE_URL`` when configured, else this provider's
+        hardcoded documented image-API default (the class's own
+        ``base_url`` attribute, read directly off the class -- NEVER the
+        instance's ``self.base_url``/``self._api_base()``, which may have
+        been overridden by the normal chat ``GW_*_BASE_URL``). A missing
+        ``IMAGE_*_BASE_URL`` must never resolve to a customized chat base
+        URL."""
+        return (self.image_base_url or type(self).base_url or "").rstrip("/")
 
     def _api_base(self) -> str:
         """Base URL for ONE request (see CompatibleAdapter._api_base): connections
@@ -719,11 +723,15 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
     native_base_url = "https://generativelanguage.googleapis.com/v1beta"
 
     def _native_base(self) -> str:
-        # Dedicated IMAGE_GEMINI_BASE_URL first (see `image_base_url_env`),
-        # else the connection's normal (chat) base URL.
-        base = (self.image_base_url or self._api_base() or "").rstrip("/")
+        # Dedicated IMAGE_GEMINI_BASE_URL only (see `image_base_url_env`) --
+        # NEVER the chat GW_GEMINI_BASE_URL/self._api_base() (which may be
+        # overridden for chat only and would be the wrong endpoint shape for
+        # the native image API besides). When IMAGE_GEMINI_BASE_URL is
+        # unset, falls back to this class's hardcoded native-image-API
+        # default (`native_base_url`), never to a customized chat base URL.
+        base = (self.image_base_url or "").rstrip("/")
         if base.endswith("/openai"):
-            return base[: -len("/openai")]
+            base = base[: -len("/openai")]
         return base or self.native_base_url
 
     @staticmethod
@@ -850,8 +858,11 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
         # Bare base only (no account/path suffix) -- `generate_image` appends
         # `/accounts/<id>/ai/run/<model>` itself. The chat `_api_base()`
         # embeds a *chat* account id + `/ai/v1`, which is the wrong shape for
-        # the image path, so this is NOT `self._api_base()`.
-        return (self.image_base_url or self.base_url or "").rstrip("/")
+        # the image path, so this is NOT `self._api_base()`. Falls back to
+        # `type(self).base_url` (this class's hardcoded documented default),
+        # NEVER to `self.base_url`, which may have been overridden by the
+        # chat-only GW_CLOUDFLARE_BASE_URL.
+        return (self.image_base_url or type(self).base_url or "").rstrip("/")
 
     def _image_account(self) -> str:
         """Per-request account pick from the image account pool

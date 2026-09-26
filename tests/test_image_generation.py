@@ -760,6 +760,65 @@ class TestForceAddedGeminiImageModel(unittest.TestCase):
         self.assertEqual(gem.chat_calls, 0)
 
 
+class TestEmptyImageModelEnvSemantics(unittest.TestCase):
+    """Regression test documenting the INTENTIONAL semantics when an
+    ``*_IMAGE_MODELS`` env var is explicitly empty (``FOO_IMAGE_MODELS=``)
+    -- indistinguishable, at the config layer, from leaving it unset
+    entirely (``Config.getlist`` returns ``[]`` either way; see
+    ``_GatewayCompatibleConnection._env_list``). ``ImageRouter._catalog``
+    then falls back to this provider's documented FREE default models
+    (semantics B), NOT to disabling the provider (semantics A) -- Cloudflare
+    and Gemini both have a non-empty documented default, so an
+    explicitly-empty env var still yields a usable pool. OpenRouter's
+    documented default is itself intentionally empty (its FREE pool is
+    live-discovery-only), so an explicitly-empty env var there correctly
+    yields NO static models -- not an error, and not a fallback to a paid
+    model."""
+
+    def _gw(self, *conns, config=None, events=None):
+        from astra.ai.gateway import AstraAIGateway
+        return AstraAIGateway(connections=list(conns), config=config,
+                              events=events)
+
+    def test_explicitly_empty_cloudflare_env_uses_documented_defaults(self):
+        from astra.ai.gateway import AstraGatewayCloudflare
+        conn = AstraGatewayCloudflare(_cfg(
+            GW_CLOUDFLARE_API_KEYS="k", GW_CLOUDFLARE_ACCOUNT_IDS="acct",
+            CLOUDFLARE_IMAGE_MODELS="",
+            IMAGE_CLOUDFLARE_API_KEY="image-key",
+            IMAGE_CLOUDFLARE_ACCOUNT_ID="image-acct"))
+        # The env layer cannot tell "explicitly empty" from "unset".
+        self.assertEqual(conn.image_models, [])
+        gw = self._gw(conn)
+        ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
+        self.assertTrue(ids)
+        self.assertEqual(set(ids), set(documented_image_models("cloudflare")))
+
+    def test_explicitly_empty_gemini_env_uses_documented_defaults(self):
+        from astra.ai.gateway import AstraGatewayGemini
+        conn = AstraGatewayGemini(_cfg(
+            GW_GEMINI_API_KEYS="k", GEMINI_IMAGE_MODELS="",
+            IMAGE_GEMINI_API_KEY="image-key"))
+        self.assertEqual(conn.image_models, [])
+        gw = self._gw(conn)
+        ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
+        self.assertTrue(ids)
+        self.assertEqual(set(ids), set(documented_image_models("gemini")))
+
+    def test_explicitly_empty_openrouter_env_stays_empty_not_paid(self):
+        from astra.ai.gateway import AstraGatewayOpenRouter
+        conn = AstraGatewayOpenRouter(config=_cfg(
+            GW_OPENROUTER_API_KEYS="k", OPENROUTER_IMAGE_MODELS="",
+            IMAGE_OPENROUTER_API_KEY="image-key"))
+        self.assertEqual(conn.image_models, [])
+        # OpenRouter's own documented default is intentionally empty (its
+        # FREE image pool is live-discovery-only) -- an explicitly-empty
+        # env var must stay empty, never fall back to any paid model.
+        self.assertEqual(documented_image_models("openrouter"), ())
+        gw = self._gw(conn)
+        self.assertEqual(gw.image_targets(discover=False), [])
+
+
 class TestOpenRouterStaticPoolIsEmpty(unittest.TestCase):
     """LIVE-VERIFIED 2026-09-26: OpenRouter's image catalog
     (GET https://openrouter.ai/api/v1/images/models) contains ZERO `:free`

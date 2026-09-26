@@ -263,5 +263,71 @@ class TestImagePoolNeverFallsBackToChatPoolObject(unittest.TestCase):
         self.assertFalse(conn.image_credentials_configured())
 
 
+class TestImageBaseUrlNeverFallsBackToChatBaseUrl(unittest.TestCase):
+    """When the dedicated ``IMAGE_*_BASE_URL`` is unset, image generation
+    must use this provider's OWN hardcoded documented image-API default --
+    NEVER a customized chat ``GW_*_BASE_URL`` (e.g. a corporate proxy set
+    for chat only). Every connection here sets a deliberately-wrong custom
+    ``GW_*_BASE_URL`` and leaves ``IMAGE_*_BASE_URL`` unset; the captured
+    request must never touch that custom host."""
+
+    BAD_CHAT_PROXY = "https://chat-only-proxy.example.internal"
+
+    def test_cloudflare_ignores_a_custom_chat_base_url(self):
+        conn = AstraGatewayCloudflare(_cfg(
+            GW_CLOUDFLARE_API_KEYS="chat-token",
+            GW_CLOUDFLARE_ACCOUNT_IDS="chat-acct",
+            GW_CLOUDFLARE_BASE_URL=self.BAD_CHAT_PROXY,
+            CLOUDFLARE_IMAGE_MODELS=FLUX,
+            IMAGE_CLOUDFLARE_API_KEY="image-token",
+            IMAGE_CLOUDFLARE_ACCOUNT_ID="image-acct"))
+        # No IMAGE_CLOUDFLARE_BASE_URL configured.
+        behavior = lambda req, n: _Resp(json.dumps(
+            {"result": {"image": B64}, "success": True}))
+        with _Capture(behavior) as cap:
+            uri = conn.generate_image("a cat", model=FLUX)
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+        r = cap.requests[0]
+        self.assertNotIn(self.BAD_CHAT_PROXY, r["url"])
+        self.assertTrue(r["url"].startswith(
+            "https://api.cloudflare.com/client/v4/accounts/image-acct/"),
+            r["url"])
+
+    def test_gemini_ignores_a_custom_chat_base_url(self):
+        conn = AstraGatewayGemini(_cfg(
+            GW_GEMINI_API_KEYS="chat-key",
+            GW_GEMINI_BASE_URL=self.BAD_CHAT_PROXY,
+            GEMINI_IMAGE_MODELS=GEMINI_IMG,
+            IMAGE_GEMINI_API_KEY="image-key"))
+        # No IMAGE_GEMINI_BASE_URL configured.
+        behavior = lambda req, n: _Resp(json.dumps({"candidates": [{
+            "content": {"parts": [{"inlineData": {
+                "mimeType": "image/png", "data": B64}}]}}]}))
+        with _Capture(behavior) as cap:
+            uri = conn.generate_image("a cat", model=GEMINI_IMG)
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+        r = cap.requests[0]
+        self.assertNotIn(self.BAD_CHAT_PROXY, r["url"])
+        self.assertTrue(r["url"].startswith(
+            "https://generativelanguage.googleapis.com/v1beta/models/"),
+            r["url"])
+
+    def test_openrouter_ignores_a_custom_chat_base_url(self):
+        conn = AstraGatewayOpenRouter(config=_cfg(
+            GW_OPENROUTER_API_KEYS="chat-key",
+            GW_OPENROUTER_BASE_URL=self.BAD_CHAT_PROXY,
+            IMAGE_OPENROUTER_API_KEY="image-key"))
+        # No IMAGE_OPENROUTER_BASE_URL configured.
+        behavior = lambda req, n: _Resp(json.dumps(
+            {"data": [{"b64_json": B64}]}))
+        with _Capture(behavior) as cap:
+            uri = conn.generate_image("a cat", model=OR_LIVE_FREE)
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+        r = cap.requests[-1]
+        self.assertNotIn(self.BAD_CHAT_PROXY, r["url"])
+        self.assertEqual(r["url"],
+                         "https://openrouter.ai/api/v1/images")
+
+
 if __name__ == "__main__":
     unittest.main()

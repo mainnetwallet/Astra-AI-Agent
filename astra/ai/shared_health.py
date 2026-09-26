@@ -29,11 +29,10 @@ a different canonical provider) is never shared -- see `resolve_identity` /
 ever call into this module; normal chat routing, model selection, credential
 rotation and image generation are untouched.
 
-No secret ever leaves this module: `credential_fingerprint` is a one-way,
-namespaced hash of the raw key, and the persisted `shared_health_result` row
-holds only canonical_provider / credential_fingerprint / model / ok / error /
-latency_ms / timestamps -- never the fingerprint's input, an API key, or an
-Authorization header.
+No API key is part of the shared identity. The persisted `shared_health_result`
+row contains only canonical_provider / model / ok / error / latency_ms /
+timestamps; each caller still records the shared outcome in its own per-key
+health state and preserves its own key label.
 """
 from __future__ import annotations
 
@@ -60,12 +59,6 @@ DEFAULT_TTL_S = 600.0
 # "astra-gw-groq" for the Gateway pool), so the identical literal secret
 # configured on both sides gets two different key_ids there -- that's fine
 # for its own purpose (a stable per-pool handle) but wrong for this one. This
-# fingerprint is salted with the CANONICAL provider instead, so the same
-# (upstream, secret) always produces the same identity no matter which
-# system computed it.
-_FINGERPRINT_NAMESPACE = "astra-shared-health-v1"
-
-
 def canonical_provider(name: str) -> str:
     """Resolve a Provider adapter name OR a Gateway connection name to the
     single upstream identity they both probe (e.g. "groq" for either

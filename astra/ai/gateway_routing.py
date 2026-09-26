@@ -61,7 +61,7 @@ REQUEST_CATEGORIES = (
     # *understanding*). A request in either category may only ever be served
     # by a model whose (provider, model) entry in astra.ai.image_models
     # proves it can produce image output. See CATEGORY_HARD_CAPS below.
-    "image_generation", "image_editing",
+    "image_generation", "image_editing", "image_inpainting",
     # The Gateway's OWN control calls (chat pipeline: understand+assign and
     # verify). They must answer with one strict JSON object and sit on the
     # critical path of every chat turn, so they need a JSON-capable model and
@@ -82,6 +82,7 @@ CATEGORY_HARD_CAPS: dict[str, tuple[str, ...]] = {
     # image-generation request just because it is the fastest/healthiest one.
     "image_generation": ("image_generation",),
     "image_editing": ("image_editing",),
+    "image_inpainting": ("image_inpainting",),
     "control": ("json",),
 }
 
@@ -92,6 +93,7 @@ CATEGORY_HARD_CAPS: dict[str, tuple[str, ...]] = {
 CATEGORY_REQUIRED_OUTPUT_MODALITY: dict[str, str] = {
     "image_generation": "image",
     "image_editing": "image",
+    "image_inpainting": "image",
 }
 
 # Baseline latency estimate (ms), used only until a target has real
@@ -521,7 +523,7 @@ def meets_gateway_requirements(model: Model, *, category: str,
     need_mod = CATEGORY_REQUIRED_OUTPUT_MODALITY.get(category)
     if need_mod and need_mod not in (model.output_modalities or ["text"]):
         return False
-    if category in ("image_generation", "image_editing"):
+    if category in ("image_generation", "image_editing", "image_inpainting"):
         # Free-only image pool: capability alone is not enough -- the model
         # must be verified FREE/free-tier eligible (a paid image model must
         # never be selected for a free request).
@@ -536,7 +538,7 @@ def meets_gateway_requirements(model: Model, *, category: str,
 def eligible_image_generation_targets(
         catalog: list[tuple[object, Model]],
         routing_state: "GatewayRoutingState", *, editing: bool = False,
-        context_tokens: int = 0
+        operation: str | None = None, context_tokens: int = 0
         ) -> list[tuple[object, Model, GatewayModelHealth]]:
     """The ONLY targets an image request may ever be sent to.
 
@@ -557,7 +559,8 @@ def eligible_image_generation_targets(
     Returns (connection, model, health) triples, preserving configured
     order (call `rank_targets`/`rank_image_targets` for the serial order).
     """
-    category = "image_editing" if editing else "image_generation"
+    category = ("image_inpainting" if operation == "image_inpainting"
+                else "image_editing" if editing else "image_generation")
     return eligible_targets(catalog, routing_state, category=category,
                             context_tokens=context_tokens,
                             require_health=False, use_image_pool=True)

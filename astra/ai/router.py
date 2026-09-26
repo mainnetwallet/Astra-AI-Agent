@@ -1742,7 +1742,13 @@ class AstraRouter:
                         bucket.clear()
                     elif isinstance(bucket, int):
                         by_name[name] = 0
-        if self.shared_health is not None:
+        if self.gateway is not None and hasattr(self.gateway, "reset_all_health"):
+            # Test All covers Provider + Gateway as one health run. Reset the
+            # Gateway's local state as well so matching models (which reuse
+            # the Provider probe and therefore make no Gateway API call) do
+            # not retain stale local rows across refreshes.
+            self.gateway.reset_all_health()
+        elif self.shared_health is not None:
             self.shared_health.invalidate()
 
     def _credential_count(self, provider) -> int:

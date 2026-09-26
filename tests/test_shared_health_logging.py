@@ -71,10 +71,11 @@ class SharedHealthLoggingTests(unittest.TestCase):
         gateway = AstraAIGateway(connections=[conn], store=store, events=_Events())
 
         gateway.routing_state.record_success("groq", "m1", 9999.0)
-        gateway.shared_health._save_locked(
-            SharedHealthIdentity("groq", "m1"),
-            {"ok": False, "error": "provider-failed", "latency_ms": 123.0},
-        )
+        with gateway.shared_health._lock:
+            gateway.shared_health._save_locked(
+                SharedHealthIdentity("groq", "m1"),
+                {"ok": False, "error": "provider-failed", "latency_ms": 123.0},
+            )
         # The saved shared row has a fresh timestamp and must be reflected in
         # the Gateway health payload instead of the older local success.
         health = gateway.health()["astra-gw-groq"]["model_health"]["m1"]

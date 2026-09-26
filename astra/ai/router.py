@@ -44,7 +44,7 @@ from datetime import datetime
 
 from astra.ai.gateway_contract import ProviderExecutionPort
 from astra.ai.models import Model, metadata_for
-from astra.ai.shared_health import SharedHealthCoordinator, resolve_identity
+from astra.ai.shared_health import SharedHealthCoordinator, canonical_provider, resolve_identity
 from astra.ai.token_limits import resolve_output_tokens
 from astra.ai.routing_policy import RoutingDecisionPolicy
 from astra.core.exceptions import ProviderError, TimeoutError
@@ -1067,6 +1067,10 @@ class AstraRouter:
         adapter = next((p for p in self.providers
                         if getattr(p, "name", "?") == name), None)
         pool = getattr(adapter, "pool", None)
+        if not key_id and pool is not None and hasattr(pool, "keys"):
+            key_meta = pool.keys()
+            if key_meta:
+                key_id = key_meta[0].get("key_id")
         if key_id and pool is not None and hasattr(pool, "pinned"):
             if key_id not in {k["key_id"] for k in pool.keys()}:
                 return {"model": model_id, "ok": False, "latency_ms": 0,
@@ -1102,8 +1106,18 @@ class AstraRouter:
                        "latency_ms": round(rr.latency_ms, 1)}
 
             result, reused = self.shared_health.run(identity, _probe_fn)
-            # The shared identity already resolved the exact credential. Use it
-            # for display so concurrent key selection cannot mislabel the test.
+            # The shared provider+model result is also written into every
+            # local key slot without making any additional upstream call.
+            if pool is not None and hasattr(pool, "keys"):
+                for key_meta in pool.keys():
+                    try:
+                        with pool.pinned(key_meta["key_id"]):
+                            self._record_key_model(
+                                adapter, model_id, result["ok"],
+                                result["latency_ms"], result["error"],
+                                req=RoutingRequest(task_type="health_check"))
+                    except Exception:
+                        pass
             cred = id_cred or (pool.last_key() if pool is not None and hasattr(pool, "last_key") else None)
             if reused:
                 # No real upstream call was made by this caller — the
@@ -1657,13 +1671,29 @@ class AstraRouter:
                     bucket.clear()
                 elif isinstance(bucket, int):
                     by_name[name] = 0
+        if self.shared_health is not None:
+            self.shared_health.invalidate(canonical_provider(name))
 
     def reset_all_health(self) -> None:
-        """reset_health() for every provider — used before a "test all" run
-        so each provider's numbers reflect only this run, not history piled
-        up from every previous test."""
+        """Reset every provider plus the shared manual-health cache.
+
+        This starts a genuinely fresh Test All run. The cache is cleared once
+        here; the individual provider workers do NOT clear it again, so a
+        simultaneous Gateway probe can still reuse the Provider probe.
+        """
         for p in self.providers:
-            self.reset_health(getattr(p, "name", "?"))
+            name = getattr(p, "name", "?")
+            with self._lock:
+                self._down.discard(name)
+                self._calls[name] = 0
+                for by_name in (self._errors, self._latency):
+                    bucket = by_name.get(name)
+                    if isinstance(bucket, list):
+                        bucket.clear()
+                    elif isinstance(bucket, int):
+                        by_name[name] = 0
+        if self.shared_health is not None:
+            self.shared_health.invalidate()
 
     def _credential_count(self, provider) -> int:
         pool = getattr(provider, "pool", None)

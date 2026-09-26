@@ -2323,6 +2323,7 @@ loaders.providers = async function () {
         } finally {
           BULK_HEALTH_RUN.active = false;
           BULK_HEALTH_RUN.providerModels.clear();
+          BULK_HEALTH_RUN.providerResults.clear();
           BULK_HEALTH_RUN.deferredGatewayResults.clear();
         }
       } finally {

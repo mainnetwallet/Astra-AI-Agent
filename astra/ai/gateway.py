@@ -2244,10 +2244,15 @@ class AstraAIGateway:
             self.routing_state.record_success(conn.name, model_id, latency_ms)
         else:
             self.routing_state.record_failure(conn.name, model_id)
-        self._emit("astra_gateway.test", connection=conn.name, model=model_id,
-                   ok=ok, latency_ms=round(latency_ms, 1), reason=error,
-                   reused=reused, key_id=cred.key_id if cred else "",
-                   key_label=key_label)
+        # Emit a health-test event only when THIS Gateway call actually
+        # owned and executed the upstream probe. If shared_health reused a
+        # Provider/Gateway result, no API request happened in this caller, so
+        # showing a test log would falsely imply that this model was called.
+        if not reused:
+            self._emit("astra_gateway.test", connection=conn.name, model=model_id,
+                       ok=ok, latency_ms=round(latency_ms, 1), reason=error,
+                       reused=False, key_id=cred.key_id if cred else "",
+                       key_label=key_label)
         return {"model": model_id, "ok": ok, "error": error,
                 "latency_ms": round(latency_ms, 1),
                 "key_id": cred.key_id if cred else "",

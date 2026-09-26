@@ -1320,6 +1320,10 @@ class AstraRouter:
                             req.max_tokens, provider=name, model_meta=model))
                 ms = duration_ms(t0)
                 cost = self._estimate_cost_adapter(adapter, text)
+                test_cred = (adapter.pool.last_key()
+                              if getattr(adapter, "pool", None) is not None
+                              and hasattr(adapter.pool, "last_key") else None)
+                key_label = test_cred.label if test_cred else ""
                 self._latency[name].append(ms)
                 self._calls[name] += 1
                 self._cost_est[name] = self._cost_est.get(name, 0.0) + cost
@@ -1334,7 +1338,9 @@ class AstraRouter:
                                    _reason=("matched preference" if not attempt else
                                             f"retry #{attempt}"))
                 self._emit("ai.completed", provider=name, model=model.model_id,
-                           latency_ms=ms, op=op, trace=req.trace, terminal=True)
+                           latency_ms=ms, op=op, trace=req.trace, terminal=True,
+                           key_id=test_cred.key_id if test_cred else "",
+                           key_label=key_label)
                 self._record_key_model(adapter, model.model_id, True, ms, "", req)
                 return rr
             except (ProviderError, TimeoutError) as e:

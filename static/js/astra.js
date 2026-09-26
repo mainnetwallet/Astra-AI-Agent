@@ -2528,11 +2528,19 @@ function _applyGatewayBulkResult(key, modelId, result) {
   const rows = GATEWAY_MODEL_RESULTS[key] || [];
   const row = rows.find((r) => r.model === modelId);
   if (!row) return;
-  row.keys.forEach((slot) => Object.assign(slot, {
-    pending: false, waiting: false, ok: !!result.ok,
-    latency_ms: result.latency_ms, error: result.error,
-    tested_at: new Date().toLocaleString(), shared: true
-  }));
+  if (Array.isArray(row.keys)) {
+    row.keys.forEach((slot) => Object.assign(slot, {
+      pending: false, waiting: false, ok: !!result.ok,
+      latency_ms: result.latency_ms, error: result.error,
+      tested_at: new Date().toLocaleString(), shared: true
+    }));
+  } else {
+    Object.assign(row, {
+      pending: false, waiting: false, ok: !!result.ok,
+      latency_ms: result.latency_ms, error: result.error,
+      shared: true
+    });
+  }
   const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`);
   if (tableEl) {
     const node = $(`[data-model-row="${CSS.escape(modelId)}"]`, tableEl);

@@ -461,6 +461,7 @@
       fields: fieldsOf(e, d),
       input: input,
       output: output,
+      gatewayOnly: d.gateway_only === true,
     };
     out.search = [out.kind, out.agent, out.title, out.subject, out.detail,
                   out.category].join(" ").toLowerCase();
@@ -629,12 +630,18 @@
 
   // Adjust category/error counters when a row changes status (running -> ok/err).
   function recount(state, oldModel, newModel) {
-    if (oldModel) {
-      if (state.counts[oldModel.category] != null) state.counts[oldModel.category]--;
+    const oldApi = isApiCallTerminal(oldModel);
+    const newApi = isApiCallTerminal(newModel);
+    if (oldApi) {
+      state.counts.total--;
+      if (oldModel.status === "ok") state.counts.ai--;
       if (oldModel.status === "err") state.counts.errors--;
     }
-    if (state.counts[newModel.category] != null) state.counts[newModel.category]++;
-    if (newModel.status === "err") state.counts.errors++;
+    if (newApi) {
+      state.counts.total++;
+      if (newModel.status === "ok") state.counts.ai++;
+      if (newModel.status === "err") state.counts.errors++;
+    }
     return state.counts;
   }
 
@@ -824,10 +831,25 @@
     return state.pending.length;
   }
 
+  // Activity counters represent completed real operations, not lifecycle
+  // START rows. For AI, one provider API attempt is counted exactly once when
+  // its terminal success/failure arrives. Gateway-only manual tests are also
+  // real API calls and are terminal standalone events.
+  function isApiCallTerminal(model) {
+    if (!model) return false;
+    if (model.kind === "astra_gateway.test" && model.gatewayOnly === true)
+      return true;
+    return model.category === "ai" && !!model.endTs;
+  }
+
   function count(state, model) {
-    state.counts.total++;
-    if (state.counts[model.category] != null) state.counts[model.category]++;
-    if (model.status === "err") state.counts.errors++;
+    if (isApiCallTerminal(model)) {
+      state.counts.total++;
+      if (model.status === "ok") state.counts.ai++;
+      if (model.status === "err") state.counts.errors++;
+    } else if (model.category === "tools" && model.status !== "running") {
+      state.counts.tools++;
+    }
     return state.counts;
   }
 

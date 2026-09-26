@@ -131,6 +131,7 @@ class ImageRouter:
         return out
 
     def build_targets(self, *, editing: bool = False,
+                      operation: str | None = None,
                       discover: bool = True) -> list:
         """The eligible FREE image targets, in their deterministic serial
         order.
@@ -152,8 +153,9 @@ class ImageRouter:
                                            IMAGE_PRIORITY_ENV)
         gw = self._gw
         catalog = self._catalog(discover=discover)
+        category = operation or ("image_editing" if editing else "image_generation")
         targets = eligible_image_generation_targets(
-            catalog, gw.routing_state, editing=editing)
+            catalog, gw.routing_state, category=category)
         preferred = []
         if gw.config is not None:
             try:
@@ -166,6 +168,7 @@ class ImageRouter:
     def generate(self, prompt: str, model: str | None = None,
                 size: str = "1024x1024", n: int = 1, *,
                 editing: bool = False, source_image: dict | None = None,
+                mask_image: dict | None = None, operation: str | None = None,
                 trace: str = "", discover: bool = True) -> str:
         """Generate one image with a SIMPLE SERIAL FALLBACK.
 
@@ -186,10 +189,14 @@ class ImageRouter:
 
         gw = self._gw
         op = new_op_id()
-        category = "image_editing" if editing else "image_generation"
-        if editing and not (source_image and source_image.get("storage_path")):
+        category = operation or ("image_editing" if editing else "image_generation")
+        if category in ("image_editing", "image_inpainting") and not (
+                source_image and source_image.get("storage_path")):
             raise ProviderError("Image editing requires a reusable source image.")
-        ranked = self.build_targets(editing=editing, discover=discover)
+        if category == "image_inpainting" and not (
+                mask_image and mask_image.get("storage_path")):
+            raise ProviderError("Inpainting requires a reusable mask image.")
+        ranked = self.build_targets(operation=category, discover=discover)
         if model:
             ranked = ([t for t in ranked if t[1].model_id == model] +
                       [t for t in ranked if t[1].model_id != model])
@@ -261,9 +268,9 @@ class ImageRouter:
                          op=call_op, trace=trace, input=_gw_log_cap(prompt))
                 start = time.perf_counter()
                 try:
-                    uri = conn.generate_image(prompt, model=tmodel.model_id,
-                                              size=size, n=n,
-                                              source_image=source_image)
+                    uri = conn.generate_image(
+                        prompt, model=tmodel.model_id, size=size, n=n,
+                        source_image=source_image, mask_image=mask_image)
                 except Exception as e:
                     reason = gw._image_failure_reason(e)
                     duration_ms = round((time.perf_counter() - start) * 1000.0, 1)

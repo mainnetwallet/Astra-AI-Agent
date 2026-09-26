@@ -76,11 +76,11 @@
     // instead of a misleading generic "Agent Router" row.
     if (kind.indexOf("router.") === 0) return false;
 
-    // Gateway events are internal orchestration/transport lifecycle records.
-    // Activity Log is intentionally provider-centric: show the Provider +
-    // Model that made the upstream API request, not the Gateway wrapper or
-    // its recovery/routing bookkeeping.
-    if (kind.indexOf("astra_gateway.") === 0) return false;
+    // Gateway events are internal lifecycle records, except for a
+    // Gateway-only model test. When the model is absent from the Provider
+    // catalog, the Gateway owns the only real upstream API call, so that
+    // call must remain visible in the provider-centric Activity Log.
+    if (kind.indexOf("astra_gateway.") === 0 && d.gateway_only !== true) return false;
 
     // A Gateway health probe can reuse a Provider-side shared-health result.
     // reused:true means this caller did NOT make an upstream API request;
@@ -189,7 +189,7 @@
     "astra_gateway.success": ["🧭", "Gateway call"],
     "astra_gateway.error":   ["🧭", "Gateway error"],
     "astra_gateway.stream_interrupted": ["🧭", "Gateway stream interrupted"],
-    "astra_gateway.test":    ["🧭", "Gateway test"],
+    "astra_gateway.test":    ["🧭", "Gateway API test"],
     "router.request":  ["🧠", "Agent Router"],
     "router.decision": ["🧠", "Agent Router"],
     "router.fallback": ["🧠", "Agent Router"],

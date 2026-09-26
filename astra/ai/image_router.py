@@ -165,8 +165,8 @@ class ImageRouter:
 
     def generate(self, prompt: str, model: str | None = None,
                 size: str = "1024x1024", n: int = 1, *,
-                editing: bool = False, trace: str = "",
-                discover: bool = True) -> str:
+                editing: bool = False, source_image: dict | None = None,
+                trace: str = "", discover: bool = True) -> str:
         """Generate one image with a SIMPLE SERIAL FALLBACK.
 
         The eligible FREE image models are tried one after another in the
@@ -187,6 +187,8 @@ class ImageRouter:
         gw = self._gw
         op = new_op_id()
         category = "image_editing" if editing else "image_generation"
+        if editing and not (source_image and source_image.get("storage_path")):
+            raise ProviderError("Image editing requires a reusable source image.")
         ranked = self.build_targets(editing=editing, discover=discover)
         if model:
             ranked = ([t for t in ranked if t[1].model_id == model] +
@@ -260,7 +262,8 @@ class ImageRouter:
                 start = time.perf_counter()
                 try:
                     uri = conn.generate_image(prompt, model=tmodel.model_id,
-                                              size=size, n=n)
+                                              size=size, n=n,
+                                              source_image=source_image)
                 except Exception as e:
                     reason = gw._image_failure_reason(e)
                     duration_ms = round((time.perf_counter() - start) * 1000.0, 1)

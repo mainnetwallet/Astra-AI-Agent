@@ -119,10 +119,9 @@ _ALL_IMAGE_MODELS_FAILED_MESSAGE = "\u2715 " + IMAGE_EXHAUSTED_MESSAGE
 
 _NO_IMAGE_MODEL_MESSAGE = (
     "✕ No currently available FREE image-generation model is available.\n\n"
-    "Astra shudhu free/free-tier image model diye chobi banay (ekhon: "
-    "Cloudflare Workers AI text-to-image). Kono free image model configured, "
-    "healthy ba free allocation-er moddhe nei. CLOUDFLARE_API_KEYS + "
-    "CLOUDFLARE_ACCOUNT_IDS set kore abar chesta korun."
+    "Astra shudhu configured free/free-tier image model diye chobi banay. "
+    "Kono eligible free image model configured ba available nei. "
+    "Required image-provider credentials/configuration check kore abar chesta korun."
 )
 _NO_GATEWAY_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI gateway-er API key set kora nei."
@@ -1261,14 +1260,16 @@ class ChatPipeline:
             return "image_editing" if t == "image_editing" else "vision"
         return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
-    def _route(self, task_type, messages, provider, model, vision, req=""):
+    def _route(self, task_type, messages, provider, model, vision,
+               req="", source_image=None):
         # image_generation / image_editing are owned EXCLUSIVELY by the
         # Gateway's ImageRouter (see `_route_image`): it is the only image
         # execution path, so these tasks never reach the Provider router's
         # own image dispatch below.
         is_image = task_type in ("image_generation", "image_editing")
         if is_image:
-            rr = self._route_image(task_type, messages, model, req)
+            rr = self._route_image(task_type, messages, model, req,
+                                   source_image=source_image)
             if rr is not None:
                 # Either the real image was produced, or ImageRouter
                 # attempted every eligible FREE model and the whole pool
@@ -1305,7 +1306,8 @@ class ChatPipeline:
                 trace=req))
         return rr
 
-    def _route_image(self, task_type, messages, model, req=""):
+    def _route_image(self, task_type, messages, model, req="",
+                     source_image=None):
         """Run an image request through the dedicated Image Provider/Model
         Router (astra.ai.image_router.ImageRouter), NOT through
         `Gateway.generate_image()`. The Gateway is only ever the
@@ -1330,7 +1332,8 @@ class ChatPipeline:
             return None
         try:
             uri = fn(prompt, model=model or None,
-                     editing=(task_type == "image_editing"), trace=req)
+                     editing=(task_type == "image_editing"),
+                     source_image=source_image, trace=req)
         except Exception as e:
             err = getattr(e, "message", None) or str(e)
             self._emit("chat.pipeline.image_unavailable", error=err,
@@ -1355,8 +1358,20 @@ class ChatPipeline:
 
     def _artifacts(self, text: str, message: str) -> list:
         try:
-            return extract_artifacts(text, self.artifact_dir,
-                                     detect_output_type(message))
+            artifacts = extract_artifacts(
+                text, self.artifact_dir, detect_output_type(message))
+            # Artifact.to_dict() deliberately omits filesystem paths from the
+            # public payload. Keep an internal-only path so a generated image
+            # can become the source image for a later conversational edit.
+            for art in artifacts:
+                if art.get("artifact_type") == "image" and art.get("id"):
+                    filename = str(art.get("filename") or "")
+                    path = os.path.join(
+                        self.artifact_dir,
+                        f"{art['id']}_{os.path.basename(filename)}")
+                    if os.path.isfile(path):
+                        art["_storage_path"] = path
+            return artifacts
         except Exception:
             return []
 
@@ -1623,8 +1638,13 @@ class ChatPipeline:
                 session_id, terminal_context, exec_context, req, trace,
                 messages, content)
         else:
+            source_image = next(
+                (a for a in (attachments or [])
+                 if isinstance(a, dict) and a.get("family") == "image"
+                 and a.get("storage_path")), None)
             rr = self._route(task_type, messages, brief["provider"],
-                             brief["model"], vision, req=req)
+                             brief["model"], vision, req=req,
+                             source_image=source_image)
         if rr is None or not rr.ok:
             err = (trace.get("error") or getattr(rr, "error", "") or
                    "unknown error")

@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS astra_chat_messages (
     meta       TEXT DEFAULT '{}',        -- reply["data"] (JSON)
     artifacts  TEXT DEFAULT '[]',        -- reply["artifacts"] (JSON)
     files      TEXT DEFAULT '[]',        -- attached file NAMES (JSON)
+    attachments TEXT DEFAULT '[]',       -- internal attachment metadata for conversational reuse
     ok         INTEGER DEFAULT 1,
     created_at TEXT DEFAULT ''
 );
@@ -94,6 +95,7 @@ class ChatLog:
         store.install(SCHEMA)
         store.ensure_column("astra_chat_messages", "conversation_id",
                              "INTEGER NOT NULL DEFAULT 1")
+        self.store.ensure_column("astra_chat_messages", "attachments", "TEXT DEFAULT '[]'")
         self._bootstrap()
 
     def _bootstrap(self) -> None:
@@ -214,14 +216,15 @@ class ChatLog:
 
     # -- writes ---------------------------------------------------------------
     def _insert(self, conversation_id, role, text, action="", meta=None,
-                artifacts=None, files=None, ok=True) -> int:
+                artifacts=None, files=None, attachments=None, ok=True) -> int:
         rid = self.store.exec(
             "INSERT INTO astra_chat_messages "
-            "(conversation_id, role, text, action, meta, artifacts, files, ok, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "(conversation_id, role, text, action, meta, artifacts, files, attachments, ok, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (conversation_id, role, str(text or ""), str(action or ""),
              _cap_json(meta or {}, {}), _cap_json(artifacts or [], []),
-             _cap_json(files or [], []), 1 if ok else 0, _now()))
+             _cap_json(files or [], []), _cap_json(attachments or [], []),
+             1 if ok else 0, _now()))
         try:   # keep the table bounded (globally, across every chat)
             self.store.exec(
                 "DELETE FROM astra_chat_messages WHERE id <= "
@@ -231,7 +234,8 @@ class ChatLog:
         return rid
 
     def add_user(self, text: str, files: list | None = None,
-                 conversation_id: int | None = None) -> int:
+                 conversation_id: int | None = None,
+                 attachments: list | None = None) -> int:
         """Returns the conversation id the message was actually written to,
         so the caller can pin the rest of the turn (begin/add_reply) to it —
         `current_id` can change while the agent is still working (the user
@@ -249,10 +253,57 @@ class ChatLog:
         redacted = self._redact(text or "")
         if self._is_duplicate_pending_submit(cid, redacted):
             return cid
+        safe_attachments = []
+        for att in (attachments or [])[:10]:
+            if not isinstance(att, dict) or att.get("family") != "image":
+                continue
+            safe_attachments.append({
+                "family": "image",
+                "storage_path": str(att.get("storage_path") or ""),
+                "mime_type": str(att.get("detected_type") or att.get("mime_type") or "image/png"),
+                "original_filename": str(att.get("original_filename") or att.get("filename") or "image"),
+            })
         self._insert(cid, "user", redacted,
-                      files=[str(f) for f in (files or [])][:20])
+                     files=[str(f) for f in (files or [])][:20],
+                     attachments=safe_attachments)
         self._touch(cid, first_text=text)
         return cid
+
+    def latest_image_attachment(self, conversation_id: int | None = None) -> dict | None:
+        """Return the newest reusable image from this conversation.
+
+        Priority follows conversation order: newest uploaded image first,
+        otherwise the newest generated image artifact. Storage paths remain
+        internal and are never returned by the public history API.
+        """
+        cid = conversation_id if conversation_id is not None else self.current_id
+        rows = self.store.fetch(
+            "SELECT attachments, artifacts FROM astra_chat_messages "
+            "WHERE conversation_id = ? ORDER BY id DESC LIMIT 100",
+            (cid,))
+        for row in rows:
+            try:
+                attachments = json.loads(row.get("attachments") or "[]")
+            except Exception:
+                attachments = []
+            for att in attachments:
+                if (isinstance(att, dict) and att.get("family") == "image"
+                        and att.get("storage_path")):
+                    return att
+            try:
+                artifacts = json.loads(row.get("artifacts") or "[]")
+            except Exception:
+                artifacts = []
+            for art in artifacts:
+                if (isinstance(art, dict) and (art.get("type") == "image" or art.get("artifact_type") == "image")
+                        and (art.get("storage_path") or art.get("_storage_path"))):
+                    return {
+                        "family": "image",
+                        "storage_path": str(art.get("storage_path") or art.get("_storage_path")),
+                        "mime_type": str(art.get("mime_type") or "image/png"),
+                        "original_filename": str(art.get("filename") or "generated.png"),
+                    }
+        return None
 
     def _is_duplicate_pending_submit(self, conversation_id: int, text: str) -> bool:
         if not text.strip() or not self.pending_for(conversation_id):
@@ -274,12 +325,43 @@ class ChatLog:
 
     def add_reply(self, reply: dict, conversation_id: int | None = None) -> int:
         cid = conversation_id if conversation_id is not None else self.current_id
+        raw_artifacts = list(reply.get("artifacts") or []) if isinstance(reply, dict) else []
+        # Strip private filesystem lineage from the caller's response object
+        # before the API layer can serialize it, while retaining the path
+        # locally for the internal conversation index.
+        if isinstance(reply, dict):
+            reply["artifacts"] = [
+                {k: v for k, v in art.items() if k != "_storage_path"}
+                if isinstance(art, dict) else art
+                for art in raw_artifacts
+            ]
         reply = self._redact(reply if isinstance(reply, dict) else {"reply": str(reply)})
         data = reply.get("data") or {}
         if isinstance(data, dict) and len(json.dumps(data, default=str)) > MAX_JSON_BYTES:
             data = {k: data[k] for k in ("execution_id",) if k in data}
+        artifacts = raw_artifacts
+        internal_attachments = []
+        public_artifacts = []
+        for art in artifacts:
+            if not isinstance(art, dict):
+                continue
+            clean = dict(art)
+            internal_path = clean.pop("_storage_path", "")
+            if (internal_path and clean.get("artifact_type") == "image"
+                    and clean.get("id")):
+                internal_attachments.append({
+                    "family": "image",
+                    "storage_path": str(internal_path),
+                    "mime_type": str(clean.get("mime_type") or "image/png"),
+                    "original_filename": str(clean.get("filename") or "generated.png"),
+                })
+            public_artifacts.append(clean)
+        # Never expose the internal artifact path in the response object.
+        if isinstance(reply, dict):
+            reply["artifacts"] = public_artifacts
         rid = self._insert(cid, "ai", reply.get("reply", ""), reply.get("action", ""),
-                            data, reply.get("artifacts") or [],
+                            data, public_artifacts,
+                            attachments=internal_attachments,
                             ok=bool(reply.get("ok", True)))
         self._touch(cid)
         return rid

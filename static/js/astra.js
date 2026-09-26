@@ -2529,13 +2529,31 @@ const BULK_HEALTH_RUN = {
   providerResults: new Map(),
   deferredGatewayResults: new Map()
 };
-function _bulkProviderNameForGateway(key) { return String(key || "").replace(/^astra-gw-/, ""); }
+// Resolve a Gateway connection to the actual Provider catalog name without
+// assuming casing. Gateway connection names are stable ("astra-gw-cohere"),
+// while Provider adapter names may be "cohere", "Cohere", etc. Provider
+// matching is therefore case-insensitive, but model IDs remain exact/case-
+// sensitive: only the same provider identity AND the same model ID share.
+function _bulkProviderNameForGateway(key) {
+  const short = String(key || "").replace(/^astra-gw-/i, "").trim();
+  if (!short) return "";
+  const match = Object.keys(PROVIDER_MODELS).find((name) =>
+    String(name).trim().toLowerCase() === short.toLowerCase());
+  return match || short;
+}
+function _bulkProviderModelsForGateway(key) {
+  const provider = _bulkProviderNameForGateway(key);
+  return Array.isArray(PROVIDER_MODELS[provider]) ? PROVIDER_MODELS[provider] : [];
+}
 function _bulkModelToken(provider, model) { return provider + "\0" + model; }
 function _bulkGatewayShouldWait(key, modelId) {
   if (!BULK_HEALTH_RUN.active) return false;
   const provider = _bulkProviderNameForGateway(key);
-  return Array.isArray(PROVIDER_MODELS[provider]) &&
-    PROVIDER_MODELS[provider].includes(modelId) &&
+  const providerModels = _bulkProviderModelsForGateway(key);
+  // Exact model-ID intersection:
+  //   Provider has model -> Gateway waits and reuses Provider result.
+  //   Provider does not have model -> Gateway owns a real API test.
+  return providerModels.includes(modelId) &&
     !BULK_HEALTH_RUN.providerModels.has(_bulkModelToken(provider, modelId));
 }
 function _applyGatewayBulkResult(key, modelId, result) {

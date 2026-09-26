@@ -774,6 +774,12 @@ a[class*="hl-"] { pointer-events: none; }
   display: flex; align-items: center; gap: 8px; padding: 8px 16px;
   font-size: 12px; color: var(--accent);
 }
+/* `.upload-indicator { display: flex }` above otherwise beats the
+   browser's built-in `[hidden] { display: none }` UA rule (author CSS
+   always wins over UA styles), so setting `el.hidden = true` in JS
+   silently did nothing visually -- the indicator stayed on screen
+   forever once created. Must be explicit. */
+.upload-indicator[hidden] { display: none; }
 .upload-spinner {
   width: 14px; height: 14px; border: 2px solid var(--line);
   border-top-color: var(--accent); border-radius: 50%;

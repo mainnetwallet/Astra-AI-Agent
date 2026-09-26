@@ -1510,6 +1510,36 @@ class TestProviderImageAdapterMechanics(unittest.TestCase):
         self.assertIn("IMAGE",
                       seen["body"]["generationConfig"]["responseModalities"])
 
+    def test_gemini_native_edit_forwards_source_image(self):
+        from astra.ai.gateway import AstraGatewayGemini
+        fd, source = tempfile.mkstemp(suffix=".png")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(PNG)
+            conn = AstraGatewayGemini(config=_cfg(IMAGE_GEMINI_API_KEY="k"))
+            seen = {}
+
+            def side(req, timeout=None):
+                seen["body"] = json.loads(req.data.decode())
+                return _resp(_gemini_ok())
+
+            with mock.patch("urllib.request.urlopen", side):
+                out = conn.generate_image(
+                    "make it brighter", model=GEMINI_IMG,
+                    source_image={"storage_path": source,
+                                  "mime_type": "image/png"})
+            self.assertTrue(out.startswith("data:image/png;base64,"))
+            parts = seen["body"]["contents"][0]["parts"]
+            self.assertEqual(parts[0]["inlineData"]["mimeType"], "image/png")
+            self.assertEqual(
+                base64.b64decode(parts[0]["inlineData"]["data"]), PNG)
+            self.assertEqual(parts[1]["text"], "make it brighter")
+        finally:
+            try:
+                os.unlink(source)
+            except OSError:
+                pass
+
     def test_openai_images_protocol_mechanics(self):
         from astra.ai.gateway import AstraGatewayZAI
         conn = AstraGatewayZAI(config=_cfg(GW_ZAI_API_KEYS="k",

@@ -60,9 +60,26 @@
 
   function isMeaningful(event) {
     var e = event || {};
+    var d = e.data && typeof e.data === "object" ? e.data : {};
     var kind = String(e.kind == null ? "" : e.kind);
     if (!kind) return false;
     if (NOISE_KINDS[kind]) return false;
+
+    // A Gateway health probe can reuse a Provider-side shared-health result.
+    // reused:true means this caller did NOT make an upstream API request;
+    // the original owner already produced the real call/result event. Do not
+    // render a second synthetic health-test row for the same shared result.
+    if (kind === "astra_gateway.test" && d.reused === true) return false;
+
+    // A routing health check can fail before selecting any provider/model.
+    // Attempts: 0 + this exact "no eligible" result means there was no
+    // upstream API call to report, so keeping it in Activity Log is noise.
+    if (kind === "ai.failed" &&
+        Number(d.attempts || d.attempt || 0) === 0 &&
+        /no eligible provider\/model available/i.test(String(d.error || ""))) {
+      return false;
+    }
+
     // The Gateway's own connections also emit ai.* while streaming, but every
     // Gateway call is already reported (with provider+model) by the
     // astra_gateway.* wrapper — showing both would double-count one call.

@@ -2163,7 +2163,7 @@ loaders.providers = async function () {
       `${modelCount} model(s) · ${keyCount} key(s) · ${p.calls || 0} calls · ${p.errors || 0} err</span>` +
       `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}"${busy ? " disabled" : ""}>` +
       (busy ? "⏳ Testing…"
-            : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"}${keyCount > 1 ? ` × ${keyCount} keys` : ""})`) +
+            : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"} · ${keyCount ? _healthKeyLabel("provider", n) : "direct"})`) +
       `</button>` +
       `</div>` +
       `<div class="model-health-table" data-role="model-table">` +
@@ -2626,7 +2626,7 @@ function renderGatewayCard(core) {
       `<span class="status-dot ${dot}"></span><b>${esc(label)}</b>` +
       `<span class="grow muted">${esc(c.state)} · ${models}</span>` +
       `<button class="btn mini" data-role="gw-test" data-conn="${esc(key)}"${busy ? " disabled" : ""}>` +
-      (busy ? "⏳ Testing…" : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"})`) +
+      (busy ? "⏳ Testing…" : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"} · ${(c.keys || []).length ? _healthKeyLabel("gateway", key) : "direct"})`) +
       `</button>` +
       `</div>` +
       `<div class="model-health-table" data-role="gw-model-table">` +

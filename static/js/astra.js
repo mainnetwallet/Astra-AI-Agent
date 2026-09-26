@@ -1878,12 +1878,10 @@ function keyChipHtml(k) {
 // Saved (server-side) per-key results -> the same row shape a live test
 // produces, so a page reload shows the last known state of every key.
 function savedKeyRows(models, keys, keyResults) {
-  let any = false;
   const rows = models.map((m) => ({
     model: m,
     keys: keys.map((k) => {
       const r = ((keyResults || {})[m] || {})[k.key_id];
-      if (r) any = true;
       return r ? { key_id: k.key_id, label: k.label, ok: r.ok, latency_ms: r.latency_ms,
                    error: r.error, tested_at: r.tested_at }
                : { key_id: k.key_id, label: k.label };
@@ -1902,12 +1900,10 @@ function savedKeyRows(models, keys, keyResults) {
 // card was missing this restoration entirely, so it went blank on every
 // reload even though the server has the data (routing_state health).
 function savedGatewayModelRows(models, modelHealth) {
-  let any = false;
   const rows = (models || []).map((modelId) => {
     const h = (modelHealth || {})[modelId];
     const tested = h && ((h.success_count || 0) + (h.failure_count || 0) > 0);
     if (!tested) return { model: modelId, untested: true };
-    any = true;
     const lastOk = h.last_success && (!h.last_failure || h.last_success > h.last_failure);
     return lastOk
       ? { model: modelId, ok: true, latency_ms: Math.round(h.average_latency_ms || 0) }

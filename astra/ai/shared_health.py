@@ -54,11 +54,7 @@ from astra.ai.gateway_routing import GATEWAY_PROVIDER_SHORT
 # sides of this boundary.
 DEFAULT_TTL_S = 600.0
 
-# Separate hash namespace from `Credential.key_id` (astra/ai/credentials.py).
-# `key_id` is salted with the LOCAL pool label ("groq" for the Provider pool,
-# "astra-gw-groq" for the Gateway pool), so the identical literal secret
-# configured on both sides gets two different key_ids there -- that's fine
-# for its own purpose (a stable per-pool handle) but wrong for this one. This
+# Credential identity is intentionally excluded from shared-health dedup.
 def canonical_provider(name: str) -> str:
     """Resolve a Provider adapter name OR a Gateway connection name to the
     single upstream identity they both probe (e.g. "groq" for either

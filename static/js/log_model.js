@@ -71,6 +71,11 @@
     if (!kind) return false;
     if (NOISE_KINDS[kind]) return false;
 
+    // Router events are control-plane bookkeeping, not upstream API calls.
+    // The Activity Log should show the actual Provider/Gateway operation
+    // instead of a misleading generic "Agent Router" row.
+    if (kind.indexOf("router.") === 0) return false;
+
     // A Gateway health probe can reuse a Provider-side shared-health result.
     // reused:true means this caller did NOT make an upstream API request;
     // the original owner already produced the real call/result event. Do not

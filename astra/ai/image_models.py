@@ -156,6 +156,7 @@ from dataclasses import dataclass, field
 # with no import cycle).
 IMAGE_GENERATION = "image_generation"
 IMAGE_EDITING = "image_editing"
+IMAGE_INPAINTING = "image_inpainting"
 INPUT_IMAGE = "image"
 
 # ── free-tier eligibility ──────────────────────────────────────────────────
@@ -311,33 +312,37 @@ _SPECS: tuple = (
     ImageSpec("cloudflare", "@cf/stabilityai/stable-diffusion-xl-base-1.0",
               PROTOCOL_CLOUDFLARE_RUN,
               _CF_SCHEMA.format("stable-diffusion-xl-base-1.0"),
-              capabilities=(IMAGE_GENERATION,),
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING, IMAGE_INPAINTING),
+              input_modalities=("text", "image"),
               sizes=("1024x1024", "768x768", "512x512"),
               free_tier=FREE_TRUE, free_evidence=_CF_FREE,
-              params=("prompt", "width", "height")),
+              params=("prompt", "width", "height", "image_b64", "mask", "strength")),
     ImageSpec("cloudflare", "@cf/bytedance/stable-diffusion-xl-lightning",
               PROTOCOL_CLOUDFLARE_RUN,
               _CF_SCHEMA.format("stable-diffusion-xl-lightning"),
-              capabilities=(IMAGE_GENERATION,),
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING, IMAGE_INPAINTING),
+              input_modalities=("text", "image"),
               sizes=("1024x1024", "768x768", "512x512"),
               free_tier=FREE_TRUE, free_evidence=_CF_FREE,
-              params=("prompt", "width", "height")),
+              params=("prompt", "width", "height", "image_b64", "mask", "strength")),
     ImageSpec("cloudflare", "@cf/lykon/dreamshaper-8-lcm",
               PROTOCOL_CLOUDFLARE_RUN, _CF_SCHEMA.format("dreamshaper-8-lcm"),
-              capabilities=(IMAGE_GENERATION,),
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING, IMAGE_INPAINTING),
+              input_modalities=("text", "image"),
               sizes=("1024x1024", "768x768", "512x512"),
               free_tier=FREE_TRUE, free_evidence=_CF_FREE,
-              params=("prompt", "width", "height")),
+              params=("prompt", "width", "height", "image_b64", "mask", "strength")),
     ImageSpec("cloudflare", "@cf/runwayml/stable-diffusion-v1-5-inpainting",
               PROTOCOL_CLOUDFLARE_RUN,
               _CF_SCHEMA.format("stable-diffusion-v1-5-inpainting"),
               # Text-to-Image per Cloudflare's own task label; the inpainting
               # mode needs a source image+mask, which this adapter does not
               # send, so NO image_editing capability is advertised.
-              capabilities=(IMAGE_GENERATION,),
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING, IMAGE_INPAINTING),
+              input_modalities=("text", "image"),
               sizes=("512x512",),
               free_tier=FREE_TRUE, free_evidence=_CF_FREE,
-              params=("prompt", "width", "height")),
+              params=("prompt", "width", "height", "image_b64", "mask", "strength")),
     ImageSpec("cloudflare", "@cf/leonardo/lucid-origin",
               PROTOCOL_CLOUDFLARE_RUN, _CF_SCHEMA.format("lucid-origin"),
               capabilities=(IMAGE_GENERATION,),

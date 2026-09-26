@@ -1013,6 +1013,8 @@ class WebApp:
                 att = process_upload(f["data"], f["filename"], upload_dir)
                 item = att.to_dict()
                 item["_storage_path"] = att.storage_path
+                if "mask" in str(f.get("filename", "")).lower():
+                    item["role"] = "mask"
                 attachments.append(item)
             except Exception as e:
                 attachments.append({

@@ -1055,23 +1055,80 @@ class AstraRouter:
         attempt, no rotation), and the outcome is saved against
         (provider, key, model) — see `_record_key_model`. Without it the
         pool picks a key as usual and the result is still saved against
-        whichever key it used."""
+        whichever key it used.
+
+        When this (provider, key, model) resolves to the same canonical
+        upstream identity as a Gateway-side manual test
+        (astra.ai.gateway.AstraAIGateway.test_connection_model) running
+        concurrently or recently, the real upstream call is shared through
+        `self.shared_health` instead of firing a second identical request
+        — see astra/ai/shared_health.py. Only this manual-test path is
+        affected; live routing is untouched."""
         adapter = next((p for p in self.providers
                         if getattr(p, "name", "?") == name), None)
         pool = getattr(adapter, "pool", None)
-        req = RoutingRequest(task_type="health_check",
-                             messages=self._TEST_MESSAGES,
-                             preferred_provider=name, preferred_model=model_id,
-                             no_fallback=True, max_tokens=8)
         if key_id and pool is not None and hasattr(pool, "pinned"):
             if key_id not in {k["key_id"] for k in pool.keys()}:
                 return {"model": model_id, "ok": False, "latency_ms": 0,
                         "error": f"unknown key {key_id!r}", "key_id": key_id,
                         "key": key_id}
-            with pool.pinned(key_id):
-                rr = self.route_request(req)
-        else:
-            rr = self.route_request(req)
+
+        identity, id_cred = (resolve_identity(pool, name, model_id, key_id)
+                             if self.shared_health is not None else (None, None))
+
+        def _do_route(pinned_key_id):
+            req = RoutingRequest(task_type="health_check",
+                                 messages=self._TEST_MESSAGES,
+                                 preferred_provider=name, preferred_model=model_id,
+                                 no_fallback=True, max_tokens=8)
+            if pinned_key_id and pool is not None and hasattr(pool, "pinned"):
+                with pool.pinned(pinned_key_id):
+                    return self.route_request(req)
+            return self.route_request(req)
+
+        if identity is not None:
+            holder: dict = {}
+
+            def _probe_fn():
+                # Pin to the exact credential the shared identity was
+                # resolved against — whether or not the caller passed an
+                # explicit key_id — so the identity and the actual upstream
+                # call (if this caller owns the probe) always agree on
+                # which key is being tested.
+                rr = _do_route(id_cred.key_id if id_cred else key_id)
+                holder["rr"] = rr
+                return {"ok": bool(rr.ok),
+                       "error": "" if rr.ok else (rr.error or "test failed"),
+                       "latency_ms": round(rr.latency_ms, 1)}
+
+            result, reused = self.shared_health.run(identity, _probe_fn)
+            cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
+            if reused:
+                # No real upstream call was made by this caller — the
+                # Gateway-side probe owns it. Local Provider health state
+                # (key_health / model routing) must still reflect the
+                # shared result.
+                self._record_key_model(adapter, model_id, result["ok"],
+                                       result["latency_ms"], result["error"],
+                                       req=RoutingRequest(task_type="health_check"))
+                return {"model": model_id, "ok": result["ok"],
+                        "latency_ms": round(result["latency_ms"], 1),
+                        "error": result["error"],
+                        "key_id": cred.key_id if cred else (key_id or ""),
+                        "key": cred.label if cred else ""}
+            rr = holder["rr"]
+            return {
+                "model": rr.model or model_id,
+                "ok": bool(rr.ok),
+                "latency_ms": round(rr.latency_ms, 1),
+                "error": "" if rr.ok else (rr.error or "test failed"),
+                "key_id": cred.key_id if cred else (key_id or ""),
+                "key": cred.label if cred else "",
+            }
+
+        # Identity couldn't be resolved (no pool / no usable credential) —
+        # unchanged direct-probe behavior.
+        rr = _do_route(key_id)
         cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
         return {
             "model": rr.model or model_id,

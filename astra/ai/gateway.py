@@ -56,6 +56,7 @@ from astra.ai.image_payload import image_result_to_data_uri
 from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError, TimeoutError
 from astra.core.events import new_op_id
+from astra.ai.shared_health import SharedHealthCoordinator, resolve_identity
 
 
 def _close_http_error(exc) -> None:
@@ -1549,6 +1550,12 @@ class AstraAIGateway:
         from astra.ai.gateway_routing import (GatewayRoutingState,
                                               build_gateway_catalog)
         self.routing_state = GatewayRoutingState(store)
+        # Manual-health-check dedup with the Provider system (see
+        # astra/ai/shared_health.py). `AstraRouter` adopts THIS instance
+        # when it wires a Gateway in (see its __init__), so the two
+        # converge on one coordinator when used together; this default
+        # keeps a standalone Gateway (no Router attached) working too.
+        self.shared_health = SharedHealthCoordinator(store=store)
         self._catalog = build_gateway_catalog(self.connections)
         # §2-§5, §18: task-level execution recovery for the EXISTING
         # Provider system's own catalog — a completely separate namespace
@@ -2036,30 +2043,66 @@ class AstraAIGateway:
         result immediately — same idea as AstraRouter.test_provider_model,
         so the UI can fire one request per model and show each result the
         instant it lands instead of waiting on the connection's whole
-        model list."""
-        start = time.perf_counter()
-        try:
+        model list.
+
+        When this (connection, model) resolves to the same canonical
+        upstream provider + credential + model as a Provider-side manual
+        test (astra.ai.router.AstraRouter.test_provider_model) running
+        concurrently or recently, the real upstream HTTP probe is shared
+        through `self.shared_health` instead of firing a second identical
+        request — see astra/ai/shared_health.py. Only this manual-test
+        path is affected: normal chat routing/fallback is untouched."""
+        pool = getattr(conn, "pool", None)
+        identity, cred = (resolve_identity(pool, conn.name, model_id)
+                          if self.shared_health is not None else (None, None))
+
+        def _probe() -> dict:
             # Deliberately tiny output for a latency/health probe — this is
             # a connectivity test, not AI content, so it is the one place a
             # small explicit budget is correct (astra.ai.token_limits).
-            conn.chat(self._TEST_MESSAGES, model=model_id, max_tokens=8)
-        except (ProviderError, TimeoutError) as e:
-            error = getattr(e, "message", None) or str(e)
+            start = time.perf_counter()
+            try:
+                conn.chat(self._TEST_MESSAGES, model=model_id, max_tokens=8)
+            except (ProviderError, TimeoutError) as e:
+                return {"ok": False,
+                       "error": getattr(e, "message", None) or str(e),
+                       "latency_ms": 0.0}
+            except Exception as e:
+                return {"ok": False, "error": f"{type(e).__name__}: {e}",
+                       "latency_ms": 0.0}
+            return {"ok": True, "error": "",
+                   "latency_ms": round((time.perf_counter() - start) * 1000.0, 1)}
+
+        if identity is not None:
+            # Pin the pool to the exact credential the shared identity was
+            # resolved against, so — if this caller ends up owning the real
+            # probe — the identity and the actual upstream call always
+            # agree on which key is being tested.
+            pin = (pool.pinned(cred.key_id)
+                  if pool is not None and cred is not None and hasattr(pool, "pinned")
+                  else None)
+
+            def _probe_fn():
+                if pin is not None:
+                    with pin:
+                        return _probe()
+                return _probe()
+
+            result, reused = self.shared_health.run(identity, _probe_fn)
+        else:
+            result, reused = _probe(), False
+
+        ok = bool(result.get("ok"))
+        error = result.get("error") or ""
+        latency_ms = result.get("latency_ms") or 0.0
+        if ok:
+            self.routing_state.record_success(conn.name, model_id, latency_ms)
+        else:
             self.routing_state.record_failure(conn.name, model_id)
-            self._emit("astra_gateway.test", connection=conn.name,
-                       model=model_id, ok=False, reason=error)
-            return {"model": model_id, "ok": False, "error": error, "latency_ms": 0}
-        except Exception as e:
-            error = f"{type(e).__name__}: {e}"
-            self.routing_state.record_failure(conn.name, model_id)
-            self._emit("astra_gateway.test", connection=conn.name,
-                       model=model_id, ok=False, reason=error)
-            return {"model": model_id, "ok": False, "error": error, "latency_ms": 0}
-        latency_ms = (time.perf_counter() - start) * 1000.0
-        self.routing_state.record_success(conn.name, model_id, latency_ms)
         self._emit("astra_gateway.test", connection=conn.name, model=model_id,
-                   ok=True, latency_ms=round(latency_ms, 1))
-        return {"model": model_id, "ok": True, "error": "",
+                   ok=ok, latency_ms=round(latency_ms, 1), reason=error,
+                   reused=reused)
+        return {"model": model_id, "ok": ok, "error": error,
                 "latency_ms": round(latency_ms, 1)}
 
     def test_connection(self, conn) -> dict:

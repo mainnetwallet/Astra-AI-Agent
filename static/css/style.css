@@ -1213,3 +1213,39 @@ body:has(#tab-workflow.active) .topbar .tab.active {
   .wf-log-step, .wf-log-text, .wf-log-err { grid-column: 2; }
   body { overflow-x: hidden; }
 }
+
+
+/* Health-test key selector */
+.health-key-selector {
+  margin: 0 0 10px;
+  padding: 10px;
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: 10px;
+  background: var(--panel, rgba(255,255,255,.03));
+}
+.health-key-selector[hidden] { display: none; }
+.health-key-selector-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.health-key-selector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 7px;
+}
+.health-key-selector-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: 8px;
+}
+.health-key-selector-row select {
+  max-width: 120px;
+  min-width: 86px;
+}

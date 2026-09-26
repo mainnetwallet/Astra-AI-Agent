@@ -44,6 +44,7 @@ from datetime import datetime
 
 from astra.ai.gateway_contract import ProviderExecutionPort
 from astra.ai.models import Model, metadata_for
+from astra.ai.shared_health import SharedHealthCoordinator, resolve_identity
 from astra.ai.token_limits import resolve_output_tokens
 from astra.ai.routing_policy import RoutingDecisionPolicy
 from astra.core.exceptions import ProviderError, TimeoutError
@@ -333,7 +334,7 @@ class AstraRouter:
     def __init__(self, providers: list | None = None, config=None,
                  max_retries: int = 2, backoff_s: float = 1.0,
                  registry=None, preference: str = "fastest", store=None,
-                 gateway=None):
+                 gateway=None, shared_health=None):
         self.config = config
         self.max_retries = max(0, int((config and config.get("AI_MAX_RETRIES")) or max_retries))
         self.backoff_s = float((config and config.get("AI_BACKOFF")) or backoff_s)
@@ -344,6 +345,17 @@ class AstraRouter:
         # optional Astra AI Gateway — deliberately NOT part of
         # self.providers / ProviderRegistry (see module docstring).
         self.gateway = gateway
+        # Manual-health-check dedup, shared with `self.gateway` (see
+        # astra/ai/shared_health.py). Whichever of Router/Gateway is built
+        # first "owns" the coordinator instance; the other adopts it here,
+        # so the two always converge on ONE instance when wired together —
+        # required for in-process concurrent-probe coordination — while
+        # still working standalone (own instance) if used without the other.
+        self.shared_health = (shared_health
+                              or getattr(self.gateway, "shared_health", None)
+                              or SharedHealthCoordinator(store=store))
+        if self.gateway is not None:
+            self.gateway.shared_health = self.shared_health
         self.policy = RoutingDecisionPolicy(stats=self._load_aggregate(),
                                             preference=self.preference)
         self._lock = threading.RLock()

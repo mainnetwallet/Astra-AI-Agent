@@ -2179,9 +2179,12 @@ loaders.providers = async function () {
     PROVIDER_KEYS[n] = p.keys || [];
     _ensureHealthKey("provider", n);
     LAST_PROVIDER_DATA[n] = p;
-    // First paint after a reload: show the last saved per-key results.
-    if (!(PROVIDER_MODEL_RESULTS[n] || []).length && (p.keys || []).length) {
-      PROVIDER_MODEL_RESULTS[n] = savedKeyRows(p.models || [], p.keys, p.key_results);
+    // The server is the durable source of truth for per-key/model
+    // health. Rebuild these rows on every non-live render so a refresh or
+    // another loader pass cannot leave stale client-only "not tested" rows.
+    if (!LIVE_PROVIDER_TESTS.has(n) && (p.keys || []).length) {
+      const saved = savedKeyRows(p.models || [], p.keys, p.key_results);
+      if (saved.length) PROVIDER_MODEL_RESULTS[n] = saved;
     }
     // A test that was still running when the page was refreshed: show its
     // unfinished rows as pending (and reveal the card) until the server has

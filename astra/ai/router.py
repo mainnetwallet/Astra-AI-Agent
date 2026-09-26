@@ -1231,12 +1231,47 @@ class AstraRouter:
         return "unknown"
 
     def key_health(self, provider: str) -> dict:
-        """Saved per-key results for one provider:
-        {model: {key_id: {ok, latency_ms, error, source, tested_at, key_label}}}."""
+        """Return persisted per-key/model health for one provider.
+
+        The in-memory map is a fast cache, but the dashboard's GET
+        /api/providers endpoint is also the persistence boundary used after a
+        browser refresh. Re-read this provider's rows from SQLite so a result
+        written by a concurrent health-test request is immediately visible to
+        a later health snapshot, even when the router instance predates that
+        write or another request populated the DB first.
+        """
+        rows = {}
+        with self._lock:
+            for (p, key_id, model), row in list(self._key_model.items()):
+                if p == provider:
+                    rows[(key_id, model)] = dict(row)
+
+            if self.store:
+                try:
+                    db_rows = self.store.fetch(
+                        "SELECT key_id, model, ok, latency_ms, error, source, "
+                        "tested_at, ts, key_label FROM key_model_health "
+                        "WHERE provider=?",
+                        (provider,))
+                    for r in db_rows:
+                        rows[(r["key_id"], r["model"])] = {
+                            "ok": bool(r["ok"]),
+                            "latency_ms": r["latency_ms"] or 0,
+                            "error": r["error"] or "",
+                            "source": r["source"] or "live",
+                            "tested_at": r["tested_at"] or "",
+                            "ts": r["ts"] or 0.0,
+                            "key_label": r["key_label"] or "",
+                        }
+                    for (key_id, model), row in rows.items():
+                        self._key_model[(provider, key_id, model)] = row
+                except Exception:
+                    # Keep the in-memory snapshot as a fallback if the store
+                    # is temporarily unavailable.
+                    pass
+
         out: dict = {}
-        for (p, key_id, model), row in list(self._key_model.items()):
-            if p != provider:
-                continue
+        for (key_id, model), row in rows.items():
             out.setdefault(model, {})[key_id] = {
                 k: row[k] for k in ("ok", "latency_ms", "error", "source",
                                     "tested_at", "key_label")}

@@ -1106,6 +1106,16 @@ class AstraRouter:
                        "latency_ms": round(rr.latency_ms, 1)}
 
             result, reused = self.shared_health.run(identity, _probe_fn)
+            # Materialize the shared result in Gateway routing health even
+            # when the Provider side owned the only real upstream request.
+            # This is persistence only: it never emits a second API-call
+            # event and never performs another upstream request.
+            if self.gateway is not None and hasattr(self.gateway, "record_shared_health_result"):
+                try:
+                    self.gateway.record_shared_health_result(
+                        name, model_id, result["ok"], result["latency_ms"], result["error"])
+                except Exception:
+                    pass
             # The shared provider+model result is also written into every
             # local key slot without making any additional upstream call.
             if pool is not None and hasattr(pool, "keys"):

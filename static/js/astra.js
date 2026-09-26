@@ -1878,7 +1878,10 @@ function keyChipHtml(k) {
 // Saved (server-side) per-key results -> the same row shape a live test
 // produces, so a page reload shows the last known state of every key.
 function savedKeyRows(models, keys, keyResults) {
-  const rows = models.map((m) => ({
+  // Always return one row per configured model. A provider can have valid
+  // models/credentials before any health result has been saved; those rows
+  // must still render as "not tested yet" after a refresh.
+  return models.map((m) => ({
     model: m,
     keys: keys.map((k) => {
       const r = ((keyResults || {})[m] || {})[k.key_id];
@@ -1887,10 +1890,6 @@ function savedKeyRows(models, keys, keyResults) {
                : { key_id: k.key_id, label: k.label };
     }),
   }));
-  // Always return one row per configured model. A provider can have
-  // valid models/credentials before any health result has been saved; in
-  // that case the UI must still render those models as "not tested yet".
-  return rows;
 }
 
 // Saved (server-side) per-model Gateway health -> the same row shape a
@@ -1900,7 +1899,10 @@ function savedKeyRows(models, keys, keyResults) {
 // card was missing this restoration entirely, so it went blank on every
 // reload even though the server has the data (routing_state health).
 function savedGatewayModelRows(models, modelHealth) {
-  const rows = (models || []).map((modelId) => {
+  // Always return one row per configured model. Without this, a Gateway
+  // connection with no saved health result renders an empty model table,
+  // which can make the health state appear to vanish after refresh.
+  return (models || []).map((modelId) => {
     const h = (modelHealth || {})[modelId];
     const tested = h && ((h.success_count || 0) + (h.failure_count || 0) > 0);
     if (!tested) return { model: modelId, untested: true };
@@ -1909,10 +1911,6 @@ function savedGatewayModelRows(models, modelHealth) {
       ? { model: modelId, ok: true, latency_ms: Math.round(h.average_latency_ms || 0) }
       : { model: modelId, ok: false, error: "last test failed" };
   });
-  // Always return one row per configured model. Without this, a Gateway
-  // connection with no saved health result renders an empty model table,
-  // making the Hide/Show models control appear broken for that connection.
-  return rows;
 }
 
 function _healthKeys(kind, name) {
@@ -2073,6 +2071,12 @@ function modelHealthRowsHtml(results) {
         `<span class="model-name">${esc(m.model)}</span>` +
         `<div class="key-results">${m.keys.map(keyChipHtml).join("")}</div></div>`;
     }
+    if (m.waiting) {
+      return `<div class="model-health-row pending" data-model-row="${esc(m.model)}">` +
+        `<span class="status-dot warn"></span>` +
+        `<span class="model-name">${esc(m.model)}</span>` +
+        `<span class="model-latency">⏳ waiting for Provider result…</span></div>`;
+    }
     if (m.pending) {
       return `<div class="model-health-row pending" data-model-row="${esc(m.model)}">` +
         `<span class="status-dot warn"></span>` +
@@ -2179,9 +2183,9 @@ loaders.providers = async function () {
     PROVIDER_KEYS[n] = p.keys || [];
     _ensureHealthKey("provider", n);
     LAST_PROVIDER_DATA[n] = p;
-    // The server is the durable source of truth for per-key/model
-    // health. Rebuild these rows on every non-live render so a refresh or
-    // another loader pass cannot leave stale client-only "not tested" rows.
+    // The server is the durable source of truth for per-key/model health.
+    // Rebuild these rows on every non-live render so a refresh or another
+    // loader pass cannot leave stale client-only "not tested" rows.
     if (!LIVE_PROVIDER_TESTS.has(n) && (p.keys || []).length) {
       const saved = savedKeyRows(p.models || [], p.keys, p.key_results);
       if (saved.length) PROVIDER_MODEL_RESULTS[n] = saved;
@@ -2242,7 +2246,6 @@ loaders.providers = async function () {
       // "revealed by testing it" override moot — clear it so it doesn't
       // linger and confuse the next hide.
       FORCE_SHOWN_PROVIDERS.clear();
-      // Clear any DOM-only reveal left by a per-provider Test click.
       list.querySelectorAll(".provider-card.force-show").forEach((el) => el.classList.remove("force-show"));
     };
   }
@@ -2312,6 +2315,7 @@ loaders.providers = async function () {
         await post("/api/v1/providers/reset-all-health");
         BULK_HEALTH_RUN.active = true;
         BULK_HEALTH_RUN.providerModels.clear();
+        BULK_HEALTH_RUN.providerResults.clear();
         BULK_HEALTH_RUN.deferredGatewayResults.clear();
         try {
           await Promise.allSettled([
@@ -2323,6 +2327,7 @@ loaders.providers = async function () {
         } finally {
           BULK_HEALTH_RUN.active = false;
           BULK_HEALTH_RUN.providerModels.clear();
+          BULK_HEALTH_RUN.providerResults.clear();
           BULK_HEALTH_RUN.deferredGatewayResults.clear();
         }
       } finally {
@@ -2429,7 +2434,16 @@ async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
     (modelId) => post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
       .then((res) => (res.ok && res.data) ? res.data :
         { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
-    (result) => { bumpCounts(result.ok); _runningNoteLocal(name, result); }, !!resume);
+    (result) => {
+      bumpCounts(result.ok);
+      _runningNoteLocal(name, result);
+      if (BULK_HEALTH_RUN.active) {
+        const token = _bulkModelToken(name, result.model);
+        BULK_HEALTH_RUN.providerModels.add(token);
+        BULK_HEALTH_RUN.providerResults.set(token, result);
+        _flushBulkGatewayResult(name, result.model, result);
+      }
+    }, !!resume);
 }
 
 async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey, tableEl, onResult, resumeRows) {
@@ -2473,7 +2487,9 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
         }));
         repaint(row);
         if (BULK_HEALTH_RUN.active) {
-          BULK_HEALTH_RUN.providerModels.add(_bulkModelToken(name, modelId));
+          const token = _bulkModelToken(name, modelId);
+          BULK_HEALTH_RUN.providerModels.add(token);
+          BULK_HEALTH_RUN.providerResults.set(token, result);
           _flushBulkGatewayResult(name, modelId, result);
         }
         if (onResult) onResult(result);
@@ -2505,9 +2521,14 @@ const GATEWAY_MODELS = {};
 const GATEWAY_KEYS = {};
 
 // Bulk Test All keeps matching Gateway rows in Waiting until the Provider
-// result for the same provider+model has been saved. The Gateway probe
-// may run in parallel and reuse the shared result, but its UI waits.
-const BULK_HEALTH_RUN = { active: false, providerModels: new Set(), deferredGatewayResults: new Map() };
+// result for the same provider+model has been saved. Matching Gateway rows
+// never make their own upstream health call; the Provider result is reused.
+const BULK_HEALTH_RUN = {
+  active: false,
+  providerModels: new Set(),
+  providerResults: new Map(),
+  deferredGatewayResults: new Map()
+};
 function _bulkProviderNameForGateway(key) { return String(key || "").replace(/^astra-gw-/, ""); }
 function _bulkModelToken(provider, model) { return provider + "\0" + model; }
 function _bulkGatewayShouldWait(key, modelId) {
@@ -2521,11 +2542,19 @@ function _applyGatewayBulkResult(key, modelId, result) {
   const rows = GATEWAY_MODEL_RESULTS[key] || [];
   const row = rows.find((r) => r.model === modelId);
   if (!row) return;
-  row.keys.forEach((slot) => Object.assign(slot, {
-    pending: false, waiting: false, ok: !!result.ok,
-    latency_ms: result.latency_ms, error: result.error,
-    tested_at: new Date().toLocaleString(), shared: true
-  }));
+  if (Array.isArray(row.keys)) {
+    row.keys.forEach((slot) => Object.assign(slot, {
+      pending: false, waiting: false, ok: !!result.ok,
+      latency_ms: result.latency_ms, error: result.error,
+      tested_at: new Date().toLocaleString(), shared: true
+    }));
+  } else {
+    Object.assign(row, {
+      pending: false, waiting: false, ok: !!result.ok,
+      latency_ms: result.latency_ms, error: result.error,
+      shared: true
+    });
+  }
   const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`);
   if (tableEl) {
     const node = $(`[data-model-row="${CSS.escape(modelId)}"]`, tableEl);
@@ -2536,7 +2565,7 @@ function _flushBulkGatewayResult(provider, modelId, result) {
   const token = _bulkModelToken(provider, modelId);
   for (const [deferredKey, deferred] of BULK_HEALTH_RUN.deferredGatewayResults) {
     if (deferred.token !== token) continue;
-    _applyGatewayBulkResult(deferred.key, deferred.modelId, result);
+    _applyGatewayBulkResult(deferred.gatewayKey, modelId, result);
     BULK_HEALTH_RUN.deferredGatewayResults.delete(deferredKey);
   }
 }
@@ -2594,11 +2623,53 @@ async function _testGatewayConnectionStreamingInner(key, btn, resume, bulk = fal
     : models;
   const keys = GATEWAY_KEYS[key] || [];
   if (!keys.length) {
-    await streamModelTests(toRun, tableEl, GATEWAY_MODEL_RESULTS[key],
-      (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
+    // In bulk mode, a Gateway model that also exists in the Provider catalog
+    // reuses the Provider's real probe. It must never issue a second API call.
+    if (!bulk) {
+      await streamModelTests(toRun, tableEl, GATEWAY_MODEL_RESULTS[key],
+        (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
+          .then((res) => (res.ok && res.data) ? res.data :
+            { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
+        undefined, !!resume);
+      return;
+    }
+    const rows = toRun.map((modelId) => {
+      const token = _bulkModelToken(_bulkProviderNameForGateway(key), modelId);
+      const sharedResult = BULK_HEALTH_RUN.providerResults.get(token);
+      if (sharedResult) {
+        return { model: modelId, ok: !!sharedResult.ok,
+                 latency_ms: sharedResult.latency_ms || 0,
+                 error: sharedResult.error || "", shared: true };
+      }
+      const waiting = _bulkGatewayShouldWait(key, modelId);
+      if (waiting) {
+        BULK_HEALTH_RUN.deferredGatewayResults.set(
+          key + "\0" + modelId, { gatewayKey: key, token });
+      }
+      return { model: modelId, waiting };
+    });
+    GATEWAY_MODEL_RESULTS[key].length = 0;
+    rows.forEach((r) => GATEWAY_MODEL_RESULTS[key].push(r));
+    if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(GATEWAY_MODEL_RESULTS[key]);
+
+    // Only models without a matching Provider are real Gateway probes.
+    const probeModels = rows.filter((r) => !r.waiting).map((r) => r.model);
+    await Promise.allSettled(probeModels.map((modelId) =>
+      post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
         .then((res) => (res.ok && res.data) ? res.data :
-          { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
-      undefined, !!resume);
+          { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" })
+        .catch((e) => ({ model: modelId, ok: false, latency_ms: 0, error: String(e) }))
+        .then((result) => {
+          const row = GATEWAY_MODEL_RESULTS[key].find((r) => r.model === modelId);
+          if (!row) return;
+          Object.assign(row, { waiting: false, ok: !!result.ok,
+            latency_ms: result.latency_ms, error: result.error });
+          if (tableEl) {
+            const node = $(`[data-model-row="${CSS.escape(modelId)}"]`, tableEl);
+            if (node) node.outerHTML = modelHealthRowsHtml([row]);
+          }
+        })
+    ));
     return;
   }
   await testGatewaySelectedKeyStreaming(
@@ -2612,18 +2683,30 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
   const rows = models.map((modelId) => {
     const prior = existing[modelId];
     if (resume && prior && Array.isArray(prior.keys)) return prior;
+    const token = _bulkModelToken(_bulkProviderNameForGateway(key), modelId);
     const sharedWaiting = bulk && _bulkGatewayShouldWait(key, modelId);
+    const sharedResult = sharedWaiting ? BULK_HEALTH_RUN.providerResults.get(token) : null;
+    const restoredResult = resume && prior && prior.pending === false
+      ? { ok: !!prior.ok, latency_ms: prior.latency_ms || 0, error: prior.error || "" }
+      : null;
+    const immediateResult = sharedResult || restoredResult;
+    if (sharedWaiting && !immediateResult) {
+      BULK_HEALTH_RUN.deferredGatewayResults.set(
+        key + "\0" + modelId, { gatewayKey: key, token });
+    }
     return {
       model: modelId,
       keys: keys.map((k) => ({
         key_id: k.key_id,
         label: k.label,
-        pending: !sharedWaiting && !(resume && prior && prior.pending === false) && k.key_id === chosen,
-        waiting: sharedWaiting || (!(resume && prior && prior.pending === false) && k.key_id !== chosen),
-        ...(resume && prior && prior.pending === false ? {
-          ok: !!prior.ok,
-          latency_ms: prior.latency_ms || 0,
-          error: prior.error || ""
+        pending: !immediateResult && !sharedWaiting && k.key_id === chosen,
+        waiting: !immediateResult && (sharedWaiting || k.key_id !== chosen),
+        ...(immediateResult ? {
+          ok: !!immediateResult.ok,
+          latency_ms: immediateResult.latency_ms || 0,
+          error: immediateResult.error || "",
+          tested_at: new Date().toLocaleString(),
+          shared: true
         } : {})
       })),
     };
@@ -2636,13 +2719,9 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
     const node = $(`[data-model-row="${CSS.escape(row.model)}"]`, tableEl);
     if (node) node.outerHTML = modelHealthRowsHtml([row]);
   };
-  // A shared/waiting model is display-only: its Provider probe is the
-  // authoritative call. Never call the Gateway endpoint for that row.
-  // Waiting rows are flushed by _flushBulkGatewayResult() when the matching
-  // Provider result is saved. Only a genuinely pending Gateway row may issue
-  // a Gateway API request.
   const probeModels = rows.filter((r) =>
-    r.keys.some((k) => k.pending)).map((r) => r.model);
+    r.keys.some((k) => k.pending))
+    .map((r) => r.model);
   const probes = probeModels.map((modelId) =>
     post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
       .then((res) => (res.ok && res.data) ? res.data :
@@ -2651,16 +2730,6 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
       .then((result) => {
         const row = rows.find((r) => r.model === modelId);
         if (!row) return;
-        // Bulk Test All: keep Gateway UI in Waiting until the matching
-        // Provider result has been applied. The Gateway probe itself may
-        // still run in parallel and reuse the shared upstream result.
-        if (bulk && _bulkGatewayShouldWait(key, modelId)) {
-          BULK_HEALTH_RUN.deferredGatewayResults.set(
-            key + "\0" + modelId,
-            { token: _bulkModelToken(_bulkProviderNameForGateway(key), modelId), key, modelId, result }
-          );
-          return;
-        }
         row.keys.forEach((slot) => Object.assign(slot, {
           pending: false,
           waiting: false,
@@ -2802,8 +2871,6 @@ function renderGatewayCard(core) {
       st.gateway = hidden;
       _saveModelsHiddenState(st);
       FORCE_SHOWN_GATEWAY.clear();
-      // Clear any DOM-only reveal left by a per-connection Test click.
-      // Clearing the Set alone does not remove the class from already-painted cards.
       card.querySelectorAll(".provider-card.force-show").forEach((el) => el.classList.remove("force-show"));
     };
   }

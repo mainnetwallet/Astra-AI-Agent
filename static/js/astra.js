@@ -2305,12 +2305,21 @@ loaders.providers = async function () {
         // Individual workers deliberately skip reset so Provider↔Gateway
         // probes can share the same in-flight/fresh result.
         await post("/api/v1/providers/reset-all-health");
-        await Promise.allSettled([
-          ...providerNames.map((name) =>
-            testProviderStreaming(name, undefined, false, true).then(bumpProgress)),
-          ...connectionKeys.map((key) =>
-            testGatewayConnectionStreaming(key, undefined, false, true).then(bumpProgress)),
-        ]);
+        BULK_HEALTH_RUN.active = true;
+        BULK_HEALTH_RUN.providerModels.clear();
+        BULK_HEALTH_RUN.deferredGatewayResults.clear();
+        try {
+          await Promise.allSettled([
+            ...providerNames.map((name) =>
+              testProviderStreaming(name, undefined, false, true).then(bumpProgress)),
+            ...connectionKeys.map((key) =>
+              testGatewayConnectionStreaming(key, undefined, false, true).then(bumpProgress)),
+          ]);
+        } finally {
+          BULK_HEALTH_RUN.active = false;
+          BULK_HEALTH_RUN.providerModels.clear();
+          BULK_HEALTH_RUN.deferredGatewayResults.clear();
+        }
       } finally {
         delete testAllBtn.dataset.live;
         _runningUpdate((st) => { st.testAll = 0; st.gatewayAll = 0; });
@@ -2447,6 +2456,12 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
       .then((result) => {
         const row = rows.find((r) => r.model === modelId);
         if (!row) return;
+        if (bulk && _bulkGatewayShouldWait(key, modelId)) {
+          BULK_HEALTH_RUN.deferredGatewayResults.set(key, {
+            token: _bulkModelToken(_bulkProviderNameForGateway(key), modelId), result
+          });
+          return;
+        }
         row.keys.forEach((slot) => Object.assign(slot, {
           pending: false,
           waiting: false,
@@ -2458,6 +2473,10 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
           shared: slot.key_id !== chosen
         }));
         repaint(row);
+        if (BULK_HEALTH_RUN.active) {
+          BULK_HEALTH_RUN.providerModels.add(_bulkModelToken(name, modelId));
+          _flushBulkGatewayResult(name, modelId, result);
+        }
         if (onResult) onResult(result);
       })
   );
@@ -2485,6 +2504,43 @@ const GATEWAY_MODEL_RESULTS = {};   // connection name -> [{model, ok, latency_m
 // re-fetching.
 const GATEWAY_MODELS = {};
 const GATEWAY_KEYS = {};
+
+// Bulk Test All keeps matching Gateway rows in Waiting until the Provider
+// result for the same provider+model has been saved. The Gateway probe
+// may run in parallel and reuse the shared result, but its UI waits.
+const BULK_HEALTH_RUN = { active: false, providerModels: new Set(), deferredGatewayResults: new Map() };
+function _bulkProviderNameForGateway(key) { return String(key || "").replace(/^astra-gw-/, ""); }
+function _bulkModelToken(provider, model) { return provider + "\0" + model; }
+function _bulkGatewayShouldWait(key, modelId) {
+  if (!BULK_HEALTH_RUN.active) return false;
+  const provider = _bulkProviderNameForGateway(key);
+  return Array.isArray(PROVIDER_MODELS[provider]) &&
+    PROVIDER_MODELS[provider].includes(modelId) &&
+    !BULK_HEALTH_RUN.providerModels.has(_bulkModelToken(provider, modelId));
+}
+function _applyGatewayBulkResult(key, modelId, result) {
+  const rows = GATEWAY_MODEL_RESULTS[key] || [];
+  const row = rows.find((r) => r.model === modelId);
+  if (!row) return;
+  row.keys.forEach((slot) => Object.assign(slot, {
+    pending: false, waiting: false, ok: !!result.ok,
+    latency_ms: result.latency_ms, error: result.error,
+    tested_at: new Date().toLocaleString(), shared: true
+  }));
+  const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`);
+  if (tableEl) {
+    const node = $(`[data-model-row="${CSS.escape(modelId)}"]`, tableEl);
+    if (node) node.outerHTML = modelHealthRowsHtml([row]);
+  }
+}
+function _flushBulkGatewayResult(provider, modelId, result) {
+  const token = _bulkModelToken(provider, modelId);
+  for (const [key, deferred] of BULK_HEALTH_RUN.deferredGatewayResults) {
+    if (deferred.token !== token) continue;
+    _applyGatewayBulkResult(key, modelId, result);
+    BULK_HEALTH_RUN.deferredGatewayResults.delete(key);
+  }
+}
 
 // Best-average-latency across a connection's tracked models — used purely
 // to *display* connections fastest/healthiest first, mirroring how the
@@ -2548,22 +2604,23 @@ async function _testGatewayConnectionStreamingInner(key, btn, resume, bulk = fal
   }
   await testGatewaySelectedKeyStreaming(
     key, toRun, keys, _selectedHealthKey("gateway", key),
-    tableEl, GATEWAY_MODEL_RESULTS[key], !!resume);
+    tableEl, GATEWAY_MODEL_RESULTS[key], !!resume, !!bulk);
 }
 
-async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, tableEl, resultsArray, resume) {
+async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, tableEl, resultsArray, resume, bulk = false) {
   const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
   const existing = Object.fromEntries(resultsArray.map((r) => [r.model, r]));
   const rows = models.map((modelId) => {
     const prior = existing[modelId];
     if (resume && prior && Array.isArray(prior.keys)) return prior;
+    const sharedWaiting = bulk && _bulkGatewayShouldWait(key, modelId);
     return {
       model: modelId,
       keys: keys.map((k) => ({
         key_id: k.key_id,
         label: k.label,
-        pending: !(resume && prior && prior.pending === false) && k.key_id === chosen,
-        waiting: !(resume && prior && prior.pending === false) && k.key_id !== chosen,
+        pending: !sharedWaiting && !(resume && prior && prior.pending === false) && k.key_id === chosen,
+        waiting: sharedWaiting || (!(resume && prior && prior.pending === false) && k.key_id !== chosen),
         ...(resume && prior && prior.pending === false ? {
           ok: !!prior.ok,
           latency_ms: prior.latency_ms || 0,
@@ -2580,9 +2637,10 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
     const node = $(`[data-model-row="${CSS.escape(row.model)}"]`, tableEl);
     if (node) node.outerHTML = modelHealthRowsHtml([row]);
   };
-  const pendingModels = rows.filter((r) => r.keys.some((k) => k.pending))
+  const probeModels = rows.filter((r) =>
+    r.keys.some((k) => k.pending) || (bulk && _bulkGatewayShouldWait(key, r.model)))
     .map((r) => r.model);
-  const probes = pendingModels.map((modelId) =>
+  const probes = probeModels.map((modelId) =>
     post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
       .then((res) => (res.ok && res.data) ? res.data :
         { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" })

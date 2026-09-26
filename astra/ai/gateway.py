@@ -685,10 +685,10 @@ class _GatewayCompatibleConnection:
 class AstraGatewayGemini(_GatewayCompatibleConnection):
     """Astra AI Gateway / Gemini connection (independent of GeminiAdapter)."""
     name = "astra-gw-gemini"
-    #: Canonical, non-``GW_``-prefixed image-model list — shared with the
+    #: Canonical, non-``GW_``-prefixed image-model list, owned by
+    #: ImageRouter (astra/ai/image_router.py) — shared with the
     #: Provider/ModelRegistry system's own catalog seed (astra/ai/models.py),
-    #: since both hold the identical documented FREE model id. There is no
-    #: separate ``GW_GEMINI_IMAGE_MODELS`` any more.
+    #: since both hold the identical documented FREE model id.
     image_models_env = "GEMINI_IMAGE_MODELS"
     base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
     models_env = "GW_GEMINI_MODELS"
@@ -775,10 +775,10 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
     independent GW_CLOUDFLARE_ACCOUNT_IDS list.
     """
     name = "astra-gw-cloudflare"
-    #: Canonical, non-``GW_``-prefixed image-model list — shared with the
+    #: Canonical, non-``GW_``-prefixed image-model list, owned by
+    #: ImageRouter (astra/ai/image_router.py) — shared with the
     #: Provider/ModelRegistry system's own catalog seed (astra/ai/models.py),
-    #: since both hold the identical documented FREE model ids. There is no
-    #: separate ``GW_CLOUDFLARE_IMAGE_MODELS`` any more.
+    #: since both hold the identical documented FREE model ids.
     image_models_env = "CLOUDFLARE_IMAGE_MODELS"
     base_url = "https://api.cloudflare.com/client/v4"
     models_env = "GW_CLOUDFLARE_MODELS"
@@ -921,7 +921,8 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
     #: Provider/ModelRegistry system's own catalog seed (astra/ai/models.py).
     #: Left empty by default: OpenRouter's live discovery
     #: (`_discover_image_models`) is authoritative for its FREE image ids.
-    #: There is no separate ``GW_OPENROUTER_IMAGE_MODELS`` any more.
+    #: Owned by ImageRouter (astra/ai/image_router.py), like the other two
+    #: canonical image-model lists.
     image_models_env = "OPENROUTER_IMAGE_MODELS"
     base_url = "https://openrouter.ai/api/v1"
     models_env = "GW_OPENROUTER_MODELS"

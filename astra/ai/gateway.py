@@ -56,7 +56,7 @@ from astra.ai.image_payload import image_result_to_data_uri
 from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError, TimeoutError
 from astra.core.events import new_op_id
-from astra.ai.shared_health import SharedHealthCoordinator, resolve_identity
+from astra.ai.shared_health import SharedHealthCoordinator, SharedHealthIdentity, resolve_identity
 
 
 def _close_http_error(exc) -> None:
@@ -2321,7 +2321,39 @@ class AstraAIGateway:
         model_health_by_conn: dict[str, dict] = {}
         for conn, model in self._catalog:
             h = self.routing_state.get_health(model.provider, model.model_id)
-            model_health_by_conn.setdefault(conn.name, {})[model.model_id] = h.to_dict()
+            health = h.to_dict()
+            # A bulk Test All may deliberately reuse the Provider's manual
+            # health probe for this exact provider+model, so the Gateway
+            # does not make a duplicate upstream request. If this Gateway
+            # has no local probe row yet, expose the fresh shared result as
+            # its saved model health too. This makes a browser refresh show
+            # the same result instead of "not tested yet".
+            if (health["success_count"] + health["failure_count"] == 0
+                    and self.shared_health is not None):
+                shared = self.shared_health.get_fresh(
+                    SharedHealthIdentity(model.provider, model.model_id))
+                if shared is not None:
+                    if shared.get("ok"):
+                        health.update({
+                            "success_count": 1,
+                            "failure_count": 0,
+                            "consecutive_failures": 0,
+                            "average_latency_ms": round(
+                                float(shared.get("latency_ms") or 0.0), 1),
+                            "last_success": shared.get("tested_at") or "",
+                            "last_failure": "",
+                            "cooldown_until": 0.0,
+                        })
+                    else:
+                        health.update({
+                            "success_count": 0,
+                            "failure_count": 1,
+                            "consecutive_failures": 1,
+                            "average_latency_ms": 0.0,
+                            "last_success": "",
+                            "last_failure": shared.get("tested_at") or "",
+                        })
+            model_health_by_conn.setdefault(conn.name, {})[model.model_id] = health
         out = {}
         for c in self.connections:
             pool = getattr(c, "pool", None)

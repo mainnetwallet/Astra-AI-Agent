@@ -79,16 +79,27 @@
     // separate upstream API call. Keep the Activity Log provider-centric.
     if (kind === "gateway.execution_recovery" || kind.indexOf("gateway.") === 0) return false;
 
-    // Gateway events are internal lifecycle records, except for a
-    // Gateway-only model test. When the model is absent from the Provider
-    // catalog, the Gateway owns the only real upstream API call, so that
-    // call must remain visible in the provider-centric Activity Log.
-    if (kind.indexOf("astra_gateway.") === 0 && d.gateway_only !== true) return false;
-
-    // A Gateway health probe can reuse a Provider-side shared-health result.
-    // reused:true means this caller did NOT make an upstream API request;
-    // the original owner already produced the real call/result event. Do not
-    // render a second synthetic health-test row for the same shared result.
+    // A Gateway health-check probe (astra_gateway.test, from the AI
+    // Provider health page) can reuse a Provider-side shared-health result
+    // via SharedHealthCoordinator (astra/ai/shared_health.py). reused:true
+    // means THIS caller made no upstream request at all -- the original
+    // owner already produced the real call/result event, so a second
+    // synthetic health-test row for the same shared result would be noise.
+    // This is the ONLY astra_gateway.* dedup case: it exists purely for the
+    // health page's shared-probe bookkeeping, not for ordinary chat.
+    //
+    // Every other astra_gateway.* kind (request/success/error) is a genuine
+    // per-turn upstream call the Gateway itself makes -- during ordinary
+    // chat processing (understand/verify/tool-brain calls) as well as an
+    // explicit model call -- and it is the ONLY record of that call
+    // anywhere in the log, so it must always stay visible. (Previously this
+    // was hidden whenever the model also existed in the plain Provider
+    // catalog, which silently swallowed every real Gateway call made with
+    // an overlapping model -- e.g. understand()/verify() picking a Cohere
+    // model that Cohere's own provider adapter also lists. The
+    // per-connection ai.started/ai.completed duplicate of that SAME call is
+    // dropped separately below via `e.agent === "gateway"`, so nothing is
+    // double-counted by showing the wrapper event unconditionally.)
     if (kind === "astra_gateway.test" && d.reused === true) return false;
 
     // Health probes emit router-level retry/fallback lifecycle events as

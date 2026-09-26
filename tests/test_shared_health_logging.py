@@ -46,8 +46,9 @@ class SharedHealthLoggingTests(unittest.TestCase):
         events = _Events()
         provider = GroqAdapter(config=_cfg(GROQ_API_KEYS="secret-A", GROQ_MODELS="m1"))
         conn = AstraGatewayGroq(config=_cfg(GW_GROQ_API_KEYS="secret-A", GW_GROQ_MODELS="m1"))
-        gateway = AstraAIGateway(connections=[conn], store=Store(":memory:"), events=events)
-        router = AstraRouter([provider], gateway=gateway, store=gateway.store)
+        store = Store(":memory:")
+        gateway = AstraAIGateway(connections=[conn], store=store, events=events)
+        router = AstraRouter([provider], gateway=gateway, store=store)
 
         with mock.patch.object(CompatibleAdapter, "_post", _post(calls)), \
              mock.patch.object(_GatewayCompatibleConnection, "_post", _post(calls)):

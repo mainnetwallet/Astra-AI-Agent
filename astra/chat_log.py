@@ -27,6 +27,7 @@ written to disk through the transcript either.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -255,13 +256,15 @@ class ChatLog:
             return cid
         safe_attachments = []
         for att in (attachments or [])[:10]:
-            if not isinstance(att, dict) or att.get("family") != "image":
+            if (not isinstance(att, dict) or att.get("family") != "image"
+                        or att.get("role") == "mask"):
                 continue
             safe_attachments.append({
                 "family": "image",
-                "storage_path": str(att.get("storage_path") or ""),
+                "storage_path": str(att.get("storage_path") or att.get("_storage_path") or ""),
                 "mime_type": str(att.get("detected_type") or att.get("mime_type") or "image/png"),
                 "original_filename": str(att.get("original_filename") or att.get("filename") or "image"),
+                "role": str(att.get("role") or "image"),
             })
         self._insert(cid, "user", redacted,
                      files=[str(f) for f in (files or [])][:20],
@@ -287,9 +290,20 @@ class ChatLog:
             except Exception:
                 attachments = []
             for att in attachments:
-                if (isinstance(att, dict) and att.get("family") == "image"
-                        and att.get("storage_path")):
-                    return att
+                if not isinstance(att, dict) or att.get("family") != "image":
+                    continue
+                path = str(att.get("storage_path") or "")
+                if not path or not os.path.isfile(path):
+                    continue
+                try:
+                    from astra.core.attachments import detect_mime
+                    with open(path, "rb") as fh:
+                        raw = fh.read()
+                    if not detect_mime(raw, att.get("original_filename") or path).startswith("image/"):
+                        continue
+                except (OSError, ValueError):
+                    continue
+                return dict(att, storage_path=path)
             try:
                 artifacts = json.loads(row.get("artifacts") or "[]")
             except Exception:

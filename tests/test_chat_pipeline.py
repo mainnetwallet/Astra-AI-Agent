@@ -27,11 +27,15 @@ TARGETS = [
 
 
 def understand(final_request="", was_incomplete=False, provider="gemini",
-               model="gemini-pro", criteria=("answers the question",)):
-    return json.dumps({"final_request": final_request,
-                       "was_incomplete": was_incomplete, "provider": provider,
-                       "model": model, "criteria": list(criteria),
-                       "reason": "best fit"})
+               model="gemini-pro", criteria=("answers the question",),
+               task_type=None):
+    data = {"final_request": final_request,
+            "was_incomplete": was_incomplete, "provider": provider,
+            "model": model, "criteria": list(criteria),
+            "reason": "best fit"}
+    if task_type is not None:
+        data["task_type"] = task_type
+    return json.dumps(data)
 
 
 def verdict(v="complete", missing=(), action="fix", instructions=""):
@@ -103,10 +107,11 @@ class FakeImageRouter:
         self.calls = []                # every generate() call's arguments
 
     def generate(self, prompt, model=None, size="1024x1024", n=1, *,
-                 editing=False, trace="", discover=True):
+                 editing=False, source_images=None, trace="", discover=True):
         self.calls.append({"prompt": prompt, "model": model, "size": size,
-                           "n": n, "editing": editing, "trace": trace,
-                           "discover": discover})
+                           "n": n, "editing": editing,
+                           "source_images": source_images or [],
+                           "trace": trace, "discover": discover})
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -614,6 +619,26 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         pipe.run("photo create koro")
         self.assertEqual(len(gw.image_router.calls), 1)
         self.assertEqual(rt.requests, [])
+
+    def test_gateway_task_type_is_authoritative_for_execution_path(self):
+        """The Gateway's UNDERSTAND API call owns task classification.
+        An ambiguous user message must follow the task_type returned by the
+        Gateway rather than being re-classified locally by ChatPipeline."""
+        pipe, gw, rt = self._make(
+            [understand(task_type="image_generation"), verdict("complete")],
+            [self._PNG_DATA_URI])
+        pipe.run("make something for me")
+        self.assertEqual(len(gw.image_router.calls), 1)
+        self.assertEqual(rt.requests, [])
+
+    def test_gateway_task_type_coding_is_authoritative(self):
+        pipe, gw, rt = self._make(
+            [understand(task_type="coding"), verdict("complete")],
+            ["implemented"])
+        pipe.run("do something with my project")
+        self.assertEqual(len(rt.requests), 1)
+        self.assertEqual(rt.requests[0].task_type, "coding")
+        self.assertEqual(gw.image_router.calls, [])
 
     def test_normal_chat_request_gets_no_output_modality(self):
         """Regression guard: 'python code likhe dao' and other ordinary

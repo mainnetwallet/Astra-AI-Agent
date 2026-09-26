@@ -79,6 +79,14 @@ class TestActivityLogUI(unittest.TestCase):
         self.assertIn("function interruptedModel(", model)
         self.assertIn("INTERRUPTED_REASON", model)
 
+    def test_activity_log_displays_credential_key_label(self):
+        model = _read("static", "js", "log_model.js")
+        self.assertIn('"key_label"', model)
+        self.assertIn('key_label: "Key"', model)
+        # The terminal provider/gateway events carry the secret-free slot label;
+        # the details grid must expose it as the human-readable Key field.
+        self.assertIn('push(FIELD_LABELS[key] || humanize(key), fieldValue(d[key]))', model)
+
     def test_rendering_uses_the_shared_model(self):
         for call in ("AstraLog.normalize(", "AstraLog.isMeaningful(",
                      "AstraLog.onAppend(", "AstraLog.onScroll(",

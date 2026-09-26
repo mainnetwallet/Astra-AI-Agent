@@ -512,7 +512,8 @@ class GatewayRoutingState:
             doomed = [key for key in self._health if key[0] == provider]
             for key in doomed:
                 self._health.pop(key, None)
-            if self._last_provider == provider:
+            clear_last = self._last_provider == provider
+            if clear_last:
                 self._last_provider = ""
                 self._last_model = ""
                 self._last_timestamp = ""
@@ -522,7 +523,7 @@ class GatewayRoutingState:
                     self.store.exec(
                         "DELETE FROM gateway_model_health WHERE provider=?",
                         (provider,))
-                    if self._last_provider == "":
+                    if clear_last:
                         self.store.exec("DELETE FROM gateway_routing_state WHERE id = 1")
                 except Exception:
                     pass

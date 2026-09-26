@@ -2103,6 +2103,7 @@ function _saveModelsHiddenState(state) {
 }
 
 loaders.providers = async function () {
+  _initHealthKeyPicker();
   const r = await api("/api/providers");
   const list = $("#providers-list");
   // Re-apply the persisted hide/show state on every load — classList

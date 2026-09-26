@@ -1611,6 +1611,10 @@ class AstraAIGateway:
         # converge on one coordinator when used together; this default
         # keeps a standalone Gateway (no Router attached) working too.
         self.shared_health = SharedHealthCoordinator(store=store)
+        # Installed by AstraRouter when wired together. This read-only callback
+        # lets manual Gateway tests identify models that exist only in Gateway,
+        # without copying the Provider catalog into Gateway state.
+        self.provider_model_lookup = None
         self._catalog = build_gateway_catalog(self.connections)
         # §2-§5, §18: task-level execution recovery for the EXISTING
         # Provider system's own catalog — a completely separate namespace
@@ -2254,10 +2258,22 @@ class AstraAIGateway:
         # not make an upstream API request. The real owner already emitted
         # the actual provider/Gateway call event. Do not create a second
         # Activity Log row that falsely looks like another API call.
+        # Gateway-only model = this Gateway exposes the model but the real
+        # Provider catalog does not. Its test is the only upstream API call,
+        # so keep that real call visible in the provider-centric Activity Log.
+        gateway_only = False
+        lookup = getattr(self, "provider_model_lookup", None)
+        if callable(lookup):
+            try:
+                gateway_only = not bool(lookup(model_id, conn.name))
+            except Exception:
+                gateway_only = False
         if not reused:
-            self._emit("astra_gateway.test", connection=conn.name, model=model_id,
+            self._emit("astra_gateway.test", connection=conn.name,
+                       provider=_short_provider(conn), model=model_id,
                        ok=ok, latency_ms=round(latency_ms, 1), reason=error,
-                       reused=False, key_id=cred.key_id if cred else "",
+                       reused=False, gateway_only=gateway_only,
+                       key_id=cred.key_id if cred else "",
                        key_label=key_label)
         return {"model": model_id, "ok": ok, "error": error,
                 "latency_ms": round(latency_ms, 1),

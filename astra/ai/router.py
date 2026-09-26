@@ -44,7 +44,7 @@ from datetime import datetime
 
 from astra.ai.gateway_contract import ProviderExecutionPort
 from astra.ai.models import Model, metadata_for
-from astra.ai.shared_health import SharedHealthCoordinator, resolve_identity
+from astra.ai.shared_health import SharedHealthCoordinator, canonical_provider, resolve_identity
 from astra.ai.token_limits import resolve_output_tokens
 from astra.ai.routing_policy import RoutingDecisionPolicy
 from astra.core.exceptions import ProviderError, TimeoutError

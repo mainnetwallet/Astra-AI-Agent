@@ -101,18 +101,43 @@ class OrderingTests(_Base):
         self.assertTrue(r2["ok"])
 
 
+class KeySharingTests(_Base):
+    """All keys keep local results while provider+model uses one upstream probe."""
+
+    def test_provider_and_gateway_all_keys_share_one_call(self):
+        calls = []
+        self._patched(calls)
+        provider = _provider(key="secret-A,secret-B")
+        conn = _gw_conn(key="secret-A,secret-B")
+        router, gateway, provider, conn = _stack(provider=provider, conn=conn)
+        pkeys = [k["key_id"] for k in provider.pool.keys()]
+        router.test_provider_model("groq", "m1", key_id=pkeys[0])
+        p2 = router.test_provider_model("groq", "m1", key_id=pkeys[1])
+        g1 = gateway.test_connection_model(conn, "m1")
+        g2 = gateway.test_connection_model(conn, "m1")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(p2["key"] == "")
+        self.assertTrue(p2["reused"])
+        self.assertTrue(g1["reused"])
+        self.assertTrue(g2["reused"])
+        self.assertEqual(p2["key"], "key 2")
+        self.assertEqual(g1["key"], "key 1")
+        self.assertEqual(g2["key"], "key 2")
+
 class NonSharingTests(_Base):
     """TEST 3 / 4 / 5 — never over-deduplicate."""
 
-    def test_different_keys_are_two_calls(self):
+    def test_different_keys_share_one_call(self):
         calls = []
         self._patched(calls)
-        provider = _provider(key="secret-A")
-        conn = _gw_conn(key="secret-B")           # different credential
+        provider = _provider(key="secret-A,secret-B")
+        conn = _gw_conn(key="secret-A,secret-B")
         router, gateway, provider, conn = _stack(provider=provider, conn=conn)
-        router.test_provider_model("groq", "m1")
+        pkeys = [k["key_id"] for k in provider.pool.keys()]
+        router.test_provider_model("groq", "m1", key_id=pkeys[0])
+        router.test_provider_model("groq", "m1", key_id=pkeys[1])
         gateway.test_connection_model(conn, "m1")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
 
     def test_different_models_are_two_calls(self):
         calls = []

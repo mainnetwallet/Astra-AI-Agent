@@ -2167,15 +2167,20 @@ class AstraAIGateway:
         ok = bool(result.get("ok"))
         error = result.get("error") or ""
         latency_ms = result.get("latency_ms") or 0.0
+        key_label = cred.label if cred is not None else ""
         if ok:
             self.routing_state.record_success(conn.name, model_id, latency_ms)
         else:
             self.routing_state.record_failure(conn.name, model_id)
         self._emit("astra_gateway.test", connection=conn.name, model=model_id,
                    ok=ok, latency_ms=round(latency_ms, 1), reason=error,
-                   reused=reused)
+                   reused=reused, key_id=cred.key_id if cred else "",
+                   key_label=key_label)
         return {"model": model_id, "ok": ok, "error": error,
-                "latency_ms": round(latency_ms, 1)}
+                "latency_ms": round(latency_ms, 1),
+                "key_id": cred.key_id if cred else "",
+                "key": key_label, "key_label": key_label,
+                "reused": reused}
 
     def test_connection(self, conn) -> dict:
         """Probe EVERY model this Gateway connection exposes — not just the

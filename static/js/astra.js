@@ -2443,7 +2443,7 @@ function _connAvgLatency(c) {
 // uses for providers, so a single connection's "🧪 Test" and the bulk
 // Test All look and behave identically. `btn` (optional) gets its label
 // updated while this connection's own test runs.
-async function testGatewayConnectionStreaming(key, btn, resume) {
+async function testGatewayConnectionStreaming(key, btn, resume, bulk = false) {
   const models = GATEWAY_MODELS[key] || [];
   if (models.length && resume) {
     LIVE_GATEWAY_TESTS.add(key);
@@ -2456,13 +2456,13 @@ async function testGatewayConnectionStreaming(key, btn, resume) {
     _runningUpdate((st) => { st.gateway[key] = entry; });
   }
   try {
-    await _testGatewayConnectionStreamingInner(key, btn, resume);
+    await _testGatewayConnectionStreamingInner(key, btn, resume, bulk);
   } finally {
     if (LIVE_GATEWAY_TESTS.delete(key)) _runningUpdate((st) => { delete st.gateway[key]; });
   }
 }
 
-async function _testGatewayConnectionStreamingInner(key, btn, resume) {
+async function _testGatewayConnectionStreamingInner(key, btn, resume, bulk = false) {
   const models = GATEWAY_MODELS[key] || [];
   const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`);
   if (!models.length) {
@@ -2471,14 +2471,64 @@ async function _testGatewayConnectionStreamingInner(key, btn, resume) {
   }
   if (btn) btn.textContent = `⏳ Testing ${models.length} model${models.length === 1 ? "" : "s"}…`;
   GATEWAY_MODEL_RESULTS[key] = GATEWAY_MODEL_RESULTS[key] || [];
+  if (!resume && !bulk) {
+    await post(`/api/v1/gateway/${encodeURIComponent(key)}/reset-health`);
+  }
   const toRun = resume
     ? GATEWAY_MODEL_RESULTS[key].filter((r) => r.pending).map((r) => r.model)
     : models;
-  await streamModelTests(toRun, tableEl, GATEWAY_MODEL_RESULTS[key],
-    (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
+  const keys = GATEWAY_KEYS[key] || [];
+  if (!keys.length) {
+    await streamModelTests(toRun, tableEl, GATEWAY_MODEL_RESULTS[key],
+      (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
+        .then((res) => (res.ok && res.data) ? res.data :
+          { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
+      undefined, !!resume);
+    return;
+  }
+  await testGatewaySelectedKeyStreaming(
+    key, toRun, keys, _selectedHealthKey("gateway", key),
+    tableEl, GATEWAY_MODEL_RESULTS[key], !!resume);
+}
+
+async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, tableEl, resultsArray, resume) {
+  const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
+  const rows = resume && resultsArray.length ? resultsArray :
+    models.map((m) => ({
+      model: m,
+      keys: keys.map((k) => ({ key_id: k.key_id, label: k.label, pending: true })),
+    }));
+  resultsArray.length = 0;
+  rows.forEach((r) => resultsArray.push(r));
+  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(resultsArray);
+  const repaint = (row) => {
+    if (!tableEl) return;
+    const node = $(`[data-model-row="${CSS.escape(row.model)}"]`, tableEl);
+    if (node) node.outerHTML = modelHealthRowsHtml([row]);
+  };
+  const pendingModels = rows.filter((r) => r.keys.some((k) => k.pending))
+    .map((r) => r.model);
+  const probes = pendingModels.map((modelId) =>
+    post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
       .then((res) => (res.ok && res.data) ? res.data :
-        { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
-    undefined, !!resume);
+        { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" })
+      .catch((e) => ({ model: modelId, ok: false, latency_ms: 0, error: String(e) }))
+      .then((result) => {
+        const row = rows.find((r) => r.model === modelId);
+        if (!row) return;
+        row.keys.forEach((slot) => Object.assign(slot, {
+          pending: false,
+          ok: !!result.ok,
+          latency_ms: result.latency_ms,
+          error: result.error,
+          tested_at: new Date().toLocaleString(),
+          selected: slot.key_id === chosen,
+          shared: slot.key_id !== chosen
+        }));
+        repaint(row);
+      })
+  );
+  return Promise.allSettled(probes);
 }
 
 async function runGatewayConnectionTest(key, btn, card) {
@@ -2606,7 +2656,7 @@ function renderGatewayCard(core) {
       testBtn.textContent = `⏳ Testing gateway (0/${total})…`;
       try {
         await Promise.allSettled(keys.map((key) =>
-          testGatewayConnectionStreaming(key).then(() => {
+          testGatewayConnectionStreaming(key, undefined, false, true).then(() => {
             done += 1;
             testBtn.textContent = `⏳ Testing gateway (${done}/${total})…`;
           })));

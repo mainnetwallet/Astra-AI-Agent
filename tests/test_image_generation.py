@@ -517,6 +517,13 @@ class TestImageRequestClassification(unittest.TestCase):
             self.assertNotIn(classify(text),
                              ("image_generation", "image_editing"), text)
 
+    def test_gateway_classifies_edit_and_inpaint_from_modalities(self):
+        self.assertEqual(classify_gateway_request(
+            "ei photo ta cinematic kore dao", image_input=True), "image_editing")
+        self.assertEqual(classify_gateway_request(
+            "ei photo ta inpaint kore dao", image_input=True, mask_input=True),
+            "image_inpainting")
+
     def test_image_production_never_becomes_simple_chat(self):
         for text in self.GEN + self.EDIT:
             self.assertNotEqual(classify(text), "simple_chat", text)
@@ -1540,6 +1547,32 @@ class TestProviderImageAdapterMechanics(unittest.TestCase):
                 os.unlink(source)
             except OSError:
                 pass
+
+    def test_cloudflare_img2img_and_mask_are_sent_as_bytes(self):
+        from astra.ai.gateway import AstraGatewayCloudflare
+        fd, source = tempfile.mkstemp(suffix=".png")
+        fd2, mask = tempfile.mkstemp(suffix=".png")
+        try:
+            with os.fdopen(fd, "wb") as fh: fh.write(PNG)
+            with os.fdopen(fd2, "wb") as fh: fh.write(PNG)
+            conn = AstraGatewayCloudflare(config=_cfg(
+                IMAGE_CLOUDFLARE_API_KEY="k",
+                IMAGE_CLOUDFLARE_ACCOUNT_ID="acct",
+                CLOUDFLARE_IMAGE_MODELS=SDXL))
+            seen = {}
+            def side(req, timeout=None):
+                seen["body"] = json.loads(req.data.decode())
+                return _resp(_cf_ok())
+            with mock.patch("urllib.request.urlopen", side):
+                conn.generate_image("cinematic", model=SDXL,
+                                    source_image={"storage_path": source},
+                                    mask_image={"storage_path": mask})
+            self.assertEqual(base64.b64decode(seen["body"]["image_b64"]), PNG)
+            self.assertEqual(seen["body"]["mask"], list(PNG))
+        finally:
+            for p in (source, mask):
+                try: os.unlink(p)
+                except OSError: pass
 
     def test_openai_images_protocol_mechanics(self):
         from astra.ai.gateway import AstraGatewayZAI

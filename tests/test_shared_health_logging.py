@@ -60,6 +60,27 @@ class SharedHealthLoggingTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual([k for k, _ in events.rows if k == "astra_gateway.test"], [])
 
+
+    def test_shared_result_overrides_older_gateway_health(self):
+        """A fresh Provider result must survive Gateway refresh even when an
+        older direct Gateway probe already exists for the same model."""
+        from astra.ai.gateway import AstraAIGateway, AstraGatewayGroq
+        from astra.ai.shared_health import SharedHealthIdentity
+        conn = AstraGatewayGroq(config=_cfg(GW_GROQ_API_KEYS="secret-A", GW_GROQ_MODELS="m1"))
+        store = Store(":memory:")
+        gateway = AstraAIGateway(connections=[conn], store=store, events=_Events())
+
+        gateway.routing_state.record_success("groq", "m1", 9999.0)
+        gateway.shared_health._save_locked(
+            SharedHealthIdentity("groq", "m1"),
+            {"ok": False, "error": "provider-failed", "latency_ms": 123.0},
+        )
+        # The saved shared row has a fresh timestamp and must be reflected in
+        # the Gateway health payload instead of the older local success.
+        health = gateway.health()["astra-gw-groq"]["model_health"]["m1"]
+        self.assertEqual(health["failure_count"], 1)
+        self.assertEqual(health["last_failure"] != "", True)
+
     def test_real_gateway_probe_still_emits_test_event(self):
         calls = []
         events = _Events()

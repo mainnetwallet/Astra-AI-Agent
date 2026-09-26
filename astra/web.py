@@ -121,6 +121,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from .agent import Agent
 from .chat_log import ChatLog
+from .ai.router import classify
 from .ai.conversation_context import ConversationContextBuilder
 from .security import (REDACTED, ApiError, RateLimiter, make_request_id,
                      redact)
@@ -1534,11 +1535,27 @@ class WebApp:
                     reply = {"reply": "", "action": "none", "ok": True,
                             "data": {"duplicate_of_pending": True}}
                 else:
-                    cid = log.add_user(msg, files=names, conversation_id=cid)
+                    # Reuse the newest image only when the new message
+                    # is explicitly an image-editing request. This enables
+                    # "make the previous photo brighter" without forcing every
+                    # later chat turn through a vision model.
+                    agent_attachments = list(attachments or [])
+                    has_current_image = any(
+                        isinstance(a, dict) and a.get("family") == "image"
+                        for a in agent_attachments)
+                    if not has_current_image and classify(msg) == "image_editing":
+                        previous_image = log.latest_image_attachment(cid)
+                        if previous_image:
+                            agent_attachments.append(previous_image)
+                    cid = log.add_user(msg, files=names,
+                                       attachments=agent_attachments,
+                                       conversation_id=cid)
                     token = log.begin(cid)
                     try:
                         reply = site.agent.handle(
-                            msg, history=history, attachments=attachments or None)
+                            msg, history=history,
+                            attachments=agent_attachments or None,
+                            conversation_id=cid)
                         rid = log.add_reply(reply, conversation_id=cid)
                         self._bind_approval_message(reply, rid)
                     finally:
@@ -1549,10 +1566,19 @@ class WebApp:
                     reply = {"reply": "", "action": "none", "ok": True,
                             "data": {"duplicate_of_pending": True}}
                 else:
-                    cid = log.add_user(msg, conversation_id=cid)
+                    agent_attachments = []
+                    if classify(msg) == "image_editing":
+                        previous_image = log.latest_image_attachment(cid)
+                        if previous_image:
+                            agent_attachments.append(previous_image)
+                    cid = log.add_user(msg, attachments=agent_attachments,
+                                       conversation_id=cid)
                     token = log.begin(cid)
                     try:
-                        reply = site.agent.handle(msg, history=history)
+                        reply = site.agent.handle(
+                            msg, history=history,
+                            attachments=agent_attachments or None,
+                            conversation_id=cid)
                         rid = log.add_reply(reply, conversation_id=cid)
                         self._bind_approval_message(reply, rid)
                     finally:

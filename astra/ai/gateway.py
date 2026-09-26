@@ -619,7 +619,9 @@ class _GatewayCompatibleConnection:
         self._done(cred)
         if self.events:
             self.events.emit("ai.completed", agent="gateway", provider=self.name,
-                             length=len(full))
+                             length=len(full),
+                             key_id=cred.key_id if cred else "",
+                             key_label=cred.label if cred else "")
 
     # -- image generation -----------------------------------------------------
     def _default_image_model(self) -> str:
@@ -1689,22 +1691,37 @@ class AstraAIGateway:
                 result = fn(conn, call_model)
             except (ProviderError, TimeoutError) as e:
                 last_error = getattr(e, "message", None) or str(e)
+                cred = (getattr(conn, "pool", None).last_key()
+                        if getattr(conn, "pool", None) is not None
+                        and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=short,
                            model=used_model, reason=last_error, op=op,
-                           trace=trace, terminal=False, attempt=attempts)
+                           trace=trace, terminal=False, attempt=attempts,
+                           key_id=cred.key_id if cred else "",
+                           key_label=cred.label if cred else "")
                 continue
             except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
+                cred = (getattr(conn, "pool", None).last_key()
+                        if getattr(conn, "pool", None) is not None
+                        and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=short,
                            model=used_model, reason=last_error, op=op,
-                           trace=trace, terminal=False, attempt=attempts)
+                           trace=trace, terminal=False, attempt=attempts,
+                           key_id=cred.key_id if cred else "",
+                           key_label=cred.label if cred else "")
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
             self.last_connection = conn.name
             self.last_model = used_model
+            cred = (getattr(conn, "pool", None).last_key()
+                    if getattr(conn, "pool", None) is not None
+                    and hasattr(conn.pool, "last_key") else None)
             self._emit("astra_gateway.success", provider=short,
                        model=used_model, latency_ms=round(latency_ms, 1),
                        op=op, trace=trace, terminal=True,
+                       key_id=cred.key_id if cred else "",
+                       key_label=cred.label if cred else "",
                        output=_gw_log_output(result))
             return result
         self.last_connection = ""
@@ -1877,26 +1894,41 @@ class AstraAIGateway:
                 last_error = getattr(e, "message", None) or str(e)
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
+                cred = (getattr(conn, "pool", None).last_key()
+                        if getattr(conn, "pool", None) is not None
+                        and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=target_model.provider,
                           model=target_model.model_id, reason=last_error,
-                          op=op, trace=trace, terminal=False, attempt=attempts)
+                          op=op, trace=trace, terminal=False, attempt=attempts,
+                          key_id=cred.key_id if cred else "",
+                          key_label=cred.label if cred else "")
                 continue
             except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
+                cred = (getattr(conn, "pool", None).last_key()
+                        if getattr(conn, "pool", None) is not None
+                        and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=target_model.provider,
                           model=target_model.model_id, reason=last_error,
-                          op=op, trace=trace, terminal=False, attempt=attempts)
+                          op=op, trace=trace, terminal=False, attempt=attempts,
+                          key_id=cred.key_id if cred else "",
+                          key_label=cred.label if cred else "")
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
             self.routing_state.record_success(target_model.provider,
                                               target_model.model_id, latency_ms)
             self.last_connection = conn.name
             self.last_model = target_model.model_id
+            cred = (getattr(conn, "pool", None).last_key()
+                    if getattr(conn, "pool", None) is not None
+                    and hasattr(conn.pool, "last_key") else None)
             self._emit("astra_gateway.success", provider=target_model.provider,
                       model=target_model.model_id, latency_ms=round(latency_ms, 1),
                       op=op, trace=trace, terminal=True,
+                      key_id=cred.key_id if cred else "",
+                      key_label=cred.label if cred else "",
                       output=_gw_log_output(result))
             return result
         self.last_connection = ""
@@ -1936,21 +1968,36 @@ class AstraAIGateway:
                         full.append(chunk)
                         yield chunk
                 except (ProviderError, TimeoutError) as e:
+                    cred = (getattr(conn, "pool", None).last_key()
+                            if getattr(conn, "pool", None) is not None
+                            and hasattr(conn.pool, "last_key") else None)
                     self._emit("astra_gateway.error", provider=short,
                                model=used_model,
                                reason=getattr(e, "message", None) or str(e),
-                               op=op, trace=trace, terminal=False)
+                               op=op, trace=trace, terminal=False,
+                               key_id=cred.key_id if cred else "",
+                               key_label=cred.label if cred else "")
                     continue
                 except Exception as e:
+                    cred = (getattr(conn, "pool", None).last_key()
+                            if getattr(conn, "pool", None) is not None
+                            and hasattr(conn.pool, "last_key") else None)
                     self._emit("astra_gateway.error", provider=short,
                                model=used_model,
                                reason=f"{type(e).__name__}: {e}",
-                               op=op, trace=trace, terminal=False)
+                               op=op, trace=trace, terminal=False,
+                               key_id=cred.key_id if cred else "",
+                               key_label=cred.label if cred else "")
                     continue
+                cred = (getattr(conn, "pool", None).last_key()
+                        if getattr(conn, "pool", None) is not None
+                        and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.success", provider=short,
                            model=used_model,
                            latency_ms=round((time.perf_counter() - start) * 1000.0, 1),
                            op=op, trace=trace, terminal=True,
+                           key_id=cred.key_id if cred else "",
+                           key_label=cred.label if cred else "",
                            output=_gw_log_output("".join(full)))
                 return
             self._emit("astra_gateway.error", provider="", model=model or "",
@@ -1984,9 +2031,14 @@ class AstraAIGateway:
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
                 reason = getattr(e, "message", None) or str(e)
+                cred = (getattr(conn, "pool", None).last_key()
+                        if getattr(conn, "pool", None) is not None
+                        and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=target_model.provider,
                           model=target_model.model_id, reason=reason,
-                          op=op, trace=trace, terminal=False)
+                          op=op, trace=trace, terminal=False,
+                          key_id=cred.key_id if cred else "",
+                          key_label=cred.label if cred else "")
                 if emitted_any:
                     self._emit("astra_gateway.stream_interrupted",
                               provider=target_model.provider,
@@ -1999,9 +2051,14 @@ class AstraAIGateway:
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
                 reason = f"{type(e).__name__}: {e}"
+                cred = (getattr(conn, "pool", None).last_key()
+                        if getattr(conn, "pool", None) is not None
+                        and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=target_model.provider,
                           model=target_model.model_id, reason=reason,
-                          op=op, trace=trace, terminal=False)
+                          op=op, trace=trace, terminal=False,
+                          key_id=cred.key_id if cred else "",
+                          key_label=cred.label if cred else "")
                 if emitted_any:
                     self._emit("astra_gateway.stream_interrupted",
                               provider=target_model.provider,
@@ -2015,9 +2072,14 @@ class AstraAIGateway:
                                               target_model.model_id, latency_ms)
             self.last_connection = conn.name
             self.last_model = target_model.model_id
+            cred = (getattr(conn, "pool", None).last_key()
+                    if getattr(conn, "pool", None) is not None
+                    and hasattr(conn.pool, "last_key") else None)
             self._emit("astra_gateway.success", provider=target_model.provider,
                       model=target_model.model_id, latency_ms=round(latency_ms, 1),
                       op=op, trace=trace, terminal=True,
+                      key_id=cred.key_id if cred else "",
+                      key_label=cred.label if cred else "",
                       output=_gw_log_output("".join(full)))
             return
         self.last_connection = ""

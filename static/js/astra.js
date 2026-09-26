@@ -2237,6 +2237,8 @@ loaders.providers = async function () {
       // "revealed by testing it" override moot — clear it so it doesn't
       // linger and confuse the next hide.
       FORCE_SHOWN_PROVIDERS.clear();
+      // Clear any DOM-only reveal left by a per-provider Test click.
+      list.querySelectorAll(".provider-card.force-show").forEach((el) => el.classList.remove("force-show"));
     };
   }
   if (toggleBtn) {
@@ -2787,6 +2789,9 @@ function renderGatewayCard(core) {
       st.gateway = hidden;
       _saveModelsHiddenState(st);
       FORCE_SHOWN_GATEWAY.clear();
+      // Clear any DOM-only reveal left by a per-connection Test click.
+      // Clearing the Set alone does not remove the class from already-painted cards.
+      card.querySelectorAll(".provider-card.force-show").forEach((el) => el.classList.remove("force-show"));
     };
   }
   if (gwToggleBtn) {

@@ -249,10 +249,28 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "perform it; you must not turn the task into instructions for the user, "
     "and you must not ask the Provider merely to explain how.\n\n"
 
-    "3) ASSIGN. From the provider/model list you are given, pick the single "
+    "3) CLASSIFY. Decide the ONE primary task type for this user request. "
+    "This classification is authoritative for the execution path; the "
+    "downstream ChatPipeline must not re-guess the task when this field is "
+    "present. Use exactly ONE of: simple_chat, general, reasoning, coding, "
+    "long_context, structured_output, tool_use, research, planning, "
+    "translation, summarization, vision, image_generation, image_editing. "
+    "Use image_generation when the user asks Astra to CREATE/GENERATE/DRAW "
+    "an image and there is no source image being edited. Use image_editing "
+    "when the user asks to change/retouch/modify an uploaded, previous, or "
+    "previously-generated image. Use vision when an image is supplied only "
+    "for understanding/analysis and the requested output is text. Do not "
+    "classify image generation as vision. Do not classify image editing as "
+    "coding or general just because the instruction contains those words. "
+    "If a request combines capabilities, choose the primary execution "
+    "capability that actually produces the requested result. \n\n"
+
+    "4) ASSIGN. From the provider/model list you are given, pick the single "
     "best provider+model for this job (coding -> a coding-capable model, "
     "hard reasoning -> a high-quality model, simple chat -> a fast one, "
-    "images -> a vision model). Each entry shows a `health` value "
+    "image generation -> an image-generation model, image editing -> an "
+    "image-editing model, vision -> a vision model). Each entry shows a "
+    "`health` value "
     "('ok' or 'unknown' — already-failing models are never listed here); "
     "prefer health=ok over health=unknown when both otherwise fit equally. "
     "Copy provider and model EXACTLY from the list. If nothing in the "
@@ -260,13 +278,13 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "\"\" for both — automatic routing will handle it, including trying "
     "a currently-unhealthy model as a last resort if it must.\n\n"
 
-    "4) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
+    "5) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
     "answer must satisfy (for an execution task, the criteria must require "
     "the real action to have been performed and its result reported).\n\n"
 
     "Reply with exactly this JSON shape:\n"
     "{\"final_request\": \"...\", \"was_incomplete\": true|false, "
-    "\"provider\": \"...\", \"model\": \"...\", "
+    "\"task_type\": \"<category>\", \"provider\": \"...\", \"model\": \"...\", "
     "\"criteria\": [\"...\"], \"reason\": \"<one short line>\", "
     "\"execution\": {\"required\": true|false, \"capability\": \"\", "
     "\"environment\": \"agent_runtime\"|\"host_fallback\", "
@@ -707,7 +725,7 @@ class ChatPipeline:
         caps = (capabilities if capabilities is not None
                 else collect_runtime_capabilities(self.registry))
         fallback = {"final_request": message, "was_incomplete": False,
-                    "provider": "", "model": "", "criteria": [],
+                    "task_type": "", "provider": "", "model": "", "criteria": [],
                     "reason": "", "execution": ProviderExecutionDecision(),
                     "ok": False}
         targets = []
@@ -777,6 +795,15 @@ class ChatPipeline:
             return fallback
 
         provider, model = _clean(data.get("provider")), _clean(data.get("model"))
+        allowed_task_types = {
+            "simple_chat", "general", "reasoning", "coding", "long_context",
+            "structured_output", "tool_use", "research", "planning",
+            "translation", "summarization", "vision", "image_generation",
+            "image_editing",
+        }
+        task_type = _clean(data.get("task_type"))
+        if task_type not in allowed_task_types:
+            task_type = self._task_type(message, attachments)
         valid = {(t["provider"], t["model"]) for t in targets}
         if (provider, model) not in valid:
             # Never trust an invented target. Keep a provider-only pick when
@@ -796,6 +823,7 @@ class ChatPipeline:
         return {"final_request": _clean(data["final_request"]) if rewrote
                 else message,
                 "was_incomplete": rewrote,
+                "task_type": task_type,
                 "provider": provider, "model": model, "criteria": criteria,
                 "reason": _clean(data.get("reason")), "execution": execution,
                 "ok": True}
@@ -1550,6 +1578,7 @@ class ChatPipeline:
         execution = (brief.get("execution") or ProviderExecutionDecision())
         trace.update({"understood": brief["final_request"],
                       "was_incomplete": brief["was_incomplete"],
+                      "task_type": brief.get("task_type", ""),
                       "assigned": assigned, "criteria": brief["criteria"],
                       "assign_reason": brief["reason"],
                       "execution": execution.to_dict(),
@@ -1599,7 +1628,9 @@ class ChatPipeline:
                 "Recent conversation (for reference):\n" + ctx_text +
                 "\n\nCurrent request:\n" + brief["final_request"], attachments)
         messages.append({"role": "user", "content": content})
-        task_type = self.gateway.classify_image_operation(brief["final_request"], attachments) if self.gateway else self._task_type(brief["final_request"], attachments)
+        # The Gateway's UNDERSTAND call is the authoritative classifier.
+        # Only the legacy/failure path above uses the local classifier.
+        task_type = brief.get("task_type") or self._task_type(brief["final_request"], attachments)
 
         # The Provider is the AI that does the work. With the shared
         # Terminal/tool surface wired, that work is a real multi-step agent

@@ -1366,13 +1366,12 @@ class ChatPipeline:
             # public payload. Keep an internal-only path so a generated image
             # can become the source image for a later conversational edit.
             for art in artifacts:
-                if art.get("artifact_type") == "image" and art.get("id"):
-                    filename = str(art.get("filename") or "")
-                    path = os.path.join(
-                        self.artifact_dir,
-                        f"{art['id']}_{os.path.basename(filename)}")
-                    if os.path.isfile(path):
+                if art.get("artifact_type") == "image":
+                    path = str(art.get("_storage_path") or "")
+                    if path and os.path.isfile(path):
                         art["_storage_path"] = path
+                    else:
+                        art.pop("_storage_path", None)
             return artifacts
         except Exception:
             return []

@@ -1164,7 +1164,7 @@ const LOGS_MAX_BUFFER = 300;   // bounded DOM: oldest rows drop off the top
 // Compact breakdown shown above the timeline (matches the filter chips).
 const LOG_STAT_DEFS = [
   { key: "total", label: "Total API Calls" },
-  { key: "ai", label: "AI Call Success" },
+  { key: "ai", label: "API Call Success" },
   { key: "tools", label: "Tools" },
   { key: "errors", label: "Errors" },
 ];

@@ -234,8 +234,8 @@ class ChatLog:
         return rid
 
     def add_user(self, text: str, files: list | None = None,
-                 attachments: list | None = None,
-                 conversation_id: int | None = None) -> int:
+                 conversation_id: int | None = None,
+                 attachments: list | None = None) -> int:
         """Returns the conversation id the message was actually written to,
         so the caller can pin the rest of the turn (begin/add_reply) to it —
         `current_id` can change while the agent is still working (the user

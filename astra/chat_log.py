@@ -27,6 +27,7 @@ written to disk through the transcript either.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -287,9 +288,20 @@ class ChatLog:
             except Exception:
                 attachments = []
             for att in attachments:
-                if (isinstance(att, dict) and att.get("family") == "image"
-                        and att.get("storage_path")):
-                    return att
+                if not isinstance(att, dict) or att.get("family") != "image":
+                    continue
+                path = str(att.get("storage_path") or "")
+                if not path or not os.path.isfile(path):
+                    continue
+                try:
+                    from astra.core.attachments import detect_mime
+                    with open(path, "rb") as fh:
+                        raw = fh.read()
+                    if not detect_mime(raw, att.get("original_filename") or path).startswith("image/"):
+                        continue
+                except (OSError, ValueError):
+                    continue
+                return dict(att, storage_path=path)
             try:
                 artifacts = json.loads(row.get("artifacts") or "[]")
             except Exception:

@@ -295,11 +295,11 @@ class ChatLog:
             except Exception:
                 artifacts = []
             for art in artifacts:
-                if (isinstance(art, dict) and art.get("type") == "image"
-                        and art.get("storage_path")):
+                if (isinstance(art, dict) and (art.get("type") == "image" or art.get("artifact_type") == "image")
+                        and (art.get("storage_path") or art.get("_storage_path"))):
                     return {
                         "family": "image",
-                        "storage_path": str(art["storage_path"]),
+                        "storage_path": str(art.get("storage_path") or art.get("_storage_path")),
                         "mime_type": str(art.get("mime_type") or "image/png"),
                         "original_filename": str(art.get("filename") or "generated.png"),
                     }
@@ -329,8 +329,29 @@ class ChatLog:
         data = reply.get("data") or {}
         if isinstance(data, dict) and len(json.dumps(data, default=str)) > MAX_JSON_BYTES:
             data = {k: data[k] for k in ("execution_id",) if k in data}
+        artifacts = list(reply.get("artifacts") or [])
+        internal_attachments = []
+        public_artifacts = []
+        for art in artifacts:
+            if not isinstance(art, dict):
+                continue
+            clean = dict(art)
+            internal_path = clean.pop("_storage_path", "")
+            if (internal_path and clean.get("artifact_type") == "image"
+                    and clean.get("id")):
+                internal_attachments.append({
+                    "family": "image",
+                    "storage_path": str(internal_path),
+                    "mime_type": str(clean.get("mime_type") or "image/png"),
+                    "original_filename": str(clean.get("filename") or "generated.png"),
+                })
+            public_artifacts.append(clean)
+        # Never expose the internal artifact path in the response object.
+        if isinstance(reply, dict):
+            reply["artifacts"] = public_artifacts
         rid = self._insert(cid, "ai", reply.get("reply", ""), reply.get("action", ""),
-                            data, reply.get("artifacts") or [],
+                            data, public_artifacts,
+                            attachments=internal_attachments,
                             ok=bool(reply.get("ok", True)))
         self._touch(cid)
         return rid

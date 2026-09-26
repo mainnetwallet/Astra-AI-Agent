@@ -2619,11 +2619,53 @@ async function _testGatewayConnectionStreamingInner(key, btn, resume, bulk = fal
     : models;
   const keys = GATEWAY_KEYS[key] || [];
   if (!keys.length) {
-    await streamModelTests(toRun, tableEl, GATEWAY_MODEL_RESULTS[key],
-      (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
+    // In bulk mode, a Gateway model that also exists in the Provider catalog
+    // reuses the Provider's real probe. It must never issue a second API call.
+    if (!bulk) {
+      await streamModelTests(toRun, tableEl, GATEWAY_MODEL_RESULTS[key],
+        (modelId) => post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
+          .then((res) => (res.ok && res.data) ? res.data :
+            { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
+        undefined, !!resume);
+      return;
+    }
+    const rows = toRun.map((modelId) => {
+      const token = _bulkModelToken(_bulkProviderNameForGateway(key), modelId);
+      const sharedResult = BULK_HEALTH_RUN.providerResults.get(token);
+      if (sharedResult) {
+        return { model: modelId, ok: !!sharedResult.ok,
+                 latency_ms: sharedResult.latency_ms || 0,
+                 error: sharedResult.error || "", shared: true };
+      }
+      const waiting = _bulkGatewayShouldWait(key, modelId);
+      if (waiting) {
+        BULK_HEALTH_RUN.deferredGatewayResults.set(
+          key + "\0" + modelId, { gatewayKey: key, token });
+      }
+      return { model: modelId, waiting };
+    });
+    GATEWAY_MODEL_RESULTS[key].length = 0;
+    rows.forEach((r) => GATEWAY_MODEL_RESULTS[key].push(r));
+    if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(GATEWAY_MODEL_RESULTS[key]);
+
+    // Only models without a matching Provider are real Gateway probes.
+    const probeModels = rows.filter((r) => !r.waiting).map((r) => r.model);
+    await Promise.allSettled(probeModels.map((modelId) =>
+      post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
         .then((res) => (res.ok && res.data) ? res.data :
-          { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
-      undefined, !!resume);
+          { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" })
+        .catch((e) => ({ model: modelId, ok: false, latency_ms: 0, error: String(e) }))
+        .then((result) => {
+          const row = GATEWAY_MODEL_RESULTS[key].find((r) => r.model === modelId);
+          if (!row) return;
+          Object.assign(row, { waiting: false, ok: !!result.ok,
+            latency_ms: result.latency_ms, error: result.error });
+          if (tableEl) {
+            const node = $(`[data-model-row="${CSS.escape(modelId)}"]`, tableEl);
+            if (node) node.outerHTML = modelHealthRowsHtml([row]);
+          }
+        })
+    ));
     return;
   }
   await testGatewaySelectedKeyStreaming(

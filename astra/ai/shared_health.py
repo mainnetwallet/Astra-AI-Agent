@@ -120,16 +120,15 @@ def _now_iso() -> str:
 
 SHARED_HEALTH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS shared_health_result (
-    canonical_provider     TEXT NOT NULL,
-    credential_fingerprint TEXT NOT NULL,
-    model                  TEXT NOT NULL,
-    ok                     INTEGER NOT NULL DEFAULT 0,
-    error                  TEXT DEFAULT '',
-    latency_ms             REAL DEFAULT 0,
-    tested_at              TEXT DEFAULT '',
-    ts                     REAL DEFAULT 0,
-    source                 TEXT DEFAULT 'live',
-    PRIMARY KEY (canonical_provider, credential_fingerprint, model)
+    canonical_provider TEXT NOT NULL,
+    model              TEXT NOT NULL,
+    ok                 INTEGER NOT NULL DEFAULT 0,
+    error              TEXT DEFAULT '',
+    latency_ms         REAL DEFAULT 0,
+    tested_at          TEXT DEFAULT '',
+    ts                 REAL DEFAULT 0,
+    source             TEXT DEFAULT 'live',
+    PRIMARY KEY (canonical_provider, model)
 );
 """
 
@@ -159,9 +158,39 @@ class SharedHealthCoordinator:
         self._inflight_result: dict[SharedHealthIdentity, dict] = {}
         if self.store is not None:
             try:
-                self.store.install(SHARED_HEALTH_SCHEMA)
+                self._ensure_schema()
             except Exception:
+                # Persistence is an optimization; in-memory sharing remains valid.
                 self.store = None
+
+    def _ensure_schema(self) -> None:
+        """Install the provider+model schema and migrate the previous
+        provider+credential+model table. New identity ignores credentials."""
+        self.store.install(SHARED_HEALTH_SCHEMA)
+        cols = self.store.fetch("PRAGMA table_info(shared_health_result)")
+        names = {r["name"] for r in cols}
+        if "credential_fingerprint" not in names:
+            return
+        self.store.exec(
+            "CREATE TABLE IF NOT EXISTS shared_health_result_v2 ("
+            "canonical_provider TEXT NOT NULL, model TEXT NOT NULL, "
+            "ok INTEGER NOT NULL DEFAULT 0, error TEXT DEFAULT '', "
+            "latency_ms REAL DEFAULT 0, tested_at TEXT DEFAULT '', "
+            "ts REAL DEFAULT 0, source TEXT DEFAULT 'live', "
+            "PRIMARY KEY (canonical_provider, model))"
+        )
+        self.store.exec(
+            "INSERT OR REPLACE INTO shared_health_result_v2 "
+            "(canonical_provider, model, ok, error, latency_ms, tested_at, ts, source) "
+            "SELECT old.canonical_provider, old.model, old.ok, old.error, "
+            "old.latency_ms, old.tested_at, old.ts, old.source "
+            "FROM shared_health_result old "
+            "WHERE old.ts = (SELECT MAX(newer.ts) FROM shared_health_result newer "
+            "WHERE newer.canonical_provider=old.canonical_provider "
+            "AND newer.model=old.model)"
+        )
+        self.store.exec("DROP TABLE shared_health_result")
+        self.store.exec("ALTER TABLE shared_health_result_v2 RENAME TO shared_health_result")
 
     # -- freshness ----------------------------------------------------------
     def _fresh(self, row: dict | None) -> dict | None:
@@ -181,7 +210,7 @@ class SharedHealthCoordinator:
         try:
             r = self.store.fetchone(
                 "SELECT * FROM shared_health_result WHERE canonical_provider=? "
-                "AND credential_fingerprint=? AND model=?", tuple(identity))
+                "AND model=?", tuple(identity))
         except Exception:
             return None
         if not r:
@@ -209,16 +238,15 @@ class SharedHealthCoordinator:
         if self.store:
             try:
                 self.store.exec(
-                    "INSERT INTO shared_health_result (canonical_provider, "
-                    "credential_fingerprint, model, ok, error, latency_ms, "
-                    "tested_at, ts, source) VALUES (?,?,?,?,?,?,?,?,?) "
-                    "ON CONFLICT(canonical_provider, credential_fingerprint, model) "
+                    "INSERT INTO shared_health_result (canonical_provider, model, ok, error, "
+                    "latency_ms, tested_at, ts, source) VALUES (?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(canonical_provider, model) "
                     "DO UPDATE SET ok=excluded.ok, error=excluded.error, "
                     "latency_ms=excluded.latency_ms, tested_at=excluded.tested_at, "
                     "ts=excluded.ts, source=excluded.source",
-                    (identity.provider, identity.fingerprint, identity.model,
-                     int(row["ok"]), row["error"], row["latency_ms"],
-                     row["tested_at"], row["ts"], "live"))
+                    (identity.provider, identity.model, int(row["ok"]),
+                     row["error"], row["latency_ms"], row["tested_at"],
+                     row["ts"], "live"))
             except Exception:
                 pass
         return row

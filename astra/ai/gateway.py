@@ -2311,12 +2311,12 @@ class AstraAIGateway:
         for conn, model in self._catalog:
             h = self.routing_state.get_health(model.provider, model.model_id)
             health = h.to_dict()
-            // A bulk Test All may deliberately reuse the Provider's manual
-            // health probe for this exact provider+model, so the Gateway
-            // does not make a duplicate upstream request. If this Gateway
-            // has no local probe row yet, expose the fresh shared result as
-            // its saved model health too. This makes a browser refresh show
-            // the same result instead of "not tested yet".
+            # A bulk Test All may deliberately reuse the Provider's manual
+            # health probe for this exact provider+model, so the Gateway
+            # does not make a duplicate upstream request. If this Gateway
+            # has no local probe row yet, expose the fresh shared result as
+            # its saved model health too. This makes a browser refresh show
+            # the same result instead of "not tested yet".
             if (health["success_count"] + health["failure_count"] == 0
                     and self.shared_health is not None):
                 shared = self.shared_health.get_fresh(

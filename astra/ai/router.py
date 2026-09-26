@@ -127,7 +127,7 @@ class RoutingRequest:
                  evidence: dict | None = None, semantic_verifier=None,
                  required_input_modalities: list | None = None,
                  required_output_modalities: list | None = None,
-                 trace: str = ""):
+                 trace: str = "", emit_events: bool = True):
         self.task_type = task_type
         self.messages = messages or []
         self.preferred_model = preferred_model
@@ -558,8 +558,9 @@ class AstraRouter:
     def _route_end(self, req: RoutingRequest, op: str, kind: str, **data) -> None:
         """Emit the terminal event for one route operation, carrying the same
         `op` as its `router.request` so the Activity Log resolves the row."""
-        self._emit(kind, task=req.task_type, op=op, trace=req.trace,
-                   terminal=True, **data)
+        if req.emit_events:
+            self._emit(kind, task=req.task_type, op=op, trace=req.trace,
+                       terminal=True, **data)
 
     def _route_failed(self, req: RoutingRequest, op: str, error: str,
                       **kw) -> RoutingResult:
@@ -673,14 +674,15 @@ class AstraRouter:
                 # and carries the same `op`/`trace` — the Activity Log then
                 # refines one "Agent Router" row instead of appending a
                 # second, orphan one.
-                if fallback:
+                if fallback and req.emit_events:
                     self._emit("router.fallback", task=req.task_type, provider=rr.provider,
                                model=rr.model, candidates_considered=considered,
                                fallback_from=req.preferred_model or "",
                                fallback_reason=last_failure_category,
                                reason=last_failure_category or "switched to the next provider",
                                op=op, trace=req.trace, terminal=False)
-                self._emit("router.decision", task=req.task_type, provider=rr.provider,
+                if req.emit_events:
+                    self._emit("router.decision", task=req.task_type, provider=rr.provider,
                            model=rr.model, score=score, reason=rr.route_reason.get("reason", ""),
                            latency_ms=rr.latency_ms, fallback=fallback,
                            op=op, trace=req.trace, terminal=True)

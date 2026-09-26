@@ -1334,6 +1334,8 @@ class AstraRouter:
                            attempt=attempt, trace=req.trace)
                 self._emit("router.retry", provider=name, model=model.model_id,
                            attempt=attempt, trace=req.trace)
+            op = None
+            t0 = None
             try:
                 messages = self._fit_messages(req.messages, model, req.max_tokens)
                 # Everything above this point is routing/preparation. Create
@@ -1391,14 +1393,14 @@ class AstraRouter:
                               if getattr(adapter, "pool", None) is not None
                               and hasattr(adapter.pool, "last_key") else None)
                 key_label = test_cred.label if test_cred else ""
-                if "op" in locals():
+                if op is not None:
                     self._emit("ai.failed", provider=name, model=model.model_id,
                                error=last_error, attempt=attempt, op=op,
                                trace=req.trace, terminal=not retry, retrying=retry,
                                key_id=test_cred.key_id if test_cred else "",
                                key_label=key_label)
                 self._record_key_model(adapter, model.model_id, False,
-                                       duration_ms(t0) if "t0" in locals() else 0,
+                                       duration_ms(t0) if t0 is not None else 0,
                                        last_error, req)
                 if self._pinned(adapter) or not retry:
                     break
@@ -1411,7 +1413,7 @@ class AstraRouter:
                               if getattr(adapter, "pool", None) is not None
                               and hasattr(adapter.pool, "last_key") else None)
                 key_label = test_cred.label if test_cred else ""
-                if "op" in locals():
+                if op is not None:
                     self._emit("ai.failed", provider=name, model=model.model_id,
                                error=last_error, attempt=attempt, op=op,
                                trace=req.trace, terminal=not retry, retrying=retry,

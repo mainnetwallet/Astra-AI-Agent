@@ -82,6 +82,11 @@
     // Explicit lifecycle hints win: a non-terminal failure is a warning (the
     // operation is still going / about to retry), not a terminal error.
     if (d.retrying === true || d.terminal === false) return "warn";
+    // Manual health-test events carry an explicit boolean outcome but are
+    // emitted as a neutral *.test event, not a *.failed event. Respect that
+    // outcome so a 0ms/auth/rate-limit probe is never rendered as "OK".
+    if (d.ok === false) return "err";
+    if (d.ok === true) return "ok";
     // Web3 stages: prepared/submitted/broadcast are in-flight; only
     // confirmed/rejected/failed end the transaction.
     if (k === "web3.transaction.confirmed") return "ok";
@@ -602,6 +607,29 @@
   function mergeLifecycle(oldModel, newModel) {
     var merged = Object.assign({}, newModel);
     if (oldModel) {
+      // Lifecycle rows are refined in place. Keep display fields that only
+      // existed on the start event, while allowing the terminal event to
+      // supply authoritative values (especially provider/model/key_label).
+      // This is what lets an "Agent Router" row inherit the credential slot
+      // from its terminal ai.completed/ai.failed event.
+      var oldFields = Array.isArray(oldModel.fields) ? oldModel.fields : [];
+      var newFields = Array.isArray(newModel.fields) ? newModel.fields : [];
+      var fieldIndex = {};
+      var combinedFields = [];
+      oldFields.forEach(function (pair) {
+        if (!pair || !pair[0]) return;
+        fieldIndex[pair[0]] = combinedFields.length;
+        combinedFields.push(pair);
+      });
+      newFields.forEach(function (pair) {
+        if (!pair || !pair[0]) return;
+        if (fieldIndex[pair[0]] != null) combinedFields[fieldIndex[pair[0]]] = pair;
+        else {
+          fieldIndex[pair[0]] = combinedFields.length;
+          combinedFields.push(pair);
+        }
+      });
+      merged.fields = combinedFields;
       // The request row carries the Input, the terminal row carries the
       // Output: whichever side is empty keeps what the other one had.
       if (!merged.input && oldModel.input) merged.input = oldModel.input;

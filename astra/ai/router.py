@@ -1327,7 +1327,12 @@ class AstraRouter:
                 self._latency[name].append(ms)
                 self._calls[name] += 1
                 self._cost_est[name] = self._cost_est.get(name, 0.0) + cost
-                if name in self._down:
+                # Manual health probes must not mutate aggregate provider
+                # availability. Test-all intentionally probes many models/keys
+                # concurrently; one model's auth/rate-limit result must not
+                # make the whole provider "down" or generate misleading
+                # recovered/down flapping in the Activity Log.
+                if req.task_type != "health_check" and name in self._down:
                     self._down.discard(name)
                 self._last = {"provider": name, "model": model.model_id,
                               "latency_ms": ms, "task_type": req.task_type}
@@ -1390,7 +1395,12 @@ class AstraRouter:
                     break
                 if retry:
                     time.sleep(min(self.backoff_s * attempt, 8))
-        self._mark_down(name, last_error)
+        # A manual health probe records its per-key/model result but must
+        # not change aggregate provider availability. The probe is only a
+        # diagnostic observation; normal routing failures are still allowed
+        # to mark the provider down and trigger recovery/cooldown behavior.
+        if req.task_type != "health_check":
+            self._mark_down(name, last_error)
         return RoutingResult(ok=False, error=f"{name}: {last_error}",
                              attempts=0)
 

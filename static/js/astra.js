@@ -2224,8 +2224,9 @@ loaders.providers = async function () {
   // just rebuilt above), so it survives every re-render: list.innerHTML
   // replaces the children each time, never this element's own classList.
   const toggleBtn = $("#btn-providers-toggle-models");
-  if (toggleBtn && !toggleBtn.dataset.hooked) {
-    toggleBtn.dataset.hooked = "1";
+  if (toggleBtn) {
+    // Rebind on every render so a previous render can never leave this
+    // control with a stale/missing click handler.
     toggleBtn.onclick = () => {
       const hidden = list.classList.toggle("models-hidden");
       toggleBtn.textContent = hidden ? "👁 Show models" : "🙈 Hide models";
@@ -2776,8 +2777,9 @@ function renderGatewayCard(core) {
   // as #btn-providers-toggle-models: state lives as a class on #gateway-card
   // itself, so it survives this function's own re-renders.
   const gwToggleBtn = $("#btn-gateway-toggle-models");
-  if (gwToggleBtn && !gwToggleBtn.dataset.hooked) {
-    gwToggleBtn.dataset.hooked = "1";
+  if (gwToggleBtn) {
+    // Rebind on every render so a previous render can never leave this
+    // control with a stale/missing click handler.
     gwToggleBtn.onclick = () => {
       const hidden = card.classList.toggle("models-hidden");
       gwToggleBtn.textContent = hidden ? "👁 Show models" : "🙈 Hide models";

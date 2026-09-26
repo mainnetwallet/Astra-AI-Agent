@@ -1928,7 +1928,9 @@ class AstraAIGateway:
                         if getattr(conn, "pool", None) is not None
                         and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id, reason=last_error,
+                          model=target_model.model_id,
+                          gateway_only=self._gateway_only_model(conn.name, target_model.model_id),
+                          reason=last_error,
                           op=op, trace=trace, terminal=False, attempt=attempts,
                           key_id=cred.key_id if cred else "",
                           key_label=cred.label if cred else "")
@@ -1991,6 +1993,7 @@ class AstraAIGateway:
                             and hasattr(conn.pool, "last_key") else None)
                     self._emit("astra_gateway.error", provider=short,
                                model=used_model,
+                               gateway_only=self._gateway_only_model(conn.name, used_model),
                                reason=getattr(e, "message", None) or str(e),
                                op=op, trace=trace, terminal=False,
                                key_id=cred.key_id if cred else "",
@@ -2012,6 +2015,7 @@ class AstraAIGateway:
                         and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.success", provider=short,
                            model=used_model,
+                           gateway_only=self._gateway_only_model(conn.name, used_model),
                            latency_ms=round((time.perf_counter() - start) * 1000.0, 1),
                            op=op, trace=trace, terminal=True,
                            key_id=cred.key_id if cred else "",
@@ -2094,7 +2098,9 @@ class AstraAIGateway:
                     if getattr(conn, "pool", None) is not None
                     and hasattr(conn.pool, "last_key") else None)
             self._emit("astra_gateway.success", provider=target_model.provider,
-                      model=target_model.model_id, latency_ms=round(latency_ms, 1),
+                      model=target_model.model_id,
+                      gateway_only=self._gateway_only_model(conn.name, target_model.model_id),
+                      latency_ms=round(latency_ms, 1),
                       op=op, trace=trace, terminal=True,
                       key_id=cred.key_id if cred else "",
                       key_label=cred.label if cred else "",

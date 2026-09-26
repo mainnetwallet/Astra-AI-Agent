@@ -61,7 +61,9 @@ def _extract_base64_image(text: str, artifact_dir: str) -> dict | None:
     ok, _ = validate_artifact(art)
     if not ok:
         return None
-    return art.to_dict()
+    data = art.to_dict()
+    data["_storage_path"] = art.storage_path
+    return data
 
 
 def _extract_base64_audio(text: str, artifact_dir: str) -> dict | None:

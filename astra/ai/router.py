@@ -1360,8 +1360,6 @@ class AstraRouter:
                             trace=req.trace, terminal=not retry, retrying=retry,
                             key_id=test_cred.key_id if test_cred else "",
                             key_label=key_label)
-                           error=last_error, attempt=attempt, op=op,
-                           trace=req.trace, terminal=not retry, retrying=retry)
                 if self._pinned(adapter):
                     break
                 # A NON-retryable error (e.g. "no healthy credential

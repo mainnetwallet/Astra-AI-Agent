@@ -140,6 +140,8 @@ _IMG_EDIT_VERBS = r"(?:edit|editing|modify|retouch|inpaint|outpaint|restyle|"\
 _IMAGE_EDIT_RE = re.compile(
     _IMG_EDIT_VERBS + r"\s+(?:this|the|my|ei|এই)?\s*" + _IMG_EDIT_NOUNS +
     r"|" + _IMG_EDIT_NOUNS + r"[^\n]{0,24}?" + _IMG_EDIT_VERBS, re.I)
+_IMAGE_EDIT_ACTION_RE = re.compile(
+    r"\\b(?:cinematic|brighten|darken|crop|remove|add|change|replace|background|color|colour|resize|upscale|enhance|retouch|restyle|make|turn)\\b|(?:cinematic|এডিট|পরিবর্তন|বদলে|বদলাও|করো|দাও)", re.I)
 
 SIMPLE_TEXT_MAX_CHARS = 40
 
@@ -172,9 +174,11 @@ def classify_gateway_request(text: str, *, vision: bool = False,
     # photo" contains the word "photo", but the user is asking Astra to make
     # an image, not to look at one. "describe this screenshot" matches neither
     # verb list and still classifies as `vision` below.
-    if mask_input and image_input and _IMAGE_EDIT_RE.search(text):
+    edit_intent = bool(_IMAGE_EDIT_RE.search(text) or
+                       (image_input and _IMAGE_EDIT_ACTION_RE.search(text)))
+    if mask_input and image_input and edit_intent:
         return "image_inpainting"
-    if _IMAGE_EDIT_RE.search(text) and image_input:
+    if edit_intent and (image_input or re.search(r"\b(?:upload|uploaded|generated|যেটা|ওই)\b", text, re.I)):
         return "image_editing"
     if _IMAGE_GEN_RE.search(text):
         return "image_generation"

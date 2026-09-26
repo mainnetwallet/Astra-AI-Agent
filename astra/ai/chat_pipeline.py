@@ -119,10 +119,9 @@ _ALL_IMAGE_MODELS_FAILED_MESSAGE = "\u2715 " + IMAGE_EXHAUSTED_MESSAGE
 
 _NO_IMAGE_MODEL_MESSAGE = (
     "✕ No currently available FREE image-generation model is available.\n\n"
-    "Astra shudhu free/free-tier image model diye chobi banay (ekhon: "
-    "Cloudflare Workers AI text-to-image). Kono free image model configured, "
-    "healthy ba free allocation-er moddhe nei. CLOUDFLARE_API_KEYS + "
-    "CLOUDFLARE_ACCOUNT_IDS set kore abar chesta korun."
+    "Astra shudhu configured free/free-tier image model diye chobi banay. "
+    "Kono eligible free image model configured ba available nei. "
+    "Required image-provider credentials/configuration check kore abar chesta korun."
 )
 _NO_GATEWAY_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI gateway-er API key set kora nei."

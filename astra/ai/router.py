@@ -356,6 +356,7 @@ class AstraRouter:
                               or SharedHealthCoordinator(store=store))
         if self.gateway is not None:
             self.gateway.shared_health = self.shared_health
+            self.gateway.provider_model_lookup = self.provider_model_exists
         self.policy = RoutingDecisionPolicy(stats=self._load_aggregate(),
                                             preference=self.preference)
         self._lock = threading.RLock()
@@ -375,6 +376,21 @@ class AstraRouter:
             store.install(STATS_SCHEMA)
             store.install(KEY_MODEL_SCHEMA)
             self._load_key_model()
+
+    def provider_model_exists(self, model_id: str, gateway_name: str = "") -> bool:
+        """Check whether a Gateway model is also exposed by the Provider catalog.
+
+        This is a local catalog lookup only; it never makes a Provider API call.
+        """
+        from astra.ai.shared_health import canonical_provider
+        gateway_provider = canonical_provider(gateway_name) if gateway_name else ""
+        for provider in self.providers:
+            pname = canonical_provider(getattr(provider, "name", ""))
+            if gateway_provider and pname != gateway_provider:
+                continue
+            if str(model_id) in {str(m) for m in (getattr(provider, "models", None) or [])}:
+                return True
+        return False
 
     # -- plumbing -------------------------------------------------------------
     def _slots(self, provider) -> None:

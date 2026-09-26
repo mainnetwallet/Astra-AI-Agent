@@ -190,6 +190,8 @@ class ImageRouter:
         if editing and not (source_image and source_image.get("storage_path")):
             raise ProviderError(
                 "Image editing requires a reusable source image.")
+        if editing and not (source_image and source_image.get("storage_path")):
+            raise ProviderError("Image editing requires a reusable source image.")
         ranked = self.build_targets(editing=editing, discover=discover)
         if model:
             ranked = ([t for t in ranked if t[1].model_id == model] +

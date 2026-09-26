@@ -256,7 +256,8 @@ class ChatLog:
             return cid
         safe_attachments = []
         for att in (attachments or [])[:10]:
-            if not isinstance(att, dict) or att.get("family") != "image":
+            if (not isinstance(att, dict) or att.get("family") != "image"
+                        or att.get("role") == "mask"):
                 continue
             safe_attachments.append({
                 "family": "image",

@@ -72,6 +72,12 @@ EVENT_KINDS = (
     "image.generation.start", "image.generation.attempt",
     "image.generation.failure", "image.generation.fallback",
     "image.generation.success", "image.generation.exhausted",
+    # Same-model, different-key retry: rate limiting is a PER-KEY problem
+    # (CredentialPool tracks health/cooldown per key), so a 429 on one key
+    # retries the SAME model with the connection's next healthy key before
+    # ImageRouter gives up on the model and falls back to a different one
+    # (see ImageRouter.generate()).
+    "image.generation.key_retry",
     # Gateway-spec supervision (§9-12, §19): deterministic result
     # validation + bounded correction, layered on top of the existing
     # retry/verify pipeline — see astra.core.classification + correction.

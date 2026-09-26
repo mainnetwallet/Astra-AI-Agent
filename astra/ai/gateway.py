@@ -2029,6 +2029,21 @@ class AstraAIGateway:
     # never delays saving another connection's result.
     _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
 
+    def classify_image_operation(self, message: str, attachments=None) -> str:
+        """Gateway-owned deterministic modality/operation decision."""
+        from astra.ai.gateway_routing import classify_gateway_request
+        has_image = any(
+            isinstance(a, dict) and a.get("family") == "image"
+            and a.get("role") != "mask"
+            for a in (attachments or []))
+        has_mask = any(
+            isinstance(a, dict) and a.get("family") == "image"
+            and a.get("role") == "mask"
+            for a in (attachments or []))
+        return classify_gateway_request(
+            message, vision=has_image, image_input=has_image,
+            mask_input=has_mask)
+
     # -- image generation: eligible targets + failover -----------------------
     #
     # NOTE: image-model-pool construction is OWNED by `ImageRouter` (see
@@ -2067,6 +2082,8 @@ class AstraAIGateway:
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1, *,
                        editing: bool = False, source_image: dict | None = None,
+                       mask_image: dict | None = None,
+                       operation: str | None = None,
                        trace: str = "", discover: bool = True) -> str:
         """Backward-compatible delegating wrapper -- NOT an execution path.
 

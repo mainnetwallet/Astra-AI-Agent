@@ -2334,7 +2334,7 @@ loaders.providers = async function () {
       }
     };
   }
-  renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null, provs || {});
+  renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
   renderHealthKeySelector();
   _maybeResumeRuns();
   _syncRunningUi();
@@ -2701,7 +2701,7 @@ async function runGatewayConnectionTest(key, btn, card) {
   }
 }
 
-function renderGatewayCard(core, providerData = {}) {
+function renderGatewayCard(core) {
   const card = $("#gateway-card");
   if (!card) return;
   // Same persisted hide/show restore as loaders.providers — must happen
@@ -2743,23 +2743,7 @@ function renderGatewayCard(core, providerData = {}) {
     // instead of leaving this connection's table empty until someone
     // clicks Test again.
     if (!(GATEWAY_MODEL_RESULTS[key] || []).length) {
-      const providerName = _bulkProviderNameForGateway(key);
-      const provider = (providerData || {})[providerName] || {};
-      const providerSaved = provider.key_results || {};
-      const providerRows = Object.keys(providerSaved).length
-        ? savedKeyRows(c.models || [], c.keys || [], providerSaved)
-        : [];
-      if (providerRows.length) {
-        GATEWAY_MODEL_RESULTS[key] = providerRows.map((row) => {
-          const tested = (row.keys || []).filter((k) => k.ok === true || k.ok === false);
-          if (!tested.length) return { model: row.model, untested: true };
-          const winner = tested.find((k) => k.ok === true) || tested[0];
-          return { model: row.model, ok: !!winner.ok, latency_ms: winner.latency_ms || 0,
-                   error: winner.error || "", shared: true };
-        });
-      } else {
-        GATEWAY_MODEL_RESULTS[key] = savedGatewayModelRows(c.models || [], c.model_health || {});
-      }
+      GATEWAY_MODEL_RESULTS[key] = savedGatewayModelRows(c.models || [], c.model_health || {});
     }
     LAST_GATEWAY_DATA[key] = c;
     // Test still running when the page was refreshed: models whose saved

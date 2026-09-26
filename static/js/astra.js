@@ -1878,18 +1878,18 @@ function keyChipHtml(k) {
 // Saved (server-side) per-key results -> the same row shape a live test
 // produces, so a page reload shows the last known state of every key.
 function savedKeyRows(models, keys, keyResults) {
-  let any = false;
-  const rows = models.map((m) => ({
+  // Always return one row per configured model. A provider can have valid
+  // models/credentials before any health result has been saved; those rows
+  // must still render as "not tested yet" after a refresh.
+  return models.map((m) => ({
     model: m,
     keys: keys.map((k) => {
       const r = ((keyResults || {})[m] || {})[k.key_id];
-      if (r) any = true;
       return r ? { key_id: k.key_id, label: k.label, ok: r.ok, latency_ms: r.latency_ms,
                    error: r.error, tested_at: r.tested_at }
                : { key_id: k.key_id, label: k.label };
     }),
   }));
-  return any ? rows : [];
 }
 
 // Saved (server-side) per-model Gateway health -> the same row shape a
@@ -1899,18 +1899,18 @@ function savedKeyRows(models, keys, keyResults) {
 // card was missing this restoration entirely, so it went blank on every
 // reload even though the server has the data (routing_state health).
 function savedGatewayModelRows(models, modelHealth) {
-  let any = false;
-  const rows = (models || []).map((modelId) => {
+  // Always return one row per configured model. Without this, a Gateway
+  // connection with no saved health result renders an empty model table,
+  // which can make the health state appear to vanish after refresh.
+  return (models || []).map((modelId) => {
     const h = (modelHealth || {})[modelId];
     const tested = h && ((h.success_count || 0) + (h.failure_count || 0) > 0);
     if (!tested) return { model: modelId, untested: true };
-    any = true;
     const lastOk = h.last_success && (!h.last_failure || h.last_success > h.last_failure);
     return lastOk
       ? { model: modelId, ok: true, latency_ms: Math.round(h.average_latency_ms || 0) }
       : { model: modelId, ok: false, error: "last test failed" };
   });
-  return any ? rows : [];
 }
 
 function _healthKeys(kind, name) {
@@ -2183,9 +2183,12 @@ loaders.providers = async function () {
     PROVIDER_KEYS[n] = p.keys || [];
     _ensureHealthKey("provider", n);
     LAST_PROVIDER_DATA[n] = p;
-    // First paint after a reload: show the last saved per-key results.
-    if (!(PROVIDER_MODEL_RESULTS[n] || []).length && (p.keys || []).length) {
-      PROVIDER_MODEL_RESULTS[n] = savedKeyRows(p.models || [], p.keys, p.key_results);
+    // The server is the durable source of truth for per-key/model health.
+    // Rebuild these rows on every non-live render so a refresh or another
+    // loader pass cannot leave stale client-only "not tested" rows.
+    if (!LIVE_PROVIDER_TESTS.has(n) && (p.keys || []).length) {
+      const saved = savedKeyRows(p.models || [], p.keys, p.key_results);
+      if (saved.length) PROVIDER_MODEL_RESULTS[n] = saved;
     }
     // A test that was still running when the page was refreshed: show its
     // unfinished rows as pending (and reveal the card) until the server has
@@ -2243,6 +2246,7 @@ loaders.providers = async function () {
       // "revealed by testing it" override moot — clear it so it doesn't
       // linger and confuse the next hide.
       FORCE_SHOWN_PROVIDERS.clear();
+      list.querySelectorAll(".provider-card.force-show").forEach((el) => el.classList.remove("force-show"));
     };
   }
   if (toggleBtn) {
@@ -2867,6 +2871,7 @@ function renderGatewayCard(core) {
       st.gateway = hidden;
       _saveModelsHiddenState(st);
       FORCE_SHOWN_GATEWAY.clear();
+      card.querySelectorAll(".provider-card.force-show").forEach((el) => el.classList.remove("force-show"));
     };
   }
   if (gwToggleBtn) {

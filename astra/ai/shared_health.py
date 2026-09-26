@@ -8,7 +8,7 @@ execution paths). The ONLY thing this module coordinates is the manual
 "test connection" HTTP probe itself, for the specific case where both
 systems would otherwise send an identical real upstream request:
 
-    same canonical upstream provider + same credential + same model
+    same canonical upstream provider + same model
 
     Provider Router                     Gateway Router
          |                                    |
@@ -22,22 +22,20 @@ systems would otherwise send an identical real upstream request:
                         /            \\
               Provider local state   Gateway local state
 
-Anything less specific than that triple (different key, different model, or
+Anything less specific than that pair (different model or
 a different canonical provider) is never shared -- see `resolve_identity` /
 `SharedHealthIdentity`. Only the manual health-check entry points
 (`AstraRouter.test_provider_model`, `AstraAIGateway.test_connection_model`)
 ever call into this module; normal chat routing, model selection, credential
 rotation and image generation are untouched.
 
-No secret ever leaves this module: `credential_fingerprint` is a one-way,
-namespaced hash of the raw key, and the persisted `shared_health_result` row
-holds only canonical_provider / credential_fingerprint / model / ok / error /
-latency_ms / timestamps -- never the fingerprint's input, an API key, or an
-Authorization header.
+No API key is part of the shared identity. The persisted `shared_health_result`
+row contains only canonical_provider / model / ok / error / latency_ms /
+timestamps; each caller still records the shared outcome in its own per-key
+health state and preserves its own key label.
 """
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from datetime import datetime
@@ -56,17 +54,7 @@ from astra.ai.gateway_routing import GATEWAY_PROVIDER_SHORT
 # sides of this boundary.
 DEFAULT_TTL_S = 600.0
 
-# Separate hash namespace from `Credential.key_id` (astra/ai/credentials.py).
-# `key_id` is salted with the LOCAL pool label ("groq" for the Provider pool,
-# "astra-gw-groq" for the Gateway pool), so the identical literal secret
-# configured on both sides gets two different key_ids there -- that's fine
-# for its own purpose (a stable per-pool handle) but wrong for this one. This
-# fingerprint is salted with the CANONICAL provider instead, so the same
-# (upstream, secret) always produces the same identity no matter which
-# system computed it.
-_FINGERPRINT_NAMESPACE = "astra-shared-health-v1"
-
-
+# Credential identity is intentionally excluded from shared-health dedup.
 def canonical_provider(name: str) -> str:
     """Resolve a Provider adapter name OR a Gateway connection name to the
     single upstream identity they both probe (e.g. "groq" for either
@@ -77,50 +65,29 @@ def canonical_provider(name: str) -> str:
     return GATEWAY_PROVIDER_SHORT.get(name, name)
 
 
-def credential_fingerprint(provider: str, secret: str) -> str:
-    """Deterministic, one-way, secret-free identity for one credential
-    against one canonical provider. Never logged, never returned to any
-    caller, never stored anywhere except as this fingerprint."""
-    return hashlib.sha256(
-        f"{_FINGERPRINT_NAMESPACE}\0{provider}\0{secret}".encode("utf-8")
-    ).hexdigest()[:16]
-
-
 class SharedHealthIdentity(tuple):
-    """(canonical_provider, credential_fingerprint, model) -- a hashable,
-    secret-free identity for one manual health-check target. Two probes
-    share a result if and only if all three match."""
+    """(canonical_provider, model) -- the manual health-check sharing
+    identity. Credentials are deliberately NOT part of this identity."""
     __slots__ = ()
 
-    def __new__(cls, provider: str, fingerprint: str, model: str):
-        return super().__new__(cls, (provider, fingerprint, model))
+    def __new__(cls, provider: str, model: str):
+        return super().__new__(cls, (provider, model))
 
     @property
     def provider(self) -> str:
         return self[0]
 
     @property
-    def fingerprint(self) -> str:
-        return self[1]
-
-    @property
     def model(self) -> str:
-        return self[2]
+        return self[1]
 
 
 def resolve_identity(pool, provider_name: str, model_id: str,
                      key_id: str | None = None):
-    """Resolve the (SharedHealthIdentity, Credential) a manual health probe
-    against `pool` (a `CredentialPool`, Provider- or Gateway-owned -- both
-    are the same class) would use, or (None, None) when it can't be
-    determined (no pool, no usable credential, or `key_id` doesn't name a
-    key in this pool). Callers must treat (None, None) as "skip sharing,
-    probe directly" -- exactly what happened before this module existed.
+    """Resolve shared provider+model identity plus this caller's owner key.
 
-    When `key_id` is given, resolution is pinned to that exact key (mirrors
-    the manual per-key test UI); this never fails table lookups the caller
-    hasn't already validated -- see `AstraRouter.test_provider_model`, which
-    checks `key_id` against `pool.keys()` before calling this.
+    key_id controls only the credential used if this caller owns the probe;
+    it is deliberately excluded from SharedHealthIdentity.
     """
     if pool is None or not hasattr(pool, "pick") or not hasattr(pool, "pinned"):
         return None, None
@@ -134,10 +101,7 @@ def resolve_identity(pool, provider_name: str, model_id: str,
     secret = pool.get_secret_for(cred) if hasattr(pool, "get_secret_for") else None
     if not secret:
         return None, None
-    provider = canonical_provider(provider_name)
-    fp = credential_fingerprint(provider, secret)
-    return SharedHealthIdentity(provider, fp, model_id), cred
-
+    return SharedHealthIdentity(canonical_provider(provider_name), model_id), cred
 
 def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -145,16 +109,15 @@ def _now_iso() -> str:
 
 SHARED_HEALTH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS shared_health_result (
-    canonical_provider     TEXT NOT NULL,
-    credential_fingerprint TEXT NOT NULL,
-    model                  TEXT NOT NULL,
-    ok                     INTEGER NOT NULL DEFAULT 0,
-    error                  TEXT DEFAULT '',
-    latency_ms             REAL DEFAULT 0,
-    tested_at              TEXT DEFAULT '',
-    ts                     REAL DEFAULT 0,
-    source                 TEXT DEFAULT 'live',
-    PRIMARY KEY (canonical_provider, credential_fingerprint, model)
+    canonical_provider TEXT NOT NULL,
+    model              TEXT NOT NULL,
+    ok                 INTEGER NOT NULL DEFAULT 0,
+    error              TEXT DEFAULT '',
+    latency_ms         REAL DEFAULT 0,
+    tested_at          TEXT DEFAULT '',
+    ts                 REAL DEFAULT 0,
+    source             TEXT DEFAULT 'live',
+    PRIMARY KEY (canonical_provider, model)
 );
 """
 
@@ -184,9 +147,39 @@ class SharedHealthCoordinator:
         self._inflight_result: dict[SharedHealthIdentity, dict] = {}
         if self.store is not None:
             try:
-                self.store.install(SHARED_HEALTH_SCHEMA)
+                self._ensure_schema()
             except Exception:
+                # Persistence is an optimization; in-memory sharing remains valid.
                 self.store = None
+
+    def _ensure_schema(self) -> None:
+        """Install the provider+model schema and migrate the previous
+        provider+credential+model table. New identity ignores credentials."""
+        self.store.install(SHARED_HEALTH_SCHEMA)
+        cols = self.store.fetch("PRAGMA table_info(shared_health_result)")
+        names = {r["name"] for r in cols}
+        if "credential_fingerprint" not in names:
+            return
+        self.store.exec(
+            "CREATE TABLE IF NOT EXISTS shared_health_result_v2 ("
+            "canonical_provider TEXT NOT NULL, model TEXT NOT NULL, "
+            "ok INTEGER NOT NULL DEFAULT 0, error TEXT DEFAULT '', "
+            "latency_ms REAL DEFAULT 0, tested_at TEXT DEFAULT '', "
+            "ts REAL DEFAULT 0, source TEXT DEFAULT 'live', "
+            "PRIMARY KEY (canonical_provider, model))"
+        )
+        self.store.exec(
+            "INSERT OR REPLACE INTO shared_health_result_v2 "
+            "(canonical_provider, model, ok, error, latency_ms, tested_at, ts, source) "
+            "SELECT old.canonical_provider, old.model, old.ok, old.error, "
+            "old.latency_ms, old.tested_at, old.ts, old.source "
+            "FROM shared_health_result old "
+            "WHERE old.ts = (SELECT MAX(newer.ts) FROM shared_health_result newer "
+            "WHERE newer.canonical_provider=old.canonical_provider "
+            "AND newer.model=old.model)"
+        )
+        self.store.exec("DROP TABLE shared_health_result")
+        self.store.exec("ALTER TABLE shared_health_result_v2 RENAME TO shared_health_result")
 
     # -- freshness ----------------------------------------------------------
     def _fresh(self, row: dict | None) -> dict | None:
@@ -206,7 +199,7 @@ class SharedHealthCoordinator:
         try:
             r = self.store.fetchone(
                 "SELECT * FROM shared_health_result WHERE canonical_provider=? "
-                "AND credential_fingerprint=? AND model=?", tuple(identity))
+                "AND model=?", tuple(identity))
         except Exception:
             return None
         if not r:
@@ -234,16 +227,15 @@ class SharedHealthCoordinator:
         if self.store:
             try:
                 self.store.exec(
-                    "INSERT INTO shared_health_result (canonical_provider, "
-                    "credential_fingerprint, model, ok, error, latency_ms, "
-                    "tested_at, ts, source) VALUES (?,?,?,?,?,?,?,?,?) "
-                    "ON CONFLICT(canonical_provider, credential_fingerprint, model) "
+                    "INSERT INTO shared_health_result (canonical_provider, model, ok, error, "
+                    "latency_ms, tested_at, ts, source) VALUES (?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(canonical_provider, model) "
                     "DO UPDATE SET ok=excluded.ok, error=excluded.error, "
                     "latency_ms=excluded.latency_ms, tested_at=excluded.tested_at, "
                     "ts=excluded.ts, source=excluded.source",
-                    (identity.provider, identity.fingerprint, identity.model,
-                     int(row["ok"]), row["error"], row["latency_ms"],
-                     row["tested_at"], row["ts"], "live"))
+                    (identity.provider, identity.model, int(row["ok"]),
+                     row["error"], row["latency_ms"], row["tested_at"],
+                     row["ts"], "live"))
             except Exception:
                 pass
         return row

@@ -1043,7 +1043,6 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
 class AstraGatewayMistral(_GatewayCompatibleConnection):
     """Astra AI Gateway / Mistral connection (independent of MistralAdapter)."""
     name = "astra-gw-mistral"
-    image_models_env = "GW_MISTRAL_IMAGE_MODELS"
     base_url = "https://api.mistral.ai/v1"
     models_env = "GW_MISTRAL_MODELS"
     api_keys_env = "GW_MISTRAL_API_KEYS"
@@ -1092,7 +1091,7 @@ class AstraGatewayCohere(_GatewayCompatibleConnection):
 class AstraGatewayZAI(_GatewayCompatibleConnection):
     """Astra AI Gateway / Z.AI (GLM) connection (independent of ZAIAdapter)."""
     name = "astra-gw-zai"
-    image_models_env = "GW_ZAI_IMAGE_MODELS"
+    image_models_env = "ZAI_IMAGE_MODELS"
     base_url = "https://api.z.ai/api/paas/v4"
     models_env = "GW_ZAI_MODELS"
     api_keys_env = "GW_ZAI_API_KEYS"
@@ -1391,7 +1390,7 @@ def _build_connection(cls, config=None):
         return None
 
     # ── image generation (InvokeModel) ────────────────────────────────────
-    image_models_env = "GW_BEDROCK_IMAGE_MODELS"
+    image_models_env = "BEDROCK_IMAGE_MODELS"
 
     def list_image_models(self, *, discover: bool = True) -> list:
         return list(getattr(self, "image_models", []) or [])
@@ -1481,11 +1480,13 @@ class AstraAIGateway:
     and the attempt loop.
 
     IMAGE GENERATION is the deliberate exception to steps 3/4 above: it
-    uses a SIMPLE SERIAL FALLBACK over its own FREE image-model pool, in a
-    deterministic priority order (astra.ai.image_models), with NO proactive
-    health check and no cooldown gating -- the actual generation request is
-    the availability signal, and a failure is remembered only for that one
-    request. See `image_targets()` / `generate_image()`.
+    uses a SIMPLE SERIAL FALLBACK over the FREE image-model pool ImageRouter
+    owns, in a deterministic priority order (astra.ai.image_models), with NO
+    proactive health check and no cooldown gating -- the actual generation
+    request is the availability signal, and a failure is remembered only for
+    that one request. The Gateway owns no image-model configuration of its
+    own; it only classifies and hands off. See `image_targets()` /
+    `generate_image()`.
     """
 
     def __init__(self, connections: list | None = None, config=None,

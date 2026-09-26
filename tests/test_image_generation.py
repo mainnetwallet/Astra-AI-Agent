@@ -1448,7 +1448,7 @@ class TestProviderImageAdapterMechanics(unittest.TestCase):
     def test_openai_images_protocol_mechanics(self):
         from astra.ai.gateway import AstraGatewayZAI
         conn = AstraGatewayZAI(config=_cfg(GW_ZAI_API_KEYS="k",
-                                           GW_ZAI_IMAGE_MODELS="glm-image"))
+                                           ZAI_IMAGE_MODELS="glm-image"))
         seen = {}
 
         def side(req, timeout=None):

@@ -1673,7 +1673,9 @@ class AstraAIGateway:
         last_error = ""
         attempts = 0
         self._emit("astra_gateway.request", category="explicit_model",
-                   model=model or "", op=op, trace=trace,
+                   model=model or "", gateway_only=self._gateway_only_model(
+                       self.connections[0].name, model) if self.connections else False,
+                   op=op, trace=trace,
                    input=_gw_log_input(messages))
         for conn in self.connections:
             attempts += 1
@@ -1699,7 +1701,8 @@ class AstraAIGateway:
                         if getattr(conn, "pool", None) is not None
                         and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=short,
-                           model=used_model, reason=last_error, op=op,
+                           model=used_model, gateway_only=self._gateway_only_model(
+                               conn.name, used_model), reason=last_error, op=op,
                            trace=trace, terminal=False, attempt=attempts,
                            key_id=cred.key_id if cred else "",
                            key_label=cred.label if cred else "")
@@ -1722,7 +1725,8 @@ class AstraAIGateway:
                     if getattr(conn, "pool", None) is not None
                     and hasattr(conn.pool, "last_key") else None)
             self._emit("astra_gateway.success", provider=short,
-                       model=used_model, latency_ms=round(latency_ms, 1),
+                       model=used_model, gateway_only=self._gateway_only_model(
+                           conn.name, used_model), latency_ms=round(latency_ms, 1),
                        op=op, trace=trace, terminal=True,
                        key_id=cred.key_id if cred else "",
                        key_label=cred.label if cred else "",
@@ -1846,6 +1850,15 @@ class AstraAIGateway:
                 ranked, self.routing_state.last_successful())
         return category, ranked
 
+    def _gateway_only_model(self, conn_name: str, model_id: str) -> bool:
+        lookup = getattr(self, "provider_model_lookup", None)
+        if not callable(lookup) or not model_id:
+            return False
+        try:
+            return not bool(lookup(model_id, conn_name))
+        except Exception:
+            return False
+
     def _emit(self, kind: str, **data) -> None:
         if self.events:
             try:
@@ -1902,7 +1915,8 @@ class AstraAIGateway:
                         if getattr(conn, "pool", None) is not None
                         and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id, reason=last_error,
+                          model=target_model.model_id, gateway_only=self._gateway_only_model(
+                              conn.name, target_model.model_id), reason=last_error,
                           op=op, trace=trace, terminal=False, attempt=attempts,
                           key_id=cred.key_id if cred else "",
                           key_label=cred.label if cred else "")
@@ -1929,7 +1943,8 @@ class AstraAIGateway:
                     if getattr(conn, "pool", None) is not None
                     and hasattr(conn.pool, "last_key") else None)
             self._emit("astra_gateway.success", provider=target_model.provider,
-                      model=target_model.model_id, latency_ms=round(latency_ms, 1),
+                      model=target_model.model_id, gateway_only=self._gateway_only_model(
+                          conn.name, target_model.model_id), latency_ms=round(latency_ms, 1),
                       op=op, trace=trace, terminal=True,
                       key_id=cred.key_id if cred else "",
                       key_label=cred.label if cred else "",
@@ -2261,13 +2276,7 @@ class AstraAIGateway:
         # Gateway-only model = this Gateway exposes the model but the real
         # Provider catalog does not. Its test is the only upstream API call,
         # so keep that real call visible in the provider-centric Activity Log.
-        gateway_only = False
-        lookup = getattr(self, "provider_model_lookup", None)
-        if callable(lookup):
-            try:
-                gateway_only = not bool(lookup(model_id, conn.name))
-            except Exception:
-                gateway_only = False
+        gateway_only = self._gateway_only_model(conn.name, model_id)
         if not reused:
             self._emit("astra_gateway.test", connection=conn.name,
                        provider=_short_provider(conn), model=model_id,

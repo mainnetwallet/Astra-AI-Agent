@@ -1913,7 +1913,8 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
             self._gw = gw
 
         def generate(self, prompt, model=None, size="1024x1024", n=1, *,
-                     editing=False, trace="", discover=True):
+                     editing=False, source_image=None, mask_image=None,
+                     operation=None, trace="", discover=True):
             self._gw.image_calls.append((prompt, model, editing))
             self._gw.last_model = FLUX
             return DATA_URI
@@ -1929,6 +1930,13 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
 
         def is_usable(self):
             return self.usable
+
+        def classify_image_operation(self, message, attachments=None):
+            from astra.ai.gateway_routing import classify_gateway_request
+            has_image = any(isinstance(a, dict) and a.get("family") == "image"
+                            for a in (attachments or []))
+            return classify_gateway_request(message, vision=has_image,
+                                            image_input=has_image)
 
         def chat(self, messages, max_tokens=None, category=None, trace=""):
             self.calls.append(messages)

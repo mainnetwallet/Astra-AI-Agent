@@ -2259,6 +2259,15 @@ class AstraAIGateway:
         return {"connection": conn.name, "ok": any(r["ok"] for r in results),
                 "models": results, "error": ""}
 
+    def reset_connection_health(self, name: str) -> None:
+        """Start a fresh manual test run for one Gateway connection."""
+        if self.shared_health is None:
+            return
+        conn = next((c for c in self.connections if c.name == name), None)
+        if conn is not None:
+            from astra.ai.shared_health import canonical_provider
+            self.shared_health.invalidate(canonical_provider(conn.name))
+
     def test_connection_by_name(self, name: str) -> dict:
         """Probe exactly one connection by its name (e.g. 'astra-gw-gemini'),
         or every model of every connection sharing that name."""

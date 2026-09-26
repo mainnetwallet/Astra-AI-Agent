@@ -568,13 +568,23 @@ class AstraRouter:
         kw.pop("ok", None)
         kw.setdefault("requested_provider", req.preferred_provider or "")
         kw.setdefault("requested_model", req.preferred_model or "")
-        self._route_end(req, op, "ai.failed", aggregate=True, error=error, **kw)
+        # A health probe that never reached an eligible candidate made no
+        # upstream API call. Do not put a fake "Provider failed" operation in
+        # the Activity Log for it. If a real candidate was called, _attempt()
+        # already emitted the actual terminal failure event.
+        if req.task_type != "health_check":
+            self._route_end(req, op, "ai.failed", aggregate=True, error=error, **kw)
         return RoutingResult(ok=False, error=error, **kw)
 
     def route_request(self, req: RoutingRequest) -> RoutingResult:
         self._normalize_requirements(req)
         op = new_op_id()
-        self._emit("router.request", task=req.task_type, op=op, trace=req.trace)
+        # Health probes are diagnostic calls, not normal routing operations.
+        # Do not create a synthetic Agent Router log entry before we know an
+        # actual upstream API call will happen. Real health API calls still
+        # emit ai.started/ai.completed/ai.failed from _attempt().
+        if req.task_type != "health_check":
+            self._emit("router.request", task=req.task_type, op=op, trace=req.trace)
         # Strict mandatory-Gateway enforcement (Gap 1 defense-in-depth):
         # `req.task_contract` is how a caller (the chat pipeline, or any
         # post-execution final-verification pass) declares
@@ -708,8 +718,13 @@ class AstraRouter:
                              requested_provider=req.preferred_provider or "",
                              requested_model=req.preferred_model or "",
                              fallback_reason=last_failure_category)
-        self._route_end(req, op, "ai.failed", aggregate=True, error=error,
-                        attempts=attempts)
+        # Health probes with zero real attempts are intentionally silent in
+        # the Activity Log. A probe that did make an upstream attempt has its
+        # own ai.started/ai.failed lifecycle from _attempt(), so there is no
+        # need for an extra aggregate "Provider failed" row either.
+        if req.task_type != "health_check":
+            self._route_end(req, op, "ai.failed", aggregate=True, error=error,
+                            attempts=attempts)
         return last
 
     # -- Gateway-DRIVEN execution loop (§2-§12, §17-§18) -----------------------

@@ -325,11 +325,21 @@ class ChatLog:
 
     def add_reply(self, reply: dict, conversation_id: int | None = None) -> int:
         cid = conversation_id if conversation_id is not None else self.current_id
+        raw_artifacts = list(reply.get("artifacts") or []) if isinstance(reply, dict) else []
+        # Strip private filesystem lineage from the caller's response object
+        # before the API layer can serialize it, while retaining the path
+        # locally for the internal conversation index.
+        if isinstance(reply, dict):
+            reply["artifacts"] = [
+                {k: v for k, v in art.items() if k != "_storage_path"}
+                if isinstance(art, dict) else art
+                for art in raw_artifacts
+            ]
         reply = self._redact(reply if isinstance(reply, dict) else {"reply": str(reply)})
         data = reply.get("data") or {}
         if isinstance(data, dict) and len(json.dumps(data, default=str)) > MAX_JSON_BYTES:
             data = {k: data[k] for k in ("execution_id",) if k in data}
-        artifacts = list(reply.get("artifacts") or [])
+        artifacts = raw_artifacts
         internal_attachments = []
         public_artifacts = []
         for art in artifacts:

@@ -2240,10 +2240,16 @@ class AstraAIGateway:
         error = result.get("error") or ""
         latency_ms = result.get("latency_ms") or 0.0
         key_label = cred.label if cred is not None else ""
+        # Persist Gateway routing health under the canonical short provider
+        # identity used by the catalog/health loader. Otherwise a live test
+        # appears successful but refresh reads a different key and shows
+        # "not tested yet" again.
+        from astra.ai.shared_health import canonical_provider
+        routing_provider = canonical_provider(conn.name)
         if ok:
-            self.routing_state.record_success(conn.name, model_id, latency_ms)
+            self.routing_state.record_success(routing_provider, model_id, latency_ms)
         else:
-            self.routing_state.record_failure(conn.name, model_id)
+            self.routing_state.record_failure(routing_provider, model_id)
         self._emit("astra_gateway.test", connection=conn.name, model=model_id,
                    ok=ok, latency_ms=round(latency_ms, 1), reason=error,
                    reused=reused, key_id=cred.key_id if cred else "",

@@ -152,6 +152,7 @@ def _now_iso() -> str:
 # 10. Request classification — lightweight, deterministic, local
 # ═══════════════════════════════════════════════════════════════════════════
 def classify_gateway_request(text: str, *, vision: bool = False,
+                              image_input: bool = False, mask_input: bool = False,
                               structured_output: bool = False,
                               tools: list | None = None,
                               context_tokens: int = 0,
@@ -171,7 +172,9 @@ def classify_gateway_request(text: str, *, vision: bool = False,
     # photo" contains the word "photo", but the user is asking Astra to make
     # an image, not to look at one. "describe this screenshot" matches neither
     # verb list and still classifies as `vision` below.
-    if _IMAGE_EDIT_RE.search(text):
+    if mask_input and image_input and _IMAGE_EDIT_RE.search(text):
+        return "image_inpainting"
+    if _IMAGE_EDIT_RE.search(text) and image_input:
         return "image_editing"
     if _IMAGE_GEN_RE.search(text):
         return "image_generation"

@@ -1747,7 +1747,6 @@ function _loadRunning() {
     }
   }
   if (st.testAll && now - st.testAll > RUNNING_MAX_AGE_MS) st.testAll = 0;
-  if (st.gatewayAll && now - st.gatewayAll > RUNNING_MAX_AGE_MS) st.gatewayAll = 0;
   return st;
 }
 function _runningUpdate(fn) {
@@ -1839,9 +1838,9 @@ function _syncRunningUi() {
   const pendingCount = RESTORED_PROVIDER_PENDING.size + RESTORED_GATEWAY_PENDING.size;
   const liveCount = LIVE_PROVIDER_TESTS.size + LIVE_GATEWAY_TESTS.size;
   const anyLive = liveCount > 0;
-  if (pendingCount === 0 && !anyLive && (st.testAll || st.gatewayAll)) {
-    _runningUpdate((s2) => { s2.testAll = 0; s2.gatewayAll = 0; });
-    st.testAll = 0; st.gatewayAll = 0;
+  if (pendingCount === 0 && !anyLive && st.testAll) {
+    _runningUpdate((s2) => { s2.testAll = 0; });
+    st.testAll = 0;
   }
   const setBusy = (btn, busyLabel, busy) => {
     if (!btn || btn.dataset.live) return;
@@ -2773,34 +2772,6 @@ function renderGatewayCard(core) {
       if (!b) return;
       runGatewayConnectionTest(b.dataset.conn, b, card);
     });
-  }
-
-  const testBtn = $("#btn-gateway-test");
-  if (testBtn && !testBtn.dataset.hooked) {
-    testBtn.dataset.hooked = "1";
-    testBtn.onclick = async () => {
-      testBtn.disabled = true;
-      testBtn.dataset.live = "1";
-      _runningUpdate((st) => { st.gatewayAll = Date.now(); });
-      const prevLabel = testBtn.dataset.restored ? testBtn.dataset.orig : testBtn.textContent;
-      const keys = Object.keys(GATEWAY_MODELS);
-      const total = keys.length;
-      let done = 0;
-      testBtn.textContent = `⏳ Testing gateway (0/${total})…`;
-      try {
-        await Promise.allSettled(keys.map((key) =>
-          testGatewayConnectionStreaming(key, undefined, false, true).then(() => {
-            done += 1;
-            testBtn.textContent = `⏳ Testing gateway (${done}/${total})…`;
-          })));
-      } finally {
-        delete testBtn.dataset.live;
-        _runningUpdate((st) => { st.gatewayAll = 0; });
-        testBtn.disabled = false;
-        testBtn.textContent = prevLabel;
-        loaders.providers();
-      }
-    };
   }
 
   // Hide/show toggle for every connection's per-model rows — same pattern

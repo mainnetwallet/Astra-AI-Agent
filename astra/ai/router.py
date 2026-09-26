@@ -154,6 +154,10 @@ class RoutingRequest:
         # (e.g. a chat turn). Propagated onto every emitted lifecycle event so
         # the Activity Log can resolve a request's children when it ends.
         self.trace = trace or ""
+        # Route-level log suppression is used by manual health probes so a
+        # shared/reused or ineligible probe does not create a fake execution
+        # entry; real upstream attempts still emit from `_attempt`.
+        self.emit_events = bool(emit_events)
 
     def __repr__(self):
         return (f"RoutingRequest(task_type={self.task_type!r}, "

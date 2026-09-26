@@ -5,8 +5,7 @@ coordinated by astra.ai.shared_health.SharedHealthCoordinator.
 
 Provider and Gateway stay fully independent systems; only the manual
 "test connection" upstream HTTP probe is deduplicated when both would
-otherwise send an identical real request (same canonical upstream provider +
-same credential + same model).
+otherwise send an identical real request (same canonical upstream provider + same model).
 """
 from __future__ import annotations
 
@@ -123,6 +122,7 @@ class KeySharingTests(_Base):
         self.assertEqual(p2["key"], "key 2")
         self.assertEqual(g1["key"], "key 1")
         self.assertEqual(g2["key"], "key 2")
+
 
 class NonSharingTests(_Base):
     """TEST 3 / 4 / 5 — never over-deduplicate."""

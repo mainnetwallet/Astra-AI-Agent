@@ -122,7 +122,7 @@ CF_ENV = dict(GW_CLOUDFLARE_API_KEYS="cf-token-under-test",
               GW_CLOUDFLARE_ACCOUNT_IDS="acct-1111",
               CLOUDFLARE_IMAGE_MODELS=FLUX + "," + LUCID)
 GEMINI_ENV = dict(GW_GEMINI_API_KEYS="gem-key-under-test",
-                  GW_GEMINI_IMAGE_MODELS=GEMINI_IMG)
+                  GEMINI_IMAGE_MODELS=GEMINI_IMG)
 OR_ENV = dict(GW_OPENROUTER_API_KEYS="or-key-under-test")
 
 
@@ -216,7 +216,7 @@ class TestCredentialFailureIsNeverPerModel(unittest.TestCase):
         gw = build_astra_ai_gateway(_cfg(
             GW_CLOUDFLARE_API_KEYS="rejected-token",
             GW_CLOUDFLARE_ACCOUNT_IDS="acct-1111",
-            GW_CLOUDFLARE_IMAGE_MODELS=self.CF7), events=bus)
+            CLOUDFLARE_IMAGE_MODELS=self.CF7), events=bus)
         with _Capture(behavior) as cap:
             with self.assertRaises(ProviderError):
                 gw.generate_image("a cat", discover=False)
@@ -296,7 +296,7 @@ class TestImageGenerationNeverRetriesTheSameModel(unittest.TestCase):
         # Three keys: without the single-attempt rule a retryable 429 would
         # produce three HTTP requests against the SAME model.
         return dict(GW_GEMINI_API_KEYS="k1,k2,k3",
-                    GW_GEMINI_IMAGE_MODELS=GEMINI_IMG)
+                    GEMINI_IMAGE_MODELS=GEMINI_IMG)
 
     def test_429_makes_exactly_one_provider_attempt_even_with_many_keys(self):
         bus = _bus()
@@ -316,7 +316,7 @@ class TestImageGenerationNeverRetriesTheSameModel(unittest.TestCase):
 
     def test_429_advances_to_the_next_model_not_the_same_one(self):
         gw = build_astra_ai_gateway(_cfg(
-            GW_GEMINI_API_KEYS="k1,k2,k3", GW_GEMINI_IMAGE_MODELS=GEMINI_IMG,
+            GW_GEMINI_API_KEYS="k1,k2,k3", GEMINI_IMAGE_MODELS=GEMINI_IMG,
             **CF_ENV))
         seen = []
 
@@ -384,7 +384,7 @@ class TestOpenRouterEmptyFreePoolIsNeverFilled(unittest.TestCase):
         # selectable unless it is a statically VERIFIED free image model.
         gw = build_astra_ai_gateway(_cfg(
             GW_OPENROUTER_API_KEYS="or-key-under-test",
-            GW_OPENROUTER_IMAGE_MODELS=OR_LIVE_FREE))
+            OPENROUTER_IMAGE_MODELS=OR_LIVE_FREE))
         self.assertEqual(
             [t[1].model_id for t in gw.image_targets(discover=False)
              if t[0].name == "astra-gw-openrouter"], [])

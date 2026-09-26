@@ -115,7 +115,7 @@ class TestCloudflareDedicatedImageCredentials(unittest.TestCase):
         gw = build_astra_ai_gateway(_cfg(
             GW_CLOUDFLARE_API_KEYS="chat-token",
             GW_CLOUDFLARE_ACCOUNT_IDS="chat-acct",
-            GW_CLOUDFLARE_IMAGE_MODELS=FLUX,
+            CLOUDFLARE_IMAGE_MODELS=FLUX,
             IMAGE_CLOUDFLARE_API_KEY="image-token",
             IMAGE_CLOUDFLARE_ACCOUNT_ID="image-acct",
             IMAGE_CLOUDFLARE_BASE_URL="https://image.example.com/client/v4"))
@@ -137,7 +137,7 @@ class TestCloudflareDedicatedImageCredentials(unittest.TestCase):
         gw = build_astra_ai_gateway(_cfg(
             GW_CLOUDFLARE_API_KEYS="chat-token",
             GW_CLOUDFLARE_ACCOUNT_IDS="chat-acct",
-            GW_CLOUDFLARE_IMAGE_MODELS=FLUX))
+            CLOUDFLARE_IMAGE_MODELS=FLUX))
         behavior = lambda req, n: _Resp(json.dumps(
             {"result": {"image": B64}, "success": True}))
         with _Capture(behavior) as cap:
@@ -170,7 +170,7 @@ class TestGeminiDedicatedImageCredentials(unittest.TestCase):
     def test_dedicated_image_key_and_base_url_are_used(self):
         gw = build_astra_ai_gateway(_cfg(
             GW_GEMINI_API_KEYS="chat-key",
-            GW_GEMINI_IMAGE_MODELS=GEMINI_IMG,
+            GEMINI_IMAGE_MODELS=GEMINI_IMG,
             IMAGE_GEMINI_API_KEY="image-key",
             IMAGE_GEMINI_BASE_URL="https://image.example.com/v1beta/openai"))
         behavior = lambda req, n: _Resp(json.dumps({"candidates": [{
@@ -187,7 +187,7 @@ class TestGeminiDedicatedImageCredentials(unittest.TestCase):
     def test_missing_image_vars_fall_back_to_chat_key(self):
         gw = build_astra_ai_gateway(_cfg(
             GW_GEMINI_API_KEYS="chat-key",
-            GW_GEMINI_IMAGE_MODELS=GEMINI_IMG))
+            GEMINI_IMAGE_MODELS=GEMINI_IMG))
         behavior = lambda req, n: _Resp(json.dumps({"candidates": [{
             "content": {"parts": [{"inlineData": {
                 "mimeType": "image/png", "data": B64}}]}}]}))

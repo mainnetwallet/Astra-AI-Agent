@@ -99,7 +99,7 @@ from astra.terminal.manager import default_session_id_for
 # tests.test_multimodal.TestProviderRouterImageRefusal for the coverage.
 _CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
                               "summarization", "research", "planning",
-                              "image_generation", "image_editing"})
+                              "image_generation", "image_editing", "image_inpainting"})
 
 # Plain-text replies for missing AI configuration. Shown as-is (no
 # markdown rendering in the chat UI — see the note on _run_turn's fail
@@ -1266,7 +1266,7 @@ class ChatPipeline:
         # Gateway's ImageRouter (see `_route_image`): it is the only image
         # execution path, so these tasks never reach the Provider router's
         # own image dispatch below.
-        is_image = task_type in ("image_generation", "image_editing")
+        is_image = task_type in ("image_generation", "image_editing", "image_inpainting")
         if is_image:
             rr = self._route_image(task_type, messages, model, req,
                                    source_image=source_image,

@@ -2497,11 +2497,24 @@ async function _testGatewayConnectionStreamingInner(key, btn, resume, bulk = fal
 
 async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, tableEl, resultsArray, resume) {
   const chosen = keys.some((k) => k.key_id === selectedKey) ? selectedKey : keys[0].key_id;
-  const rows = resume && resultsArray.length ? resultsArray :
-    models.map((m) => ({
-      model: m,
-      keys: keys.map((k) => ({ key_id: k.key_id, label: k.label, pending: true })),
-    }));
+  const existing = Object.fromEntries(resultsArray.map((r) => [r.model, r]));
+  const rows = models.map((modelId) => {
+    const prior = existing[modelId];
+    if (resume && prior && Array.isArray(prior.keys)) return prior;
+    return {
+      model: modelId,
+      keys: keys.map((k) => ({
+        key_id: k.key_id,
+        label: k.label,
+        pending: !(resume && prior && prior.pending === false),
+        ...(resume && prior && prior.pending === false ? {
+          ok: !!prior.ok,
+          latency_ms: prior.latency_ms || 0,
+          error: prior.error || ""
+        } : {})
+      })),
+    };
+  });
   resultsArray.length = 0;
   rows.forEach((r) => resultsArray.push(r));
   if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(resultsArray);

@@ -1166,7 +1166,7 @@ const LOG_STAT_DEFS = [
   { key: "total", label: "Total API Calls" },
   { key: "ai", label: "API Call Success" },
   { key: "tools", label: "Tools" },
-  { key: "errors", label: "Errors" },
+  { key: "errors", label: "API Errors" },
 ];
 
 function renderLogStats() {

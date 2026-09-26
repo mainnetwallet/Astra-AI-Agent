@@ -138,8 +138,9 @@ class _FakeConn:
         self.chat_calls += 1
         return "text answer"
 
-    def generate_image(self, prompt, model=None, size="1024x1024", n=1):
-        self.image_calls.append((model, prompt))
+    def generate_image(self, prompt, model=None, size="1024x1024", n=1,
+                       source_image=None):
+        self.image_calls.append((model, prompt, source_image))
         outcome = self._outcomes.pop(0) if self._outcomes else "ok"
         if isinstance(outcome, Exception):
             raise outcome
@@ -208,14 +209,15 @@ class TestFreeImagePool(unittest.TestCase):
             self.assertIn("image",
                           metadata_for(mid, provider)["output_modalities"], mid)
 
-    def test_no_pool_model_advertises_image_editing(self):
-        # No Astra adapter forwards a source image to an image API, so
-        # advertising editing would be a lie: every kept model is
-        # generation-only.
+    def test_only_capable_models_advertise_image_editing(self):
         for provider, mid in image_pool():
-            self.assertFalse(is_image_editing_model(provider, mid), mid)
-            self.assertNotIn(IMAGE_EDITING,
-                             image_spec(provider, mid).capabilities, mid)
+            spec = image_spec(provider, mid)
+            if provider == "gemini" and mid == GEMINI_IMG:
+                self.assertTrue(is_image_editing_model(provider, mid), mid)
+                self.assertIn(IMAGE_EDITING, spec.capabilities, mid)
+            else:
+                self.assertFalse(is_image_editing_model(provider, mid), mid)
+                self.assertNotIn(IMAGE_EDITING, spec.capabilities, mid)
 
     def test_cloudflare_pool_is_the_documented_text_to_image_set(self):
         self.assertEqual(set(documented_image_models("cloudflare")),
@@ -695,11 +697,16 @@ class TestEligibleImageTargets(unittest.TestCase):
         cat = build_gateway_catalog([cf], include_image_models=True)
         self.assertEqual([m.model_id for _c, m in cat], [FLUX])
 
-    def test_no_editing_target_exists_because_no_adapter_forwards_an_image(self):
+    def test_editing_targets_require_an_edit_capable_model(self):
         state = GatewayRoutingState(None)
+        cf_only = self._catalog()
         self.assertEqual(
-            eligible_image_generation_targets(self._catalog(), state,
-                                              editing=True), [])
+            eligible_image_generation_targets(cf_only, state, editing=True), [])
+        gem = _FakeConn("astra-gw-gemini", "gemini",
+                        image_models=[GEMINI_IMG])
+        targets = eligible_image_generation_targets(
+            self._catalog(gem), state, editing=True)
+        self.assertEqual([m.model_id for _c, m, _h in targets], [GEMINI_IMG])
 
 
 # ---------------------------------------------------------------------------
@@ -1371,13 +1378,12 @@ class TestGatewayImageFailover(unittest.TestCase):
         gw.generate_image("a cat", model="llama-70b", discover=False)
         self.assertEqual(gw.last_model, FLUX)
 
-    def test_editing_returns_a_clear_error_because_nothing_advertises_editing(self):
-        gw = self._gw(self._cf())
+    def test_editing_requires_a_source_image(self):
+        gw = self._gw(self._gemini())
         with self.assertRaises(ProviderError) as ctx:
             gw.generate_image("ei photo ta edit kore dao", editing=True,
                               discover=False)
-        self.assertIn("No image-generation model is currently configured",
-                      str(ctx.exception))
+        self.assertIn("source image", str(ctx.exception).lower())
 
     def test_gateway_priority_is_configurable(self):
         from astra.ai.gateway import AstraAIGateway

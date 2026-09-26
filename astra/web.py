@@ -1011,7 +1011,11 @@ class WebApp:
             try:
                 from .core.attachments import process_upload
                 att = process_upload(f["data"], f["filename"], upload_dir)
-                attachments.append(att.to_dict())
+                item = att.to_dict()
+                item["_storage_path"] = att.storage_path
+                if "mask" in str(f.get("filename", "")).lower():
+                    item["role"] = "mask"
+                attachments.append(item)
             except Exception as e:
                 attachments.append({
                     "filename": f.get("filename", "unknown"),
@@ -1543,10 +1547,12 @@ class WebApp:
                     has_current_image = any(
                         isinstance(a, dict) and a.get("family") == "image"
                         for a in agent_attachments)
-                    if not has_current_image and classify(msg) == "image_editing":
+                    operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
+                    if not has_current_image and operation in ("image_editing", "image_inpainting"):
                         previous_image = log.latest_image_attachment(cid)
                         if previous_image:
                             agent_attachments.append(previous_image)
+                            operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
                     cid = log.add_user(msg, files=names,
                                        attachments=agent_attachments,
                                        conversation_id=cid)
@@ -1567,10 +1573,12 @@ class WebApp:
                             "data": {"duplicate_of_pending": True}}
                 else:
                     agent_attachments = []
-                    if classify(msg) == "image_editing":
+                    operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
+                    if operation in ("image_editing", "image_inpainting"):
                         previous_image = log.latest_image_attachment(cid)
                         if previous_image:
                             agent_attachments.append(previous_image)
+                            operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
                     cid = log.add_user(msg, attachments=agent_attachments,
                                        conversation_id=cid)
                     token = log.begin(cid)

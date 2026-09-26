@@ -1261,34 +1261,30 @@ class ChatPipeline:
         return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
     def _route(self, task_type, messages, provider, model, vision, req=""):
-        # image_generation / image_editing must only ever land on a model that
-        # genuinely supports image output AND exposes a real image API. The
-        # router enforces that itself (see AstraRouter._normalize_requirements
-        # + TASK_HARD_CAPABILITIES), and out_mods is set explicitly here too
-        # so the requirement is visible at the call site.
+        # image_generation / image_editing are owned EXCLUSIVELY by the
+        # Gateway's ImageRouter (see `_route_image`): it is the only image
+        # execution path, so these tasks never reach the Provider router's
+        # own image dispatch below.
         is_image = task_type in ("image_generation", "image_editing")
-        # 1) Prefer the Gateway's own image path when it is usable: it builds
-        #    the eligible-image-target list, calls the real provider image
-        #    API and fails over across image models only.
         if is_image:
             rr = self._route_image(task_type, messages, model, req)
-            if rr is not None and rr.ok:
-                return rr
             if rr is not None:
-                # The Gateway has an image path and already attempted the
-                # whole FREE pool: report that terminal failure instead of
-                # re-running the identical models through the Provider router
-                # (which would only duplicate the image-generation spend).
+                # Either the real image was produced, or ImageRouter
+                # attempted every eligible FREE model and the whole pool
+                # failed. Both are terminal for this turn.
                 return rr
-            # 2) The Gateway has no image execution path, so fall back to the
-            #    Provider router, which has its own image-capable-only filter
-            #    and serial failover over the same FREE pool.
-            return self.router.route_request(RoutingRequest(
-                task_type=task_type, messages=messages,
-                preferred_provider=provider or None,
-                preferred_model=model or None,
-                vision=vision, max_tokens=self.max_tokens, trace=req,
-                required_output_modalities=["image"]))
+            # No ImageRouter execution path is available (unusable Gateway,
+            # no image_router, or an empty prompt). Image generation is
+            # owned EXCLUSIVELY by ImageRouter, so the request must NOT fall
+            # back to the Provider router's own image dispatch -- that is the
+            # duplicate execution path this architecture forbids. Report the
+            # honest "no image model" failure instead.
+            failed = RoutingResult(ok=False, error=(
+                "No image-generation execution path is configured "
+                "(ImageRouter unavailable)."))
+            failed.attempts = 0
+            failed._port_kind = "gateway"
+            return failed
         rr = self.router.route_request(RoutingRequest(
             task_type=task_type, messages=messages,
             preferred_provider=provider or None,

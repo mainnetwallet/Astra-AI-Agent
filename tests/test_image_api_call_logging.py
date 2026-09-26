@@ -25,12 +25,17 @@ from astra.core.events import EventBus
 from astra.core.exceptions import ProviderError, TimeoutError
 from astra.store import Store
 from tests.test_image_generation import (DATA_URI, FLUX, GEMINI_IMG,
-                                         LIGHTNING, OR_FLUX, _FakeConn,
-                                         _http_error)
+                                         LIGHTNING, LUCID, OR_DEAD_FREE_IDS,
+                                         _FakeConn, _http_error)
 
 GEMINI = ("astra-gw-gemini", "gemini", GEMINI_IMG)
-OPENROUTER = ("astra-gw-openrouter", "openrouter", OR_FLUX)
 CLOUDFLARE = ("astra-gw-cloudflare", "cloudflare", FLUX)
+#: OpenRouter contributes NO routable FREE model (its live catalog was
+#: verified 2026-09-26 to contain zero `:free` image models), so it cannot be
+#: exercised through the free-pool call contract here; its API contract is
+#: covered by tests/test_image_generation.py::TestOpenRouterImagesApi with a
+#: mocked HTTP layer.
+CLOUDFLARE_LUCID = ("astra-gw-cloudflare", "cloudflare", LUCID)
 
 
 def _bus():
@@ -111,13 +116,14 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
     def test_every_fallback_model_gets_its_own_call_pair(self):
         gem = _FakeConn(GEMINI[0], GEMINI[1], image_models=[GEMINI_IMG],
                         outcomes=[_http_error("u", 429)])
-        orc = _FakeConn(OPENROUTER[0], OPENROUTER[1], image_models=[OR_FLUX])
-        gw, bus = self._gw(gem, orc)
+        cf = _FakeConn(CLOUDFLARE_LUCID[0], CLOUDFLARE_LUCID[1],
+                       image_models=[LUCID])
+        gw, bus = self._gw(gem, cf)
         gw.generate_image("a cat", discover=False, trace="req-4")
 
         starts = _data(bus, "astra_gateway.request")
         self.assertEqual([(d["provider"], d["model"]) for d in starts],
-                         [("gemini", GEMINI_IMG), ("openrouter", OR_FLUX)])
+                         [("gemini", GEMINI_IMG), ("cloudflare", LUCID)])
         # One api-call op PER attempted model -- not one for the whole request.
         self.assertEqual(len({d["op"] for d in starts}), 2)
 
@@ -130,10 +136,10 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
         self.assertEqual((errs[0]["provider"], errs[0]["status_code"]),
                          ("gemini", 429))
         self.assertEqual((oks[0]["provider"], oks[0]["status_code"]),
-                         ("openrouter", 200))
+                         ("cloudflare", 200))
 
     def test_all_supported_image_providers_use_the_same_call_contract(self):
-        for name, short, model in (GEMINI, OPENROUTER, CLOUDFLARE):
+        for name, short, model in (GEMINI, CLOUDFLARE, CLOUDFLARE_LUCID):
             with self.subTest(provider=short):
                 conn = _FakeConn(name, short, image_models=[model])
                 gw, bus = self._gw(conn)
@@ -149,6 +155,21 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
                     (ok[0]["provider"], ok[0]["model"], ok[0]["status_code"]),
                     (short, model, 200))
                 self.assertEqual(start[0]["op"], ok[0]["op"])
+
+    def test_dead_openrouter_ids_never_produce_an_api_call_row(self):
+        # OpenRouter's static FREE pool is empty (verified 2026-09-26), so an
+        # operator-configured dead id must yield NO provider API call and NO
+        # astra_gateway.* row -- never a fabricated call for a model that was
+        # not actually requested.
+        orc = _FakeConn("astra-gw-openrouter", "openrouter",
+                        image_models=list(OR_DEAD_FREE_IDS))
+        gw, bus = self._gw(orc)
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False, trace="req-dead")
+        self.assertEqual(orc.image_calls, [])
+        for kind in ("astra_gateway.request", "astra_gateway.success",
+                     "astra_gateway.error"):
+            self.assertEqual(_data(bus, kind), [], kind)
 
     def test_network_failure_is_logged_with_a_zero_status_and_reason(self):
         cf = _FakeConn(CLOUDFLARE[0], CLOUDFLARE[1],
@@ -188,8 +209,12 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
 
 
 class TestRouterImageApiCallLog(unittest.TestCase):
-    """The Provider-router image path (used when the Gateway has no image
-    execution path) must log the same fields on its own ai.* contract."""
+    """The Provider router (AstraRouter) keeps its own image dispatch and must
+    log the same fields on its own ai.* contract. NOTE: ChatPipeline no longer
+    reaches this path for image requests -- ImageRouter is the exclusive image
+    execution owner there (see tests/test_image_execution_boundary.py); the
+    Provider router's image support remains part of the separate Provider
+    system and is exercised here directly."""
 
     def _router(self, *adapters):
         from astra.ai.router import AstraRouter

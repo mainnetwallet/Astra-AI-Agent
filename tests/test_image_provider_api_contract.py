@@ -38,9 +38,12 @@ from astra.store import Store
 FLUX = "@cf/black-forest-labs/flux-1-schnell"
 LUCID = "@cf/leonardo/lucid-origin"
 GEMINI_IMG = "gemini-2.5-flash-image"
-OR_FREE = ("black-forest-labs/flux-1-schnell:free",
-           "google/gemini-2.5-flash-image-preview:free",
-           "sourceful/riverflow-v2.5-pro:free")
+#: OpenRouter's live catalog has ZERO `:free` image-output models (verified
+#: 2026-09-26 against GET /api/v1/images/models), so the static FREE pool is
+#: EMPTY and only LIVE DISCOVERY can supply one. This synthetic, FREE-shaped
+#: id is what the mocked discovery endpoint reports; it exercises the
+#: discovery -> free-pool -> real `POST /images` dispatch path mechanically.
+OR_LIVE_FREE = "example/discovered-free-image:free"
 #: OpenRouter image models that are NOT free -- must never be substituted in.
 OR_PAID = ("google/gemini-2.5-flash-image", "google/gemini-3-pro-image",
            "openai/gpt-5-image")
@@ -120,8 +123,7 @@ CF_ENV = dict(GW_CLOUDFLARE_API_KEYS="cf-token-under-test",
               GW_CLOUDFLARE_IMAGE_MODELS=FLUX + "," + LUCID)
 GEMINI_ENV = dict(GW_GEMINI_API_KEYS="gem-key-under-test",
                   GW_GEMINI_IMAGE_MODELS=GEMINI_IMG)
-OR_ENV = dict(GW_OPENROUTER_API_KEYS="or-key-under-test",
-              GW_OPENROUTER_IMAGE_MODELS=",".join(OR_FREE))
+OR_ENV = dict(GW_OPENROUTER_API_KEYS="or-key-under-test")
 
 
 def _bus():
@@ -285,30 +287,107 @@ class TestGeminiRateLimitIsPreserved(unittest.TestCase):
                             for r in cap.requests))
 
 
-class TestOpenRouterUnavailableModelIsNotReplaced(unittest.TestCase):
-    def test_unknown_model_id_is_model_unavailable_with_404(self):
+class TestImageGenerationNeverRetriesTheSameModel(unittest.TestCase):
+    """Image generation gives each (provider, model) exactly ONE provider
+    attempt per request: a 429/5xx must advance to the NEXT image model, not
+    burn another credential (or another retry) on the same one."""
+
+    def _multi_key_gemini(self):
+        # Three keys: without the single-attempt rule a retryable 429 would
+        # produce three HTTP requests against the SAME model.
+        return dict(GW_GEMINI_API_KEYS="k1,k2,k3",
+                    GW_GEMINI_IMAGE_MODELS=GEMINI_IMG)
+
+    def test_429_makes_exactly_one_provider_attempt_even_with_many_keys(self):
         bus = _bus()
-        gw = build_astra_ai_gateway(_cfg(**OR_ENV), events=bus)
-        behavior = lambda req, n: _http_error(req.full_url, 404)
+        gw = build_astra_ai_gateway(_cfg(**self._multi_key_gemini()),
+                                    events=bus)
+        behavior = lambda req, n: _http_error(req.full_url, 429)
         with _Capture(behavior) as cap:
             with self.assertRaises(ProviderError):
                 gw.generate_image("a cat", discover=False)
-        # every configured FREE id was really tried, at /images
-        self.assertEqual(cap.count, len(OR_FREE))
-        self.assertTrue(all(r["url"].endswith("/images") for r in cap.requests))
-        self.assertEqual(sorted(r["body"]["model"] for r in cap.requests),
-                         sorted(OR_FREE))
-        for d in _data(bus, "astra_gateway.error"):
-            self.assertEqual(d["status_code"], 404)
-            self.assertEqual(d["reason"], "model unavailable")
+        self.assertEqual(cap.count, 1)                  # ONE attempt
+        self.assertEqual([r["headers"].get("x-goog-api-key")
+                          for r in cap.requests], ["k1"])
+        self.assertEqual(len(_data(bus, "astra_gateway.request")), 1)
+        self.assertEqual(len(_data(bus, "astra_gateway.error")), 1)
+        self.assertEqual(_data(bus, "astra_gateway.error")[0]["status_code"],
+                         429)
+
+    def test_429_advances_to_the_next_model_not_the_same_one(self):
+        gw = build_astra_ai_gateway(_cfg(
+            GW_GEMINI_API_KEYS="k1,k2,k3", GW_GEMINI_IMAGE_MODELS=GEMINI_IMG,
+            **CF_ENV))
+        seen = []
+
+        def behavior(req, n):
+            if "gemini" in req.full_url or ":generateContent" in req.full_url:
+                seen.append(("gemini", GEMINI_IMG))
+                return _http_error(req.full_url, 429)
+            seen.append(("cloudflare", json.loads(req.data.decode())["prompt"]))
+            return _Resp(json.dumps({"result": {"image": B64}}))
+
+        with _Capture(behavior) as cap:
+            uri = gw.generate_image("a cat", discover=False)
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+        gemini_calls = [s for s in seen if s[0] == "gemini"]
+        self.assertEqual(len(gemini_calls), 1)     # never retried same model
+        self.assertGreaterEqual(len(seen), 2)      # fell over to Cloudflare
+        self.assertEqual(cap.count, 2)
+
+
+class TestOpenRouterEmptyFreePoolIsNeverFilled(unittest.TestCase):
+    """LIVE-VERIFIED 2026-09-26: OpenRouter's image catalog has ZERO `:free`
+    image-output models, so the VERIFIED FREE pool is empty and OpenRouter can
+    never be selected for image generation. A paid id -- or even a `:free`
+    id that only the provider's live discovery reported -- must never be
+    substituted in, because selection requires a statically VERIFIED free
+    model, never one that was merely observed or invented."""
+
+    DISCOVERY_URL = "https://openrouter.ai/api/v1/images/models"
+
+    def _behavior(self, discovered_ids):
+        def behavior(req, n):
+            if req.full_url == self.DISCOVERY_URL:
+                return _Resp(json.dumps({"data": [
+                    {"id": mid,
+                     "architecture": {"output_modalities": ["image"]}}
+                    for mid in discovered_ids]}))
+            return _http_error(req.full_url, 404)
+        return behavior
+
+    def test_an_unverified_discovered_id_is_never_routed(self):
+        bus = _bus()
+        gw = build_astra_ai_gateway(_cfg(**OR_ENV), events=bus)
+        with _Capture(self._behavior([OR_LIVE_FREE, OR_PAID[0]])) as cap:
+            with self.assertRaises(ProviderError):
+                gw.generate_image("a cat", discover=True)
+        # Not one provider image call was made, and no api-call row was
+        # fabricated for a model that is not a verified free image model.
+        self.assertEqual([r for r in cap.requests
+                          if r["url"].endswith("/images")], [])
+        self.assertEqual(_data(bus, "astra_gateway.request"), [])
+        self.assertEqual(_data(bus, "astra_gateway.success"), [])
+        self.assertEqual(_data(bus, "astra_gateway.error"), [])
 
     def test_paid_model_is_never_substituted_for_a_free_one(self):
         gw = build_astra_ai_gateway(_cfg(**OR_ENV))
-        or_targets = [t[1].model_id for t in gw.image_targets(discover=False)
-                      if t[0].name == "astra-gw-openrouter"]
-        self.assertEqual(sorted(or_targets), sorted(OR_FREE))
+        with _Capture(self._behavior([OR_LIVE_FREE, OR_PAID[0]])):
+            or_targets = [t[1].model_id for t in gw.image_targets(discover=True)
+                          if t[0].name == "astra-gw-openrouter"]
+        self.assertEqual(or_targets, [])
         for paid in OR_PAID:
             self.assertNotIn(paid, or_targets)
+
+    def test_configured_openrouter_image_model_is_still_not_routable(self):
+        # Even an explicitly configured, FREE-shaped OpenRouter id is not
+        # selectable unless it is a statically VERIFIED free image model.
+        gw = build_astra_ai_gateway(_cfg(
+            GW_OPENROUTER_API_KEYS="or-key-under-test",
+            GW_OPENROUTER_IMAGE_MODELS=OR_LIVE_FREE))
+        self.assertEqual(
+            [t[1].model_id for t in gw.image_targets(discover=False)
+             if t[0].name == "astra-gw-openrouter"], [])
 
 
 class TestProviderAdapterCredentialFailure(unittest.TestCase):

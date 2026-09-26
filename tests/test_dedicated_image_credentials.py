@@ -39,7 +39,11 @@ from astra.core.exceptions import ProviderError
 
 FLUX = "@cf/black-forest-labs/flux-1-schnell"
 GEMINI_IMG = "gemini-2.5-flash-image"
-OR_FREE_ONE = "black-forest-labs/flux-1-schnell:free"
+#: OpenRouter's live catalog has ZERO `:free` image-output models (verified
+#: 2026-09-26), so the static FREE pool is EMPTY. This synthetic, FREE-shaped
+#: id just supplies an explicit model id for the adapter-level credential
+#: checks below; it is not a real catalog id.
+OR_LIVE_FREE = "example/discovered-free-image:free"
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
 B64 = base64.b64encode(PNG).decode()
@@ -194,30 +198,31 @@ class TestGeminiDedicatedImageCredentials(unittest.TestCase):
 
 
 class TestOpenRouterDedicatedImageCredentials(unittest.TestCase):
+    def _conn(self, **env):
+        from astra.ai.gateway import AstraGatewayOpenRouter
+        return AstraGatewayOpenRouter(config=_cfg(**env))
+
     def test_dedicated_image_key_and_base_url_are_used(self):
-        gw = build_astra_ai_gateway(_cfg(
+        conn = self._conn(
             GW_OPENROUTER_API_KEYS="chat-key",
-            GW_OPENROUTER_IMAGE_MODELS=OR_FREE_ONE,
             IMAGE_OPENROUTER_API_KEY="image-key",
-            IMAGE_OPENROUTER_BASE_URL="https://image.example.com/api/v1"))
+            IMAGE_OPENROUTER_BASE_URL="https://image.example.com/api/v1")
         behavior = lambda req, n: _Resp(json.dumps(
             {"data": [{"b64_json": B64}]}))
         with _Capture(behavior) as cap:
-            uri = gw.generate_image("a cat", model=OR_FREE_ONE, discover=False)
+            uri = conn.generate_image("a cat", model=OR_LIVE_FREE)
         self.assertTrue(uri.startswith("data:image/png;base64,"))
-        r = cap.requests[0]
+        r = cap.requests[-1]
         self.assertEqual(r["url"], "https://image.example.com/api/v1/images")
         self.assertEqual(r["headers"].get("authorization"), "Bearer image-key")
 
     def test_missing_image_vars_fall_back_to_chat_key_and_base_url(self):
-        gw = build_astra_ai_gateway(_cfg(
-            GW_OPENROUTER_API_KEYS="chat-key",
-            GW_OPENROUTER_IMAGE_MODELS=OR_FREE_ONE))
+        conn = self._conn(GW_OPENROUTER_API_KEYS="chat-key")
         behavior = lambda req, n: _Resp(json.dumps(
             {"data": [{"b64_json": B64}]}))
         with _Capture(behavior) as cap:
-            gw.generate_image("a cat", model=OR_FREE_ONE, discover=False)
-        r = cap.requests[0]
+            conn.generate_image("a cat", model=OR_LIVE_FREE)
+        r = cap.requests[-1]
         self.assertEqual(r["url"], "https://openrouter.ai/api/v1/images")
         self.assertEqual(r["headers"].get("authorization"), "Bearer chat-key")
 

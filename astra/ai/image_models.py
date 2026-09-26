@@ -23,17 +23,16 @@ audit is reproducible instead of being a claim in a commit message.
 Audited 2026-09-25, RE-AUDITED 2026-09-26 against the providers' CURRENT
 official sources:
 
-USER-REQUESTED OVERRIDE (2026-09-26): on explicit user request four
-candidate ids are FORCE-INCLUDED in the FREE pool even though the strict
-audit below found them paid / deprecated / absent from the live catalog:
-``gemini-2.5-flash-image`` and the three OpenRouter ``:free`` ids
-(``black-forest-labs/flux-1-schnell:free``,
-``google/gemini-2.5-flash-image-preview:free``,
-``sourceful/riverflow-v2.5-pro:free``). Their exact ids are preserved and
-their spec is marked free_tier=TRUE, but this is a recorded, deliberate
-exception -- NOT a claim that the provider prices them at zero. A genuine
-upstream failure is reported and the serial fallback continues to the next
-FREE model.
+USER-REQUESTED OVERRIDE (2026-09-26, FINALIZED): ``gemini-2.5-flash-image``
+is the ONE remaining force-included candidate, kept as the dedicated Gemini
+provider model. Its exact id is preserved and its spec is marked
+free_tier=TRUE as a recorded, deliberate exception -- NOT a claim that the
+provider prices it at zero. The three OpenRouter ``:free`` ids that used to
+be force-included were REMOVED on 2026-09-26 after live re-verification of
+``https://openrouter.ai/api/v1/images/models`` proved none of them exists as
+a free image model (see the OpenRouter section and REJECTED_IMAGE_MODELS),
+so OpenRouter's active FREE pool is now empty. A genuine upstream failure is
+reported and the serial fallback continues to the next FREE model.
 
 * Cloudflare Workers AI -- https://developers.cloudflare.com/workers-ai/models/
   The free allocation is documented on
@@ -49,10 +48,11 @@ FREE model.
   are not on any paid-only exception list, so text-to-image stays
   free-tier usable. Kept models are the ones whose published input schema
   accepts a JSON ``{"prompt": ...}`` body (schema-input.json), i.e. the
-  ones Astra's Workers AI adapter can actually invoke. Spot-checked live on
-  2026-09-26: flux-1-schnell, stable-diffusion-xl-base-1.0 and
-  dreamshaper-8-lcm are still current in Cloudflare's own model-catalog
-  examples.
+  ones Astra's Workers AI adapter can actually invoke. Re-verified LIVE on
+  2026-09-26 against https://developers.cloudflare.com/workers-ai/models/:
+  all seven kept ids are still listed in Cloudflare's own catalog, and each
+  one's schema-input.json resolves and accepts a JSON ``prompt`` body (the
+  flux-2-* successors publish a multipart/form-data schema and stay out).
 
 * Google Gemini -- https://ai.google.dev/gemini-api/docs/pricing
   Every Gemini image model (``gemini-3.1-flash-image``,
@@ -71,13 +71,17 @@ FREE model.
   $0.015/image and CogView-4 at $0.01/image (no free tier) -> removed.
 
 * OpenRouter -- https://openrouter.ai/api/v1/images/models
-  The live catalog's ``:free`` variants all output text, and the image
-  models it lists are paid (``google/gemini-2.5-flash-image`` etc.), so the
-  strict audit found no free image model. EXCEPTION: the three ``:free``
-  candidates named in the request (``google/gemini-2.5-flash-image-preview
-  :free``, ``black-forest-labs/flux-1-schnell:free``,
-  ``sourceful/riverflow-v2.5-pro:free``) are force-included below; all other
-  OpenRouter image models stay out.
+  Re-verified LIVE on 2026-09-26 (GET /api/v1/images/models returned 55
+  image models): the catalog contains ZERO ``:free`` image models, and a
+  scan of the main ``/api/v1/models`` catalog found 17 ``:free`` models of
+  which NONE declares an image output modality. The active FREE pool is
+  therefore EMPTY. The three previously force-included ``:free`` ids are now
+  all recorded as rejected (see REJECTED_IMAGE_MODELS): two do not exist in
+  the live catalog at all, and the third's ``:free`` variant does not exist
+  while its paid base id (``sourceful/riverflow-v2.5-pro``) is priced at
+  $0.13/image. No paid model was substituted. OpenRouter's live-discovery
+  path is retained, so if OpenRouter ever publishes a genuinely free
+  image-output model it is picked up automatically; nothing is invented.
 
 * Groq, Cerebras, SambaNova, Cohere, Mistral -- no image-generation API path
   in this repository at all -> never image-capable.
@@ -355,33 +359,11 @@ _SPECS: tuple = (
               free_tier=FREE_TRUE, free_evidence=_USER_REQ_EVIDENCE,
               params=("prompt",)),
     # ── OpenRouter Image API (POST /api/v1/images) ────────────────────────
-    ImageSpec("openrouter", "black-forest-labs/flux-1-schnell:free",
-              PROTOCOL_OPENROUTER_IMAGES,
-              "user request 2026-09-26 (force-added FREE candidate)",
-              capabilities=(IMAGE_GENERATION,),
-              input_modalities=("text",),
-              output_modalities=("text", "image"),
-              sizes=("1024x1024",),
-              free_tier=FREE_TRUE, free_evidence=_USER_REQ_EVIDENCE,
-              params=("prompt",)),
-    ImageSpec("openrouter", "google/gemini-2.5-flash-image-preview:free",
-              PROTOCOL_OPENROUTER_IMAGES,
-              "user request 2026-09-26 (force-added FREE candidate)",
-              capabilities=(IMAGE_GENERATION,),
-              input_modalities=("text", "image"),
-              output_modalities=("text", "image"),
-              sizes=("1024x1024",),
-              free_tier=FREE_TRUE, free_evidence=_USER_REQ_EVIDENCE,
-              params=("prompt",)),
-    ImageSpec("openrouter", "sourceful/riverflow-v2.5-pro:free",
-              PROTOCOL_OPENROUTER_IMAGES,
-              "user request 2026-09-26 (force-added FREE candidate)",
-              capabilities=(IMAGE_GENERATION,),
-              input_modalities=("text",),
-              output_modalities=("text", "image"),
-              sizes=("1024x1024",),
-              free_tier=FREE_TRUE, free_evidence=_USER_REQ_EVIDENCE,
-              params=("prompt",)),
+    # No static OpenRouter entry: the live catalog (re-verified 2026-09-26)
+    # lists ZERO ``:free`` image-output models, so the active FREE pool is
+    # intentionally empty. A genuinely free model would still be picked up
+    # at runtime by ``AstraGatewayOpenRouter._discover_image_models`` -- the
+    # dynamic path the registry documents rather than a hard-coded guess.
 )
 
 
@@ -390,9 +372,11 @@ _SPECS: tuple = (
 # order, regardless of which provider serves it. The provider is NEVER a
 # grouping/batching unit -- a request tries model #1, then model #2, then
 # model #3, ... in exactly this order, crossing provider boundaries as often
-# as the list does (Gemini -> Cloudflare -> Cloudflare -> ... -> OpenRouter).
-# "Try every Cloudflare model, then every Gemini model, then every
-# OpenRouter model" is explicitly NOT the behaviour.
+# as the list does (Gemini -> Cloudflare -> Cloudflare -> ...). With
+# OpenRouter's active pool empty the list currently ends in Cloudflare, but
+# the rule is unchanged: the order is a single global sequence, never
+# grouped per provider ("try every Cloudflare model, then every Gemini
+# model" is explicitly NOT the behaviour).
 #
 # The order is a curated DEFAULT (not a health signal, not a liveness probe):
 #   1.  gemini-2.5-flash-image               native Google image output
@@ -403,9 +387,9 @@ _SPECS: tuple = (
 #   6.  @cf/bytedance/stable-diffusion-xl-lightning
 #   7.  @cf/lykon/dreamshaper-8-lcm
 #   8.  @cf/runwayml/stable-diffusion-v1-5-inpainting
-#   9.  google/gemini-2.5-flash-image-preview:free   (OpenRouter)
-#   10. black-forest-labs/flux-1-schnell:free        (OpenRouter)
-#   11. sourceful/riverflow-v2.5-pro:free            (OpenRouter)
+#   (No OpenRouter entry: its live catalog has zero FREE image models, so
+#   the active pool contributes nothing until a genuinely free one appears
+#   through live discovery.)
 #
 # Override the whole ordering with IMAGE_GENERATION_PRIORITY (or
 # GW_IMAGE_GENERATION_PRIORITY for the AI Gateway). The override is ALSO a
@@ -420,9 +404,6 @@ IMAGE_PRIORITY = (
     "@cf/bytedance/stable-diffusion-xl-lightning",
     "@cf/lykon/dreamshaper-8-lcm",
     "@cf/runwayml/stable-diffusion-v1-5-inpainting",
-    "google/gemini-2.5-flash-image-preview:free",
-    "black-forest-labs/flux-1-schnell:free",
-    "sourceful/riverflow-v2.5-pro:free",
 )
 
 _PRIORITY_INDEX = {mid: i for i, mid in enumerate(IMAGE_PRIORITY)}
@@ -441,9 +422,20 @@ _REJECT_PAID_BEDROCK = ("paid-only: Bedrock InvokeModel image models are "
                         "billed per image with no free tier")
 _REJECT_PAID_ZAI = ("paid-only: Z.AI prices GLM-Image $0.015/image and "
                     "CogView-4 $0.01/image; no free tier")
-_REJECT_OR_PAID = ("no free model: OpenRouter's catalog lists this image "
-                   "model as paid (its :free variants are text-output only; the "
-                   "three force-added :free ids are the recorded exception)")
+_REJECT_OR_PAID = ("no free model: OpenRouter's image catalog lists this "
+                   "model as paid (its ``:free`` variants are text-output "
+                   "only; live re-verification on 2026-09-26 found zero free "
+                   "image-output models, so nothing is substituted)")
+_REJECT_OR_ABSENT = (
+    "not in OpenRouter's live image catalog: GET "
+    "https://openrouter.ai/api/v1/images/models (re-verified 2026-09-26, 55 "
+    "image models, zero ``:free``) does not list this id at all -- it exists "
+    "neither as a free nor a paid image model")
+_REJECT_OR_NO_FREE_VARIANT = (
+    "no such free variant: OpenRouter lists this id only as a PAID image "
+    "model (pricing $0.13/image for the 1K tier, re-verified 2026-09-26); no "
+    "``:free`` image model exists in its live catalog, and a paid model is "
+    "never substituted into the FREE pool")
 _REJECT_TOGETHER_NOT_LIVE = (
     "not currently free: Together's own model page marks FLUX.1 [schnell] "
     "Free \"not available on Together's Serverless API\" / \"Launching "
@@ -483,8 +475,14 @@ REJECTED_IMAGE_MODELS: dict = {
     ("zai", "glm-image"): _REJECT_PAID_ZAI,
     ("zai", "cogview-4"): _REJECT_PAID_ZAI,
     ("zai", "cogview-4-250304"): _REJECT_PAID_ZAI,
-    # OpenRouter — the three requested :free ids are force-added (see the
-    # module docstring); every OTHER OpenRouter image model stays paid/out.
+    # OpenRouter — the live catalog (re-verified 2026-09-26 via GET
+    # /api/v1/images/models) has ZERO free image-output models. The three
+    # previously force-included ``:free`` ids were removed because none of
+    # them exists as a free image model; every OpenRouter image model stays
+    # paid/out, and the active FREE pool is empty (never a paid substitute).
+    ("openrouter", "google/gemini-2.5-flash-image-preview:free"): _REJECT_OR_ABSENT,
+    ("openrouter", "black-forest-labs/flux-1-schnell:free"): _REJECT_OR_ABSENT,
+    ("openrouter", "sourceful/riverflow-v2.5-pro:free"): _REJECT_OR_NO_FREE_VARIANT,
     ("openrouter", "google/gemini-2.5-flash-image"): _REJECT_OR_PAID,
     ("openrouter", "google/gemini-3.1-flash-image"): _REJECT_OR_PAID,
     ("openrouter", "google/gemini-3.1-flash-lite-image"): _REJECT_OR_PAID,

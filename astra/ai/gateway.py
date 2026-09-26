@@ -400,7 +400,8 @@ class _GatewayCompatibleConnection:
     def _attempt_count(self) -> int:
         return max(0, int(getattr(self, "max_retries", GW_MAX_RETRIES))) + 1
 
-    def _run(self, fn, *, pool: CredentialPool | None = None):
+    def _run(self, fn, *, pool: CredentialPool | None = None,
+             single_attempt: bool = False):
         """Run `fn(cred)` with a bounded number of attempts.
 
         A fresh credential is picked for every attempt, so a 429/auth
@@ -413,6 +414,12 @@ class _GatewayCompatibleConnection:
         original, informative error is re-raised rather than a generic
         "no healthy credential" — failover reporting stays truthful.
 
+        ``single_attempt``: make EXACTLY one provider attempt, with no
+        same-model retry even for a retryable 429/5xx. Image generation sets
+        this: its serial fallback gives each (provider, model) exactly one
+        attempt per user request, so a rate limit must advance to the NEXT
+        image model rather than spend extra quota on the same one.
+
         ``pool``: which CredentialPool `_pick()`/`_done()` should use for the
         duration of this call (defaults to the connection's normal chat
         pool). Image generation passes `self.image_pool` so a dedicated
@@ -421,7 +428,7 @@ class _GatewayCompatibleConnection:
         prev = getattr(self._tl_pool, "pool", None)
         self._tl_pool.pool = pool or self.pool
         try:
-            attempts = self._attempt_count()
+            attempts = 1 if single_attempt else self._attempt_count()
             last = None
             for attempt in range(attempts):
                 cred = self._pick()
@@ -630,7 +637,7 @@ class _GatewayCompatibleConnection:
             self._done(cred)
             return data
 
-        data = self._run(once, pool=self.image_pool)
+        data = self._run(once, pool=self.image_pool, single_attempt=True)
         uri = image_result_to_data_uri(data)
         if not uri:
             err = ProviderError(
@@ -725,7 +732,7 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
             self._done(cred)
             return data
 
-        data = self._run(once, pool=self.image_pool)
+        data = self._run(once, pool=self.image_pool, single_attempt=True)
         uri = self._inline_image(data)
         if not uri:
             err = ProviderError(
@@ -852,7 +859,7 @@ class AstraGatewayCloudflare(_GatewayCompatibleConnection):
             self._done(cred)
             return raw
 
-        raw = self._run(once, pool=self.image_pool)
+        raw = self._run(once, pool=self.image_pool, single_attempt=True)
         uri = ""
         if raw[:1] == b"{":
             try:
@@ -984,7 +991,7 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
             self._done(cred)
             return data
 
-        data = self._run(once, pool=self.image_pool)
+        data = self._run(once, pool=self.image_pool, single_attempt=True)
         uri = image_result_to_data_uri(data)
         if not uri:
             err = ProviderError(
@@ -1383,7 +1390,7 @@ def _build_connection(cls, config=None):
             self._done(cred)
             return data
 
-        data = self._run(once)
+        data = self._run(once, single_attempt=True)
         uri = image_result_to_data_uri(data)
         if not uri:
             err = ProviderError(

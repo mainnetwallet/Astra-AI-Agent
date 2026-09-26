@@ -1657,13 +1657,29 @@ class AstraRouter:
                     bucket.clear()
                 elif isinstance(bucket, int):
                     by_name[name] = 0
+        if self.shared_health is not None:
+            self.shared_health.invalidate(canonical_provider(name))
 
     def reset_all_health(self) -> None:
-        """reset_health() for every provider — used before a "test all" run
-        so each provider's numbers reflect only this run, not history piled
-        up from every previous test."""
+        """Reset every provider plus the shared manual-health cache.
+
+        This starts a genuinely fresh Test All run. The cache is cleared once
+        here; the individual provider workers do NOT clear it again, so a
+        simultaneous Gateway probe can still reuse the Provider probe.
+        """
         for p in self.providers:
-            self.reset_health(getattr(p, "name", "?"))
+            name = getattr(p, "name", "?")
+            with self._lock:
+                self._down.discard(name)
+                self._calls[name] = 0
+                for by_name in (self._errors, self._latency):
+                    bucket = by_name.get(name)
+                    if isinstance(bucket, list):
+                        bucket.clear()
+                    elif isinstance(bucket, int):
+                        by_name[name] = 0
+        if self.shared_health is not None:
+            self.shared_health.invalidate()
 
     def _credential_count(self, provider) -> int:
         pool = getattr(provider, "pool", None)

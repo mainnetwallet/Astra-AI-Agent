@@ -2429,7 +2429,16 @@ async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
     (modelId) => post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
       .then((res) => (res.ok && res.data) ? res.data :
         { model: modelId, ok: false, latency_ms: 0, error: res.error || "test failed" }),
-    (result) => { bumpCounts(result.ok); _runningNoteLocal(name, result); }, !!resume);
+    (result) => {
+      bumpCounts(result.ok);
+      _runningNoteLocal(name, result);
+      if (BULK_HEALTH_RUN.active) {
+        const token = _bulkModelToken(name, result.model);
+        BULK_HEALTH_RUN.providerModels.add(token);
+        BULK_HEALTH_RUN.providerResults.set(token, result);
+        _flushBulkGatewayResult(name, result.model, result);
+      }
+    }, !!resume);
 }
 
 async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey, tableEl, onResult, resumeRows) {

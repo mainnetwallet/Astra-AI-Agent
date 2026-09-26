@@ -2071,6 +2071,12 @@ function modelHealthRowsHtml(results) {
         `<span class="model-name">${esc(m.model)}</span>` +
         `<div class="key-results">${m.keys.map(keyChipHtml).join("")}</div></div>`;
     }
+    if (m.waiting) {
+      return `<div class="model-health-row pending" data-model-row="${esc(m.model)}">` +
+        `<span class="status-dot warn"></span>` +
+        `<span class="model-name">${esc(m.model)}</span>` +
+        `<span class="model-latency">⏳ waiting for Provider result…</span></div>`;
+    }
     if (m.pending) {
       return `<div class="model-health-row pending" data-model-row="${esc(m.model)}">` +
         `<span class="status-dot warn"></span>` +
@@ -2305,6 +2311,7 @@ loaders.providers = async function () {
         await post("/api/v1/providers/reset-all-health");
         BULK_HEALTH_RUN.active = true;
         BULK_HEALTH_RUN.providerModels.clear();
+        BULK_HEALTH_RUN.providerResults.clear();
         BULK_HEALTH_RUN.deferredGatewayResults.clear();
         try {
           await Promise.allSettled([
@@ -2327,7 +2334,7 @@ loaders.providers = async function () {
       }
     };
   }
-  renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
+  renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null, provs || {});
   renderHealthKeySelector();
   _maybeResumeRuns();
   _syncRunningUi();
@@ -2454,12 +2461,6 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
       .then((result) => {
         const row = rows.find((r) => r.model === modelId);
         if (!row) return;
-        if (bulk && _bulkGatewayShouldWait(key, modelId)) {
-          BULK_HEALTH_RUN.deferredGatewayResults.set(key, {
-            token: _bulkModelToken(_bulkProviderNameForGateway(key), modelId), result
-          });
-          return;
-        }
         row.keys.forEach((slot) => Object.assign(slot, {
           pending: false,
           waiting: false,
@@ -2472,7 +2473,9 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
         }));
         repaint(row);
         if (BULK_HEALTH_RUN.active) {
-          BULK_HEALTH_RUN.providerModels.add(_bulkModelToken(name, modelId));
+          const token = _bulkModelToken(name, modelId);
+          BULK_HEALTH_RUN.providerModels.add(token);
+          BULK_HEALTH_RUN.providerResults.set(token, result);
           _flushBulkGatewayResult(name, modelId, result);
         }
         if (onResult) onResult(result);
@@ -2506,7 +2509,12 @@ const GATEWAY_KEYS = {};
 // Bulk Test All keeps matching Gateway rows in Waiting until the Provider
 // result for the same provider+model has been saved. The Gateway probe
 // may run in parallel and reuse the shared result, but its UI waits.
-const BULK_HEALTH_RUN = { active: false, providerModels: new Set(), deferredGatewayResults: new Map() };
+const BULK_HEALTH_RUN = {
+  active: false,
+  providerModels: new Set(),
+  providerResults: new Map(),
+  deferredGatewayResults: new Map()
+};
 function _bulkProviderNameForGateway(key) { return String(key || "").replace(/^astra-gw-/, ""); }
 function _bulkModelToken(provider, model) { return provider + "\0" + model; }
 function _bulkGatewayShouldWait(key, modelId) {
@@ -2533,10 +2541,10 @@ function _applyGatewayBulkResult(key, modelId, result) {
 }
 function _flushBulkGatewayResult(provider, modelId, result) {
   const token = _bulkModelToken(provider, modelId);
-  for (const [key, deferred] of BULK_HEALTH_RUN.deferredGatewayResults) {
+  for (const [deferredKey, deferred] of BULK_HEALTH_RUN.deferredGatewayResults) {
     if (deferred.token !== token) continue;
-    _applyGatewayBulkResult(key, modelId, result);
-    BULK_HEALTH_RUN.deferredGatewayResults.delete(key);
+    _applyGatewayBulkResult(deferred.gatewayKey, modelId, result);
+    BULK_HEALTH_RUN.deferredGatewayResults.delete(deferredKey);
   }
 }
 
@@ -2611,18 +2619,30 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
   const rows = models.map((modelId) => {
     const prior = existing[modelId];
     if (resume && prior && Array.isArray(prior.keys)) return prior;
+    const token = _bulkModelToken(_bulkProviderNameForGateway(key), modelId);
     const sharedWaiting = bulk && _bulkGatewayShouldWait(key, modelId);
+    const sharedResult = sharedWaiting ? BULK_HEALTH_RUN.providerResults.get(token) : null;
+    const restoredResult = resume && prior && prior.pending === false
+      ? { ok: !!prior.ok, latency_ms: prior.latency_ms || 0, error: prior.error || "" }
+      : null;
+    const immediateResult = sharedResult || restoredResult;
+    if (sharedWaiting && !immediateResult) {
+      BULK_HEALTH_RUN.deferredGatewayResults.set(
+        key + "\0" + modelId, { gatewayKey: key, token });
+    }
     return {
       model: modelId,
       keys: keys.map((k) => ({
         key_id: k.key_id,
         label: k.label,
-        pending: !sharedWaiting && !(resume && prior && prior.pending === false) && k.key_id === chosen,
-        waiting: sharedWaiting || (!(resume && prior && prior.pending === false) && k.key_id !== chosen),
-        ...(resume && prior && prior.pending === false ? {
-          ok: !!prior.ok,
-          latency_ms: prior.latency_ms || 0,
-          error: prior.error || ""
+        pending: !immediateResult && !sharedWaiting && k.key_id === chosen,
+        waiting: !immediateResult && (sharedWaiting || k.key_id !== chosen),
+        ...(immediateResult ? {
+          ok: !!immediateResult.ok,
+          latency_ms: immediateResult.latency_ms || 0,
+          error: immediateResult.error || "",
+          tested_at: new Date().toLocaleString(),
+          shared: true
         } : {})
       })),
     };
@@ -2636,7 +2656,7 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
     if (node) node.outerHTML = modelHealthRowsHtml([row]);
   };
   const probeModels = rows.filter((r) =>
-    r.keys.some((k) => k.pending) || (bulk && _bulkGatewayShouldWait(key, r.model)))
+    r.keys.some((k) => k.pending))
     .map((r) => r.model);
   const probes = probeModels.map((modelId) =>
     post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
@@ -2681,7 +2701,7 @@ async function runGatewayConnectionTest(key, btn, card) {
   }
 }
 
-function renderGatewayCard(core) {
+function renderGatewayCard(core, providerData = {}) {
   const card = $("#gateway-card");
   if (!card) return;
   // Same persisted hide/show restore as loaders.providers — must happen
@@ -2723,7 +2743,23 @@ function renderGatewayCard(core) {
     // instead of leaving this connection's table empty until someone
     // clicks Test again.
     if (!(GATEWAY_MODEL_RESULTS[key] || []).length) {
-      GATEWAY_MODEL_RESULTS[key] = savedGatewayModelRows(c.models || [], c.model_health || {});
+      const providerName = _bulkProviderNameForGateway(key);
+      const provider = (providerData || {})[providerName] || {};
+      const providerSaved = provider.key_results || {};
+      const providerRows = Object.keys(providerSaved).length
+        ? savedKeyRows(c.models || [], c.keys || [], providerSaved)
+        : [];
+      if (providerRows.length) {
+        GATEWAY_MODEL_RESULTS[key] = providerRows.map((row) => {
+          const tested = (row.keys || []).filter((k) => k.ok === true || k.ok === false);
+          if (!tested.length) return { model: row.model, untested: true };
+          const winner = tested.find((k) => k.ok === true) || tested[0];
+          return { model: row.model, ok: !!winner.ok, latency_ms: winner.latency_ms || 0,
+                   error: winner.error || "", shared: true };
+        });
+      } else {
+        GATEWAY_MODEL_RESULTS[key] = savedGatewayModelRows(c.models || [], c.model_health || {});
+      }
     }
     LAST_GATEWAY_DATA[key] = c;
     // Test still running when the page was refreshed: models whose saved

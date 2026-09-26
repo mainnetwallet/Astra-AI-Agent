@@ -1966,99 +1966,21 @@ class AstraAIGateway:
     _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
 
     # -- image generation: eligible targets + failover -----------------------
+    #
+    # NOTE: image-model-pool construction is OWNED by `ImageRouter` (see
+    # astra/ai/image_router.py, `ImageRouter._catalog` / `.build_targets`).
+    # These two methods are kept ONLY as thin, backward-compatible
+    # delegating wrappers for existing callers/tests that still hold a
+    # Gateway reference and call `gateway.image_targets(...)` /
+    # `gateway._image_catalog(...)` directly -- the Gateway itself
+    # constructs NO image model pool of its own.
     def _image_catalog(self, *, discover: bool = True) -> list:
-        """(connection, Model) for every image-generation model the live
-        connections can actually serve. OpenRouter merges its official
-        discovery API; every other connection uses its configured list.
-        Only models the evidence registry recognizes are included."""
-        from astra.ai.gateway_routing import GATEWAY_PROVIDER_SHORT
-        from astra.ai.image_models import (FREE_TRUE, PROTOCOL_OPENROUTER_IMAGES,
-                                           documented_image_models,
-                                           image_spec, make_image_spec)
-        from astra.ai.models import Model, metadata_for
-        out = []
-        for conn in self.connections:
-            short = GATEWAY_PROVIDER_SHORT.get(getattr(conn, "name", ""),
-                                               getattr(conn, "name", ""))
-            mids = []
-            fn = getattr(conn, "list_image_models", None)
-            if callable(fn):
-                try:
-                    mids = fn(discover=discover) or []
-                except Exception:
-                    mids = []
-            if not mids:
-                mids = list(getattr(conn, "image_models", None) or [])
-            if not mids:
-                # No explicit env list for this connection: fall back to the
-                # registry's documented FREE image models for this provider,
-                # so the configured pool is used out of the box. A non-empty
-                # env list always wins (requirement: configurable without
-                # source edits).
-                mids = list(documented_image_models(short))
-            # A provider's LIVE discovery response is authoritative for the
-            # exact image model ids it returns, even when the static registry
-            # has no entry yet (spec section 11: OpenRouter).
-            live = set()
-            live_fn = getattr(conn, "live_image_models", None)
-            if discover and callable(live_fn):
-                try:
-                    live = set(live_fn(discover=discover) or [])
-                except Exception:
-                    live = set()
-            for mid in mids:
-                spec = image_spec(short, mid)
-                if spec is None and mid in live:
-                    # Live-discovered ids are only ever accepted when the
-                    # provider's own API reported them as FREE image models
-                    # (OpenRouter's ":free" variants); otherwise a paid model
-                    # could sneak into the free pool.
-                    spec = make_image_spec(
-                        short, mid, PROTOCOL_OPENROUTER_IMAGES,
-                        capabilities=("image_generation",),
-                        input_modalities=("text", "image"),
-                        free_tier=FREE_TRUE,
-                        free_evidence="provider live catalog: free image output")
-                if spec is None or not spec.is_free:
-                    continue
-                meta = metadata_for(mid, short, image_spec_override=spec)
-                meta.pop("provider", None)
-                if "image" not in (meta.get("output_modalities") or []):
-                    continue
-                out.append((conn, Model(short, mid, **meta)))
-        return out
+        return self.image_router._catalog(discover=discover)
 
     def image_targets(self, *, editing: bool = False,
                       discover: bool = True) -> list:
-        """The eligible FREE image targets, in their deterministic serial
-        order.
-
-        Deliberately NO health filter and NO health-based ranking: image
-        generation has no proactive health check, so a model is only ever
-        considered "unavailable" after the real generation request for the
-        current user turn actually failed. The order comes from
-        astra.ai.image_models' curated priority, overridable per deployment
-        with the CANONICAL ``GW_IMAGE_GENERATION_PRIORITY``. The legacy
-        ``IMAGE_GENERATION_PRIORITY`` (no ``GW_`` prefix) is consulted only
-        when the canonical var is unset/empty -- a documented backward-
-        compatibility fallback, not a second independently-configurable
-        priority list.
-        """
-        from astra.ai.gateway_routing import (
-            eligible_image_generation_targets, rank_image_targets)
-        from astra.ai.image_models import (GATEWAY_IMAGE_PRIORITY_ENV,
-                                           IMAGE_PRIORITY_ENV)
-        catalog = self._image_catalog(discover=discover)
-        targets = eligible_image_generation_targets(
-            catalog, self.routing_state, editing=editing)
-        preferred = []
-        if self.config is not None:
-            try:
-                preferred = (self.config.getlist(GATEWAY_IMAGE_PRIORITY_ENV)
-                             or self.config.getlist(IMAGE_PRIORITY_ENV))
-            except Exception:
-                preferred = []
-        return rank_image_targets(targets, preferred_ids=preferred)
+        return self.image_router.build_targets(editing=editing,
+                                               discover=discover)
 
     @staticmethod
     def _image_failure_reason(exc) -> str:

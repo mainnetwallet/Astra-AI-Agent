@@ -223,7 +223,10 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
         # supplies one eligible target regardless of capability -- the same
         # pattern tests.test_image_provider_api_contract uses -- to prove
         # the *editing* category specifically (not just image_generation)
-        # reaches the success event.
+        # reaches the success event. ImageRouter -- not the host -- now owns
+        # target selection (`build_targets`/`_catalog`), so the fixed target
+        # list is injected by overriding `build_targets` on the router
+        # instance rather than an `image_targets()` method on the host.
         from astra.ai.image_router import ImageRouter
 
         cf = _FakeConn(CLOUDFLARE[0], CLOUDFLARE[1], image_models=[FLUX])
@@ -239,10 +242,6 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
             last_model = ""
 
             @staticmethod
-            def image_targets(*, editing=False, discover=True):
-                return [(cf, target, None)]
-
-            @staticmethod
             def _image_failure_reason(exc):
                 return str(exc)
 
@@ -250,7 +249,10 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
             def _emit(kind, **data):
                 bus.emit(kind, **data)
 
-        ImageRouter(_Host()).generate("edit this photo", editing=True)
+        router = ImageRouter(_Host())
+        router.build_targets = lambda *, editing=False, discover=True: [
+            (cf, target, None)]
+        router.generate("edit this photo", editing=True)
         for kind in ("astra_gateway.request", "astra_gateway.success"):
             rows = _data(bus, kind)
             self.assertTrue(rows, kind)

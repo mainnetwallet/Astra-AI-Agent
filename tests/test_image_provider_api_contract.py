@@ -437,15 +437,15 @@ class TestProviderAdapterCredentialFailure(unittest.TestCase):
                          output_modalities=["text", "image"])]
 
         class _Host:
-            """Minimal Gateway-shaped host: supplies the eligible image
-            targets and the event sink, but performs no HTTP itself."""
+            """Minimal Gateway-shaped host: supplies the event sink, but
+            performs no HTTP itself. ImageRouter -- not the host -- now owns
+            target selection (`build_targets`/`_catalog`), so the fixed
+            eligible-target list is injected by overriding `build_targets`
+            on the router instance below rather than an `image_targets()`
+            method here."""
             last_attempts = 0
             last_connection = ""
             last_model = ""
-
-            @staticmethod
-            def image_targets(*, editing=False, discover=True):
-                return [(a, m, None) for m in targets]
 
             @staticmethod
             def _image_failure_reason(exc):
@@ -458,7 +458,11 @@ class TestProviderAdapterCredentialFailure(unittest.TestCase):
         behavior = lambda req, n: _http_error(req.full_url, 401)
         with _Capture(behavior) as cap:
             with self.assertRaises(ProviderError):
-                ImageRouter(_Host()).generate("akta cat photo banao")
+                router = ImageRouter(_Host())
+                router.build_targets = (
+                    lambda *, editing=False, discover=True:
+                    [(a, m, None) for m in targets])
+                router.generate("akta cat photo banao")
         self.assertEqual(cap.count, 1)
         errs = _data(bus, "astra_gateway.error")
         self.assertEqual(len(errs), 2)

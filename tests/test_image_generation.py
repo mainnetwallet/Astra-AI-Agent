@@ -931,6 +931,27 @@ class TestSerialFallbackAndGlobalOrdering(unittest.TestCase):
         ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
         self.assertEqual(ids[:2], [LUCID, GEMINI_IMG])
 
+    def test_legacy_priority_var_is_a_fallback_when_canonical_is_unset(self):
+        """IMAGE_GENERATION_PRIORITY (no GW_ prefix) is a documented legacy
+        fallback alias for GW_IMAGE_GENERATION_PRIORITY, consulted only when
+        the canonical var is unset/empty -- not a second, independently
+        configurable priority list."""
+        gem = self._gemini()
+        cf = self._cf(models=[LUCID])
+        gw = self._gw(gem, cf, config=_cfg(
+            IMAGE_GENERATION_PRIORITY=LUCID + "," + GEMINI_IMG))
+        ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
+        self.assertEqual(ids[:2], [LUCID, GEMINI_IMG])
+
+    def test_canonical_priority_var_wins_over_legacy_when_both_set(self):
+        gem = self._gemini()
+        cf = self._cf(models=[LUCID])
+        gw = self._gw(gem, cf, config=_cfg(
+            GW_IMAGE_GENERATION_PRIORITY=GEMINI_IMG,
+            IMAGE_GENERATION_PRIORITY=LUCID))
+        ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
+        self.assertEqual(ids[0], GEMINI_IMG)
+
     def test_env_list_changes_the_pool_without_code_edits(self):
         conn = _FakeConn("astra-gw-cloudflare", "cloudflare",
                          image_models=[PHOENIX])

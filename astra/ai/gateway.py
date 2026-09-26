@@ -1965,19 +1965,25 @@ class AstraAIGateway:
         generation has no proactive health check, so a model is only ever
         considered "unavailable" after the real generation request for the
         current user turn actually failed. The order comes from
-        astra.ai.image_models' curated priority (overridable per deployment
-        with GW_IMAGE_GENERATION_PRIORITY).
+        astra.ai.image_models' curated priority, overridable per deployment
+        with the CANONICAL ``GW_IMAGE_GENERATION_PRIORITY``. The legacy
+        ``IMAGE_GENERATION_PRIORITY`` (no ``GW_`` prefix) is consulted only
+        when the canonical var is unset/empty -- a documented backward-
+        compatibility fallback, not a second independently-configurable
+        priority list.
         """
         from astra.ai.gateway_routing import (
             eligible_image_generation_targets, rank_image_targets)
-        from astra.ai.image_models import GATEWAY_IMAGE_PRIORITY_ENV
+        from astra.ai.image_models import (GATEWAY_IMAGE_PRIORITY_ENV,
+                                           IMAGE_PRIORITY_ENV)
         catalog = self._image_catalog(discover=discover)
         targets = eligible_image_generation_targets(
             catalog, self.routing_state, editing=editing)
         preferred = []
         if self.config is not None:
             try:
-                preferred = self.config.getlist(GATEWAY_IMAGE_PRIORITY_ENV)
+                preferred = (self.config.getlist(GATEWAY_IMAGE_PRIORITY_ENV)
+                             or self.config.getlist(IMAGE_PRIORITY_ENV))
             except Exception:
                 preferred = []
         return rank_image_targets(targets, preferred_ids=preferred)

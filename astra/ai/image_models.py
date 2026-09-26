@@ -211,19 +211,24 @@ IMAGE_MODELS_ENV = {
 }
 
 # Gateway (GW_*) equivalents — the Gateway keeps its own, fully independent
-# model lists (see astra/ai/gateway.py).
-#: env var holding the optional, comma-separated serial-fallback order (the
-#: in-repo ``IMAGE_PRIORITY`` order is the deterministic default).
-IMAGE_PRIORITY_ENV = "IMAGE_GENERATION_PRIORITY"
+# model lists, read directly by each connection class's own
+# ``image_models_env`` attribute (see astra/ai/gateway.py, e.g.
+# ``AstraGatewayCloudflare.image_models_env = "GW_CLOUDFLARE_IMAGE_MODELS"``).
+# There is deliberately no dict mirroring those names here: a
+# provider-name -> env-var mapping like ``IMAGE_MODELS_ENV`` below would be
+# dead weight for the Gateway, since each connection class is already the
+# single source of truth for its own env var name.
+#
+#: CANONICAL env var for the deterministic, comma-separated serial-fallback
+#: priority order used by the Gateway's ImageRouter (the in-repo
+#: ``IMAGE_PRIORITY`` tuple above is the default when unset).
 GATEWAY_IMAGE_PRIORITY_ENV = "GW_IMAGE_GENERATION_PRIORITY"
-
-GATEWAY_IMAGE_MODELS_ENV = {
-    "astra-gw-gemini": "GW_GEMINI_IMAGE_MODELS",
-    "astra-gw-cloudflare": "GW_CLOUDFLARE_IMAGE_MODELS",
-    "astra-gw-openrouter": "GW_OPENROUTER_IMAGE_MODELS",
-    "astra-gw-bedrock": "GW_BEDROCK_IMAGE_MODELS",
-    "astra-gw-zai": "GW_ZAI_IMAGE_MODELS",
-}
+#: Legacy fallback alias for ``GATEWAY_IMAGE_PRIORITY_ENV``, consulted only
+#: when the canonical ``GW_*`` var is unset/empty (see
+#: ``AstraAIGateway.image_targets``). Predates the ``GW_`` prefix convention;
+#: kept for backward compatibility rather than removed, since a deployment
+#: may already set it.
+IMAGE_PRIORITY_ENV = "IMAGE_GENERATION_PRIORITY"
 
 
 @dataclass(frozen=True)

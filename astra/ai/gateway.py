@@ -1673,8 +1673,7 @@ class AstraAIGateway:
         last_error = ""
         attempts = 0
         self._emit("astra_gateway.request", category="explicit_model",
-                   model=model or "", gateway_only=self._gateway_only_model(
-                       self.connections[0].name, model) if self.connections else False,
+                   model=model or "", gateway_only=self._gateway_only_model("", model),
                    op=op, trace=trace,
                    input=_gw_log_input(messages))
         for conn in self.connections:

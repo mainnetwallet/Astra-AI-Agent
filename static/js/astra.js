@@ -213,6 +213,7 @@ function chatWaitForReply(gen, conversationId) {
   chatTyping();
   const started = Date.now();
   const finish = () => {
+    hideUploadIndicator();
     if (gen !== CHAT.viewGen) return;   // a later view already owns this state
     chatStatusFinish();
     delete send.dataset.busy;

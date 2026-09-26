@@ -1683,6 +1683,20 @@ const PROVIDER_MODELS = {};
 // {key_id, label:"key 1", healthy, in_cooldown, last_error}). Read by the
 // per-key test so it knows which keys to fire every model through.
 const PROVIDER_KEYS = {};
+const HEALTH_KEY_SELECTION_KEY = "astra_health_test_key_selection";
+const HEALTH_KEY_SELECTION = { providers: {}, gateway: {} };
+function _loadHealthKeySelection() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HEALTH_KEY_SELECTION_KEY) || "{}");
+    Object.assign(HEALTH_KEY_SELECTION.providers, saved.providers || {});
+    Object.assign(HEALTH_KEY_SELECTION.gateway, saved.gateway || {});
+  } catch (_) {}
+}
+function _saveHealthKeySelection() {
+  try { localStorage.setItem(HEALTH_KEY_SELECTION_KEY, JSON.stringify(HEALTH_KEY_SELECTION)); }
+  catch (_) {}
+}
+_loadHealthKeySelection();
 // Providers/connections temporarily revealed by their own Test click while
 // the main Hide/Show toggle is set to hidden — session-only (never saved to
 // localStorage), so a real page refresh drops back to fully hidden per the
@@ -1901,6 +1915,94 @@ function savedGatewayModelRows(models, modelHealth) {
   return any ? rows : [];
 }
 
+function _healthKeys(kind, name) {
+  return kind === "gateway" ? (GATEWAY_KEYS[name] || []) : (PROVIDER_KEYS[name] || []);
+}
+function _ensureHealthKey(kind, name) {
+  const keys = _healthKeys(kind, name);
+  if (!keys.length) return "";
+  const map = kind === "gateway" ? HEALTH_KEY_SELECTION.gateway : HEALTH_KEY_SELECTION.providers;
+  if (map[name] && keys.some((k) => k.key_id === map[name])) return map[name];
+  map[name] = keys[0].key_id;
+  _saveHealthKeySelection();
+  return map[name];
+}
+function _selectedHealthKey(kind, name) { return _ensureHealthKey(kind, name); }
+function _healthKeyLabel(kind, name) {
+  const id = _selectedHealthKey(kind, name);
+  const key = _healthKeys(kind, name).find((k) => k.key_id === id);
+  return key ? key.label : "Key 1";
+}
+function _setAllHealthKeys(position) {
+  for (const [name, keys] of Object.entries(PROVIDER_KEYS)) {
+    if (keys.length) HEALTH_KEY_SELECTION.providers[name] =
+      position === "last" ? keys[keys.length - 1].key_id : keys[0].key_id;
+  }
+  for (const [name, keys] of Object.entries(GATEWAY_KEYS)) {
+    if (keys.length) HEALTH_KEY_SELECTION.gateway[name] =
+      position === "last" ? keys[keys.length - 1].key_id : keys[0].key_id;
+  }
+  _saveHealthKeySelection();
+  renderHealthKeySelector();
+}
+function renderHealthKeySelector() {
+  const panel = $("#health-key-selector");
+  const button = $("#btn-health-key-selector");
+  if (!panel || !button) return;
+  const providers = Object.entries(PROVIDER_KEYS).filter(([, keys]) => keys.length);
+  const gateways = Object.entries(GATEWAY_KEYS).filter(([, keys]) => keys.length);
+  const all = providers.concat(gateways);
+  if (!all.length) { button.textContent = "🔑 Test key"; panel.hidden = true; return; }
+  const labels = providers.map(([n]) => _healthKeyLabel("provider", n))
+    .concat(gateways.map(([n]) => _healthKeyLabel("gateway", n)));
+  const same = labels.length > 0 && labels.every((x) => x === labels[0]);
+  button.textContent = "🔑 Test key: " + (same ? labels[0] : "Custom");
+  const row = (kind, name, keys) => {
+    const selected = _selectedHealthKey(kind, name);
+    const label = kind === "gateway" ? (GATEWAY_LABELS[name] || name) : name;
+    return '<div class="health-key-selector-row"><span>' + esc(label) +
+      '</span><select data-health-key-kind="' + kind +
+      '" data-health-key-name="' + esc(name) + '">' +
+      keys.map((k) => '<option value="' + esc(k.key_id) + '"' +
+        (k.key_id === selected ? ' selected' : '') + '>' +
+        esc(k.label) + '</option>').join("") +
+      '</select></div>';
+  };
+  panel.innerHTML =
+    '<div class="health-key-selector-head"><b>Select test key</b>' +
+    '<button type="button" class="btn mini" data-health-key-shortcut="first">1st key</button>' +
+    '<button type="button" class="btn mini" data-health-key-shortcut="last">Last key</button>' +
+    '<span class="muted">Only the selected key makes the real call; other key rows reuse the result.</span></div>' +
+    '<div class="health-key-selector-grid">' +
+    providers.map(([n, keys]) => row("provider", n, keys)).join("") +
+    gateways.map(([n, keys]) => row("gateway", n, keys)).join("") +
+    '</div>';
+  if (!panel.dataset.hooked) {
+    panel.dataset.hooked = "1";
+    panel.addEventListener("change", (ev) => {
+      const sel = ev.target.closest("[data-health-key-kind]");
+      if (!sel) return;
+      const map = sel.dataset.healthKeyKind === "gateway"
+        ? HEALTH_KEY_SELECTION.gateway : HEALTH_KEY_SELECTION.providers;
+      map[sel.dataset.healthKeyName] = sel.value;
+      _saveHealthKeySelection();
+      renderHealthKeySelector();
+    });
+    panel.addEventListener("click", (ev) => {
+      const b = ev.target.closest("[data-health-key-shortcut]");
+      if (b) _setAllHealthKeys(b.dataset.healthKeyShortcut);
+    });
+  }
+}
+if ($("#btn-health-key-selector")) {
+  $("#btn-health-key-selector").addEventListener("click", () => {
+    const panel = $("#health-key-selector");
+    if (!panel) return;
+    renderHealthKeySelector();
+    panel.hidden = !panel.hidden;
+  });
+}
+
 function modelHealthRowsHtml(results) {
   if (!results || !results.length) {
     return "";
@@ -2026,6 +2128,7 @@ loaders.providers = async function () {
     const modelCount = p.models ? p.models.length : 0;
     PROVIDER_MODELS[n] = p.models || [];
     PROVIDER_KEYS[n] = p.keys || [];
+    _ensureHealthKey("provider", n);
     LAST_PROVIDER_DATA[n] = p;
     // First paint after a reload: show the last saved per-key results.
     if (!(PROVIDER_MODEL_RESULTS[n] || []).length && (p.keys || []).length) {
@@ -2164,6 +2267,7 @@ loaders.providers = async function () {
     };
   }
   renderGatewayCard(r.ok ? (r.data.astra_ai_gateway || null) : null);
+  renderHealthKeySelector();
   _maybeResumeRuns();
   _syncRunningUi();
 };
@@ -2311,6 +2415,7 @@ const GATEWAY_MODEL_RESULTS = {};   // connection name -> [{model, ok, latency_m
 // role as PROVIDER_MODELS, read by the per-model test instead of
 // re-fetching.
 const GATEWAY_MODELS = {};
+const GATEWAY_KEYS = {};
 
 // Best-average-latency across a connection's tracked models — used purely
 // to *display* connections fastest/healthiest first, mirroring how the
@@ -2421,6 +2526,8 @@ function renderGatewayCard(core) {
     const modelCount = (c.models || []).length;
     const models = modelCount ? `${modelCount} model(s)` : "no models";
     GATEWAY_MODELS[key] = c.models || [];
+    GATEWAY_KEYS[key] = c.keys || [];
+    _ensureHealthKey("gateway", key);
     // First paint after a reload: show the last saved per-model results
     // (same idea as PROVIDER_MODEL_RESULTS restoration in loaders.providers),
     // instead of leaving this connection's table empty until someone

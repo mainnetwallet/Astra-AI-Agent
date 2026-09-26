@@ -1359,8 +1359,20 @@ class ChatPipeline:
 
     def _artifacts(self, text: str, message: str) -> list:
         try:
-            return extract_artifacts(text, self.artifact_dir,
-                                     detect_output_type(message))
+            artifacts = extract_artifacts(
+                text, self.artifact_dir, detect_output_type(message))
+            # Artifact.to_dict() deliberately omits filesystem paths from the
+            # public payload. Keep an internal-only path so a generated image
+            # can become the source image for a later conversational edit.
+            for art in artifacts:
+                if art.get("artifact_type") == "image" and art.get("id"):
+                    filename = str(art.get("filename") or "")
+                    path = os.path.join(
+                        self.artifact_dir,
+                        f"{art['id']}_{os.path.basename(filename)}")
+                    if os.path.isfile(path):
+                        art["_storage_path"] = path
+            return artifacts
         except Exception:
             return []
 

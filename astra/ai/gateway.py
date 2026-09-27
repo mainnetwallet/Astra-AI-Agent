@@ -1055,7 +1055,7 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
                     if not outs or "image" not in outs:
                         continue
                     # OpenRouter marks its free variants with a ":free"
-                    # suffix; anything else is paid and must not enter the
+                    # suffix; anything else is not eligible for the
                     # FREE image pool.
                     if not mid.endswith(":free"):
                         continue

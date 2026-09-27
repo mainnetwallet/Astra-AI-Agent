@@ -4,8 +4,6 @@ Every image API Astra speaks returns image data in one of a few shapes:
 
     * OpenAI-compatible Images API -> {"data": [{"b64_json"|"url": ...}]}
     * Cloudflare Workers AI        -> {"result": {"image"|"images": ...}}
-    * Bedrock (Stability)          -> {"artifacts": [{"base64": ...}]}
-    * Bedrock (Nova Canvas/Titan)  -> {"images": ["<base64>", ...]}
 
 This module turns all of them into the single `data:<mime>;base64,<...>`
 shape the artifact pipeline (`astra.ai.artifact_extraction`) understands.
@@ -28,7 +26,6 @@ def _extract_image_payload(data) -> tuple | None:
       * OpenAI-compatible Images API  -> {"data": [{"b64_json"|"url": ...}]}
       * Cloudflare Workers AI         -> {"result": {"image": <b64>}}
                                          {"result": {"images": [{"image": ..}]}}
-      * Bedrock Stability             -> {"artifacts": [{"base64": <b64>}]}
     """
     if not isinstance(data, dict):
         return None
@@ -47,19 +44,6 @@ def _extract_image_payload(data) -> tuple | None:
                 return ("b64", it["image"])
             if isinstance(it, str) and it:
                 return ("b64", it)
-    # Bedrock Nova Canvas / Titan Image return a top-level `images` array of
-    # base64 strings -> {"images": ["<b64>", ...], "error": null}
-    for it in (data.get("images") or []):
-        if isinstance(it, str) and it:
-            return ("b64", it)
-        if isinstance(it, dict):
-            if isinstance(it.get("base64"), str) and it["base64"]:
-                return ("b64", it["base64"])
-            if isinstance(it.get("image"), str) and it["image"]:
-                return ("b64", it["image"])
-    for it in (data.get("artifacts") or []):
-        if isinstance(it, dict) and isinstance(it.get("base64"), str) and it["base64"]:
-            return ("b64", it["base64"])
     if isinstance(data.get("image"), str) and data["image"]:
         return ("b64", data["image"])
     return None

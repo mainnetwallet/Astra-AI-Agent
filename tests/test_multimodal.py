@@ -724,11 +724,6 @@ class TestRealImageGeneration(unittest.TestCase):
         adapter = CompatibleAdapter.__new__(CompatibleAdapter)
         self.assertTrue(hasattr(adapter, "generate_image"))
 
-    def test_bedrock_adapter_has_generate_image(self):
-        from astra.ai.adapters.bedrock import BedrockAdapter
-        adapter = BedrockAdapter.__new__(BedrockAdapter)
-        self.assertTrue(hasattr(adapter, "generate_image"))
-
     def test_base_provider_raises_not_supported(self):
         from astra.ai.provider import AIProvider
         p = AIProvider()
@@ -739,16 +734,6 @@ class TestRealImageGeneration(unittest.TestCase):
     def test_no_openai_adapter_so_dall_e_has_no_image_output(self):
         meta = metadata_for("dall-e-3", "openai")
         self.assertNotIn("image", meta.get("output_modalities", ["text"]))
-
-    def test_paid_bedrock_image_model_has_no_image_output(self):
-        # Bedrock Nova Canvas / Titan / Stability are real image models but
-        # paid-only, so they are NOT in Astra's FREE image pool: no image
-        # output modality is advertised for them.
-        for mid in ("stability.stable-diffusion-xl-v1",
-                    "amazon.nova-canvas-v1:0",
-                    "amazon.titan-image-generator-v2:0"):
-            meta = metadata_for(mid, "bedrock")
-            self.assertNotIn("image", meta.get("output_modalities", []), mid)
 
     def test_free_cloudflare_image_model_has_image_output(self):
         meta = metadata_for("@cf/black-forest-labs/flux-1-schnell",

@@ -242,7 +242,8 @@ def build(store: Store | None = None, config=None,
     # astra/ai/gateway.py module docstring for the isolation contract.
     gateway_intelligence = build_gateway_request_intelligence(gateway)
     discovery = ModelDiscovery(model_registry,
-                               adapter_by_name={p.name: p for p in providers})
+                               adapter_by_name={p.name: p for p in providers},
+                               events=events)
     env_models = getattr(config, "get", lambda _k, d="": d)("ASTRA_STARTUP_DISCOVERY", "")
     if env_models == "1":
         discovery.refresh(force=False)   # best-effort, never blocks boot

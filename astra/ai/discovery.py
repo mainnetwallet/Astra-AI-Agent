@@ -15,12 +15,24 @@ from astra.ai.models import metadata_for
 
 
 class ModelDiscovery:
-    def __init__(self, registry, adapter_by_name=None, cache_ttl_s: int = 300):
+    def __init__(self, registry, adapter_by_name=None, cache_ttl_s: int = 300,
+                events=None):
         self.registry = registry
         self.adapter_by_name = adapter_by_name or {}
         self.cache_ttl_s = cache_ttl_s
         self._cache: dict[str, dict] = {}      # provider -> {at, models}
         self._lock = threading.Lock()
+        self.events = events
+
+    def attach_events(self, events) -> None:
+        self.events = events
+
+    def _emit(self, kind: str, **data) -> None:
+        if self.events:
+            try:
+                self.events.emit(kind, agent="discovery", **data)
+            except Exception:
+                pass
 
     def _adapter_for(self, provider: str):
         a = self.adapter_by_name.get(provider)
@@ -29,6 +41,26 @@ class ModelDiscovery:
                 if getattr(adapter, "name", "") == provider:
                     return adapter
         return a
+
+    def _list_models(self, provider: str, adapter, op: str) -> list:
+        """The single call site for the real upstream GET /models request,
+        so every caller (discover(), validate()) gets it logged exactly
+        once, the same way an astra_gateway.*/ai.* call is (see
+        astra.core.events.EVENT_KINDS)."""
+        import time
+        self._emit("provider.discovery.request", provider=provider, op=op)
+        start = time.monotonic()
+        try:
+            ids = adapter.list_models()
+        except Exception as e:
+            self._emit("provider.discovery.error", provider=provider, op=op,
+                       terminal=True, reason=f"{type(e).__name__}: {e}",
+                       duration_ms=round((time.monotonic() - start) * 1000, 1))
+            raise
+        self._emit("provider.discovery.success", provider=provider, op=op,
+                   terminal=True, model_count=len(ids or []),
+                   duration_ms=round((time.monotonic() - start) * 1000, 1))
+        return ids
 
     def discover(self, provider: str, *, force: bool = False) -> dict:
         """Discover models for one provider. Returns {provider, models, from_cache}."""
@@ -42,8 +74,9 @@ class ModelDiscovery:
             self._cache[provider] = {"at": time.monotonic(), "models": []}
             return {"provider": provider, "models": [], "from_cache": False,
                     "error": "no discovery adapter"}
+        from astra.core.events import new_op_id
         try:
-            ids = adapter.list_models()
+            ids = self._list_models(provider, adapter, new_op_id())
         except Exception:
             ids = []
         with self._lock:
@@ -71,8 +104,10 @@ class ModelDiscovery:
         if not known:
             adapter = self._adapter_for(provider)
             if adapter is not None and hasattr(adapter, "list_models"):
+                from astra.core.events import new_op_id
                 try:
-                    known = model_id in adapter.list_models()
+                    known = model_id in self._list_models(
+                        provider, adapter, new_op_id())
                 except Exception:
                     known = False
         if known:

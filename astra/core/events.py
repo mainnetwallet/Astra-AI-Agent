@@ -52,6 +52,15 @@ EVENT_KINDS = (
     # plugins / providers (contract for future modules)
     "plugin.loaded", "plugin.failed", "plugin.disabled",
     "provider.selected", "provider.failed", "provider.health_changed",
+    # ModelDiscovery (astra/ai/discovery.py): the real GET /models probe a
+    # provider adapter makes — on boot (ASTRA_STARTUP_DISCOVERY=1), on a
+    # manual "refresh models" click, and during model validation. This is
+    # an actual upstream API call and must be visible in the Activity Log
+    # exactly like any other provider request (see log_model.js: the
+    # "provider" kind-head already maps to the "ai" category, so these
+    # count toward Total API Calls the same way astra_gateway.*/ai.* do).
+    "provider.discovery.request", "provider.discovery.success",
+    "provider.discovery.error",
     # AstraRouter (internal routing brain) — routing decision visibility
     "router.request", "router.decision", "router.fallback", "router.retry",
     "credential.rotation",

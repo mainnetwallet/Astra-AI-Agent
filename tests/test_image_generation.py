@@ -959,6 +959,10 @@ class TestGatewayImageFailover(unittest.TestCase):
         return _FakeConn(name, "cloudflare", image_models=list(models),
                          outcomes=outcomes)
 
+    def _gemini(self, outcomes=None):
+        return _FakeConn("astra-gw-gemini", "gemini",
+                         image_models=[GEMINI_IMG], outcomes=outcomes)
+
     def _text(self):
         return _FakeConn("astra-gw-groq", "groq", models=["llama-70b"])
 
@@ -1098,7 +1102,9 @@ class TestGatewayImageFailover(unittest.TestCase):
         # ::TestImageGenerationNeverRetriesTheSameModel).
         from astra.ai.gateway import AstraGatewayCloudflare
         cfg = _cfg(GW_CLOUDFLARE_API_KEYS="key-one,key-two",
-                   GW_CLOUDFLARE_ACCOUNT_IDS="acct1")
+                   GW_CLOUDFLARE_ACCOUNT_IDS="acct1",
+                   IMAGE_CLOUDFLARE_API_KEY="key-one,key-two",
+                   IMAGE_CLOUDFLARE_ACCOUNT_ID="acct1")
         conn = AstraGatewayCloudflare(config=cfg)
         calls = {"n": 0}
 
@@ -1868,11 +1874,13 @@ class TestEndToEndImageTurn(_TempArtifactDirMixin, unittest.TestCase):
             dispatch / serial-fallback code, not a re-implementation."""
 
             def generate(self, prompt, model=None, size="1024x1024", n=1, *,
-                         editing=False, source_images=None, trace="", discover=True):
+                         editing=False, source_image=None, mask_image=None,
+                         operation=None, trace="", discover=True):
                 gw.image_calls.append((prompt, model, editing))
                 uri = real.image_router.generate(
                     prompt, model=model, size=size, n=n, editing=editing,
-                    trace=trace, discover=False)
+                    source_image=source_image, mask_image=mask_image,
+                    operation=operation, trace=trace, discover=False)
                 gw.last_model = real.last_model
                 return uri
 

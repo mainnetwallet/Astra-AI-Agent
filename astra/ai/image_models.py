@@ -310,9 +310,49 @@ IMAGE_EXHAUSTED_MESSAGE = (
 
 
 # ── unsupported image models ───────────────────────────────────────────────
-# Models outside the four-provider image pool are not selectable. They are
-# intentionally not enumerated here; normal provider registration remains
-# independent from image capability selection.
+# Models outside the four-provider image pool are not selectable. Rejections
+# for the four supported providers (plus re-audited candidates outside them)
+# are recorded here with real evidence, so a caller can explain WHY a model
+# was left out rather than getting a bare "unsupported".
+_REJECT_OR_PAID = ("no free model: OpenRouter's image catalog lists this "
+                   "id as paid-only (re-verified 2026-09-26 via GET "
+                   "/api/v1/images/models)")
+_REJECT_OR_ABSENT = (
+    "no free model: this id does not exist in OpenRouter's current live "
+    "image catalog (re-verified 2026-09-26)")
+_REJECT_OR_NO_FREE_VARIANT = (
+    "no free model: OpenRouter does not publish a :free variant of this "
+    "model in its image catalog (re-verified 2026-09-26)")
+_REJECT_NSCALE_PAID = ("paid-only OpenAI-compatible image API; "
+                       "no documented free allocation")
+
+REJECTED_IMAGE_MODELS: dict = {
+    # OpenRouter — the live catalog (re-verified 2026-09-26 via GET
+    # /api/v1/images/models) has ZERO free image-output models.
+    ("openrouter", "google/gemini-2.5-flash-image-preview:free"): _REJECT_OR_ABSENT,
+    ("openrouter", "black-forest-labs/flux-1-schnell:free"): _REJECT_OR_ABSENT,
+    ("openrouter", "sourceful/riverflow-v2.5-pro:free"): _REJECT_OR_NO_FREE_VARIANT,
+    ("openrouter", "google/gemini-2.5-flash-image"): _REJECT_OR_PAID,
+    ("openrouter", "google/gemini-3.1-flash-image"): _REJECT_OR_PAID,
+    ("openrouter", "google/gemini-3.1-flash-lite-image"): _REJECT_OR_PAID,
+    ("openrouter", "google/gemini-3-pro-image"): _REJECT_OR_PAID,
+    ("openrouter", "openai/gpt-5-image"): _REJECT_OR_PAID,
+    ("openrouter", "openai/gpt-5-image-mini"): _REJECT_OR_PAID,
+    ("openrouter", "sourceful/riverflow-v2.5-pro"): _REJECT_OR_PAID,
+    # Cloudflare — stale / adapter-incompatible ids that must never sneak in.
+    ("cloudflare", "@cf/runwayml/stable-diffusion-v1-5-img2img"): (
+        "not in the current Workers AI catalog (provider removed it)"),
+    ("cloudflare", "@cf/black-forest-labs/flux-2-dev"): (
+        "adapter mismatch: current input schema requires multipart/form-data; "
+        "Astra's Workers AI path sends JSON"),
+    ("cloudflare", "@cf/black-forest-labs/flux-2-klein-4b"): (
+        "adapter mismatch: current input schema requires multipart/form-data"),
+    ("cloudflare", "@cf/black-forest-labs/flux-2-klein-9b"): (
+        "adapter mismatch: current input schema requires multipart/form-data"),
+    # ── 2026-09-26 re-audit: additional candidates investigated, none free ──
+    ("nscale", "black-forest-labs/FLUX.1-schnell"): _REJECT_NSCALE_PAID,
+}
+
 
 # ── lookup ─────────────────────────────────────────────────────────────────
 def image_spec(provider: str, model_id: str) -> ImageSpec | None:
@@ -408,7 +448,18 @@ def image_pool() -> tuple:
 
 
 def rejected_image_reason(provider: str, model_id: str) -> str:
-    """Return an empty reason for models outside the supported image pool."""
+    """Why (provider, model_id) is NOT in the free pool ('' when unknown)."""
+    p = str(provider or "").strip().lower()
+    if not model_id:
+        return ""
+    if image_spec(p, model_id) is not None:
+        return ""
+    if (p, model_id) in REJECTED_IMAGE_MODELS:
+        return REJECTED_IMAGE_MODELS[(p, model_id)]
+    low = _normalize(model_id)
+    for (rp, rm), reason in REJECTED_IMAGE_MODELS.items():
+        if rp == p and _normalize(rm) == low:
+            return reason
     return ""
 
 

@@ -179,7 +179,7 @@ def classify_gateway_request(text: str, *, vision: bool = False,
                        (image_input and _IMAGE_EDIT_ACTION_RE.search(text)))
     if mask_input and image_input and edit_intent:
         return "image_inpainting"
-    if edit_intent and (image_input or re.search(r"\b(?:upload|uploaded|generated|যেটা|ওই)\b", text, re.I)):
+    if edit_intent:
         return "image_editing"
     if _IMAGE_GEN_RE.search(text):
         return "image_generation"

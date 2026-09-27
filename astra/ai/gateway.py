@@ -762,24 +762,41 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
 
     @staticmethod
     def _inline_image(data) -> str:
+        return AstraGatewayGemini._inline_parts(data)[1]
+
+    @staticmethod
+    def _inline_parts(data) -> tuple[str, str]:
+        """Return (caption_text, image_data_uri) from a native
+        `generateContent` response's first candidate. Either may be empty.
+
+        A [TEXT, IMAGE] responseModalities request (2.5-series models) can
+        return BOTH a text part and an inline-image part in the same
+        candidate; earlier this only kept the image and silently dropped
+        any caption the model wrote alongside it."""
         import base64 as _b64
         try:
             parts = data["candidates"][0]["content"]["parts"]
         except (KeyError, IndexError, TypeError):
-            return ""
+            return "", ""
+        text_out = ""
+        image_uri = ""
         for part in parts or []:
             if not isinstance(part, dict):
                 continue
             inline = part.get("inlineData") or part.get("inline_data")
-            if not inline or not inline.get("data"):
+            if inline and inline.get("data") and not image_uri:
+                mime = inline.get("mimeType") or inline.get("mime_type") or "image/png"
+                try:
+                    raw = _b64.b64decode(inline["data"])
+                except Exception:
+                    raw = None
+                if raw:
+                    image_uri = f"data:{mime};base64," + _b64.b64encode(raw).decode("ascii")
                 continue
-            mime = inline.get("mimeType") or inline.get("mime_type") or "image/png"
-            try:
-                raw = _b64.b64decode(inline["data"])
-            except Exception:
-                continue
-            return f"data:{mime};base64," + _b64.b64encode(raw).decode("ascii")
-        return ""
+            text = part.get("text")
+            if text and not text_out:
+                text_out = text.strip()
+        return text_out, image_uri
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1,
@@ -827,13 +844,18 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
             return data
 
         data = self._run(once, pool=self.image_pool, single_attempt=True)
-        uri = self._inline_image(data)
+        caption, uri = self._inline_parts(data)
         if not uri:
             err = ProviderError(
                 f"{self.name}: image generation returned no image data")
             err.retryable = False
             raise err
-        return uri
+        # Downstream (ChatPipeline._reply / sanitize_final_response) strips
+        # the embedded data URI back out for the visible chat text and
+        # extracts the image itself as a separate artifact card, so
+        # returning "caption\n\nuri" surfaces BOTH the model's own text and
+        # the image, instead of the image alone.
+        return f"{caption}\n\n{uri}" if caption else uri
 
 class AstraGatewayGroq(_GatewayCompatibleConnection):
     """Astra AI Gateway / Groq connection (independent of GroqAdapter)."""

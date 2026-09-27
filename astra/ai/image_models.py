@@ -133,7 +133,7 @@ class ImageSpec:
 
 def _normalize(model_id: str) -> str:
     low = str(model_id or "").strip().lower()
-        for pref in ("us.", "eu.", "apac."):
+    for pref in ("us.", "eu.", "apac."):
         if low.startswith(pref):
             return low[len(pref):]
     return low
@@ -150,23 +150,103 @@ _CF_FREE = ("https://developers.cloudflare.com/workers-ai/platform/pricing/ "
 _CF_SCHEMA = ("https://developers.cloudflare.com/workers-ai/models/{}/"
               "schema-input.json")
 
-#: Evidence recorded for the user-requested (force-added) FREE candidates.
+#: Evidence recorded for the user-selected Gemini image model.
 _USER_REQ_EVIDENCE = (
-    "user-requested FREE candidate (2026-09-26): force-included in the FREE "
-    "image pool on explicit request; the real generation call decides runtime "
-    "availability")
+    "user-selected Gemini image model kept in the supported image pool")
 
-#: Hugging Face force-include (2026-09-27, EXPLICIT USER REQUEST). This is
-#: NOT a claim that Hugging Face's Inference Providers image path is
-#: verified free per-call -- the opposite is documented and unchanged (see
-#: `_REJECT_HF_CREDITS` / the module docstring): free-tier accounts get only
-#: a $0.10/month total credit, and a single image can exhaust it, so this is
-#: a recorded, deliberate override -- same pattern as the Gemini exception
-#: above -- kept honest rather than silently marked as verified free.
 _HF_FORCE_EVIDENCE = (
     "user-selected Hugging Face image model kept in the supported image pool"
 )
 
+
+_SPECS: tuple = (
+    ImageSpec("cloudflare", "@cf/black-forest-labs/flux-1-schnell",
+              PROTOCOL_CLOUDFLARE_RUN, _CF_SCHEMA.format("flux-1-schnell"),
+              capabilities=(IMAGE_GENERATION,), sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_CF_FREE,
+              params=("prompt", "steps")),
+    ImageSpec("cloudflare", "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+              PROTOCOL_CLOUDFLARE_RUN,
+              _CF_SCHEMA.format("stable-diffusion-xl-base-1.0"),
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING, IMAGE_INPAINTING),
+              input_modalities=("text", "image"),
+              sizes=("1024x1024", "768x768", "512x512"),
+              free_tier=FREE_TRUE, free_evidence=_CF_FREE,
+              params=("prompt", "width", "height", "image_b64", "mask", "strength")),
+    ImageSpec("cloudflare", "@cf/bytedance/stable-diffusion-xl-lightning",
+              PROTOCOL_CLOUDFLARE_RUN,
+              _CF_SCHEMA.format("stable-diffusion-xl-lightning"),
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING, IMAGE_INPAINTING),
+              input_modalities=("text", "image"),
+              sizes=("1024x1024", "768x768", "512x512"),
+              free_tier=FREE_TRUE, free_evidence=_CF_FREE,
+              params=("prompt", "width", "height", "image_b64", "mask", "strength")),
+    ImageSpec("cloudflare", "@cf/lykon/dreamshaper-8-lcm",
+              PROTOCOL_CLOUDFLARE_RUN, _CF_SCHEMA.format("dreamshaper-8-lcm"),
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING, IMAGE_INPAINTING),
+              input_modalities=("text", "image"),
+              sizes=("1024x1024", "768x768", "512x512"),
+              free_tier=FREE_TRUE, free_evidence=_CF_FREE,
+              params=("prompt", "width", "height", "image_b64", "mask", "strength")),
+    ImageSpec("cloudflare", "@cf/runwayml/stable-diffusion-v1-5-inpainting",
+              PROTOCOL_CLOUDFLARE_RUN,
+              _CF_SCHEMA.format("stable-diffusion-v1-5-inpainting"),
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING, IMAGE_INPAINTING),
+              input_modalities=("text", "image"), sizes=("512x512",),
+              free_tier=FREE_TRUE, free_evidence=_CF_FREE,
+              params=("prompt", "width", "height", "image_b64", "mask", "strength")),
+    ImageSpec("cloudflare", "@cf/leonardo/lucid-origin",
+              PROTOCOL_CLOUDFLARE_RUN, _CF_SCHEMA.format("lucid-origin"),
+              capabilities=(IMAGE_GENERATION,),
+              sizes=("1024x1024", "768x768", "512x512"),
+              free_tier=FREE_TRUE, free_evidence=_CF_FREE,
+              params=("prompt", "width", "height")),
+    ImageSpec("cloudflare", "@cf/leonardo/phoenix-1.0",
+              PROTOCOL_CLOUDFLARE_RUN, _CF_SCHEMA.format("phoenix-1.0"),
+              capabilities=(IMAGE_GENERATION,),
+              sizes=("1024x1024", "768x768", "512x512"),
+              free_tier=FREE_TRUE, free_evidence=_CF_FREE,
+              params=("prompt", "width", "height")),
+    ImageSpec("gemini", "gemini-2.5-flash-image",
+              PROTOCOL_GEMINI_CONTENT,
+              "user-selected Gemini image model",
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING),
+              input_modalities=("text", "image"),
+              output_modalities=("text", "image"), sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_USER_REQ_EVIDENCE,
+              params=("prompt",)),
+    ImageSpec("huggingface", "black-forest-labs/FLUX.1-schnell",
+              PROTOCOL_OPENAI_IMAGES,
+              "user-selected Hugging Face image model",
+              capabilities=(IMAGE_GENERATION,), sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
+    ImageSpec("huggingface", "black-forest-labs/FLUX.1-dev",
+              PROTOCOL_OPENAI_IMAGES,
+              "user-selected Hugging Face image model",
+              capabilities=(IMAGE_GENERATION,), sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
+    ImageSpec("huggingface", "black-forest-labs/FLUX.1-Kontext-dev",
+              PROTOCOL_OPENAI_IMAGES,
+              "user-selected Hugging Face image model",
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING),
+              input_modalities=("text", "image"), sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
+    ImageSpec("huggingface", "Qwen/Qwen-Image",
+              PROTOCOL_OPENAI_IMAGES,
+              "user-selected Hugging Face image model",
+              capabilities=(IMAGE_GENERATION,), sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
+    ImageSpec("huggingface", "stabilityai/stable-diffusion-3.5-large",
+              PROTOCOL_OPENAI_IMAGES,
+              "user-selected Hugging Face image model",
+              capabilities=(IMAGE_GENERATION,), sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
+)
 
 # ── deterministic GLOBAL, MODEL-by-MODEL serial-fallback order ────────────
 # ONE flat list: every FREE image model competes in this single priority

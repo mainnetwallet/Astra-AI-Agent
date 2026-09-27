@@ -234,10 +234,6 @@ IMAGE_EXHAUSTED_MESSAGE = (
 # intentionally not enumerated here; normal provider registration remains
 # independent from image capability selection.
 
-REJECTED_IMAGE_MODELS: dict = {}
-
-
-
 # ── lookup ─────────────────────────────────────────────────────────────────
 def image_spec(provider: str, model_id: str) -> ImageSpec | None:
     """Return the documented FREE ImageSpec for (provider, model_id), or None.

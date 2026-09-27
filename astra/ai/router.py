@@ -1360,7 +1360,11 @@ class AstraRouter:
                                        last_error, req)
                 if self._pinned(adapter) or not retry:
                     break
-                time.sleep(min(self.backoff_s * attempt, 8))
+                # A fresh, never-tried credential needs no backoff -- only
+                # sleep once we would be repeating a key (or there is no
+                # pool at all), i.e. a genuine transient retry.
+                if credential_count == 0 or attempt >= credential_count:
+                    time.sleep(min(self.backoff_s * attempt, 8))
             except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
                 self._errors[name] = self._errors.get(name, 0) + 1
@@ -1377,7 +1381,8 @@ class AstraRouter:
                                key_label=key_label)
                 if self._pinned(adapter) or not retry:
                     break
-                time.sleep(min(self.backoff_s * attempt, 8))
+                if credential_count == 0 or attempt >= credential_count:
+                    time.sleep(min(self.backoff_s * attempt, 8))
         if req.task_type != "health_check":
             self._mark_down(name, last_error)
         return RoutingResult(ok=False, error=f"{name}: {last_error}",

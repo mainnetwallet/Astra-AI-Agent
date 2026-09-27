@@ -224,9 +224,17 @@ class TestFreeImagePool(unittest.TestCase):
                           metadata_for(mid, provider)["output_modalities"], mid)
 
     def test_only_capable_models_advertise_image_editing(self):
+        edit_capable = {
+            ("gemini", GEMINI_IMG),
+            ("cloudflare", "@cf/stabilityai/stable-diffusion-xl-base-1.0"),
+            ("cloudflare", "@cf/bytedance/stable-diffusion-xl-lightning"),
+            ("cloudflare", "@cf/lykon/dreamshaper-8-lcm"),
+            ("cloudflare", "@cf/runwayml/stable-diffusion-v1-5-inpainting"),
+            ("huggingface", "black-forest-labs/FLUX.1-Kontext-dev"),
+        }
         for provider, mid in image_pool():
             spec = image_spec(provider, mid)
-            if provider == "gemini" and mid == GEMINI_IMG:
+            if (provider, mid) in edit_capable:
                 self.assertTrue(is_image_editing_model(provider, mid), mid)
                 self.assertIn(IMAGE_EDITING, spec.capabilities, mid)
             else:
@@ -559,13 +567,25 @@ class TestEligibleImageTargets(unittest.TestCase):
 
     def test_editing_targets_require_an_edit_capable_model(self):
         state = GatewayRoutingState(None)
+        # Cloudflare's pool itself now has real edit-capable models (SDXL,
+        # LIGHTNING, DREAM, INPAINT) -- only the non-edit-capable ones
+        # (FLUX, LUCID, PHOENIX) are excluded from an editing request.
         cf_only = self._catalog()
+        targets = eligible_image_generation_targets(
+            cf_only, state, editing=True)
+        self.assertEqual({m.model_id for _c, m, _h in targets},
+                         {SDXL, LIGHTNING, DREAM, INPAINT})
+
+        text_only = self._catalog(models=(FLUX, LUCID, PHOENIX))
         self.assertEqual(
-            eligible_image_generation_targets(cf_only, state, editing=True), [])
+            eligible_image_generation_targets(text_only, state, editing=True),
+            [])
+
         gem = _FakeConn("astra-gw-gemini", "gemini",
                         image_models=[GEMINI_IMG])
         targets = eligible_image_generation_targets(
-            self._catalog(gem), state, editing=True)
+            self._catalog(gem, models=(FLUX, LUCID, PHOENIX)),
+            state, editing=True)
         self.assertEqual([m.model_id for _c, m, _h in targets], [GEMINI_IMG])
 
 
@@ -1306,7 +1326,8 @@ class TestProviderImageAdapterMechanics(unittest.TestCase):
 
     def test_gemini_native_generate_content_mechanics(self):
         from astra.ai.gateway import AstraGatewayGemini
-        conn = AstraGatewayGemini(config=_cfg(GW_GEMINI_API_KEYS="k"))
+        conn = AstraGatewayGemini(
+            config=_cfg(GW_GEMINI_API_KEYS="k", IMAGE_GEMINI_API_KEY="k"))
         seen = {}
 
         def side(req, timeout=None):
@@ -1508,7 +1529,9 @@ class TestOpenRouterImagesApi(unittest.TestCase):
 
     def _gw(self):
         from astra.ai.gateway import AstraGatewayOpenRouter
-        return AstraGatewayOpenRouter(config=_cfg(GW_OPENROUTER_API_KEYS="k"))
+        return AstraGatewayOpenRouter(
+            config=_cfg(GW_OPENROUTER_API_KEYS="k",
+                        IMAGE_OPENROUTER_API_KEY="k"))
 
     def _adapter(self):
         from astra.ai.adapters.openrouter import OpenRouterAdapter
@@ -1744,11 +1767,28 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
         def chat(self, messages, max_tokens=None, category=None, trace=""):
             self.calls.append(messages)
             self.categories.append(category)
+            # Mirror what a real LLM UNDERSTAND call would produce: derive
+            # task_type from the user's message text via the same
+            # deterministic classifier the local fallback uses, instead of
+            # hardcoding "image_generation" for every request.
+            from astra.ai.gateway_routing import classify_gateway_request
+            joined = "\n\n".join(
+                m.get("content", "") for m in messages
+                if isinstance(m, dict))
+            # Classify only the actual user request, not the surrounding
+            # system-prompt/catalogue scaffolding (which mentions JSON keys
+            # like "task_type" and would otherwise misfire the
+            # structured_output heuristic).
+            user_text = joined.rsplit("User message:\n", 1)[-1]
+            task_type = classify_gateway_request(user_text)
+            if task_type not in ("image_generation", "image_editing",
+                                 "image_inpainting"):
+                task_type = "image_generation"
             return ('{"final_request": "x", "was_incomplete": false, '
-                    '"task_type": "image_generation", "provider": "", "model": "", "criteria": [], "reason": "", '
+                    '"task_type": "%s", "provider": "", "model": "", "criteria": [], "reason": "", '
                     '"execution": {"required": false, "capability": "", '
                     '"environment": "agent_runtime", "approval_required": '
-                    'false, "intent": ""}}')
+                    'false, "intent": ""}}' % task_type)
 
         def supervise_task(self, *a, **kw):  # pragma: no cover
             raise AssertionError("image turns must not be semantically verified")

@@ -661,9 +661,12 @@
   // regardless of ok/err (a failed tool run is still one tool operation);
   // `errors` counts an "err" status in ANY category, not just ai.
   function countDelta(model) {
-    const out = { total: 1 };
+    const out = {};
     const cat = model.category;
     if (cat === "ai") {
+      // "total" is the "Total API Calls" stat: only real provider/gateway
+      // API calls (this category) count toward it, on either outcome.
+      out.total = 1;
       if (model.status === "ok") out.ai = 1;
     } else if (cat === "tools" || cat === "browser" || cat === "web3" ||
                cat === "agents") {

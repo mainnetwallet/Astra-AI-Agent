@@ -1706,8 +1706,8 @@ class ChatPipeline:
                 self._emit("chat.pipeline.finished", status="no_image_model",
                            op=f"chat:{req}", request=req, trace=req,
                            terminal=True)
-                return self._reply(message, False, trace,
-                                   {"stage": "image_generation", "error": err})
+                trace["stage"] = "image_generation"
+                return self._reply(message, False, trace)
             if "no eligible" in err:
                 # No Provider key is configured (empty/missing plain
                 # *_API_KEYS in .env). This isn't a real runtime failure to

@@ -209,75 +209,6 @@ class RoutingResult:
                 "completion_status": self.completion_status}
 
 
-def classify(text: str) -> str:
-    """Task-type classification for a user message (deterministic)."""
-    import re
-    low = text.lower()
-    # Image-generation intent, in either word order: English tends to put
-    # the verb first ("create an image"), but Banglish/Bangla phrasing
-    # written in Latin script often puts the noun first ("photo create
-    # koro", "akta chobi banao"). Matching only the first order was
-    # silently falling through to the "vision" branch below, which sets
-    # required_capabilities=["vision"] (image *understanding*) — the wrong
-    # capability axis entirely for an image *generation* request — and
-    # that hard-filters out every text-only model, failing the request
-    # for a reason that has nothing to do with what the user actually
-    # asked for. Bengali written in its own script (not just transliterated
-    # Banglish) uses the same noun-then-verb order — "ছবি বানাও" (chobi
-    # banao), "তৈরি করো" (toiri koro) — so the noun/verb token lists carry
-    # both the Latin-script transliteration AND the Bengali-script word.
-    # NOTE: the noun<->verb connector below does NOT use \b at the join —
-    # Bengali dependent vowel signs ("ি" in ছবি, "ো" in ফোটো, "ৈ" in তৈরি,
-    # Unicode category Mc) are not \w to Python's re engine, so a \b placed
-    # right after a noun ending in one of these never matches and silently
-    # kills the whole branch. The join only needs "nearby", not "exactly
-    # adjacent", so requiring a hard word boundary there was never doing
-    # useful work anyway — see test_multimodal.TestCapabilityRouting for
-    # the exact phrases this must (and, for plain "কাজ করো"/"do work" with
-    # no image noun in range, must not) match.
-    _img_nouns = (r"(?:image|picture|photo|photograph|illustration|diagram|"
-                 r"logo|icon|art|artwork|chobi|chhobi|ছবি|ফটো|ফোটো)")
-    _img_edit_verbs = (r"(?:edit|editing|modify|retouch|inpaint|outpaint|"
-                       r"restyle|এডিট|badle|badol|change)")
-    _img_verbs = (r"(?:generate|create|draw|make|design|render|paint|"
-                  r"banao|banawo|banai|baniye|banate|bana|banan|toiri|"
-                  r"বানাও|বানান|বানাতে|তৈরি|তৈরী|করো)")
-    # Editing an EXISTING image is its own task type, checked before both
-    # generation and "vision": "ei photo ta edit kore dao" must never be
-    # served by a model that only *understands* images.
-    if re.search(_img_edit_verbs + r"\s+(?:this|the|my|ei|এই)?\s*" + _img_nouns, low) or \
-       re.search(_img_nouns + r".{0,24}" + _img_edit_verbs, low):
-        return "image_editing"
-    if re.search(_img_verbs + r"\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,3}" + _img_nouns, low) or \
-       re.search(_img_nouns + r".{0,24}" + _img_verbs, low):
-        return "image_generation"
-    if re.search(r"generate\s+(an?\s+)?audio|create\s+(an?\s+)?audio|text.to.speech|tts\b", low):
-        return "audio"
-    if re.search(r"generate\s+(an?\s+)?video|create\s+(an?\s+)?video", low):
-        return "video"
-    if re.search(r"\[.*file.*attached\]|\[.*attachment", low):
-        return "multimodal"
-    if re.search(r"read|analyse|analyze|research|compare|report|what is|about", low):
-        return "research"
-    if re.search(r"\b(code|fix|test|debug|refactor|github|repo)\b", low):
-        return "coding"
-    if re.search(r"open .*website|navigate|click|browser|visit ", low):
-        return "browser"
-    if re.search(r"wallet|token|stake|send .*eth|contract|transaction|balance", low):
-        return "web3"
-    if re.search(r"image|photo|picture|screenshot|vision", low):
-        return "vision"
-    if re.search(r"\bsummarize\b|tl;dr|short version", low):
-        return "summarization"
-    if re.search(r"\btranslate\b|\banglish\b|\btranslate to\b|\bbangla\b|\bbangali\b", low):
-        return "translation"
-    if re.search(r"plan|workflow|steps to|how do i|schedule", low):
-        return "planning"
-    if re.search(r"json|table|csv|structured", low):
-        return "structured_output"
-    return "simple_chat"
-
-
 class _RouterExecutionPort(ProviderExecutionPort):
     """Concrete `ProviderExecutionPort` (§3): executes a
     `ProviderExecutionTarget` against the Existing Provider system's real
@@ -553,11 +484,10 @@ class AstraRouter:
             hard = TASK_HARD_CAPABILITIES.get(req.task_type)
             if hard:
                 req.required_capabilities = list(hard)
-        # `classify()` already recognizes image-generation intent in both
-        # English ("create an image") and Bangla/Banglish ("akta chobi
-        # banao", "photo create koro") word orders and returns task_type
-        # "image_generation". Execution for those task types is owned
-        # EXCLUSIVELY by the Gateway's ImageRouter (see `route_request`'s
+        # task_type "image_generation" is set by the caller (Gateway's own
+        # request-intelligence classification, not this module). Execution
+        # for those task types is owned EXCLUSIVELY by the Gateway's
+        # ImageRouter (see `route_request`'s
         # fail-closed guard, which refuses them before any candidate is
         # ranked). The derived `required_output_modalities` is kept so
         # `meets_hard_requirements()` (routing_policy.py) stays honest about

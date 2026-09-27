@@ -121,7 +121,6 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from .agent import Agent
 from .chat_log import ChatLog
-from .ai.router import classify
 from .ai.conversation_context import ConversationContextBuilder
 from .security import (REDACTED, ApiError, RateLimiter, make_request_id,
                      redact)

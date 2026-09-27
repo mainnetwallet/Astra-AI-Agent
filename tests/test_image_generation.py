@@ -33,7 +33,7 @@ from astra.ai.image_models import (
     is_free_image_model, is_image_editing_model, is_image_model,
     provider_supports_image_generation, rejected_image_reason)
 from astra.ai.models import Model, ModelRegistry, metadata_for
-from astra.ai.router import AstraRouter, RoutingRequest, classify
+from astra.ai.router import AstraRouter, RoutingRequest
 from astra.core.config import Config
 from astra.core.exceptions import ProviderError, TimeoutError
 
@@ -370,23 +370,19 @@ class TestImageRequestClassification(unittest.TestCase):
         "analyze this photo",
     ]
 
-    def test_classify_image_generation_both_paths(self):
+    def test_classify_image_generation(self):
         for text in self.GEN:
-            self.assertEqual(classify(text), "image_generation", text)
             self.assertEqual(classify_gateway_request(text),
                              "image_generation", text)
 
-    def test_classify_image_editing_both_paths(self):
+    def test_classify_image_editing(self):
         for text in self.EDIT:
-            self.assertEqual(classify(text), "image_editing", text)
             self.assertEqual(classify_gateway_request(text), "image_editing",
                              text)
 
     def test_vision_requests_stay_vision(self):
         for text in self.VISION:
             self.assertEqual(classify_gateway_request(text), "vision", text)
-            self.assertNotIn(classify(text),
-                             ("image_generation", "image_editing"), text)
 
     def test_gateway_classifies_edit_and_inpaint_from_modalities(self):
         self.assertEqual(classify_gateway_request(
@@ -397,7 +393,6 @@ class TestImageRequestClassification(unittest.TestCase):
 
     def test_image_production_never_becomes_simple_chat(self):
         for text in self.GEN + self.EDIT:
-            self.assertNotEqual(classify(text), "simple_chat", text)
             self.assertNotIn(classify_gateway_request(text),
                              ("simple", "general"), text)
 
@@ -405,8 +400,6 @@ class TestImageRequestClassification(unittest.TestCase):
         for text in ("python code likhe dao - ekta reverse string function",
                      "what is the weather today",
                      "explain bitcoin halving"):
-            self.assertNotIn(classify(text),
-                             ("image_generation", "image_editing"))
             self.assertNotIn(classify_gateway_request(text),
                              ("image_generation", "image_editing"))
 

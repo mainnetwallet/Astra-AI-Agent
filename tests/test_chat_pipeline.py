@@ -584,11 +584,11 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
 
     def test_english_image_request_sets_output_modality(self):
         # was_incomplete=False (the understand() default) means the Gateway's
-        # final_request is NOT what reaches _task_type() — the ORIGINAL
-        # message is (see ChatPipeline._understand: `"final_request":
-        # ... if rewrote else message`) — so it's the literal text below
-        # that classify() must recognize, not anything scripted into
-        # understand().
+        # final_request is NOT what reaches task_type resolution — the
+        # ORIGINAL message is (see ChatPipeline._understand: `"final_request":
+        # ... if rewrote else message`) — so it's the literal text below that
+        # the Gateway's own task_type classification must recognize, not
+        # anything scripted into understand().
         pipe, gw, rt = self._make([understand(), verdict("complete")],
                                   [self._PNG_DATA_URI])
         pipe.run("generate an image of a sunset over the mountains")

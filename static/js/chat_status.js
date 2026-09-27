@@ -114,7 +114,7 @@
     groq: "Groq", gemini: "Gemini", bedrock: "Bedrock",
     cloudflare: "Cloudflare", cerebras: "Cerebras", cohere: "Cohere",
     mistral: "Mistral", openai: "OpenAI", anthropic: "Anthropic",
-    ollama: "Ollama", local: "the local model",
+    ollama: "Ollama", local: "the local model", huggingface: "Hugging Face",
   };
 
   function branded(name) {

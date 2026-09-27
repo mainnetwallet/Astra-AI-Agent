@@ -52,6 +52,7 @@ GATEWAY_PROVIDER_SHORT = {
     "astra-gw-sambanova": "sambanova",
     "astra-gw-cohere": "cohere",
     "astra-gw-zai": "zai",
+    "astra-gw-huggingface": "huggingface",
 }
 
 REQUEST_CATEGORIES = (

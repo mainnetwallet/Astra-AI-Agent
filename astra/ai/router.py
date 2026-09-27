@@ -18,7 +18,7 @@ and credential-free: the Gateway only ever receives/returns sanitized
 gateway_contract.py) and never an adapter, a credential or ProviderRegistry
 itself. The Gateway is a completely independent system with its
 own AI connections (Gemini, Groq, Cloudflare, Bedrock, OpenRouter,
-Mistral, Cerebras, SambaNova, Cohere, Z.AI) — each with
+Mistral, Cerebras, SambaNova, Cohere, Z.AI, Hugging Face) — each with
 independent credentials/models/endpoints (GW_* config). It is never added to
 `self.providers`, never appears in ProviderRegistry, provider health, or the
 provider dashboard table, and — just as important — AstraRouter NEVER

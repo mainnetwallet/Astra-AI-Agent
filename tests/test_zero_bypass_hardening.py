@@ -36,9 +36,9 @@ import unittest
 from astra.ai.gateway import (AstraAIGateway, AstraGatewayBedrock,
                               AstraGatewayCerebras, AstraGatewayCloudflare,
                               AstraGatewayCohere, AstraGatewayGemini,
-                              AstraGatewayGroq, AstraGatewayMistral,
-                              AstraGatewayOpenRouter, AstraGatewaySambaNova,
-                              AstraGatewayZAI)
+                              AstraGatewayGroq, AstraGatewayHuggingFace,
+                              AstraGatewayMistral, AstraGatewayOpenRouter,
+                              AstraGatewaySambaNova, AstraGatewayZAI)
 from astra.ai.registry import KEYS_ENV
 from astra.ai.router import AstraRouter, RoutingRequest
 from astra.core.exceptions import ProviderError
@@ -112,19 +112,19 @@ class _FailingProvider:
 # 5: Gateway/Existing-Provider credential isolation
 # ═══════════════════════════════════════════════════════════════════════
 class TestCredentialIsolation(unittest.TestCase):
-    # Every Gateway connection: the four original services plus the six
+    # Every Gateway connection: the four original services plus the seven
     # OpenAI-compatible ones added later.
     GATEWAY_CLASSES = (
         AstraGatewayGemini, AstraGatewayGroq, AstraGatewayCloudflare,
         AstraGatewayBedrock, AstraGatewayOpenRouter, AstraGatewayMistral,
         AstraGatewayCerebras, AstraGatewaySambaNova, AstraGatewayCohere,
-        AstraGatewayZAI,
+        AstraGatewayZAI, AstraGatewayHuggingFace,
     )
 
     def test_gateway_connections_use_gw_prefixed_env_only(self):
         gw_envs = {cls.api_keys_env for cls in self.GATEWAY_CLASSES}
-        self.assertEqual(len(self.GATEWAY_CLASSES), 10)
-        self.assertEqual(len(gw_envs), 10)
+        self.assertEqual(len(self.GATEWAY_CLASSES), 11)
+        self.assertEqual(len(gw_envs), 11)
         for env in gw_envs:
             self.assertTrue(env.startswith("GW_"), env)
 

@@ -55,6 +55,18 @@ LLAMA = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 # Gemini's dedicated image model.
 GEMINI_IMG = "gemini-2.5-flash-image"
 
+# The five user-requested (2026-09-27) FORCE-INCLUDED Hugging Face image
+# candidates -- explicitly NOT verified free per-call, a deliberate override
+# of the re-audit's rejection; see `_HF_FORCE_EVIDENCE` in
+# astra/ai/image_models.py.
+HF_POOL = (
+    "black-forest-labs/FLUX.1-schnell",
+    "black-forest-labs/FLUX.1-dev",
+    "black-forest-labs/FLUX.1-Kontext-dev",
+    "Qwen/Qwen-Image",
+    "stabilityai/stable-diffusion-3.5-large",
+)
+
 # OpenRouter's live image catalog contains ZERO `:free` image-output models
 # (verified 2026-09-26 against GET https://openrouter.ai/api/v1/images/models),
 # so its static FREE pool is EMPTY. OR_SYNTH is a synthetic FREE-shaped id used
@@ -183,13 +195,17 @@ def _assert_readable_png_artifact(test, art, artifact_dir):
 class TestFreeImagePool(unittest.TestCase):
     def test_pool_is_the_verified_free_providers(self):
         # Cloudflare (documented free Neurons) plus the single user-requested
-        # force-added Gemini candidate. OpenRouter remains a KNOWN free-image
-        # provider (its live-discovery path is retained) but contributes no
-        # static model: its catalog has zero `:free` image models.
+        # force-added Gemini candidate, plus the five user-requested
+        # force-added Hugging Face candidates (2026-09-27 -- explicitly NOT
+        # verified free per-call, a deliberate override; see
+        # `_HF_FORCE_EVIDENCE` in astra/ai/image_models.py). OpenRouter
+        # remains a KNOWN free-image provider (its live-discovery path is
+        # retained) but contributes no static model: its catalog has zero
+        # `:free` image models.
         self.assertEqual(set(FREE_IMAGE_PROVIDERS),
-                         {"cloudflare", "gemini", "openrouter"})
+                         {"cloudflare", "gemini", "openrouter", "huggingface"})
         self.assertEqual({p for p, _m in image_pool()},
-                         {"cloudflare", "gemini"})
+                         {"cloudflare", "gemini", "huggingface"})
 
     def test_every_pool_model_is_free_with_quotable_evidence(self):
         for provider, mid in image_pool():
@@ -387,13 +403,28 @@ class TestReauditedProviderCandidates(unittest.TestCase):
             self.assertIn("paid",
                           rejected_image_reason("together", mid).lower())
 
-    def test_huggingface_inference_providers_rejected_for_negligible_credit(self):
+    def test_huggingface_images_are_force_added_to_the_free_pool(self):
+        # 2026-09-27, EXPLICIT USER REQUEST: force-included in the FREE pool
+        # despite the underlying evidence below being unchanged (Hugging
+        # Face's free tier is a $0.10/month total credit, not a genuine
+        # per-call free image path) -- same override pattern as the Gemini
+        # exception above; see `_HF_FORCE_EVIDENCE` in astra/ai/image_models.py.
         for mid in ("black-forest-labs/FLUX.1-schnell",
-                    "black-forest-labs/FLUX.1-dev", "Qwen/Qwen-Image"):
-            self.assertFalse(is_image_model("huggingface", mid), mid)
-            reason = rejected_image_reason("huggingface", mid)
-            self.assertIn("not a genuine free tier", reason)
-            self.assertIn("$0.10/month", reason)
+                    "black-forest-labs/FLUX.1-dev",
+                    "black-forest-labs/FLUX.1-Kontext-dev",
+                    "Qwen/Qwen-Image",
+                    "stabilityai/stable-diffusion-3.5-large"):
+            self.assertTrue(is_image_model("huggingface", mid), mid)
+            self.assertTrue(is_free_image_model("huggingface", mid), mid)
+            spec = image_spec("huggingface", mid)
+            self.assertEqual(spec.free_tier, FREE_TRUE, mid)
+            self.assertEqual(spec.model, mid, mid)             # exact id kept
+            self.assertIn(IMAGE_GENERATION, spec.capabilities, mid)
+            self.assertIn("image", spec.output_modalities, mid)
+            self.assertNotIn(("huggingface", mid), REJECTED_IMAGE_MODELS, mid)
+            # honesty: the evidence string never claims verified-free status
+            self.assertIn("$0.10/month", spec.free_evidence, mid)
+            self.assertNotIn("genuine", spec.free_evidence.lower(), mid)
 
     def test_fal_ai_is_paid_only_no_standing_free_tier(self):
         for mid in ("fal-ai/flux/schnell", "fal-ai/flux/dev"):
@@ -432,23 +463,35 @@ class TestReauditedProviderCandidates(unittest.TestCase):
 
     def test_none_of_the_reaudited_providers_entered_the_free_pool(self):
         # The strict audit found no additional genuinely-free provider, so
-        # the pool must remain exactly what it was before this re-audit.
-        investigated = {"together", "huggingface", "fal", "replicate",
+        # the pool must remain exactly what it was before this re-audit --
+        # EXCEPT Hugging Face, which was subsequently force-included by
+        # explicit user request (2026-09-27), same override pattern as the
+        # Gemini exception; see `_HF_FORCE_EVIDENCE` in
+        # astra/ai/image_models.py. The underlying re-audit evidence for
+        # Hugging Face (the $0.10/month credit) is unchanged and still
+        # recorded -- this override does not retract that finding.
+        investigated = {"together", "fal", "replicate",
                         "fireworks", "nscale", "novita", "wavespeed"}
         pool_providers = {p for p, _m in image_pool()}
         self.assertEqual(pool_providers & investigated, set())
+        self.assertIn("huggingface", pool_providers)
         # The re-audit added no provider; the pool is Cloudflare plus the
-        # separately force-added Gemini / OpenRouter candidates.
+        # separately force-added Gemini / Hugging Face candidates.
         self.assertEqual(FREE_IMAGE_PROVIDERS,
-                         frozenset({"cloudflare", "gemini", "openrouter"}))
+                         frozenset({"cloudflare", "gemini", "openrouter",
+                                    "huggingface"}))
 
     def test_reaudit_evidence_never_invents_a_free_claim(self):
         # Every rejected (provider, model) pair investigated in the
         # re-audit must have a non-empty, specific reason -- never a blank
         # "unknown" rejection, which would defeat the audit-trail purpose.
+        # (Hugging Face's three example ids are no longer in this list: they
+        # were subsequently force-included in the FREE pool by explicit user
+        # request -- see test_huggingface_images_are_force_added_to_the_free_pool
+        # -- so `rejected_image_reason` correctly returns "" for them now;
+        # the underlying $0.10/month evidence remains in `_REJECT_HF_CREDITS`.)
         investigated_pairs = [
             ("together", "black-forest-labs/FLUX.1-schnell-Free"),
-            ("huggingface", "black-forest-labs/FLUX.1-schnell"),
             ("fal", "fal-ai/flux/schnell"),
             ("replicate", "black-forest-labs/flux-schnell"),
             ("fireworks", "accounts/fireworks/models/flux-1-schnell-fp8"),
@@ -885,7 +928,9 @@ class TestOpenRouterStaticPoolIsEmpty(unittest.TestCase):
                        image_models=list(CF_POOL))
         orc = _FakeConn("astra-gw-openrouter", "openrouter",
                         image_models=list(OR_DEAD_FREE_IDS))
-        gw = self._gw(gem, cf, orc)
+        hf = _FakeConn("astra-gw-huggingface", "huggingface",
+                       image_models=list(HF_POOL))
+        gw = self._gw(gem, cf, orc, hf)
         ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
         self.assertEqual(ids, list(IMAGE_PRIORITY))
         for mid in OR_DEAD_FREE_IDS:
@@ -1046,13 +1091,15 @@ class TestSerialFallbackAndGlobalOrdering(unittest.TestCase):
             LIGHTNING,
             DREAM,
             INPAINT,
-        ])
+        ] + list(HF_POOL))
 
     def test_full_pool_priority_is_exactly_image_priority(self):
         from astra.ai.image_models import IMAGE_PRIORITY
         cf = _FakeConn("astra-gw-cloudflare", "cloudflare",
                        image_models=list(CF_POOL))
-        gw = self._gw(cf, self._gemini())
+        hf = _FakeConn("astra-gw-huggingface", "huggingface",
+                       image_models=list(HF_POOL))
+        gw = self._gw(cf, self._gemini(), hf)
         ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
         self.assertEqual(ids, list(IMAGE_PRIORITY))
 
@@ -1067,8 +1114,12 @@ class TestSerialFallbackAndGlobalOrdering(unittest.TestCase):
         a = ordered(
             _FakeConn("astra-gw-cloudflare", "cloudflare",
                       image_models=list(CF_POOL)),
-            self._gemini())
+            self._gemini(),
+            _FakeConn("astra-gw-huggingface", "huggingface",
+                      image_models=list(HF_POOL)))
         b = ordered(
+            _FakeConn("astra-gw-huggingface", "huggingface",
+                      image_models=list(HF_POOL)),
             self._gemini(),
             _FakeConn("astra-gw-cloudflare", "cloudflare",
                       image_models=list(CF_POOL)))
@@ -1110,11 +1161,15 @@ class TestSerialFallbackAndGlobalOrdering(unittest.TestCase):
         from astra.ai.image_models import IMAGE_PRIORITY
         gem = self._gemini(outcomes=[ProviderError("boom")])
         cf = self._cf(outcomes=[ProviderError("boom")] * len(CF_POOL))
-        gw = self._gw(gem, cf)
+        hf = _FakeConn("astra-gw-huggingface", "huggingface",
+                       image_models=list(HF_POOL),
+                       outcomes=[ProviderError("boom")] * len(HF_POOL))
+        gw = self._gw(gem, cf, hf)
         with self.assertRaises(ProviderError):
             gw.generate_image("a cat", discover=False)
         seen = ([m for m, _p in gem.image_calls]
-                + [m for m, _p in cf.image_calls])
+                + [m for m, _p in cf.image_calls]
+                + [m for m, _p in hf.image_calls])
         self.assertEqual(seen, list(IMAGE_PRIORITY))
         self.assertEqual(len(seen), len(set(seen)))   # never retried
 

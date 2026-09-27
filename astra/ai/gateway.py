@@ -1,6 +1,6 @@
 """Astra AI Gateway — a separate multi-service AI gateway with automatic fallback.
 
-Replaces the old third-party AI gateway service with a set of ten
+Replaces the old third-party AI gateway service with a set of eleven
 independent AI connections:
 
     Astra AI Gateway
@@ -13,7 +13,8 @@ independent AI connections:
     ├── Cerebras    ← GW_CEREBRAS_* config
     ├── SambaNova   ← GW_SAMBANOVA_* config (GW_SAMBA_* also accepted)
     ├── Cohere      ← GW_COHERE_* config
-    └── Z.AI (GLM)  ← GW_ZAI_* config
+    ├── Z.AI (GLM)  ← GW_ZAI_* config
+    └── Hugging Face ← GW_HUGGINGFACE_* config
 
 Each connection has completely independent credentials, models and
 endpoints/base URLs — separate from the existing Provider system:
@@ -22,7 +23,7 @@ it is never added to ProviderRegistry and is reported separately in
 health/dashboard output, never inside the provider table.
 
 Architecture note: this module is fully self-contained. It does NOT import,
-subclass, or instantiate the existing Provider adapter classes (the ten
+subclass, or instantiate the existing Provider adapter classes (the eleven
 modules in astra/ai/adapters/*) — those remain exclusively the Provider
 system's. Each Gateway connection below implements its own request/response/
 auth plumbing against its own GW_-prefixed configuration. Nothing here reads
@@ -30,7 +31,7 @@ GEMINI_*/GROQ_*/… or touches a Provider adapter instance, client, or config
 object.
 
 Fallback: connections are attempted in `GATEWAY_CONNECTIONS` order — the
-original Gemini → Groq → Cloudflare → Bedrock chain first, then the six
+original Gemini → Groq → Cloudflare → Bedrock chain first, then the seven
 additional connections — with per-model health/cooldown and capability
 scoring applied on top (see astra/ai/gateway_routing.py). A failure at any
 connection (or model) automatically moves to the next healthy target. The
@@ -1187,6 +1188,30 @@ class AstraGatewayZAI(_GatewayCompatibleConnection):
     capabilities = ["chat", "stream", "tools", "json", "vision"]
 
 
+class AstraGatewayHuggingFace(_GatewayCompatibleConnection):
+    """Astra AI Gateway / Hugging Face connection (independent of
+    HuggingFaceAdapter). Talks to the unified OpenAI-compatible Inference
+    Providers router, which forwards chat/image calls to whichever partner
+    backend actually serves the requested model id.
+
+    Image generation reuses the base class's OpenAI-compatible
+    ``generate_image()`` (``POST /images/generations``) -- see
+    ``astra.ai.image_models`` for the force-included/free-tier status of the
+    HF_IMAGE_MODELS entries (Hugging Face's free tier is a $0.10/month
+    credit, not a genuine per-call free image path; see that module's
+    docstring for the full audit trail and override note).
+    """
+    name = "astra-gw-huggingface"
+    image_models_env = "HF_IMAGE_MODELS"
+    base_url = "https://router.huggingface.co/v1"
+    models_env = "GW_HUGGINGFACE_MODELS"
+    api_keys_env = "GW_HUGGINGFACE_API_KEYS"
+    base_url_env = "GW_HUGGINGFACE_BASE_URL"
+    image_api_keys_env = "IMAGE_HUGGINGFACE_API_KEY"
+    image_base_url_env = "IMAGE_HUGGINGFACE_BASE_URL"
+    capabilities = ["chat", "stream", "tools", "json", "vision"]
+
+
 # ── Gateway Bedrock connection (independent of BedrockAdapter) ──────────────
 def _gw_hmac(key: bytes, msg: str) -> bytes:
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
@@ -1422,8 +1447,8 @@ class AstraGatewayBedrock:
 
 # Canonical fallback order. The original four connections keep their exact
 # relative order (Gemini → Groq → Cloudflare → Bedrock) so existing routing/
-# scoring behaviour is unchanged; the six additional connections follow in a
-# fixed order and are simply skipped when unconfigured.
+# scoring behaviour is unchanged; the seven additional connections follow in
+# a fixed order and are simply skipped when unconfigured.
 GATEWAY_CONNECTIONS = (
     AstraGatewayGemini,
     AstraGatewayGroq,
@@ -1435,6 +1460,7 @@ GATEWAY_CONNECTIONS = (
     AstraGatewaySambaNova,
     AstraGatewayCohere,
     AstraGatewayZAI,
+    AstraGatewayHuggingFace,
 )
 
 

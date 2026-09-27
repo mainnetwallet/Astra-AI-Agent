@@ -2510,6 +2510,7 @@ const GATEWAY_LABELS = {
   "astra-gw-sambanova": "SambaNova",
   "astra-gw-cohere": "Cohere",
   "astra-gw-zai": "Z.AI",
+  "astra-gw-huggingface": "Hugging Face",
 };
 // Model-level Gateway test results, kept client-side for the same reason
 // as PROVIDER_MODEL_RESULTS above.

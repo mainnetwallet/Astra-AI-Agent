@@ -175,6 +175,8 @@ FREE_UNKNOWN = "unknown"
 #   * cloudflare -> Workers AI ``/ai/run/<model>``
 #   * gemini     -> native ``models/<id>:generateContent``
 #   * zai        -> OpenAI-style ``POST /images/generations``
+#   * huggingface -> OpenAI-style ``POST /images/generations`` (unified
+#     Inference Providers router)
 #   * bedrock    -> ``InvokeModel``
 #: OpenAI-style ``POST /images/generations`` (Z.AI GLM-Image/CogView). NOT
 #: OpenRouter, which uses its own dedicated endpoint below.
@@ -197,7 +199,8 @@ SUPPORTED_PROTOCOLS = frozenset({
 # Providers with a verified FREE image-generation tier AND a real adapter
 # path in this repository. This is the FREE image pool; nothing else may be
 # selected for image generation.
-FREE_IMAGE_PROVIDERS = frozenset({"cloudflare", "gemini", "openrouter"})
+FREE_IMAGE_PROVIDERS = frozenset({"cloudflare", "gemini", "openrouter",
+                                  "huggingface"})
 
 #: Backwards-compatible alias (the free pool is the supported image pool).
 SUPPORTED_PROVIDERS = FREE_IMAGE_PROVIDERS
@@ -209,6 +212,7 @@ IMAGE_MODELS_ENV = {
     "openrouter": "OPENROUTER_IMAGE_MODELS",
     "bedrock": "BEDROCK_IMAGE_MODELS",
     "zai": "ZAI_IMAGE_MODELS",
+    "huggingface": "HF_IMAGE_MODELS",
 }
 
 # The Gateway's own connection classes (astra/ai/gateway.py) read these
@@ -299,6 +303,20 @@ _USER_REQ_EVIDENCE = (
     "image pool on explicit request; the real generation call decides runtime "
     "availability")
 
+#: Hugging Face force-include (2026-09-27, EXPLICIT USER REQUEST). This is
+#: NOT a claim that Hugging Face's Inference Providers image path is
+#: verified free per-call -- the opposite is documented and unchanged (see
+#: `_REJECT_HF_CREDITS` / the module docstring): free-tier accounts get only
+#: a $0.10/month total credit, and a single image can exhaust it, so this is
+#: a recorded, deliberate override -- same pattern as the Gemini exception
+#: above -- kept honest rather than silently marked as verified free.
+_HF_FORCE_EVIDENCE = (
+    "user-requested FREE candidate (2026-09-27): force-included in the FREE "
+    "image pool on explicit request, DESPITE the $0.10/month HF Inference "
+    "Providers credit being the only free allocation (see _REJECT_HF_CREDITS "
+    "for the unchanged underlying evidence); the real generation call "
+    "decides runtime availability and may fail once that credit is spent")
+
 _SPECS: tuple = (
     # ── Cloudflare Workers AI (Workers AI /ai/run/<model>, JSON body) ─────
     # Every entry: official "Text-to-Image" task, JSON input schema requires
@@ -367,6 +385,45 @@ _SPECS: tuple = (
               sizes=("1024x1024",),
               free_tier=FREE_TRUE, free_evidence=_USER_REQ_EVIDENCE,
               params=("prompt",)),
+    # ── Hugging Face (unified router, OpenAI-style /images/generations) ───
+    # Force-included on explicit user request (2026-09-27) -- NOT a verified
+    # free-tier path; see `_HF_FORCE_EVIDENCE` above for the honest caveat.
+    ImageSpec("huggingface", "black-forest-labs/FLUX.1-schnell",
+              PROTOCOL_OPENAI_IMAGES,
+              "user request 2026-09-27 (force-added, paid-credit-limited)",
+              capabilities=(IMAGE_GENERATION,),
+              sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
+    ImageSpec("huggingface", "black-forest-labs/FLUX.1-dev",
+              PROTOCOL_OPENAI_IMAGES,
+              "user request 2026-09-27 (force-added, paid-credit-limited)",
+              capabilities=(IMAGE_GENERATION,),
+              sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
+    ImageSpec("huggingface", "black-forest-labs/FLUX.1-Kontext-dev",
+              PROTOCOL_OPENAI_IMAGES,
+              "user request 2026-09-27 (force-added, paid-credit-limited)",
+              capabilities=(IMAGE_GENERATION, IMAGE_EDITING),
+              input_modalities=("text", "image"),
+              sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
+    ImageSpec("huggingface", "Qwen/Qwen-Image",
+              PROTOCOL_OPENAI_IMAGES,
+              "user request 2026-09-27 (force-added, paid-credit-limited)",
+              capabilities=(IMAGE_GENERATION,),
+              sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
+    ImageSpec("huggingface", "stabilityai/stable-diffusion-3.5-large",
+              PROTOCOL_OPENAI_IMAGES,
+              "user request 2026-09-27 (force-added, paid-credit-limited)",
+              capabilities=(IMAGE_GENERATION,),
+              sizes=("1024x1024",),
+              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              params=("prompt",)),
     # ── OpenRouter Image API (POST /api/v1/images) ────────────────────────
     # No static OpenRouter entry: the live catalog (re-verified 2026-09-26)
     # lists ZERO ``:free`` image-output models, so the active FREE pool is
@@ -396,9 +453,17 @@ _SPECS: tuple = (
 #   6.  @cf/bytedance/stable-diffusion-xl-lightning
 #   7.  @cf/lykon/dreamshaper-8-lcm
 #   8.  @cf/runwayml/stable-diffusion-v1-5-inpainting
+#   9.  black-forest-labs/FLUX.1-schnell (huggingface, force-included)
+#   10. black-forest-labs/FLUX.1-dev (huggingface, force-included)
+#   11. black-forest-labs/FLUX.1-Kontext-dev (huggingface, force-included)
+#   12. Qwen/Qwen-Image (huggingface, force-included)
+#   13. stabilityai/stable-diffusion-3.5-large (huggingface, force-included)
 #   (No OpenRouter entry: its live catalog has zero FREE image models, so
 #   the active pool contributes nothing until a genuinely free one appears
-#   through live discovery.)
+#   through live discovery. The five Hugging Face entries are placed LAST
+#   because they are a force-included, credit-limited exception -- NOT
+#   verified free -- so genuinely free models are always tried first; see
+#   `_HF_FORCE_EVIDENCE`.)
 #
 # Override the whole ordering with IMAGE_GENERATION_PRIORITY (or
 # GW_IMAGE_GENERATION_PRIORITY for the AI Gateway). The override is ALSO a
@@ -413,6 +478,11 @@ IMAGE_PRIORITY = (
     "@cf/bytedance/stable-diffusion-xl-lightning",
     "@cf/lykon/dreamshaper-8-lcm",
     "@cf/runwayml/stable-diffusion-v1-5-inpainting",
+    "black-forest-labs/FLUX.1-schnell",
+    "black-forest-labs/FLUX.1-dev",
+    "black-forest-labs/FLUX.1-Kontext-dev",
+    "Qwen/Qwen-Image",
+    "stabilityai/stable-diffusion-3.5-large",
 )
 
 _PRIORITY_INDEX = {mid: i for i, mid in enumerate(IMAGE_PRIORITY)}
@@ -515,9 +585,15 @@ REJECTED_IMAGE_MODELS: dict = {
     ("together", "black-forest-labs/FLUX.1-schnell"): _REJECT_TOGETHER_PAID,
     ("together", "black-forest-labs/FLUX.1.1-pro"): _REJECT_TOGETHER_PAID,
     ("together", "stabilityai/stable-diffusion-xl-base-1.0"): _REJECT_TOGETHER_PAID,
-    ("huggingface", "black-forest-labs/FLUX.1-schnell"): _REJECT_HF_CREDITS,
-    ("huggingface", "black-forest-labs/FLUX.1-dev"): _REJECT_HF_CREDITS,
-    ("huggingface", "Qwen/Qwen-Image"): _REJECT_HF_CREDITS,
+    # NOTE (2026-09-27): these three ids were PROMOTED out of this rejected
+    # list into the FREE pool above (see `_HF_FORCE_EVIDENCE`) on explicit
+    # user request. `_REJECT_HF_CREDITS` still documents the underlying
+    # evidence the override deliberately overrides -- kept as a comment, not
+    # a dict entry, so the audit trail stays legible instead of
+    # contradicting `image_spec()`, which now matches all three.
+    # ("huggingface", "black-forest-labs/FLUX.1-schnell"): _REJECT_HF_CREDITS,
+    # ("huggingface", "black-forest-labs/FLUX.1-dev"): _REJECT_HF_CREDITS,
+    # ("huggingface", "Qwen/Qwen-Image"): _REJECT_HF_CREDITS,
     ("fal", "fal-ai/flux/schnell"): _REJECT_FAL_PAID,
     ("fal", "fal-ai/flux/dev"): _REJECT_FAL_PAID,
     ("replicate", "black-forest-labs/flux-schnell"): _REJECT_REPLICATE_PAID,

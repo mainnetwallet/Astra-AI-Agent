@@ -456,6 +456,7 @@ the model registry from its `<PROVIDER>_MODELS` env var:
 | Cohere | `adapters/cohere.py` | `COHERE_API_KEYS` | `COHERE_MODELS` |
 | Z.ai | `adapters/zai.py` | `ZAI_API_KEYS` | `ZAI_MODELS` |
 | Bedrock | `adapters/bedrock.py` | `BEDROCK_API_KEYS` (bearer) or `BEDROCK_CREDENTIALS` (`access_key:secret_key`) | `BEDROCK_MODELS` |
+| Hugging Face | `adapters/huggingface.py` | `HF_API_KEYS` | `HF_MODELS` |
 
 Each provider gets an unlimited **credential pool**
 (`astra/ai/credentials.py`): round-robin/least-recently-used selection
@@ -483,13 +484,14 @@ task type, scores candidate provider/model pairs by health + past
 outcomes, rotates credentials, and records routing stats
 (`/api/v1/router/status`, `/api/v1/router/stats`).
 
-The separate **Astra AI Gateway** (`astra/ai/gateway.py`) is ten
+The separate **Astra AI Gateway** (`astra/ai/gateway.py`) is eleven
 independent connections — `GW_GEMINI_*`, `GW_GROQ_*`,
 `GW_CLOUDFLARE_*`, `GW_BEDROCK_*`, `GW_OPENROUTER_*`, `GW_MISTRAL_*`,
 `GW_CEREBRAS_*`, `GW_SAMBANOVA_*` (also `GW_SAMBA_*`),
-`GW_COHERE_*`, `GW_ZAI_*` — with its own fallback chain (Gemini → Groq →
-Cloudflare → Bedrock → OpenRouter → Mistral → Cerebras → SambaNova →
-Cohere → Z.AI). Only configured connections are built; an unconfigured
+`GW_COHERE_*`, `GW_ZAI_*`, `GW_HUGGINGFACE_*` — with its own fallback chain
+(Gemini → Groq → Cloudflare → Bedrock → OpenRouter → Mistral → Cerebras →
+SambaNova → Cohere → Z.AI → Hugging Face). Only configured connections are
+built; an unconfigured
 provider is absent, never an error. Every OpenAI-compatible connection
 shares one execution contract: Bearer auth from its own per-connection
 credential pool, 60s / 120s (stream) timeouts, bounded transient retries

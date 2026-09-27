@@ -73,33 +73,11 @@ from astra.ai.json_extract import loads_lenient
 from astra.ai.multimodal_messages import build_multimodal_content
 from astra.ai.execution_history import AgentExecutionHistory
 from astra.ai.response_boundary import sanitize_final_response
-from astra.ai.router import RoutingRequest, RoutingResult, classify
+from astra.ai.router import RoutingRequest, RoutingResult
 from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError
 from astra.core.events import new_op_id
 from astra.terminal.manager import default_session_id_for
-
-# Task types that are safe to hand the router for a plain chat turn.
-# Everything else `classify()` can return (audio/video generation,
-# structured_output -> forced JSON mode, browser/web3 -> tool territory)
-# is served as ordinary chat here.
-#
-# "image_generation" is deliberately included (unlike audio/video
-# generation, which stay out of scope here): classify() already detects it
-# correctly, in English and Bangla/Banglish alike ("akta chobi banao",
-# "photo create koro"), and _route() hands those task types straight to the
-# Gateway's ImageRouter — the sole image execution owner. They must never
-# reach AstraRouter, which now refuses image task types outright (there is
-# no second image execution path). Previously this exact line coerced
-# task_type down to "simple_chat" before _route() ever saw it, so every
-# image request was quietly handed to a plain text model that just described
-# an image in words instead of generating one. See tests.test_chat_pipeline
-# .TestImageGenerationPipelineWiring,
-# tests.test_image_execution_boundary and
-# tests.test_multimodal.TestProviderRouterImageRefusal for the coverage.
-_CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
-                              "summarization", "research", "planning",
-                              "image_generation", "image_editing", "image_inpainting"})
 
 # Plain-text replies for missing AI configuration. Shown as-is (no
 # markdown rendering in the chat UI — see the note on _run_turn's fail
@@ -813,7 +791,11 @@ class ChatPipeline:
         }
         task_type = _clean(data.get("task_type"))
         if task_type not in allowed_task_types:
-            task_type = self._task_type(message, attachments)
+            # No local keyword fallback: the Gateway's own classification is
+            # the sole authority. An unrecognized/empty task_type from the
+            # Gateway just becomes a normal chat turn rather than being
+            # re-guessed from keywords.
+            task_type = "simple_chat"
         valid = {(t["provider"], t["model"]) for t in targets}
         if (provider, model) not in valid:
             # Never trust an invented target. Keep a provider-only pick when
@@ -1082,7 +1064,11 @@ class ChatPipeline:
         summary = self._approval_summary(request, result, allowed)
         if not self._tools_available():
             return self._reply(summary, True, trace)
-        task_type = self._task_type(message or "continue", None)
+        # No local classify() call: this resume path's execution capability
+        # is already fixed to "terminal" above via ProviderExecutionDecision,
+        # so task_type here only nudges agent/model selection — a fixed
+        # default is enough, no keyword classification needed.
+        task_type = "simple_chat"
         base = message or "Continue the task you were working on."
         # The host execution result (or the denial) is authoritative ground
         # truth for the continuation — the model may not re-run it.
@@ -1288,15 +1274,6 @@ class ChatPipeline:
         return rr
 
     # -- helpers -----------------------------------------------------------------
-    @staticmethod
-    def _task_type(text: str, attachments) -> str:
-        t = classify(text)
-        if _has_image(attachments):
-            # An attached image plus an edit instruction ("ei photo ta edit
-            # kore dao") is image EDITING, not plain vision -- a vision-only
-            # model cannot edit the image and must not be selected for it.
-            return "image_editing" if t == "image_editing" else "vision"
-        return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
     def _route(self, task_type, messages, provider, model, vision,
                req="", source_image=None, mask_image=None):
@@ -1638,9 +1615,11 @@ class ChatPipeline:
                 "Recent conversation (for reference):\n" + ctx_text +
                 "\n\nCurrent request:\n" + brief["final_request"], attachments)
         messages.append({"role": "user", "content": content})
-        # The Gateway's UNDERSTAND call is the authoritative classifier.
-        # Only the legacy/failure path above uses the local classifier.
-        task_type = brief.get("task_type") or self._task_type(brief["final_request"], attachments)
+        # The Gateway's UNDERSTAND call is the sole authority for task_type.
+        # If the understand call itself failed entirely (brief["ok"] is
+        # False), there is no local keyword classifier fallback anymore —
+        # the turn is simply treated as a normal chat request.
+        task_type = brief.get("task_type") or "simple_chat"
 
         # The Provider is the AI that does the work. With the shared
         # Terminal/tool surface wired, that work is a real multi-step agent

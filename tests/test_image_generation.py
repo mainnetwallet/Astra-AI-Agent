@@ -29,8 +29,9 @@ from astra.ai.gateway_routing import (
     meets_gateway_requirements, rank_image_targets, rank_targets)
 from astra.ai.image_models import (
     FREE_FALSE, FREE_IMAGE_PROVIDERS, FREE_TRUE, FREE_UNKNOWN, IMAGE_EDITING,
-    image_pool, image_spec, is_free_image_model, is_image_editing_model,
-    is_image_model, provider_supports_image_generation, rejected_image_reason)
+    IMAGE_GENERATION, documented_image_models, image_pool, image_spec,
+    is_free_image_model, is_image_editing_model, is_image_model,
+    provider_supports_image_generation, rejected_image_reason)
 from astra.ai.models import Model, ModelRegistry, metadata_for
 from astra.ai.router import AstraRouter, RoutingRequest, classify
 from astra.core.config import Config
@@ -674,7 +675,8 @@ class TestOpenRouterStaticPoolIsEmpty(unittest.TestCase):
     """LIVE-VERIFIED 2026-09-26: OpenRouter's image catalog
     (GET https://openrouter.ai/api/v1/images/models) contains ZERO `:free`
     image-output models, so its static FREE pool must be EMPTY and every
-    previously force-included `:free` id must be recorded as rejected. A
+    previously force-included `:free` id must be recorded as rejected.
+    """
 
     def _gw(self, *conns, config=None, events=None):
         from astra.ai.gateway import AstraAIGateway

@@ -28,11 +28,14 @@ TARGETS = [
 
 def understand(final_request="", was_incomplete=False, provider="gemini",
                model="gemini-pro", criteria=("answers the question",),
-               task_type=None):
+               task_type=None, targets=None):
+    if targets is None:
+        targets = [(provider, model)]
     data = {"final_request": final_request,
             "was_incomplete": was_incomplete, "provider": provider,
-            "model": model, "criteria": list(criteria),
-            "reason": "best fit"}
+            "model": model, "targets": [{"provider": p, "model": m}
+                                        for p, m in targets],
+            "criteria": list(criteria), "reason": "best fit"}
     if task_type is not None:
         data["task_type"] = task_type
     return json.dumps(data)
@@ -204,12 +207,17 @@ class TestHappyPath(unittest.TestCase):
         self.assertIn("provider=gemini model=gemini-pro", gw.calls[0][1]["content"])
 
     def test_invented_target_is_dropped_not_trusted(self):
-        pipe, gw, rt = make([understand(provider="nope", model="ghost-9"),
-                             verdict("complete")], ["answer"])
+        pipe, gw, rt = make(
+            [understand(provider="gemini", model="gemini-pro",
+                        targets=[("gemini", "gemini-pro"),
+                                 ("nope", "ghost-9")]),
+             verdict("complete")],
+            ["answer"])
         out = pipe.run("hello there")
-        self.assertIsNone(rt.requests[0].preferred_provider)
-        self.assertIsNone(rt.requests[0].preferred_model)
         self.assertTrue(out["ok"])
+        self.assertEqual(len(rt.requests), 1)
+        self.assertEqual(rt.requests[0].preferred_provider, "gemini")
+        self.assertEqual(rt.requests[0].preferred_model, "gemini-pro")
 
 
 class TestGatewayCategoryOverride(unittest.TestCase):
@@ -879,18 +887,36 @@ class TestGatewayOrderedTargetsPlan(unittest.TestCase):
         self.assertEqual(rt.requests[0].preferred_provider, "gemini")
         self.assertEqual(rt.requests[0].preferred_model, "gemini-pro")
 
-    # TEST 15: no eligible model -> no invented target, and the Gateway's
-    # deliberately-empty plan lets the existing automatic routing take over
-    # (soft preference, unchanged legacy behavior) rather than failing shut.
-    def test_empty_targets_plan_falls_back_to_automatic_routing(self):
+    # Empty Gateway target plans are terminal for normal requests.
+    # Automatic provider/model discovery must not silently take over.
+    def test_empty_targets_plan_fails_closed(self):
         pipe, gw, rt = make(
             [understand_targets([]), verdict("complete")],
             ["automatic answer"])
         out = pipe.run("hello there")
+        self.assertFalse(out["ok"])
+        self.assertEqual(rt.requests, [])
+        self.assertIn("no usable targets", out["data"]["error"].lower())
+
+    def test_gateway_sees_models_beyond_position_60(self):
+        catalogue = [
+            {"provider": "provider-%03d" % i, "model": "model-%03d" % i,
+             "capabilities": ["chat"], "quality": "mid",
+             "context_window": 32000, "health": "ok"}
+            for i in range(1, 101)
+        ]
+        pipe, gw, rt = make(
+            [understand_targets([("provider-100", "model-100")]),
+             verdict("complete")],
+            ["answered"],
+            targets=catalogue)
+        out = pipe.run("hello there")
         self.assertTrue(out["ok"])
-        self.assertIsNone(rt.requests[0].preferred_provider)
-        self.assertIsNone(rt.requests[0].preferred_model)
-        self.assertFalse(rt.requests[0].no_fallback)
+        self.assertEqual(len(rt.requests), 1)
+        self.assertEqual(rt.requests[0].preferred_provider, "provider-100")
+        self.assertEqual(rt.requests[0].preferred_model, "model-100")
+        self.assertIn("provider=provider-100 model=model-100",
+                          gw.calls[0][1]["content"])
 
     # TEST 12: the Router's own lower-level credential/key-pool retries
     # inside a single pinned target are untouched -- FakeRouter models that

@@ -154,7 +154,8 @@ _CF_SCHEMA = ("https://developers.cloudflare.com/workers-ai/models/{}/"
 _USER_REQ_EVIDENCE = (
     "user-selected Gemini image model kept in the supported image pool")
 
-_HF_FORCE_EVIDENCE = (
+#: Evidence recorded for the user-selected Hugging Face image models.
+_HF_EVIDENCE = (
     "user-selected Hugging Face image model kept in the supported image pool"
 )
 
@@ -219,32 +220,32 @@ _SPECS: tuple = (
               PROTOCOL_OPENAI_IMAGES,
               "user-selected Hugging Face image model",
               capabilities=(IMAGE_GENERATION,), sizes=("1024x1024",),
-              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              free_tier=FREE_TRUE, free_evidence=_HF_EVIDENCE,
               params=("prompt",)),
     ImageSpec("huggingface", "black-forest-labs/FLUX.1-dev",
               PROTOCOL_OPENAI_IMAGES,
               "user-selected Hugging Face image model",
               capabilities=(IMAGE_GENERATION,), sizes=("1024x1024",),
-              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              free_tier=FREE_TRUE, free_evidence=_HF_EVIDENCE,
               params=("prompt",)),
     ImageSpec("huggingface", "black-forest-labs/FLUX.1-Kontext-dev",
               PROTOCOL_OPENAI_IMAGES,
               "user-selected Hugging Face image model",
               capabilities=(IMAGE_GENERATION, IMAGE_EDITING),
               input_modalities=("text", "image"), sizes=("1024x1024",),
-              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              free_tier=FREE_TRUE, free_evidence=_HF_EVIDENCE,
               params=("prompt",)),
     ImageSpec("huggingface", "Qwen/Qwen-Image",
               PROTOCOL_OPENAI_IMAGES,
               "user-selected Hugging Face image model",
               capabilities=(IMAGE_GENERATION,), sizes=("1024x1024",),
-              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              free_tier=FREE_TRUE, free_evidence=_HF_EVIDENCE,
               params=("prompt",)),
     ImageSpec("huggingface", "stabilityai/stable-diffusion-3.5-large",
               PROTOCOL_OPENAI_IMAGES,
               "user-selected Hugging Face image model",
               capabilities=(IMAGE_GENERATION,), sizes=("1024x1024",),
-              free_tier=FREE_TRUE, free_evidence=_HF_FORCE_EVIDENCE,
+              free_tier=FREE_TRUE, free_evidence=_HF_EVIDENCE,
               params=("prompt",)),
 )
 
@@ -268,17 +269,14 @@ _SPECS: tuple = (
 #   6.  @cf/bytedance/stable-diffusion-xl-lightning
 #   7.  @cf/lykon/dreamshaper-8-lcm
 #   8.  @cf/runwayml/stable-diffusion-v1-5-inpainting
-#   9.  black-forest-labs/FLUX.1-schnell (huggingface, force-included)
-#   10. black-forest-labs/FLUX.1-dev (huggingface, force-included)
-#   11. black-forest-labs/FLUX.1-Kontext-dev (huggingface, force-included)
-#   12. Qwen/Qwen-Image (huggingface, force-included)
-#   13. stabilityai/stable-diffusion-3.5-large (huggingface, force-included)
+#   9.  black-forest-labs/FLUX.1-schnell (huggingface)
+#   10. black-forest-labs/FLUX.1-dev (huggingface)
+#   11. black-forest-labs/FLUX.1-Kontext-dev (huggingface)
+#   12. Qwen/Qwen-Image (huggingface)
+#   13. stabilityai/stable-diffusion-3.5-large (huggingface)
 #   (No OpenRouter entry: its live catalog has zero FREE image models, so
 #   the active pool contributes nothing until a genuinely free one appears
-#   through live discovery. The five Hugging Face entries are placed LAST
-#   because they are a force-included, credit-limited exception -- NOT
-#   verified free -- so genuinely free models are always tried first; see
-#   `_HF_FORCE_EVIDENCE`.)
+#   through live discovery.)
 #
 # Override the whole ordering with IMAGE_GENERATION_PRIORITY (or
 # GW_IMAGE_GENERATION_PRIORITY for the AI Gateway). The override is ALSO a

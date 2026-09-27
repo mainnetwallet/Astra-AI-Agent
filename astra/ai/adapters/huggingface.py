@@ -8,10 +8,7 @@ class HuggingFaceAdapter(CompatibleAdapter):
     """Hugging Face Inference Providers, via the unified OpenAI-compatible
     router at ``https://router.huggingface.co/v1``. The router forwards each
     call to whichever partner provider (fal, Together, Novita, ...) actually
-    serves the requested model id, billed against the account's Inference
-    Providers credit ($0.10/month on the free tier -- see
-    astra.ai.image_models for why that is NOT treated as a free image-
-    generation path).
+    serves the requested model id.
     """
     name = "huggingface"
     base_url = "https://router.huggingface.co/v1"

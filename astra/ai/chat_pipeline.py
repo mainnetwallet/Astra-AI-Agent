@@ -254,7 +254,7 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "capability that actually produces the requested result. \n\n"
 
     "4) ASSIGN. For IMAGE GENERATION and IMAGE EDITING requests, do NOT "
-    "select normal Gateway targets at all. Return an empty \\"targets\\" list "
+    "select normal Gateway targets at all. Return an empty \"targets\" list "
     "and leave provider/model empty because ImageRouter owns image provider/model "
     "selection and fallback independently. For every other request, from the "
     "provider/model list you are given, choose EVERY provider+model that can "

@@ -1273,7 +1273,17 @@ class AstraRouter:
         last_error = ""
         # Each retry is a separate upstream API attempt. Keep router/control
         # events separate from the Activity Log's real API-call lifecycle.
-        retries = self.max_retries
+        # Credential fallback is independent from the router's transient
+        # retry budget. A provider/model target may have multiple API keys;
+        # even when AI_MAX_RETRIES is 0 (or smaller than the number of
+        # configured credentials), every credential gets a chance before the
+        # Gateway target is considered exhausted. The credential pool marks
+        # failed keys unavailable/cools them and therefore naturally selects
+        # the next key on the following adapter call. For a single-key pool,
+        # the existing max_retries value still controls transient retries.
+        pool = getattr(adapter, "pool", None)
+        credential_count = int(getattr(pool, "count", 0) or 0) if pool is not None else 0
+        retries = max(self.max_retries, max(0, credential_count - 1))
         for attempt in range(1, retries + 2):
             if attempt > 1:
                 self._emit("credential.rotation", provider=name, model=model.model_id,

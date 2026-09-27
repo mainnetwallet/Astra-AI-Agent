@@ -1867,10 +1867,18 @@ class WebApp:
             # module docstring: without all three nothing can be
             # called), so a partially-configured provider is dropped
             # here rather than shown as a confusing "0 models" row.
+            #
+            # "configured" here means at least one key was ever SET, via
+            # `len(keys)` — NOT `p.get("credentials")`, which reflects
+            # only CURRENTLY-healthy keys. A provider whose one key just
+            # failed a manual test (e.g. a gated-model 401/403) would
+            # otherwise vanish from this health panel entirely instead of
+            # showing up unhealthy/red, which is what a health panel is
+            # for — and it would stay invisible until a process restart.
             provs = data.get("providers") or {}
             data["providers"] = {
                 n: p for n, p in provs.items()
-                if p.get("credentials") and p.get("base_url") and p.get("models")
+                if len(p.get("keys") or []) and p.get("base_url") and p.get("models")
             }
             return json_response({"ok": True, "data": data}, rid=req.rid)
 

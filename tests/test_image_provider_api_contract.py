@@ -43,8 +43,6 @@ GEMINI_IMG = "gemini-2.5-flash-image"
 #: id is what the mocked discovery endpoint reports; it exercises the
 #: discovery -> free-pool -> real `POST /images` dispatch path mechanically.
 OR_LIVE_FREE = "example/discovered-free-image:free"
-#: OpenRouter image models that are NOT free -- must never be substituted in.
-           "openai/gpt-5-image")
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
 B64 = base64.b64encode(PNG).decode()

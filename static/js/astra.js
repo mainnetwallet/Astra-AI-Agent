@@ -213,7 +213,6 @@ function chatWaitForReply(gen, conversationId) {
   chatTyping();
   const started = Date.now();
   const finish = () => {
-    hideUploadIndicator();
     if (gen !== CHAT.viewGen) return;   // a later view already owns this state
     chatStatusFinish();
     delete send.dataset.busy;
@@ -1054,7 +1053,6 @@ $("#chat-form").addEventListener("submit", async (e) => {
   input.style.height = "auto";
   $("#chat-send").disabled = true;
   chatTyping();
-  showUploadIndicator(hasAttachments);
   try {
     let r;
     if (hasAttachments) {
@@ -1067,7 +1065,6 @@ $("#chat-form").addEventListener("submit", async (e) => {
     } else {
       r = await post("/api/chat", { message: msg });
     }
-    hideUploadIndicator();
     if (sentGen !== CHAT.viewGen) return;   // moved to a different chat — leave it be
     if (!r.ok || !r.data) {
       chatStatusFail(r.error || "the server returned no reply");
@@ -1078,7 +1075,6 @@ $("#chat-form").addEventListener("submit", async (e) => {
     if (r.data.action === "dashboard") loaders.dashboard();
     chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts, r.data.data);
   } catch (err) {
-    hideUploadIndicator();
     if (sentGen !== CHAT.viewGen) return;   // moved to a different chat — leave it be
     chatStatusFail(String(err));
     chatBubble("ai", "Server e problem — `" + err + "`");
@@ -3139,23 +3135,6 @@ function renderArtifact(a) {
   return el;
 }
 
-/* ------------------------------ upload indicator ----------------------------- */
-function showUploadIndicator(hasFiles) {
-  if (!hasFiles) return;
-  let el = $("#upload-indicator");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "upload-indicator";
-    el.className = "upload-indicator";
-    el.innerHTML = `<span class="upload-spinner"></span> Uploading & processing…`;
-    $(".chat-shell")?.insertBefore(el, $("#chat-form")?.nextSibling || null);
-  }
-  el.hidden = false;
-}
-function hideUploadIndicator() {
-  const el = $("#upload-indicator");
-  if (el) el.hidden = true;
-}
 
 /* ---------------------------------- boot ------------------------------------ */
 /* Resolves once every <script> in index.html has executed. terminal.js and

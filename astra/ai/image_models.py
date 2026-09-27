@@ -22,7 +22,7 @@ IMAGE_INPAINTING = "image_inpainting"
 INPUT_IMAGE = "image"
 
 # ── free-tier eligibility ──────────────────────────────────────────────────
-# Three states, deliberately: a model may be capable but PAID (free_tier
+# Three states, deliberately: a model may be capable but not free (free_tier
 # False) or simply UNVERIFIED (free_tier unknown). Only FREE_TRUE may enter
 # the free image pool -- "unknown" is treated exactly like "not free" so an
 # unverifiable model can never sneak in.

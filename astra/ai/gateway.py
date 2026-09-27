@@ -1180,7 +1180,6 @@ class AstraGatewayCohere(_GatewayCompatibleConnection):
 class AstraGatewayZAI(_GatewayCompatibleConnection):
     """Astra AI Gateway / Z.AI (GLM) connection (independent of ZAIAdapter)."""
     name = "astra-gw-zai"
-    image_models_env = "ZAI_IMAGE_MODELS"
     base_url = "https://api.z.ai/api/paas/v4"
     models_env = "GW_ZAI_MODELS"
     api_keys_env = "GW_ZAI_API_KEYS"
@@ -1194,12 +1193,8 @@ class AstraGatewayHuggingFace(_GatewayCompatibleConnection):
     Providers router, which forwards chat/image calls to whichever partner
     backend actually serves the requested model id.
 
-    Image generation reuses the base class's OpenAI-compatible
-    ``generate_image()`` (``POST /images/generations``) -- see
-    ``astra.ai.image_models`` for the force-included/free-tier status of the
-    HF_IMAGE_MODELS entries (Hugging Face's free tier is a $0.10/month
-    credit, not a genuine per-call free image path; see that module's
-    docstring for the full audit trail and override note).
+    Image generation uses the supported Hugging Face image-model pool and
+    the base class's OpenAI-compatible ``generate_image()`` path.
     """
     name = "astra-gw-huggingface"
     image_models_env = "HF_IMAGE_MODELS"
@@ -1502,65 +1497,6 @@ def _build_connection(cls, config=None):
         return cls(config=config)
     except Exception:
         return None
-
-    # ── image generation (InvokeModel) ────────────────────────────────────
-    image_models_env = "BEDROCK_IMAGE_MODELS"
-
-    def list_image_models(self, *, discover: bool = True) -> list:
-        return list(getattr(self, "image_models", []) or [])
-
-    def generate_image(self, prompt: str, model: str | None = None,
-                       size: str = "1024x1024", n: int = 1) -> str:
-        """Generate an image with a documented Bedrock image model.
-
-        The model is validated against astra.ai.image_models first: a
-        Claude/Nova text model must never be handed a Titan/Stability/
-        Nova-Canvas image request body (the Gateway's Converse path stays
-        strictly separate).
-        """
-        from astra.ai.image_models import is_image_model
-        model = model or (self.image_models[0] if self.image_models else "")
-        if not model:
-            raise ProviderError(f"{self.name}: no image model configured")
-        if not is_image_model("bedrock", model):
-            err = ProviderError(
-                f"{self.name}: {model} is not an image-generation model")
-            err.retryable = False
-            raise err
-        try:
-            w, h = (int(x) for x in str(size).split("x"))
-        except (ValueError, AttributeError):
-            w, h = 1024, 1024
-        low = model.lower()
-        if "nova-canvas" in low:
-            body = {"taskType": "TEXT_IMAGE",
-                    "textToImageParams": {"text": prompt},
-                    "imageGenerationConfig": {"numberOfImages": 1, "width": w,
-                                              "height": h, "quality": "standard",
-                                              "cfgScale": 7.0}}
-        elif "titan-image" in low:
-            body = {"taskType": "TEXT_IMAGE",
-                    "textToImageParams": {"text": prompt},
-                    "imageGenerationConfig": {"numberOfImages": min(n, 1),
-                                              "width": w, "height": h}}
-        else:
-            body = {"text_prompts": [{"text": prompt}], "cfg_scale": 7,
-                    "steps": 30, "width": w, "height": h}
-        url = f"{self.base_url}/model/{model}/invoke"
-
-        def once(cred):
-            data = self._post(url, body, cred)
-            self._done(cred)
-            return data
-
-        data = self._run(once, single_attempt=True)
-        uri = image_result_to_data_uri(data)
-        if not uri:
-            err = ProviderError(
-                f"{self.name}: image generation returned no image data")
-            err.retryable = False
-            raise err
-        return uri
 
 class AstraAIGateway:
     """Multi-provider, multi-model intelligent-routing gateway.

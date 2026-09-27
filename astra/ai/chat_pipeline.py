@@ -270,11 +270,9 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "health=unknown model. Copy provider and model EXACTLY from the list "
     "for every target — never invent a provider or a model, and never "
     "list a pair that is not in the supplied list. If NOTHING in the "
-    "list is a clear fit for this request's required capability, return "
-    "an empty `targets` list — automatic routing will handle it, "
-    "including trying a currently-unhealthy model as a last resort if it "
-    "must — do not force an unsuitable model into `targets` just to fill "
-    "it.\n\n"
+    "list is a clear fit for a NORMAL request's required capability, return "
+    "an empty `targets` list; the pipeline will fail closed rather than "
+    "silently selecting a model outside this plan.\n\n"
 
     "5) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
     "answer must satisfy (for an execution task, the criteria must require "
@@ -744,10 +742,9 @@ class ChatPipeline:
         # Only surface non-failed models to the Gateway — no need to teach
         # it "avoid health=failed" when a failed model is simply never in
         # the list it's choosing from. Router.route_request()'s own
-        # fallback logic (unchanged) still tries a failed model as a last
-        # resort if nothing else fits, so hiding it here costs nothing:
-        # the Gateway just leaves provider/model empty when that happens
-        # and automatic routing takes over.
+        # fallback logic remains available only when the Gateway itself is
+        # unavailable. A successful Gateway turn with no usable targets
+        # fails closed below rather than silently discovering another model.
         usable = [t for t in targets if t.get("health") != "failed"]
         hidden = len(targets) - len(usable)
         # Give Gateway the complete non-failed catalogue. Do not truncate

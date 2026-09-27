@@ -54,10 +54,7 @@ LLAMA = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 # Gemini's dedicated image model.
 GEMINI_IMG = "gemini-2.5-flash-image"
 
-# The five user-requested (2026-09-27) FORCE-INCLUDED Hugging Face image
-# candidates -- explicitly NOT verified free per-call, a deliberate override
-# of the re-audit's rejection; see `_HF_FORCE_EVIDENCE` in
-# astra/ai/image_models.py.
+# The supported Hugging Face image candidates.
 HF_POOL = (
     "black-forest-labs/FLUX.1-schnell",
     "black-forest-labs/FLUX.1-dev",
@@ -73,7 +70,7 @@ HF_POOL = (
 # mechanically -- it is NOT a real catalog id and must never be treated as one.
 OR_SYNTH = "example/synthetic-free-image:free"
 
-# Ids removed from the active pool on 2026-09-26: live verification proved none
+# Historical OpenRouter ids that are intentionally not part of the static pool.
 OR_DEAD_FREE_IDS = (
     "google/gemini-2.5-flash-image-preview:free",
     "black-forest-labs/flux-1-schnell:free",

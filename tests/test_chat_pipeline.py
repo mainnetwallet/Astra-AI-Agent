@@ -38,9 +38,35 @@ def understand(final_request="", was_incomplete=False, provider="gemini",
     return json.dumps(data)
 
 
+def understand_targets(targets, final_request="", was_incomplete=False,
+                       criteria=("answers the question",), task_type=None):
+    """Like `understand()` but scripts the NEW `targets[]` ordered-plan
+    reply shape instead of a single provider/model pick."""
+    data = {"final_request": final_request, "was_incomplete": was_incomplete,
+            "targets": [{"provider": p, "model": m} for p, m in targets],
+            "criteria": list(criteria), "reason": "ordered plan"}
+    if task_type is not None:
+        data["task_type"] = task_type
+    return json.dumps(data)
+
+
 def verdict(v="complete", missing=(), action="fix", instructions=""):
     return json.dumps({"verdict": v, "missing": list(missing),
                        "action": action, "instructions": instructions})
+
+
+# Catalogue with explicit health values, used by the ordered-targets[]
+# fallback-plan tests below (TestGatewayOrderedTargetsPlan).
+TARGETS_HEALTH = [
+    {"provider": "gemini", "model": "gemini-pro", "capabilities": ["chat"],
+     "quality": "high", "context_window": 100000, "health": "unknown"},
+    {"provider": "groq", "model": "llama-fast", "capabilities": ["chat"],
+     "quality": "fast", "context_window": 8000, "health": "ok"},
+    {"provider": "zai", "model": "glm-a", "capabilities": ["chat"],
+     "quality": "mid", "context_window": 32000, "health": "failed"},
+    {"provider": "openrouter", "model": "model-x", "capabilities": ["chat"],
+     "quality": "mid", "context_window": 32000, "health": "ok"},
+]
 
 
 class FakeGateway:
@@ -125,7 +151,7 @@ def _png_data_uri():
 
 def make(gateway_replies, outputs, **kw):
     gw = FakeGateway(gateway_replies, usable=kw.pop("usable", True))
-    rt = FakeRouter(outputs)
+    rt = FakeRouter(outputs, targets=kw.pop("targets", None))
     # ChatPipeline's image path goes through gateway.image_router (the real
     # ImageRouter in production); the fake records the calls so the wiring can
     # be asserted directly.
@@ -735,6 +761,164 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         out = pipe.run("generate an image of a sunset over the mountains")
         self.assertNotIn("base64,", out["reply"])
         self.assertTrue((out["reply"] or "").strip())  # some human-readable line remains
+
+
+class TestGatewayOrderedTargetsPlan(unittest.TestCase):
+    """The Gateway's `targets[]` ordered plan (ASTRA AI GATEWAY — FIX MODEL
+    LIST OUTPUT + STRICT FALLBACK PLAN): every target must exist in the real
+    supplied catalogue, health must affect order, a failed target is never
+    in the plan, and the plan IS the authoritative fallback order for
+    execution — target #1 fails -> target #2 is tried, never a fresh
+    unrestricted search, and never a model outside the plan."""
+
+    # TEST 1 / TEST 9 / TEST 10: multiple eligible models -> ordered list,
+    # same-provider-multiple-models and different-providers both fall back
+    # correctly in plan order.
+    def test_multiple_eligible_models_produce_an_ordered_list(self):
+        pipe, gw, rt = make(
+            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro")]),
+             verdict("complete")],
+            ["first target answered"])
+        out = pipe.run("hello there")
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(rt.requests), 1)
+        self.assertEqual(rt.requests[0].preferred_provider, "groq")
+        self.assertEqual(rt.requests[0].preferred_model, "llama-fast")
+        self.assertTrue(rt.requests[0].no_fallback)
+
+    # TEST 6: target #1 fails -> target #2 executes.
+    def test_target_1_fails_target_2_executes(self):
+        pipe, gw, rt = make(
+            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro")]),
+             verdict("complete")],
+            [None, "second target answered"])
+        out = pipe.run("hello there")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["reply"], "second target answered")
+        self.assertEqual(len(rt.requests), 2)
+        self.assertEqual((rt.requests[0].preferred_provider,
+                          rt.requests[0].preferred_model),
+                         ("groq", "llama-fast"))
+        self.assertEqual((rt.requests[1].preferred_provider,
+                          rt.requests[1].preferred_model),
+                         ("gemini", "gemini-pro"))
+        # every attempt is pinned -- no silent substitution outside the plan
+        self.assertTrue(rt.requests[0].no_fallback)
+        self.assertTrue(rt.requests[1].no_fallback)
+
+    # TEST 7: targets #1 and #2 fail -> target #3 executes.
+    def test_targets_1_and_2_fail_target_3_executes(self):
+        # TARGETS_HEALTH marks groq/openrouter health=ok and gemini
+        # health=unknown, so the validated plan orders health=ok first:
+        # groq, openrouter, then gemini last.
+        pipe, gw, rt = make(
+            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro"),
+                                 ("openrouter", "model-x")]),
+             verdict("complete")],
+            [None, None, "third target answered"],
+            targets=TARGETS_HEALTH)
+        out = pipe.run("hello there")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["reply"], "third target answered")
+        self.assertEqual(len(rt.requests), 3)
+        self.assertEqual(rt.requests[0].preferred_provider, "groq")
+        self.assertEqual(rt.requests[1].preferred_provider, "openrouter")
+        self.assertEqual(rt.requests[2].preferred_provider, "gemini")
+
+    # TEST 8: every Gateway target fails -> honest final failure, no fresh
+    # unrestricted search and nothing outside the plan is ever tried.
+    def test_all_targets_failing_is_an_honest_final_failure(self):
+        pipe, gw, rt = make(
+            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro")]),
+             verdict("complete")],
+            [None, None])
+        out = pipe.run("hello there")
+        self.assertFalse(out["ok"])
+        # exactly two attempts -- the two plan targets, nothing more
+        self.assertEqual(len(rt.requests), 2)
+
+    # TEST 5 / TEST 13: health affects ordering -- a healthy target is
+    # attempted before an equally-fit unknown-health one, regardless of the
+    # order the Gateway happened to list them in.
+    def test_healthy_target_is_tried_before_unknown_health_target(self):
+        pipe, gw, rt = make(
+            [understand_targets([("gemini", "gemini-pro"), ("groq", "llama-fast")]),
+             verdict("complete")],
+            ["answered"], targets=TARGETS_HEALTH)
+        pipe.run("hello there")
+        # gemini-pro is health=unknown, groq/llama-fast is health=ok in
+        # TARGETS_HEALTH -- the plan must reorder health=ok first even
+        # though the Gateway listed gemini-pro first.
+        self.assertEqual(rt.requests[0].preferred_provider, "groq")
+        self.assertEqual(rt.requests[0].preferred_model, "llama-fast")
+
+    # TEST 3: an explicitly failed model is excluded from the normal plan
+    # even if the Gateway lists it.
+    def test_failed_health_target_is_excluded_from_the_plan(self):
+        pipe, gw, rt = make(
+            [understand_targets([("zai", "glm-a"), ("gemini", "gemini-pro")]),
+             verdict("complete")],
+            ["answered"], targets=TARGETS_HEALTH)
+        pipe.run("hello there")
+        # zai/glm-a is health=failed in TARGETS_HEALTH -- must never be
+        # attempted; gemini-pro is the only real target left in the plan.
+        self.assertEqual(len(rt.requests), 1)
+        self.assertEqual(rt.requests[0].preferred_provider, "gemini")
+        self.assertEqual(rt.requests[0].preferred_model, "gemini-pro")
+
+    # TEST 4 / TEST 11: the Gateway cannot invent a provider/model, and an
+    # exact duplicate pair is removed while valid ordering is preserved.
+    def test_invented_target_is_dropped_and_duplicates_are_removed(self):
+        pipe, gw, rt = make(
+            [understand_targets([("gemini", "gemini-pro"), ("fake-provider", "fake-model"),
+                                 ("gemini", "gemini-pro")]),
+             verdict("complete")],
+            ["answered"])
+        pipe.run("hello there")
+        self.assertEqual(len(rt.requests), 1)
+        self.assertEqual(rt.requests[0].preferred_provider, "gemini")
+        self.assertEqual(rt.requests[0].preferred_model, "gemini-pro")
+
+    # TEST 15: no eligible model -> no invented target, and the Gateway's
+    # deliberately-empty plan lets the existing automatic routing take over
+    # (soft preference, unchanged legacy behavior) rather than failing shut.
+    def test_empty_targets_plan_falls_back_to_automatic_routing(self):
+        pipe, gw, rt = make(
+            [understand_targets([]), verdict("complete")],
+            ["automatic answer"])
+        out = pipe.run("hello there")
+        self.assertTrue(out["ok"])
+        self.assertIsNone(rt.requests[0].preferred_provider)
+        self.assertIsNone(rt.requests[0].preferred_model)
+        self.assertFalse(rt.requests[0].no_fallback)
+
+    # TEST 12: the Router's own lower-level credential/key-pool retries
+    # inside a single pinned target are untouched -- FakeRouter models that
+    # layer as already resolved within one route_request() call, and the
+    # plan only advances to the NEXT target when that whole call reports
+    # failure (never mid-attempt).
+    def test_single_target_still_goes_through_one_pinned_route_call(self):
+        pipe, gw, rt = make(
+            [understand_targets([("gemini", "gemini-pro")]), verdict("complete")],
+            ["answered after internal retries"])
+        pipe.run("hello there")
+        self.assertEqual(len(rt.requests), 1)
+        self.assertTrue(rt.requests[0].no_fallback)
+
+    # TEST 14: Gateway verification/fix flow still runs unchanged on top of
+    # an ordered-targets[] execution.
+    def test_verification_fix_loop_still_works_with_ordered_targets(self):
+        pipe, gw, rt = make(
+            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro")]),
+             verdict("incomplete", ["no example"], "fix", "Add an example."),
+             verdict("complete")],
+            ["draft", "answer with example"])
+        out = pipe.run("explain recursion")
+        self.assertEqual(out["reply"], "answer with example")
+        # first attempt used target #1; the correction call is pinned to
+        # whichever (provider, model) actually served the first attempt
+        fix_req = rt.requests[1]
+        self.assertTrue(fix_req.no_fallback)
 
 
 if __name__ == "__main__":

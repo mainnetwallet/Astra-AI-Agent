@@ -253,18 +253,24 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "If a request combines capabilities, choose the primary execution "
     "capability that actually produces the requested result. \n\n"
 
-    "4) ASSIGN. From the provider/model list you are given, pick the single "
-    "best provider+model for this job (coding -> a coding-capable model, "
-    "hard reasoning -> a high-quality model, simple chat -> a fast one, "
-    "image generation -> an image-generation model, image editing -> an "
-    "image-editing model, vision -> a vision model). Each entry shows a "
-    "`health` value "
-    "('ok' or 'unknown' — already-failing models are never listed here); "
-    "prefer health=ok over health=unknown when both otherwise fit equally. "
-    "Copy provider and model EXACTLY from the list. If nothing in the "
-    "list is a clear fit for this request's required capability, use "
-    "\"\" for both — automatic routing will handle it, including trying "
-    "a currently-unhealthy model as a last resort if it must.\n\n"
+    "4) ASSIGN. From the provider/model list you are given, choose EVERY "
+    "provider+model that can actually do this job (coding -> coding-capable "
+    "models, hard reasoning -> high-quality models, simple chat -> fast "
+    "ones, image generation -> image-generation models, image editing -> "
+    "image-editing models, vision -> vision models), then put them in "
+    "`targets` as an ORDERED list — this order IS the fallback order: if "
+    "the first one fails, the second is used, and so on. Order by fit "
+    "first, then by health: each entry shows a `health` value ('ok' or "
+    "'unknown' — already-failing models are never listed here), and a "
+    "health=ok model must be placed before an otherwise-equally-fit "
+    "health=unknown model. Copy provider and model EXACTLY from the list "
+    "for every target — never invent a provider or a model, and never "
+    "list a pair that is not in the supplied list. If NOTHING in the "
+    "list is a clear fit for this request's required capability, return "
+    "an empty `targets` list — automatic routing will handle it, "
+    "including trying a currently-unhealthy model as a last resort if it "
+    "must — do not force an unsuitable model into `targets` just to fill "
+    "it.\n\n"
 
     "5) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
     "answer must satisfy (for an execution task, the criteria must require "
@@ -272,7 +278,8 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
 
     "Reply with exactly this JSON shape:\n"
     "{\"final_request\": \"...\", \"was_incomplete\": true|false, "
-    "\"task_type\": \"<category>\", \"provider\": \"...\", \"model\": \"...\", "
+    "\"task_type\": \"<category>\", "
+    "\"targets\": [{\"provider\": \"...\", \"model\": \"...\"}, ...], "
     "\"criteria\": [\"...\"], \"reason\": \"<one short line>\", "
     "\"execution\": {\"required\": true|false, \"capability\": \"\", "
     "\"environment\": \"agent_runtime\"|\"host_fallback\", "
@@ -714,6 +721,7 @@ class ChatPipeline:
                 else collect_runtime_capabilities(self.registry))
         fallback = {"final_request": message, "was_incomplete": False,
                     "task_type": "", "provider": "", "model": "", "criteria": [],
+                    "targets": [],
                     "reason": "", "execution": ProviderExecutionDecision(),
                     "ok": False}
         targets = []
@@ -782,7 +790,6 @@ class ChatPipeline:
                        error="unparsable Gateway reply", request=req, trace=req)
             return fallback
 
-        provider, model = _clean(data.get("provider")), _clean(data.get("model"))
         allowed_task_types = {
             "simple_chat", "general", "reasoning", "coding", "long_context",
             "structured_output", "tool_use", "research", "planning",
@@ -797,11 +804,34 @@ class ChatPipeline:
             # re-guessed from keywords.
             task_type = "simple_chat"
         valid = {(t["provider"], t["model"]) for t in targets}
-        if (provider, model) not in valid:
-            # Never trust an invented target. Keep a provider-only pick when
-            # the provider itself is real; otherwise leave routing automatic.
-            provider = provider if any(p == provider for p, _ in valid) else ""
-            model = ""
+        # Health MUST come from the real supplied catalogue, never invented
+        # or guessed by the Gateway reply — and an explicitly failed target
+        # is never part of the normal ordered plan (§13, §3).
+        usable_by_key = {(t["provider"], t["model"]): t for t in usable}
+
+        ordered_targets = self._parse_gateway_targets(
+            data.get("targets"), usable_by_key)
+
+        provider, model = "", ""
+        if ordered_targets:
+            # NEW format: the Gateway returned an explicit ordered plan.
+            # `targets` is the sole authority for this request's fallback
+            # order (see ChatPipeline._route).
+            provider = ordered_targets[0]["provider"]
+            model = ordered_targets[0]["model"]
+        else:
+            # OLD/legacy format (or the Gateway deliberately returned an
+            # empty plan): fall back to a single soft-preference pick, byte
+            # -for-byte the pre-existing behavior, so an older Gateway reply
+            # (or a genuinely-empty "nothing fits" plan) still lets the
+            # Router's own automatic ranking/fallback take over unchanged.
+            legacy_provider = _clean(data.get("provider"))
+            legacy_model = _clean(data.get("model"))
+            if (legacy_provider, legacy_model) in valid:
+                provider, model = legacy_provider, legacy_model
+            elif any(p == legacy_provider for p, _ in valid):
+                # Never trust an invented model paired with a real provider.
+                provider = legacy_provider
         criteria = [_clean(c) for c in (data.get("criteria") or [])
                     if _clean(c)][:5]
         # The Gateway's structured execution decision. `normalized()` drops
@@ -817,8 +847,52 @@ class ChatPipeline:
                 "was_incomplete": rewrote,
                 "task_type": task_type,
                 "provider": provider, "model": model, "criteria": criteria,
+                "targets": ordered_targets,
                 "reason": _clean(data.get("reason")), "execution": execution,
                 "ok": True}
+
+    @staticmethod
+    def _parse_gateway_targets(raw_targets, usable_by_key: dict) -> list[dict]:
+        """Validate + order the Gateway's `targets[]` plan (§4, §11, §12).
+
+        `usable_by_key` maps every (provider, model) pair the Router
+        actually supplied — MINUS anything explicitly health=failed — to
+        its real catalogue entry. Every item Claude proposes MUST already
+        exist in that map (`selected_targets ⊆ supplied_targets`); anything
+        else (an invented pair, a failed pair, a malformed entry, or an
+        exact duplicate) is silently dropped rather than trusted. Health on
+        the returned entries always comes from the real catalogue entry,
+        never from the Gateway's own claim. A final stable sort by health
+        (ok before unknown) guarantees §5's ordering rule even if the
+        Gateway itself mis-ordered two otherwise-equal candidates — stable
+        sort means it never reorders within the same health tier, so the
+        Gateway's own relative preference is preserved there.
+        """
+        if not isinstance(raw_targets, list):
+            return []
+        seen = set()
+        out = []
+        for item in raw_targets:
+            if isinstance(item, dict):
+                p, m = _clean(item.get("provider")), _clean(item.get("model"))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                p, m = _clean(item[0]), _clean(item[1])
+            else:
+                continue
+            key = (p, m)
+            if not p or not m or key in seen:
+                continue
+            entry = usable_by_key.get(key)
+            if entry is None:
+                # Not in the supplied catalogue at all, or explicitly
+                # health=failed — never trusted into the normal plan.
+                continue
+            seen.add(key)
+            out.append({"provider": p, "model": m,
+                        "health": entry.get("health") or "unknown"})
+        _HEALTH_RANK = {"ok": 0, "unknown": 1}
+        out.sort(key=lambda t: _HEALTH_RANK.get(t["health"], 2))
+        return out
 
     # -- step 3: Gateway call #2 (verify) -------------------------------------
     def _make_verifier(self, brief: dict, state: dict, req: str = "",
@@ -1276,7 +1350,7 @@ class ChatPipeline:
     # -- helpers -----------------------------------------------------------------
 
     def _route(self, task_type, messages, provider, model, vision,
-               req="", source_image=None, mask_image=None):
+               req="", source_image=None, mask_image=None, targets=None):
         # image_generation / image_editing are owned EXCLUSIVELY by the
         # Gateway's ImageRouter (see `_route_image`): it is the only image
         # execution path, so these tasks never reach the Provider router's
@@ -1303,6 +1377,45 @@ class ChatPipeline:
             failed.attempts = 0
             failed._port_kind = "gateway"
             return failed
+
+        if targets:
+            # NEW: the Gateway returned an explicit ORDERED targets[] plan
+            # (see ChatPipeline._understand / _parse_gateway_targets). That
+            # order IS the authoritative fallback order for this request —
+            # each target is pinned with no_fallback=True so the Router
+            # only ever executes that exact (provider, model) pair (never
+            # silently substituting one outside the plan), while the
+            # Router's OWN lower-level credential/key-pool retries inside
+            # that single pair still run exactly as before (§14 — two
+            # independent fallback layers). No fresh/unrestricted model
+            # discovery happens between targets, and if every target in the
+            # plan fails this returns that honest final failure rather than
+            # falling through to automatic routing.
+            self._emit("chat.pipeline.target_plan", task=task_type,
+                       targets=[f"{t['provider']}/{t['model']}"
+                                for t in targets],
+                       count=len(targets), request=req, trace=req)
+            rr = None
+            for idx, t in enumerate(targets):
+                rr = self.router.route_request(RoutingRequest(
+                    task_type=task_type, messages=messages,
+                    preferred_provider=t["provider"],
+                    preferred_model=t["model"], no_fallback=True,
+                    vision=vision, max_tokens=self.max_tokens, trace=req))
+                if rr is not None and rr.ok:
+                    if idx > 0:
+                        self._emit("chat.pipeline.target_fallback",
+                                   task=task_type, index=idx,
+                                   provider=t["provider"], model=t["model"],
+                                   request=req, trace=req)
+                    return rr
+                self._emit("chat.pipeline.target_failed", task=task_type,
+                           index=idx, provider=t["provider"],
+                           model=t["model"],
+                           error=getattr(rr, "error", "") if rr else "",
+                           request=req, trace=req)
+            return rr
+
         rr = self.router.route_request(RoutingRequest(
             task_type=task_type, messages=messages,
             preferred_provider=provider or None,
@@ -1558,6 +1671,7 @@ class ChatPipeline:
         else:
             brief = {"final_request": raw, "was_incomplete": False,
                      "provider": "", "model": "", "criteria": [],
+                     "targets": [],
                      "reason": "", "ok": False,
                      "execution": ProviderExecutionDecision()}
         assigned = (f"{brief['provider']}/{brief['model']}" if brief["model"]
@@ -1682,7 +1796,8 @@ class ChatPipeline:
                 mask_image = dict(mask_image, storage_path=_path_of(mask_image))
             rr = self._route(task_type, messages, brief["provider"],
                              brief["model"], vision, req=req,
-                             source_image=source_image, mask_image=mask_image)
+                             source_image=source_image, mask_image=mask_image,
+                             targets=brief.get("targets") or None)
         if rr is None or not rr.ok:
             err = (trace.get("error") or getattr(rr, "error", "") or
                    "unknown error")

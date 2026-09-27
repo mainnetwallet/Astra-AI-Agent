@@ -181,7 +181,7 @@ class ImageRouter:
 
         Returns a `data:` URI on the first success and stops immediately,
         or raises `ProviderError(IMAGE_EXHAUSTED_MESSAGE)` when every
-        eligible FREE model failed. It NEVER falls back to a paid image
+        eligible FREE model failed. It NEVER falls back outside the image
         model, a text model, a vision-only model or simple_chat.
         """
         from astra.ai.gateway import _gw_log_cap

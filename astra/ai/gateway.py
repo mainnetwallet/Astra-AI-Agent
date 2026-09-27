@@ -638,21 +638,43 @@ class _GatewayCompatibleConnection:
         return list(self.image_models)
 
     def generate_image(self, prompt: str, model: str | None = None,
-                       size: str = "1024x1024", n: int = 1) -> str:
+                       size: str = "1024x1024", n: int = 1, *,
+                       source_image: dict | None = None,
+                       mask_image: dict | None = None) -> str:
         """Generate an image via the OpenAI-compatible Images API
         (`POST /images/generations` + `response_format=b64_json`), used by
         connections whose documented image protocol this is (Z.AI
-        GLM-Image/CogView). Connections with a different documented protocol
+        GLM-Image/CogView, Hugging Face's unified Inference Providers
+        router). Connections with a different documented protocol
         override this method, so protocol ownership is explicit: OpenRouter
         (``POST /api/v1/images``), Gemini (native ``:generateContent``),
         Cloudflare (Workers AI ``/ai/run/<model>``) and Bedrock
         (``InvokeModel``).
         Returns `data:<mime>;base64,<...>`; a 429/5xx/network error
         propagates so the Gateway fails over to the next image target.
+
+        ``source_image``/``mask_image``: this base protocol has no
+        documented image-editing/inpainting request shape, so both are
+        rejected with a clear, non-retryable error rather than silently
+        ignored or sent as an unsupported field -- ImageRouter (see
+        astra/ai/image_router.py) always passes these two keywords for
+        EVERY call, editing or not, so a connection using this base
+        method unmodified must accept them (previously this signature
+        did not, so ANY image-generation call routed here -- editing or
+        plain text-to-image -- raised an unhandled TypeError instead of
+        a clean ProviderError, e.g. for astra-gw-huggingface).
         """
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
+        if source_image is not None:
+            err = ProviderError(f"{self.name}: image editing is not supported")
+            err.retryable = False
+            raise err
+        if mask_image is not None:
+            err = ProviderError(f"{self.name}: inpainting is not supported")
+            err.retryable = False
+            raise err
         body = {"model": model, "prompt": prompt, "n": max(1, int(n or 1)),
                 "size": size, "response_format": "b64_json"}
 

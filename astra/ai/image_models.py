@@ -7,7 +7,7 @@ by this module.
 
 Only explicitly free image models, or models reported as free image-output
 models by a supported provider's live catalog, may enter the image pool.
-There is no paid-image fallback.
+There is no fallback outside the supported image pool.
 """
 from __future__ import annotations
 
@@ -36,10 +36,8 @@ FREE_UNKNOWN = "unknown"
 #   * openrouter -> ``POST /api/v1/images`` (dedicated Images API)
 #   * cloudflare -> Workers AI ``/ai/run/<model>``
 #   * gemini     -> native ``models/<id>:generateContent``
-#   * zai        -> OpenAI-style ``POST /images/generations``
 #   * huggingface -> OpenAI-style ``POST /images/generations`` (unified
 #     Inference Providers router)
-#   * bedrock    -> ``InvokeModel``
 #: OpenAI-style ``POST /images/generations`` (Z.AI GLM-Image/CogView). NOT
 #: OpenRouter, which uses its own dedicated endpoint below.
 PROTOCOL_OPENAI_IMAGES = "openai_images_generations"
@@ -148,8 +146,7 @@ _CF_FREE = ("https://developers.cloudflare.com/workers-ai/platform/pricing/ "
             "\u2014 free allocation table (re-confirmed live 2026-09-26): "
             "Images = sum of 250 free steps/day (up to 1024x1024); this "
             "superseded the old blanket 10,000 Neurons/day description but "
-            "Images still bill in Neurons and are not on any paid-only "
-            "exception list")
+            "Images use the documented free allocation.")
 _CF_SCHEMA = ("https://developers.cloudflare.com/workers-ai/models/{}/"
               "schema-input.json")
 
@@ -206,7 +203,7 @@ _HF_FORCE_EVIDENCE = (
 # Override the whole ordering with IMAGE_GENERATION_PRIORITY (or
 # GW_IMAGE_GENERATION_PRIORITY for the AI Gateway). The override is ALSO a
 # single global model list; it may reorder/re-select the already-eligible
-# FREE image models but can never add a text, vision-only or paid model.
+# FREE image models but can never add a model outside the supported image pool.
 IMAGE_PRIORITY = (
     "gemini-2.5-flash-image",
     "@cf/leonardo/lucid-origin",

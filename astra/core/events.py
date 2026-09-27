@@ -123,6 +123,14 @@ EVENT_KINDS = (
     "chat.pipeline.understand_failed", "chat.pipeline.verified",
     "chat.pipeline.verify_error", "chat.pipeline.finished",
     "chat.pipeline.failed",
+    # The Gateway's ordered targets[] fallback plan (ChatPipeline._route()
+    # for a normal turn; ProviderToolCaller for a task_type == "tool_use"
+    # turn driven by the agent tool loop -- see astra/ai/agent_tool_loop.py).
+    # `target_plan` is the up-front announcement of the full ordered plan;
+    # `target_failed`/`target_fallback` are emitted per attempt as the plan
+    # is walked on a target's failure.
+    "chat.pipeline.target_plan", "chat.pipeline.target_failed",
+    "chat.pipeline.target_fallback",
     # The Gateway's OWN classification/handoff event for an
     # image_generation/image_editing turn -- emitted once, BEFORE the real
     # provider API call, so it never collapses into (or is confused with)

@@ -229,13 +229,29 @@ class GatewayToolCaller(ToolCaller):
 
 class ProviderToolCaller(ToolCaller):
     """Executes through the existing Provider system (AstraRouter), using
-    the same provider/model the Gateway assigned for this turn."""
+    the same provider/model the Gateway assigned for this turn.
+
+    When the Gateway returned an ordered `targets[]` plan (see
+    `ChatPipeline._parse_gateway_targets` / `ChatPipeline._route`), that
+    plan is the authoritative fallback order for every model call the tool
+    loop makes on `targets[0]`'s failure -- mirroring `_route()`'s own
+    targets[] handling: each target is pinned with `no_fallback=True`, no
+    target outside the plan is ever tried, and the plan's own ordering
+    (never a fresh/unrestricted search) decides what runs next. Once a
+    target in the plan answers successfully it stays pinned for later tool-
+    loop steps (`_target_index` is sticky) -- the loop does not re-walk the
+    plan from #1 on every step, it only advances past a target once that
+    target itself fails. If every remaining target in the plan has failed,
+    the loop reports that honest failure instead of trying anything outside
+    the plan or falling through to automatic routing.
+    """
 
     name = "provider"
 
     def __init__(self, router, *, task_type: str = "coding", vision: bool = False,
                  provider: str | None = None, model: str | None = None,
-                 no_fallback: bool = False, trace: str = ""):
+                 no_fallback: bool = False, trace: str = "",
+                 targets: list[dict] | None = None, events=None):
         self.router = router
         self.task_type = task_type
         self.vision = vision
@@ -245,28 +261,88 @@ class ProviderToolCaller(ToolCaller):
         self.trace = trace
         self.last_result = None
         self.last_error = ""
+        # Ordered targets[] plan: a list of {"provider": ..., "model": ...}
+        # dicts, already validated + health-ordered by
+        # ChatPipeline._parse_gateway_targets. Empty/None means the OLD/
+        # legacy single provider/model behavior below is used unchanged.
+        self.targets = [dict(t) for t in targets] if targets else []
+        self._target_index = 0
+        # Optional event sink so target_failed/target_fallback are visible
+        # in the Activity Log the same way ChatPipeline._route's are (see
+        # chat.pipeline.target_plan/target_failed/target_fallback).
+        self.events = events
 
-    def _request(self, messages, max_tokens, trace, task_type):
+    def _emit(self, kind: str, **data) -> None:
+        if self.events is None:
+            return
+        try:
+            self.events.emit(kind, agent="chat.pipeline", **data)
+        except Exception:
+            pass
+
+    def _request(self, messages, max_tokens, trace, task_type, *,
+                 provider=None, model=None, no_fallback=None):
         from astra.ai.router import RoutingRequest
 
         return self.router.route_request(RoutingRequest(
             task_type=task_type, messages=messages,
-            preferred_provider=self.provider, preferred_model=self.model,
+            preferred_provider=(self.provider if provider is None
+                                else provider),
+            preferred_model=self.model if model is None else model,
             vision=self.vision, max_tokens=max_tokens,
-            no_fallback=self.no_fallback, trace=trace or self.trace))
+            no_fallback=(self.no_fallback if no_fallback is None
+                        else no_fallback),
+            trace=trace or self.trace))
+
+    def _chat_with_targets(self, messages, max_tokens, trace):
+        """Walk `self.targets` starting at the sticky `_target_index`,
+        pinning each attempt with `no_fallback=True` exactly like
+        `ChatPipeline._route()`'s targets[] branch. Advances the sticky
+        index on failure so a later call in the SAME loop resumes from the
+        first still-untried target rather than re-trying ones already known
+        to have failed this turn."""
+        rr = None
+        start = self._target_index
+        for idx in range(start, len(self.targets)):
+            t = self.targets[idx]
+            rr = self._request(messages, max_tokens, trace, self.task_type,
+                               provider=t["provider"], model=t["model"],
+                               no_fallback=True)
+            if rr is not None and rr.ok:
+                if idx > start:
+                    self._emit("chat.pipeline.target_fallback",
+                               task=self.task_type, index=idx,
+                               provider=t["provider"], model=t["model"],
+                               trace=trace or self.trace)
+                self._target_index = idx
+                return rr
+            self._emit("chat.pipeline.target_failed", task=self.task_type,
+                       index=idx, provider=t["provider"], model=t["model"],
+                       error=getattr(rr, "error", "") if rr else "",
+                       trace=trace or self.trace)
+        # Every remaining target in the plan has failed: an honest final
+        # failure, never a fresh/unrestricted search and never a target
+        # outside the plan. Sticky index parked at len(targets) so a later
+        # call in this same loop does not re-attempt anything either.
+        self._target_index = len(self.targets)
+        return rr
 
     def chat(self, messages, *, max_tokens=None, trace=""):
-        rr = self._request(messages, max_tokens, trace, self.task_type)
-        if (rr is None or not rr.ok) and self.task_type not in (
-                "simple_chat", "vision", "image_generation",
-                "image_editing") \
-                and "no eligible" in (getattr(rr, "error", "") or ""):
-            # A hard capability filter left nothing to run on; a plain chat
-            # turn can still be served by any model. Mirrors the pipeline's
-            # own `_route` fallback so the loop never dies on a filter.
-            # Image tasks are excluded: downgrading an image request to a
-            # text model would answer with a description instead of an image.
-            rr = self._request(messages, max_tokens, trace, "simple_chat")
+        if self.targets:
+            rr = self._chat_with_targets(messages, max_tokens, trace)
+        else:
+            rr = self._request(messages, max_tokens, trace, self.task_type)
+            if (rr is None or not rr.ok) and self.task_type not in (
+                    "simple_chat", "vision", "image_generation",
+                    "image_editing") \
+                    and "no eligible" in (getattr(rr, "error", "") or ""):
+                # A hard capability filter left nothing to run on; a plain
+                # chat turn can still be served by any model. Mirrors the
+                # pipeline's own `_route` fallback so the loop never dies on
+                # a filter. Image tasks are excluded: downgrading an image
+                # request to a text model would answer with a description
+                # instead of an image.
+                rr = self._request(messages, max_tokens, trace, "simple_chat")
         if rr is None or not rr.ok:
             from astra.core.exceptions import ProviderError
             self.last_error = (rr.error if rr is not None else "") or \

@@ -660,19 +660,27 @@ class ChatPipeline:
             return False
 
     def _make_tool_caller(self, task_type, vision, *, provider=None,
-                          model=None, req=""):
+                          model=None, req="", targets=None):
         """Build the brain that drives the shared `AgentToolLoop` for this
         pipeline's configured mode. `CHAT_AGENT_BRAIN` selects WHICH AI
         decides the next tool call — never which tools exist: both callers
         reach the same `ToolRegistry` and therefore the same tools and
-        Terminal (requirement 9)."""
+        Terminal (requirement 9).
+
+        `targets`, when given, is the Gateway's ordered targets[] plan (see
+        `ChatPipeline._parse_gateway_targets`) — the authoritative
+        provider/model fallback order for this turn's tool-loop calls. Only
+        meaningful for the `ProviderToolCaller` brain: the Gateway brain
+        already IS the Gateway's own connections, so it has no targets[]
+        plan to walk."""
         from astra.ai.agent_tool_loop import (GatewayToolCaller,
                                               ProviderToolCaller)
         if self.agent_brain == "gateway" and self._gateway_usable():
             return GatewayToolCaller(self.gateway, category="tool_use")
         return ProviderToolCaller(self.router, task_type=task_type,
                                   vision=vision, provider=provider,
-                                  model=model, trace=req)
+                                  model=model, trace=req, targets=targets,
+                                  events=self.events)
 
     def _execution_evidence(self, scope) -> dict:
         """LIVE execution evidence for the Gateway's completion gate: exactly
@@ -1267,9 +1275,18 @@ class ChatPipeline:
         Gateway corrections carry the tool exchanges too."""
         from astra.ai.agent_tool_loop import AgentToolLoop
         use_gateway = (self.agent_brain == "gateway" and self._gateway_usable())
+        targets = brief.get("targets") or None
+        if targets and not use_gateway:
+            # Same up-front plan announcement `_route()` emits for the
+            # non-tool-loop path, so the Activity Log shows the fallback
+            # order this turn's tool-loop calls will walk on failure.
+            self._emit("chat.pipeline.target_plan", task=task_type,
+                       targets=[f"{t['provider']}/{t['model']}"
+                                for t in targets],
+                       count=len(targets), request=req, trace=req)
         caller = self._make_tool_caller(
             task_type, vision, provider=brief["provider"] or None,
-            model=brief["model"] or None, req=req)
+            model=brief["model"] or None, req=req, targets=targets)
         loop = AgentToolLoop(self.registry, terminal=self.terminal,
                              runtime=self.runtime,
                              events=self.events,

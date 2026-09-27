@@ -2370,12 +2370,22 @@ class WebApp:
             rid=req.rid)
 
     def _gateway_test(self, req: Request) -> Response:
-        """Test only the Astra AI Gateway's own connections."""
+        """Test only the Astra AI Gateway's own connections.
+
+        Clears the shared manual-test/health cache first (mirroring
+        AstraRouter.reset_all_health for the Provider "test all" button):
+        without this, a credential that failed once (e.g. a stale/invalid
+        key) stays cached as a failure for up to shared_health's TTL, so
+        fixing the key and re-running this exact endpoint would silently
+        keep replaying the old cached failure instead of making a fresh
+        upstream call."""
         router = self.site.router()
         gw = getattr(router, "gateway", None) if router else None
         if gw is None:
             return error_response("Astra AI Gateway not configured", 400,
                                   "gateway_unavailable", req.rid)
+        if gw.shared_health is not None:
+            gw.shared_health.invalidate()
         return json_response({"ok": True,
                               "data": {"connections": gw.test_all_connections()}},
                              rid=req.rid)
@@ -2393,12 +2403,18 @@ class WebApp:
 
     def _gateway_test_one(self, req: Request, name) -> Response:
         """Test one Astra AI Gateway connection (e.g. 'astra-gw-gemini') —
-        every model it exposes, not just one."""
+        every model it exposes, not just one.
+
+        Resets this connection's shared-health cache first, same reasoning
+        as `_gateway_test`: a manual "test this connection" call must always
+        make a real upstream attempt, never silently replay a stale cached
+        failure from before the user fixed a credential."""
         router = self.site.router()
         gw = getattr(router, "gateway", None) if router else None
         if gw is None:
             return error_response("Astra AI Gateway not configured", 400,
                                   "gateway_unavailable", req.rid)
+        gw.reset_connection_health(name)
         return json_response({"ok": True,
                               "data": gw.test_connection_by_name(name)},
                              rid=req.rid)

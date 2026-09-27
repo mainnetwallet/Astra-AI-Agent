@@ -113,7 +113,7 @@ class ImageRouter:
                 if spec is None and mid in live:
                     # Live-discovered ids are only ever accepted when the
                     # provider's own API reported them as FREE image models
-                    # (OpenRouter's ":free" variants); otherwise a paid model
+                    # (OpenRouter's ":free" variants); otherwise an unsupported model
                     # could sneak into the free pool.
                     spec = make_image_spec(
                         short, mid, PROTOCOL_OPENROUTER_IMAGES,

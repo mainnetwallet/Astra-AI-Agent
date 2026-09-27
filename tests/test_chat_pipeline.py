@@ -665,6 +665,18 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         self.assertEqual(len(gw.image_router.calls), 1)
         self.assertEqual(rt.requests, [])
 
+    def test_image_task_ignores_gateway_targets(self):
+        pipe, gw, rt = self._make(
+            [understand_targets([("gemini", "gemini-pro")],
+                                task_type="image_generation"),
+             verdict("complete")],
+            [self._PNG_DATA_URI])
+        out = pipe.run("generate an image of a sunset")
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(gw.image_router.calls), 1)
+        self.assertIsNone(gw.image_router.calls[0]["model"])
+        self.assertEqual(rt.requests, [])
+
     def test_gateway_task_type_coding_is_authoritative(self):
         pipe, gw, rt = self._make(
             [understand(task_type="coding"), verdict("complete")],

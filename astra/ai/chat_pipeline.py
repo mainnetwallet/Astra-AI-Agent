@@ -133,7 +133,7 @@ APPROVAL_DENIED_TEXT = (
     "Astra Agent Runtime if that is possible."
 )
 
-MAX_TARGETS_IN_PROMPT = 60
+# No artificial model-count cap: the Gateway receives the complete eligible catalogue.
 # NOTE: there is deliberately no Astra-imposed output-token cap for the
 # Gateway UNDERSTAND/VERIFY calls or the Provider call. The Gateway picks its
 # OWN model by keyword-classifying user-role text; those control prompts embed
@@ -253,8 +253,12 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "If a request combines capabilities, choose the primary execution "
     "capability that actually produces the requested result. \n\n"
 
-    "4) ASSIGN. From the provider/model list you are given, choose EVERY "
-    "provider+model that can actually do this job (coding -> coding-capable "
+    "4) ASSIGN. For IMAGE GENERATION and IMAGE EDITING requests, do NOT "
+    "select normal Gateway targets at all. Return an empty \\"targets\\" list "
+    "and leave provider/model empty because ImageRouter owns image provider/model "
+    "selection and fallback independently. For every other request, from the "
+    "provider/model list you are given, choose EVERY provider+model that can "
+    "actually do this job (coding -> coding-capable "
     "models, hard reasoning -> high-quality models, simple chat -> fast "
     "ones, image generation -> image-generation models, image editing -> "
     "image-editing models, vision -> vision models), then put them in "
@@ -746,7 +750,10 @@ class ChatPipeline:
         # and automatic routing takes over.
         usable = [t for t in targets if t.get("health") != "failed"]
         hidden = len(targets) - len(usable)
-        shown = usable[:MAX_TARGETS_IN_PROMPT]
+        # Give Gateway the complete non-failed catalogue. Do not truncate
+        # after an arbitrary number of models: a valid model beyond position
+        # 60 must remain selectable.
+        shown = usable
         catalogue = "\n".join(
             f"- provider={t['provider']} model={t['model']} "
             f"caps={','.join(t.get('capabilities') or []) or 'chat'} "
@@ -819,6 +826,11 @@ class ChatPipeline:
 
         ordered_targets = self._parse_gateway_targets(
             data.get("targets"), usable_by_key)
+
+        # ImageRouter owns image provider/model selection. Never carry the
+        # normal Gateway target plan into an image turn.
+        if task_type in ("image_generation", "image_editing"):
+            ordered_targets = []
 
         provider, model = "", ""
         if ordered_targets:
@@ -1372,22 +1384,14 @@ class ChatPipeline:
         # Gateway's ImageRouter (see `_route_image`): it is the only image
         # execution path, so these tasks never reach the Provider router's
         # own image dispatch below.
-        is_image = task_type in ("image_generation", "image_editing", "image_inpainting")
-        if is_image:
+        # ImageRouter is the sole owner of image execution. Keep this
+        # boundary before normal target-plan/automatic-routing logic.
+        if task_type in ("image_generation", "image_editing", "image_inpainting"):
             rr = self._route_image(task_type, messages, model, req,
                                    source_image=source_image,
                                    mask_image=mask_image)
             if rr is not None:
-                # Either the real image was produced, or ImageRouter
-                # attempted every eligible FREE model and the whole pool
-                # failed. Both are terminal for this turn.
                 return rr
-            # No ImageRouter execution path is available (unusable Gateway,
-            # no image_router, or an empty prompt). Image generation is
-            # owned EXCLUSIVELY by ImageRouter, so the request must NOT fall
-            # back to the Provider router's own image dispatch -- that is the
-            # duplicate execution path this architecture forbids. Report the
-            # honest "no image model" failure instead.
             failed = RoutingResult(ok=False, error=(
                 "No image-generation execution path is configured "
                 "(ImageRouter unavailable)."))
@@ -1752,6 +1756,19 @@ class ChatPipeline:
         # the turn is simply treated as a normal chat request.
         task_type = brief.get("task_type") or "simple_chat"
 
+        # ImageRouter is a separate routing domain. Image requests never
+        # require or consume the normal Gateway targets[] plan.
+        is_image_task = task_type in ("image_generation", "image_editing")
+        if (gateway_ok and brief.get("ok") and not is_image_task
+                and not brief.get("targets")):
+            err = "Gateway returned no usable targets for this request."
+            trace["error"] = err
+            self._emit("chat.pipeline.failed", error=err,
+                       op=f"chat:{req}", request=req, trace=req, terminal=True)
+            return self._reply(
+                "Gateway kono usable provider/model target dite pareni, "
+                "tai ei request execute kora hoyni.", False, trace)
+
         # The Provider is the AI that does the work. With the shared
         # Terminal/tool surface wired, that work is a real multi-step agent
         # tool loop (inspect -> run -> read failure -> edit -> retest) whose
@@ -1762,7 +1779,6 @@ class ChatPipeline:
         # brain is a chat caller, so it would either ask a model to describe
         # the picture or hand the tool protocol an image data URI. Image
         # turns go straight to the image execution path instead.
-        is_image_task = task_type in ("image_generation", "image_editing")
         if is_image_task:
             # The Gateway's OWN event: classification/handoff only. The
             # actual provider HTTP call (Gemini/Cloudflare/OpenRouter) is a

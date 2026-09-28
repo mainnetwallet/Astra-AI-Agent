@@ -252,7 +252,8 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
         router = ImageRouter(_Host())
         router.build_targets = lambda *, editing=False, discover=True, operation=None: [
             (cf, target, None)]
-        router.generate("edit this photo", editing=True)
+        router.generate("edit this photo", editing=True,
+                        source_image={"storage_path": "uploads/source.png"})
         for kind in ("astra_gateway.request", "astra_gateway.success"):
             rows = _data(bus, kind)
             self.assertTrue(rows, kind)

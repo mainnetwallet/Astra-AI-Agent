@@ -163,6 +163,19 @@ def _windows_case(cls):
                                     return_value="windows")
         patcher.start()
         self.addCleanup(patcher.stop)
+        # `wsl_exe()` resolves through PATH / %SystemRoot%, which only exist
+        # on a real Windows host. Pin the PATH lookup too (a bare, non-absolute
+        # name skips the on-disk existence check); an explicit
+        # RUNTIME_WSL_EXE in the config still wins, so the "missing wsl.exe"
+        # test keeps exercising the real not-found path.
+        real_which = shutil.which
+        which = mock.patch.object(
+            wsl_mod.shutil, "which",
+            side_effect=lambda name, *a, **k: (
+                "wsl.exe" if name in ("wsl.exe", "wsl")
+                else real_which(name, *a, **k)))
+        which.start()
+        self.addCleanup(which.stop)
 
     cls.setUp = setUp
     return cls

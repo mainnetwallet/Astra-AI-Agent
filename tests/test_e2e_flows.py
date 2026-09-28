@@ -34,6 +34,10 @@ class FakeProvider(AIProvider):
         self._text = text
         self._fail = fail
         self.calls = 0
+        # /api/providers only lists providers that can really be routed to
+        # (key + base URL + models), so the fixture carries one dummy key.
+        from astra.ai.credentials import CredentialPool
+        self.pool = CredentialPool(name, ["fake-key"])
 
     def health_check(self) -> bool:
         return True

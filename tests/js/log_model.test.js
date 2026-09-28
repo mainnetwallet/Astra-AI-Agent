@@ -238,7 +238,9 @@ test("count tracks the category and the error total", () => {
   Log.count(s, Log.normalize(ev("tool.completed", { tool: "a" })));
   Log.count(s, Log.normalize(ev("browser.error", { error: "no" })));
   Log.count(s, Log.normalize(ev("astra_gateway.success", { provider: "groq" })));
-  assert.strictEqual(s.counts.total, 3);
+  // "total" is the Total API Calls stat: only the gateway/provider call
+  // counts, not the tool or browser activity.
+  assert.strictEqual(s.counts.total, 1);
   assert.strictEqual(s.counts.tools, 1);
   assert.strictEqual(s.counts.browser, 1);
   assert.strictEqual(s.counts.ai, 1);
@@ -332,7 +334,8 @@ test("started -> completed produces ONE resolved row", () => {
   assert.strictEqual(rows[0].model.status, "ok");
   assert.strictEqual(rows[0].model.detail, "1.24s");
   assert.strictEqual(state.active.size, 0);
-  assert.strictEqual(state.counts.total, 1);
+  assert.strictEqual(state.counts.tools, 1);
+  assert.strictEqual(state.counts.total, 0);   // a tool run is not an API call
 });
 
 test("started -> failed produces ONE failed row", () => {

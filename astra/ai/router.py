@@ -1088,6 +1088,7 @@ class AstraRouter:
                 "error": "" if rr.ok else (rr.error or "test failed"),
                 "key_id": cred.key_id if cred else (key_id or ""),
                 "key": cred.label if cred else "",
+                "key_label": cred.label if cred else "",
             }
 
         # Identity couldn't be resolved (no pool / no usable credential) —
@@ -1101,6 +1102,7 @@ class AstraRouter:
             "error": "" if rr.ok else (rr.error or "test failed"),
             "key_id": cred.key_id if cred else (key_id or ""),
             "key": cred.label if cred else "",
+            "key_label": cred.label if cred else "",
         }
 
     # -- per-(provider, key, model) health ------------------------------------

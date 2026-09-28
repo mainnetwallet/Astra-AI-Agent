@@ -86,6 +86,7 @@ class PerKeyTestingTests(unittest.TestCase):
         post = _fake_post(bad_secrets=("bad",))
         with mock.patch.object(CompatibleAdapter, "_post", post):
             good = r.test_provider_model("groq", "m1", ids["key 1"])
+            r.shared_health.invalidate()     # each key test is a fresh manual run
             bad = r.test_provider_model("groq", "m1", ids["key 2"])
         self.assertTrue(good["ok"])
         self.assertEqual((good["key"], good["key_id"]), ("key 1", ids["key 1"]))
@@ -116,6 +117,7 @@ class PerKeyTestingTests(unittest.TestCase):
         ids = _key_ids(ad)
         with mock.patch.object(CompatibleAdapter, "_post", _fake_post(bad_secrets=("bad",))):
             r.test_provider_model("groq", "m1", ids["key 1"])
+            r.shared_health.invalidate()     # each key test is a fresh manual run
             r.test_provider_model("groq", "m1", ids["key 2"])
         r2 = _router(_adapter(), store)                      # new process, same DB
         saved = r2.key_health("groq")["m1"]

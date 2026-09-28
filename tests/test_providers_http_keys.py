@@ -57,6 +57,9 @@ class ProviderKeysHttpTests(unittest.TestCase):
         enc = urllib.parse.quote(MODEL, safe="")
         res = {}
         for label, kid in keys.items():
+            # each key test is a fresh manual run (shared health is
+            # provider+model scoped, not per key)
+            self.srv.site.router().shared_health.invalidate()
             res[label] = self._req(
                 f"/api/v1/providers/groq/test/{enc}?key={kid}", "POST")["data"]
         self.assertTrue(res["key 1"]["ok"])

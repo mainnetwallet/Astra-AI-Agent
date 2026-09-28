@@ -178,7 +178,7 @@ class TestGatewayExecutionRecovery(unittest.TestCase):
     # identity or the position it happens to sit at in `candidates` — and
     # the ordering must be fully serial: best health first, next-best
     # second, and so on down the list as each one is excluded/fails.
-    def test_selection_is_ranked_by_own_health_not_candidate_order_or_provider(self):
+    def test_selection_is_gemini_first_then_ranked_by_own_health_only(self):
         best = _t("cohere", "model-best")
         mid = _t("gemini", "model-mid")
         worst = _t("groq", "model-worst")
@@ -202,16 +202,29 @@ class TestGatewayExecutionRecovery(unittest.TestCase):
         self.assertTrue(self.rec.is_eligible(mid))
         self.assertTrue(self.rec.is_eligible(best))
 
+        # Gemini (primary) goes first even though it is only mid-health.
         first = self.rec.select_execution_target(candidates)
-        self.assertEqual(first.key(), best.key(), "best measured health must go first")
+        self.assertEqual(first.key(), mid.key(), "primary provider (Gemini) goes first")
 
+        # After that, everything else is ordered by measured health only.
         second = self.rec.recover_execution_target(
             candidates, first, RATE_LIMIT, exclude={first.key()})
-        self.assertEqual(second.key(), mid.key(), "second-best health must go second")
+        self.assertEqual(second.key(), best.key(), "best health goes next")
 
         third = self.rec.recover_execution_target(
             candidates, second, RATE_LIMIT, exclude={first.key(), second.key()})
         self.assertEqual(third.key(), worst.key(), "worst-but-still-healthy goes last")
+
+    def test_last_successful_is_recorded_but_never_reorders(self):
+        a = _t("groq", "model-a")
+        b = _t("cohere", "model-b")
+        for _ in range(3):
+            self.rec.report_execution_success(a, latency_ms=100)
+        self.rec.report_execution_success(b, latency_ms=100)
+        self.rec.report_execution_failure(b, RATE_LIMIT, cooldown_s=0)
+        self.rec.report_execution_success(b, latency_ms=100)  # b is the LAST success
+        self.assertEqual(self.rec.routing_state.last_successful()["model"], "model-b")
+        self.assertEqual(self.rec.select_execution_target([b, a]).key(), a.key())
 
     def test_required_capabilities_filter(self):
         a = _t("gemini", "model-a", caps=["chat"])

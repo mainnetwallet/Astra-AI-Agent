@@ -71,12 +71,17 @@ class GatewayExecutionRecovery:
     ever needing to know what "provider-level failure" means beyond that.
     """
 
-    def __init__(self, store=None, events=None):
+    def __init__(self, store=None, events=None, primary_provider: str = "gemini"):
         # A dedicated GatewayRoutingState instance, backed by the same
         # Store (no new database — §18) but writing exclusively under
         # `EXISTING_PROVIDER_NS`-prefixed provider ids.
         self.routing_state = GatewayRoutingState(store)
         self.events = events
+        self.primary_provider = str(primary_provider or "").strip().lower()
+
+    def _is_primary(self, target: ProviderExecutionTarget) -> bool:
+        return bool(self.primary_provider) and \
+            str(target.provider_id).lower() == self.primary_provider
 
     def _emit(self, kind: str, **data) -> None:
         if self.events:
@@ -126,10 +131,10 @@ class GatewayExecutionRecovery:
         reaches selection. Among those eligible candidates, the one with the
         best measured Gateway health goes first, the next-best second, and so
         on (`_health_sort_key`) — serial, by health, never by provider name
-        or the caller's original list position. The *last successful* target
-        for its own (namespaced) provider/model, if present among the
-        candidates, is then nudged to the very front — a soft preference,
-        never a lock (§12) — on top of that health ordering.
+        or the caller's original list position. The primary provider
+        (`primary_provider`, default Gemini) is tried first; everything else
+        follows purely by health. The last successful target is only
+        recorded, never used to reorder.
         """
         exclude = exclude or set()
         need = set(required_capabilities)
@@ -144,15 +149,10 @@ class GatewayExecutionRecovery:
             eligible.append(t)
         if not eligible:
             return None
-        eligible.sort(key=self._health_sort_key)
-        last = self.routing_state.last_successful()
-        if last and last.get("provider", "").startswith(f"{EXISTING_PROVIDER_NS}::"):
-            last_provider = last["provider"][len(EXISTING_PROVIDER_NS) + 2:]
-            for i, t in enumerate(eligible):
-                if t.provider_id == last_provider and t.model_id == last.get("model"):
-                    if i:
-                        eligible.insert(0, eligible.pop(i))
-                    break
+        # Primary provider (Gemini) first, best health first; then every
+        # other target by health only. No last-successful jump.
+        eligible.sort(key=lambda t: (0 if self._is_primary(t) else 1,
+                                     *self._health_sort_key(t)))
         return eligible[0]
 
     # -- reporting (§4, §8, §12) -----------------------------------------------

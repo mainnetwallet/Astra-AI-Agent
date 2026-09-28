@@ -15,14 +15,15 @@ Pieces:
                                      using the existing `astra.ai.models`
                                      metadata heuristics (never invented)
     - `GatewayModelHealth`        — per (provider, model) runtime health
-    - `GatewayRoutingState`       — persistent last-successful target +
-                                     per-target health, backed by the
+    - `GatewayRoutingState`       — per-target health plus a record of the
+                                     last successful target (reporting
+                                     only, never used for ordering), backed by the
                                      project's existing Store (SQLite) when
                                      one is supplied, in-memory otherwise
     - `eligible_targets`          — capability/context/health filtering
-    - `rank_targets`              — capability + health + latency + priority
-                                     scoring
-    - `prefer_last_successful`    — soft "stick to what last worked" nudge
+    - `rank_by_health`            — text/chat order: primary provider (Gemini)
+                                     first, then health only
+    - `rank_targets`              — image categories only
 
 `astra/ai/gateway.py` (AstraAIGateway) is the only caller; it owns the actual
 HTTP execution and per-attempt fallback loop.
@@ -778,18 +779,13 @@ def rank_by_health(targets: list[tuple[object, Model, GatewayModelHealth]], *,
             list. Even a provider that is not "serial-next" is used if its
             model is healthier.
 
-    Ties (identical health, e.g. never-tried targets) fall back to the
-    existing capability/latency `score_target` ranking, so category fit and
-    configured priority still break ties. Unhealthy/cooldown targets were
-    already removed by `eligible_targets`.
+    No category score, quality class, configured priority or last-successful
+    nudge is used. Exact ties keep the input order (stable sort).
+    Unhealthy/cooldown targets were already removed by `eligible_targets`.
+    `category` is accepted for call compatibility and is not used for ranking.
     """
-    n = len(targets)
-    keyed = []
-    for idx, (conn, model, health) in enumerate(targets):
-        tie = -score_target(model, health, category=category,
-                            priority_bonus=0.05 * (n - idx))
-        keyed.append([health_sort_key(model, health) + (tie,),
-                      (conn, model, health)])
+    keyed = [[health_sort_key(model, health), (conn, model, health)]
+             for conn, model, health in targets]
     # Primary provider: only its `primary_max_models` best-health models get
     # tier 0; the rest fall into tier 1 and compete on health with everyone.
     primary = sorted((k for k in keyed
@@ -800,22 +796,3 @@ def rank_by_health(targets: list[tuple[object, Model, GatewayModelHealth]], *,
         k[0] = ((0 if id(k) in top else 1),) + k[0]
     keyed.sort(key=lambda k: k[0])
     return [k[1] for k in keyed]
-
-
-def prefer_last_successful(
-        ranked: list[tuple[object, Model, GatewayModelHealth]],
-        last: dict | None
-        ) -> list[tuple[object, Model, GatewayModelHealth]]:
-    """§5: prefer the last successful target IF it's still eligible+healthy
-    (i.e. still present in `ranked`, since `eligible_targets` already
-    dropped anything unhealthy/unsuitable) — never a permanent lock."""
-    if not last:
-        return ranked
-    for i, (conn, model, health) in enumerate(ranked):
-        if model.provider == last.get("provider") and \
-                model.model_id == last.get("model"):
-            if i == 0:
-                return ranked
-            item = ranked[i]
-            return [item] + ranked[:i] + ranked[i + 1:]
-    return ranked

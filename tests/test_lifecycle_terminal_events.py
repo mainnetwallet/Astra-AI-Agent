@@ -251,9 +251,9 @@ class TestRouterGatewayCorrelation(unittest.TestCase):
         gw = AstraAIGateway(connections=[], store=store, events=bus)
         router = AstraRouter(
             providers=[
-                RecordingProvider("groq", ["m1"],
+                RecordingProvider("gemini", ["m1"],
                                   fail_models={"m1": (9, "rate limit exceeded")}),
-                RecordingProvider("gemini", ["m2"])],
+                RecordingProvider("groq", ["m2"])],
             gateway=gw)
         router.attach_events(bus)
         rr = router.route_request(RoutingRequest(

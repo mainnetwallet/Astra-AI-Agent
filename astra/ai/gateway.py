@@ -1657,8 +1657,9 @@ class AstraAIGateway:
         # from `self.routing_state` above (which only ever tracks this
         # Gateway's own GW_* connections). See gateway_recovery.py.
         from astra.ai.gateway_recovery import GatewayExecutionRecovery
-        self.execution_recovery = GatewayExecutionRecovery(store=store,
-                                                            events=events)
+        self.execution_recovery = GatewayExecutionRecovery(
+            store=store, events=events,
+            primary_provider=self.primary_provider)
         # §6-§12: Gateway-OWNED result validation + bounded correction loop,
         # distinct from execution_recovery above (which only ever decides
         # WHO to execute against). See gateway_supervision.py.

@@ -989,6 +989,16 @@ class AstraRouter:
     # independent of whatever other provider tests are running.
     _TEST_MESSAGES = [{"role": "user", "content": "ping"}]
 
+    def _gateway_has_provider(self, name: str) -> bool:
+        """True when the attached Gateway has a connection that resolves to
+        the same canonical upstream provider as Provider adapter `name`."""
+        conns = getattr(self.gateway, "connections", None) if self.gateway else None
+        if not conns:
+            return False
+        target = canonical_provider(name)
+        return any(canonical_provider(getattr(c, "name", "")) == target
+                   for c in conns)
+
     def test_provider_model(self, name: str, model_id: str,
                             key_id: str | None = None) -> dict:
         """Probe exactly ONE (provider, model) pair and return its result the
@@ -1023,8 +1033,16 @@ class AstraRouter:
                         "error": f"unknown key {key_id!r}", "key_id": key_id,
                         "key": key_id}
 
+        # Shared-health dedup exists to avoid a duplicate upstream probe
+        # between the Provider and the Gateway. Without a Gateway connection
+        # for this canonical provider there is nothing to share with, and a
+        # manual per-key test MUST hit the pinned key itself (one attempt,
+        # no rotation) -- otherwise a good key's cached result would be
+        # reported for a bad key.
+        share = (self.shared_health is not None
+                 and self._gateway_has_provider(name))
         identity, id_cred = (resolve_identity(pool, name, model_id, key_id)
-                             if self.shared_health is not None else (None, None))
+                             if share else (None, None))
 
         def _do_route(pinned_key_id):
             req = RoutingRequest(task_type="health_check",
@@ -1088,6 +1106,8 @@ class AstraRouter:
                 "error": "" if rr.ok else (rr.error or "test failed"),
                 "key_id": cred.key_id if cred else (key_id or ""),
                 "key": cred.label if cred else "",
+                "key_label": cred.label if cred else "",
+                "reused": False,
             }
 
         # Identity couldn't be resolved (no pool / no usable credential) —

@@ -85,10 +85,11 @@ class TestGatewaySelection(unittest.TestCase):
         _cat, ranked = gw._select_order(
             [{"role": "user", "content": "x"}], None, "control")
         self.assertEqual(ranked[0][1].model_id, "a")
-        # while an ordinary call still sticks to the last successful target
+        # ordinary calls are health-first too: no "last successful" jump, so
+        # the healthier (lower measured latency) model "a" stays first
         _cat, ranked = gw._select_order(
             [{"role": "user", "content": "x"}], None, "general")
-        self.assertEqual(ranked[0][1].model_id, "b")
+        self.assertEqual(ranked[0][1].model_id, "a")
 
     def test_control_falls_back_to_general_when_no_model_declares_json(self):
         gw = self._gw(_Conn("astra-gw-groq", ["a"]))

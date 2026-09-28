@@ -744,6 +744,52 @@ def rank_targets(targets: list[tuple[object, Model, GatewayModelHealth]], *,
     return [(c, m, h) for _, c, m, h in scored]
 
 
+DEFAULT_PRIMARY_PROVIDER = "gemini"
+
+
+def health_sort_key(model: Model, health: GatewayModelHealth):
+    """Lower is better: pure measured health, never provider/list position.
+
+    success_rate (higher better) -> consecutive_failures (fewer better) ->
+    measured average latency (lower better). A target with no successful call
+    yet gets a neutral placeholder so it never ranks as an unearned "fastest".
+    """
+    latency = health.average_latency_ms if health.success_count else 500.0
+    return (-health.success_rate(), health.consecutive_failures, latency)
+
+
+def rank_by_health(targets: list[tuple[object, Model, GatewayModelHealth]], *,
+                   category: str,
+                   primary_provider: str | None = DEFAULT_PRIMARY_PROVIDER
+                   ) -> list[tuple[object, Model, GatewayModelHealth]]:
+    """Health-first serial order for the Gateway's OWN calls.
+
+    Tier 1: the primary provider's (Gemini's) models, best measured health
+            first. Key rotation across that provider's keys happens inside
+            the connection (`_run`) before the next model is tried.
+    Tier 2: every OTHER provider's models, ordered ONLY by measured health --
+            the best-health model first, then the next best, regardless of
+            which provider it belongs to or where it sits in the configured
+            list. Even a provider that is not "serial-next" is used if its
+            model is healthier.
+
+    Ties (identical health, e.g. never-tried targets) fall back to the
+    existing capability/latency `score_target` ranking, so category fit and
+    configured priority still break ties. Unhealthy/cooldown targets were
+    already removed by `eligible_targets`.
+    """
+    n = len(targets)
+    keyed = []
+    for idx, (conn, model, health) in enumerate(targets):
+        tier = 0 if (primary_provider and model.provider == primary_provider) else 1
+        tie = -score_target(model, health, category=category,
+                            priority_bonus=0.05 * (n - idx))
+        keyed.append(((tier,) + health_sort_key(model, health) + (tie,),
+                      (conn, model, health)))
+    keyed.sort(key=lambda t: t[0])
+    return [t for _, t in keyed]
+
+
 def prefer_last_successful(
         ranked: list[tuple[object, Model, GatewayModelHealth]],
         last: dict | None

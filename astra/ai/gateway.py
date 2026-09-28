@@ -447,7 +447,12 @@ class _GatewayCompatibleConnection:
         prev = getattr(self._tl_pool, "pool", None)
         self._tl_pool.pool = pool if pool is not None else self.pool
         try:
-            attempts = 1 if single_attempt else self._attempt_count()
+            # Enough attempts to walk every key of this connection: a rate
+            # limit / auth failure on key 1 must fall to key 2, key 3, ...
+            # before the Gateway gives up on this model.
+            attempts = 1 if single_attempt else max(
+                self._attempt_count(),
+                int(getattr(self._active_pool(), "count", 0) or 0))
             last = None
             for attempt in range(attempts):
                 cred = self._pick()
@@ -465,7 +470,17 @@ class _GatewayCompatibleConnection:
                     return fn(cred)
                 except (ProviderError, TimeoutError) as e:
                     last = e
-                    if attempt + 1 >= attempts or not getattr(e, "retryable", False):
+                    # Key-level failure (429 / 401 / 403): the failing key is
+                    # now cooled down, so if another healthy key remains, use
+                    # it immediately -- no backoff, no wasted latency. This
+                    # may walk every key; it is NOT bounded by GW_MAX_RETRIES.
+                    if (attempt + 1 < attempts
+                            and getattr(e, "key_level", False)
+                            and bool(self._active_pool())):
+                        continue
+                    # Everything else keeps the original GW_MAX_RETRIES bound.
+                    limit = min(attempts, self._attempt_count())
+                    if attempt + 1 >= limit or not getattr(e, "retryable", False):
                         raise
                     time.sleep(min(self.retry_backoff * (attempt + 1),
                                    GW_RETRY_MAX_BACKOFF))
@@ -509,9 +524,11 @@ class _GatewayCompatibleConnection:
             err = ProviderError(f"{self.name} rate limit reached")
             err.retryable = True
             err.rate_limited = True
+            err.key_level = True
         elif code in (401, 403):
             err = ProviderError(f"{self.name} authentication failed")
             err.retryable = False
+            err.key_level = True
         else:
             err = ProviderError(f"{self.name} http {code}")
             err.retryable = retryable
@@ -1611,6 +1628,11 @@ class AstraAIGateway:
         from astra.ai.gateway_routing import (GatewayRoutingState,
                                               build_gateway_catalog)
         self.routing_state = GatewayRoutingState(store)
+        # Provider whose models are always tried first (best health first,
+        # rotating through its keys) before any other provider is used.
+        _pp = (config.get("GW_PRIMARY_PROVIDER", "gemini")
+               if config is not None and hasattr(config, "get") else "gemini")
+        self.primary_provider = str(_pp or "").strip().lower()
         # Manual-health-check dedup with the Provider system (see
         # astra/ai/shared_health.py). `AstraRouter` adopts THIS instance
         # when it wires a Gateway in (see its __init__), so the two
@@ -1815,7 +1837,7 @@ class AstraAIGateway:
         from astra.ai.gateway_routing import (REQUEST_CATEGORIES,
                                               classify_gateway_request,
                                               eligible_targets, rank_targets,
-                                              prefer_last_successful)
+                                              rank_by_health)
         text, context_tokens, vision = self._classification_inputs(messages)
         if category in REQUEST_CATEGORIES:
             # Caller knows what kind of call this is (e.g. the chat
@@ -1846,13 +1868,16 @@ class AstraAIGateway:
             targets = eligible_targets(self._catalog, self.routing_state,
                                        category=category,
                                        context_tokens=context_tokens)
-        ranked = rank_targets(targets, category=category)
-        if category != "control":
-            # "Stick to the last successful target" would pin a control call
-            # to whatever model last served ANY request (often a slow one);
-            # control calls rank purely on measured latency + health.
-            ranked = prefer_last_successful(
-                ranked, self.routing_state.last_successful())
+        # Health-first: primary provider (Gemini) models best-health first,
+        # then every other provider's models ordered purely by measured
+        # health. No "last successful" jump to the front: a model that
+        # succeeded once must not outrank a healthier one. Image categories
+        # keep their own deterministic serial order (see rank_targets).
+        if category in ("image_generation", "image_editing", "image_inpainting"):
+            ranked = rank_targets(targets, category=category)
+        else:
+            ranked = rank_by_health(targets, category=category,
+                                    primary_provider=self.primary_provider)
         return category, ranked
 
     def _gateway_only_model(self, conn_name: str, model_id: str) -> bool:

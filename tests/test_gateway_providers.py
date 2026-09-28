@@ -458,15 +458,32 @@ class GatewayProviderErrorTests(unittest.TestCase):
         self.assertIn("503", str(ctx.exception))
         self.assertEqual(len(seen), 2)
 
-    def test_auth_failure_is_never_retried(self):
+    def test_auth_failure_is_never_retried_on_the_same_key(self):
         conn = _conn(AstraGatewayOpenRouter, _cfg(),
-                     env={"GW_OPENROUTER_API_KEYS": "k1,k2", "GW_RETRY_BACKOFF": "0"})
+                     env={"GW_OPENROUTER_API_KEYS": "k1", "GW_RETRY_BACKOFF": "0"})
         side, seen = _capture([_http_error(401)])
         with mock.patch("astra.ai.gateway.urllib.request.urlopen", side):
             with self.assertRaises(ProviderError) as ctx:
                 conn.chat([{"role": "user", "content": "x"}])
         self.assertIn("authentication failed", str(ctx.exception))
         self.assertEqual(len(seen), 1, "a bad key cannot be fixed by retrying")
+
+    def test_auth_failure_rotates_to_the_next_key(self):
+        conn = _conn(AstraGatewayOpenRouter, _cfg(),
+                     env={"GW_OPENROUTER_API_KEYS": "k1,k2", "GW_RETRY_BACKOFF": "0"})
+        side, seen = _capture([_http_error(401)])
+        with mock.patch("astra.ai.gateway.urllib.request.urlopen", side):
+            conn.chat([{"role": "user", "content": "x"}])
+        self.assertEqual(len(seen), 2, "key 1 rejected -> key 2 is tried")
+
+    def test_rate_limit_walks_every_key_beyond_max_retries(self):
+        conn = _conn(AstraGatewayOpenRouter, _cfg(),
+                     env={"GW_OPENROUTER_API_KEYS": "k1,k2,k3",
+                          "GW_RETRY_BACKOFF": "0", "GW_MAX_RETRIES": "0"})
+        side, seen = _capture([_http_error(429), _http_error(429)])
+        with mock.patch("astra.ai.gateway.urllib.request.urlopen", side):
+            conn.chat([{"role": "user", "content": "x"}])
+        self.assertEqual(len(seen), 3, "k1 429 -> k2 429 -> k3 succeeds")
 
     def test_model_level_404_keeps_the_key_usable_and_is_not_retried(self):
         conn = _conn(AstraGatewaySambaNova, _cfg(), env={"GW_RETRY_BACKOFF": "0"})
@@ -663,12 +680,14 @@ class GatewayFailoverTests(unittest.TestCase):
         return AstraAIGateway(connections=conns, config=_cfg(**env))
 
     def test_new_provider_fails_over_to_an_existing_one(self):
-        bad = _StubConn("astra-gw-mistral", ["mistral-small-2603"], fail=True)
-        good = _StubConn("astra-gw-gemini", ["gemini-3.5-flash"], fail=False)
+        # Gemini is the primary provider, so it is tried first; when it
+        # fails the Gateway falls over to the next-best-health provider.
+        bad = _StubConn("astra-gw-gemini", ["gemini-3.5-flash"], fail=True)
+        good = _StubConn("astra-gw-mistral", ["mistral-small-2603"], fail=False)
         gw = self._gw([bad, good])
         self.assertEqual(gw.chat([{"role": "user", "content": "hi"}]),
-                         "reply-from-astra-gw-gemini")
-        self.assertEqual(gw.last_connection, "astra-gw-gemini")
+                         "reply-from-astra-gw-mistral")
+        self.assertEqual(gw.last_connection, "astra-gw-mistral")
         self.assertEqual(gw.last_attempts, 2)
 
     def test_existing_provider_fails_over_to_a_new_one(self):

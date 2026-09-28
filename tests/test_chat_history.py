@@ -3,6 +3,7 @@ including a reply that finishes after the browser already went away."""
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import unittest
@@ -31,12 +32,23 @@ class ChatLogUnit(unittest.TestCase):
         self.assertEqual([m["text"] for m in self.log.history(after_id=first)["messages"]], ["hi"])
 
     def test_latest_image_attachment_reuses_upload_and_generated_artifact(self):
+        # latest_image_attachment() only returns images that really exist on
+        # disk and sniff as images, so the fixtures are real (tiny) PNG files.
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+        src = os.path.join(tmp.name, "source.png")
+        gen = os.path.join(tmp.name, "generated.png")
+        for path in (src, gen):
+            with open(path, "wb") as fh:
+                fh.write(png)
         self.log.add_user(
             "make an edit", files=["source.png"],
-            attachments=[{"family": "image", "storage_path": "/tmp/source.png",
+            attachments=[{"family": "image", "storage_path": src,
                           "mime_type": "image/png"}])
         self.assertEqual(
-            self.log.latest_image_attachment()["storage_path"], "/tmp/source.png")
+            self.log.latest_image_attachment()["storage_path"], src)
 
         self.log.add_reply({
             "reply": "generated",
@@ -44,11 +56,11 @@ class ChatLogUnit(unittest.TestCase):
             "artifacts": [{
                 "id": "abc123", "filename": "generated.png",
                 "mime_type": "image/png", "artifact_type": "image",
-                "_storage_path": "/tmp/generated.png",
+                "_storage_path": gen,
             }],
         })
         latest = self.log.latest_image_attachment()
-        self.assertEqual(latest["storage_path"], "/tmp/generated.png")
+        self.assertEqual(latest["storage_path"], gen)
         self.assertNotIn("_storage_path", self.log.history()["messages"][-1]["artifacts"])
 
     def test_pending_lifecycle(self):
@@ -97,7 +109,8 @@ class ChatHistoryHttp(unittest.TestCase):
         agent = self.stack["agent"]
         self.release = threading.Event()
 
-        def slow_handle(message, context="", history=None, attachments=None):
+        def slow_handle(message, context="", history=None, attachments=None,
+                        conversation_id=None):
             self.release.wait(5)
             return {"reply": f"echo: {message}", "action": "none", "ok": True, "data": {}}
         agent.handle = slow_handle

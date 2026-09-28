@@ -1007,7 +1007,8 @@ class TestProviderRouterImageRefusal(unittest.TestCase):
             self.chat_calls += 1
             return "ok"
 
-        def generate_image(self, prompt, model=None, size="1024x1024", n=1):
+        def generate_image(self, prompt, model=None, size="1024x1024", n=1,
+                           source_image=None, mask_image=None):
             import base64
             self.generate_calls.append(prompt)
             img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200

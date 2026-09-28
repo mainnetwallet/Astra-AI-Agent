@@ -1531,6 +1531,18 @@ class WebApp:
         return json_response({"ok": True, "data": {"uploads": results}},
                              rid=req.rid)
 
+    def _image_operation(self, msg, attachments) -> str:
+        """Gateway-owned image-operation classification for /api/chat. An
+        agent without a Gateway pipeline (or a stub agent) simply has no
+        image operation; that must never turn into a 500 before the agent
+        even runs."""
+        gateway = getattr(getattr(self.site.agent, "pipeline", None),
+                          "gateway", None)
+        fn = getattr(gateway, "classify_image_operation", None)
+        if not callable(fn):
+            return ""
+        return fn(msg, attachments)
+
     # -- main route table ----------------------------------------------------
     def _route(self, req: Request, path: list) -> Response:
         site, q, body = self.site, req.query, req.body
@@ -1590,12 +1602,12 @@ class WebApp:
                     has_current_image = any(
                         isinstance(a, dict) and a.get("family") == "image"
                         for a in agent_attachments)
-                    operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
+                    operation = self._image_operation(msg, agent_attachments)
                     if not has_current_image and operation in ("image_editing", "image_inpainting"):
                         previous_image = log.latest_image_attachment(cid)
                         if previous_image:
                             agent_attachments.append(previous_image)
-                            operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
+                            operation = self._image_operation(msg, agent_attachments)
                     cid = log.add_user(msg, files=names,
                                        attachments=agent_attachments,
                                        conversation_id=cid)
@@ -1616,12 +1628,12 @@ class WebApp:
                             "data": {"duplicate_of_pending": True}}
                 else:
                     agent_attachments = []
-                    operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
+                    operation = self._image_operation(msg, agent_attachments)
                     if operation in ("image_editing", "image_inpainting"):
                         previous_image = log.latest_image_attachment(cid)
                         if previous_image:
                             agent_attachments.append(previous_image)
-                            operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
+                            operation = self._image_operation(msg, agent_attachments)
                     cid = log.add_user(msg, attachments=agent_attachments,
                                        conversation_id=cid)
                     token = log.begin(cid)

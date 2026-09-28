@@ -49,6 +49,7 @@ def understand(final_request="", *, required=False, capability="", intent="",
                model="llama-fast", was_incomplete=False, extra=None):
     data = {"final_request": final_request, "was_incomplete": was_incomplete,
             "provider": provider, "model": model, "criteria": list(criteria),
+            "targets": [{"provider": provider, "model": model}],
             "reason": "best fit",
             "execution": {"required": required, "capability": capability,
                           "intent": intent}}
@@ -107,6 +108,15 @@ class Harness:
         self.pipeline.agent_brain = brain
         self.registry = self.stack["registry"]
         self.router = self.stack["router"]
+        # Deterministic catalogue: the Gateway's targets[] plan is validated
+        # against AstraRouter.available_targets(), so without this the tests
+        # depend on which provider keys the ambient environment has set.
+        self.router.available_targets = lambda: [
+            {"provider": "groq", "model": "llama-fast",
+             "capabilities": ["chat", "coding"], "health": "ok"},
+            {"provider": "gemini", "model": "gemini-pro",
+             "capabilities": ["chat", "coding"], "health": "ok"},
+        ]
         self.gateway = self.pipeline.gateway
         self.rows = []
         events = self.stack["events"]

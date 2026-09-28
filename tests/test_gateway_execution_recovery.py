@@ -173,6 +173,46 @@ class TestGatewayExecutionRecovery(unittest.TestCase):
         self.rec.report_execution_failure(a, RATE_LIMIT)
         self.assertEqual(self.rec.select_execution_target([a, b]).key(), b.key())
 
+    # The actual bug report this test locks down: selection must be ranked
+    # by each target's OWN measured Gateway health — never by provider
+    # identity or the position it happens to sit at in `candidates` — and
+    # the ordering must be fully serial: best health first, next-best
+    # second, and so on down the list as each one is excluded/fails.
+    def test_selection_is_ranked_by_own_health_not_candidate_order_or_provider(self):
+        best = _t("cohere", "model-best")
+        mid = _t("gemini", "model-mid")
+        worst = _t("groq", "model-worst")
+        # worst: 1 success / 3 failures -> low success rate (cooldown_s=0 so
+        # it stays eligible — this test is about ranking among the healthy,
+        # not about cooldown exclusion, which other tests already cover)
+        self.rec.report_execution_success(worst, latency_ms=100)
+        for _ in range(3):
+            self.rec.report_execution_failure(worst, RATE_LIMIT, cooldown_s=0)
+        # mid: 1 success / 1 failure
+        self.rec.report_execution_success(mid, latency_ms=100)
+        self.rec.report_execution_failure(mid, RATE_LIMIT, cooldown_s=0)
+        # best: 3 successes / 0 failures
+        for _ in range(3):
+            self.rec.report_execution_success(best, latency_ms=100)
+
+        # Deliberately listed worst-health-first, to prove list position and
+        # provider name never drive the outcome — only measured health does.
+        candidates = [worst, mid, best]
+        self.assertTrue(self.rec.is_eligible(worst))   # all three eligible
+        self.assertTrue(self.rec.is_eligible(mid))
+        self.assertTrue(self.rec.is_eligible(best))
+
+        first = self.rec.select_execution_target(candidates)
+        self.assertEqual(first.key(), best.key(), "best measured health must go first")
+
+        second = self.rec.recover_execution_target(
+            candidates, first, RATE_LIMIT, exclude={first.key()})
+        self.assertEqual(second.key(), mid.key(), "second-best health must go second")
+
+        third = self.rec.recover_execution_target(
+            candidates, second, RATE_LIMIT, exclude={first.key(), second.key()})
+        self.assertEqual(third.key(), worst.key(), "worst-but-still-healthy goes last")
+
     def test_required_capabilities_filter(self):
         a = _t("gemini", "model-a", caps=["chat"])
         b = _t("gemini", "model-b", caps=["chat", "vision"])

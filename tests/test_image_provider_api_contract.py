@@ -432,7 +432,7 @@ class TestProviderAdapterCredentialFailure(unittest.TestCase):
             with self.assertRaises(ProviderError):
                 router = ImageRouter(_Host())
                 router.build_targets = (
-                    lambda *, editing=False, discover=True:
+                    lambda *, editing=False, discover=True, operation=None:
                     [(a, m, None) for m in targets])
                 router.generate("akta cat photo banao")
         self.assertEqual(cap.count, 1)

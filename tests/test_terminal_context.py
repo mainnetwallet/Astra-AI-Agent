@@ -28,6 +28,7 @@ TARGETS = [{"provider": "groq", "model": "llama", "capabilities": ["chat", "codi
 def understand(final_request="", provider="groq", model="llama"):
     return json.dumps({"final_request": final_request, "was_incomplete": False,
                        "provider": provider, "model": model,
+                       "targets": [{"provider": provider, "model": model}],
                        "criteria": ["answers"], "reason": "fit"})
 
 

@@ -98,7 +98,9 @@ def understand(final_request="", was_incomplete=False, provider="gemini",
               model="gemini-pro", criteria=("answers the question",)):
     return json.dumps({"final_request": final_request,
                        "was_incomplete": was_incomplete, "provider": provider,
-                       "model": model, "criteria": list(criteria),
+                       "model": model,
+                       "targets": [{"provider": provider, "model": model}],
+                       "criteria": list(criteria),
                        "reason": "best fit"})
 
 
@@ -110,6 +112,10 @@ def verdict(v="complete", missing=(), action="fix", instructions=""):
 TARGETS = [
     {"provider": "groq", "model": "llama-fast", "capabilities": ["chat"],
      "quality": "fast", "context_window": 8000},
+    # understand() defaults to gemini/gemini-pro; a targets[] plan is only
+    # trusted when it exists in the router's catalogue.
+    {"provider": "gemini", "model": "gemini-pro", "capabilities": ["chat"],
+     "quality": "high", "context_window": 100000},
 ]
 
 

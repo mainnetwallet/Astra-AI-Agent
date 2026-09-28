@@ -60,7 +60,8 @@ class _FakeConn:
     def live_image_models(self, *, discover=True):
         return []
 
-    def generate_image(self, prompt, model=None, size="1024x1024", n=1):
+    def generate_image(self, prompt, model=None, size="1024x1024", n=1,
+                       source_image=None, mask_image=None):
         self.image_calls.append((model, prompt))
         return DATA_URI
 

@@ -728,6 +728,8 @@ class TestProotBackendIsUnchanged(unittest.TestCase):
         self.assertIn("--rootfs=" + info["rootfs"], argv)
         self.assertIn("--bind=%s:%s" % (workspace, GUEST_WORKSPACE), argv)
         self.assertIn("--bind=/dev", argv)
+        # Node's threadpool fs calls need a pre-statx kernel release under proot.
+        self.assertIn("--kernel-release=5.4.0-faked", argv)
         self.assertIn("--bind=/proc", argv)
         self.assertIn("--bind=/sys", argv)
         self.assertIn("PATH=" + GUEST_PATH, argv)
@@ -745,6 +747,22 @@ class TestProotBackendIsUnchanged(unittest.TestCase):
         pty = backend.pty_argv(binds=[], cwd=GUEST_WORKSPACE)
         self.assertEqual(os.path.basename(pty[0]), "env")
         self.assertEqual(pty[1], "-i")
+
+
+    def test_the_kernel_release_override_can_be_changed_or_disabled(self):
+        prefix, proot = self._fake_prefix()
+        try:
+            def argv_for(value):
+                backend = ProotRuntimeBackend(
+                    _Cfg({"RUNTIME_PROOT": proot,
+                          "RUNTIME_KERNEL_RELEASE": value}), prefix=prefix)
+                return backend.build_argv(binds=[], cwd=GUEST_WORKSPACE,
+                                          argv=["/bin/bash"])
+            self.assertIn("--kernel-release=6.1.0-x", argv_for("6.1.0-x"))
+            self.assertFalse(any(a.startswith("--kernel-release")
+                                 for a in argv_for("off")))
+        finally:
+            shutil.rmtree(prefix, ignore_errors=True)
 
 
 if __name__ == "__main__":

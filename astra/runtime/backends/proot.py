@@ -59,6 +59,10 @@ import shutil
 # DEFAULT_CONTAINER is the proot-distro container the runtime roots into.
 DEFAULT_CONTAINER = "ubuntu"
 
+# Kernel release proot reports to the guest (see build_argv). Same value
+# proot-distro uses.
+DEFAULT_KERNEL_RELEASE = "5.4.0-faked"
+
 # The guest contract - guest paths, the guest PATH, the Astra prompt and
 # the MINIMAL guest environment (`env -i` equivalent) - is IDENTICAL on
 # every backend and lives in `backends/base.py`, re-exported here so the
@@ -218,6 +222,15 @@ class ProotRuntimeBackend(RuntimeBackend):
             "--change-id=0:0",
             f"--rootfs={rootfs}",
         ]
+        # Report an older kernel to the guest, as proot-distro does. On modern
+        # kernels libuv (Node) uses the `statx` syscall, which proot does not
+        # translate, so async fs calls (npm, anything on the threadpool) fail
+        # with ENOENT on files that exist. Claiming a pre-statx kernel makes
+        # libuv fall back to stat(2). RUNTIME_KERNEL_RELEASE overrides the
+        # value; set it to `off` to pass no override at all.
+        kernel = str(self._cfg("RUNTIME_KERNEL_RELEASE", DEFAULT_KERNEL_RELEASE))
+        if kernel.strip().lower() not in ("0", "off", "false", "none"):
+            proot_args.append(f"--kernel-release={kernel}")
         # Pseudo-filesystems every Linux userland needs.
         for pseudo in ("/dev", "/proc", "/sys"):
             proot_args.append(f"--bind={pseudo}")

@@ -47,6 +47,16 @@ class SystemMapAssets(unittest.TestCase):
         self.assertNotIn("new EventSource", js)      # reuses astra.js ensureEventStream
         self.assertIn("astra:event", js)
 
+    def test_workflow_sse_is_shared_not_duplicated(self):
+        # workflow.js previously opened its own EventSource("/api/events/stream")
+        # alongside astra.js's shared one — two persistent connections to the
+        # same endpoint, eating into the browser's per-origin connection limit
+        # and slowing down the rest of the app. It must reuse the one shared
+        # feed via ensureEventStream()/the "astra:event" DOM event instead.
+        js = open(os.path.join(ROOT, "static", "js", "workflow.js"), encoding="utf-8").read()
+        self.assertNotIn("new EventSource", js)
+        self.assertIn("astra:event", js)
+
     def test_no_hardcoded_provider_names_in_ui_code(self):
         for f in ("astra_os.js", "system_map_model.js"):
             src = open(os.path.join(ROOT, "static", "js", f), encoding="utf-8").read().lower()

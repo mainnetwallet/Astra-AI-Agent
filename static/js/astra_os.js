@@ -467,6 +467,14 @@
   }
 
   /* ------------------------------- tab loaders ------------------------------ */
+  // 30s, not 10s: this is a full 15-endpoint aggregate resync (health, providers,
+  // gateway, router, tools, memory, workflows, schedules, tasks, runtime, web3,
+  // metrics, system-map). Event-driven panels already refresh instantly off the
+  // shared SSE feed via liveUpdate() — this timer only needs to catch up the
+  // parts of the dashboard that SSE doesn't cover, so it doesn't need to be
+  // fast. Firing 15 concurrent requests every 10s (the default landing tab) was
+  // saturating the browser's per-origin connection limit and slowing down the
+  // rest of the app, including page navigation/refresh.
   let pollTimer = 0;
   function startPolling() {
     clearInterval(pollTimer);
@@ -474,7 +482,7 @@
       if (document.hidden || !(isActive("command-center") || isActive("system-map"))) return;
       await refreshData();
       isActive("command-center") ? renderCC() : renderMap(false);
-    }, 10000);
+    }, 30000);
   }
   async function open(tab) {
     if (!OS.eventsLoaded) await loadHistory();

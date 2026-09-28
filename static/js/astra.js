@@ -2957,6 +2957,7 @@ async function eventsPoll() {
   AstraLog.orderHistory(r.data || []).forEach((e) => {
     receiveEvent(e);
     chatStatusTrack(e);
+    emitAstraEvent(e);
   });
 }
 
@@ -2972,6 +2973,16 @@ let SSE_STATE = "reconnecting";
 // AstraChatStatus.apply() keeps a replay harmless.
 let EVENT_SOURCE = null;
 
+// Fan the shared feed out to other views (System Map / Command Center) as a DOM
+// event. Guarded: an observer failing must never break the Activity Log feed.
+function emitAstraEvent(e) {
+  try {
+    if (typeof CustomEvent === "function" && document.dispatchEvent) {
+      document.dispatchEvent(new CustomEvent("astra:event", { detail: e }));
+    }
+  } catch (_) { /* observers are best-effort */ }
+}
+
 function ensureEventStream(afterId) {
   if (!window.EventSource) return false;
   if (EVENT_SOURCE) return true;
@@ -2985,6 +2996,7 @@ function ensureEventStream(afterId) {
     try { e = JSON.parse(ev.data); } catch (_) { return; }
     receiveEvent(e);
     chatStatusTrack(e);        // the same event, as a human-readable line
+    emitAstraEvent(e);         // System Map / Command Center observe the same feed
   };
   es.onerror = () => {
     // EventSource auto-reconnects, resuming via Last-Event-ID — reflect that

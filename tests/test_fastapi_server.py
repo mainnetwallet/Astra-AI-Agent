@@ -230,6 +230,18 @@ class LiveApiTests(unittest.TestCase):
         self.assertTrue(body)
         self.assertEqual(self._get("/static/js/astra.js")[0], 200)
 
+    def test_spa_pages_serve_the_shell_with_hardened_headers(self):
+        # /system-map and /command-center are real addresses of the SPA.
+        _, index_body, _ = self._get("/")
+        for path in ("/system-map", "/command-center"):
+            status, body, headers = self._get(path)
+            self.assertEqual(status, 200, path)
+            self.assertIn("text/html", _hdr(headers, "Content-Type", ""))
+            self.assertEqual(body, index_body)
+            self._assert_hardened(status, body, headers)
+        self.assertEqual(self._get("/static/js/astra_os.js")[0], 200)
+        self.assertEqual(self._get("/static/js/system_map_model.js")[0], 200)
+
     def test_unknown_route(self):
         status, body, headers = self._get("/api/v1/does-not-exist")
         self.assertEqual(status, 404)

@@ -133,8 +133,8 @@ class GatewayExecutionRecovery:
         on (`_health_sort_key`) — serial, by health, never by provider name
         or the caller's original list position. The primary provider
         (`primary_provider`, default Gemini) is tried first; everything else
-        follows purely by health. The last successful target is only
-        recorded, never used to reorder.
+        follows purely by health. The last successful target, while still
+        eligible, is sticky and wins outright; a failure clears it.
         """
         exclude = exclude or set()
         need = set(required_capabilities)
@@ -149,8 +149,16 @@ class GatewayExecutionRecovery:
             eligible.append(t)
         if not eligible:
             return None
-        # Primary provider (Gemini) first, best health first; then every
-        # other target by health only. No last-successful jump.
+        # Sticky last_success: if the last successful target is still an
+        # eligible candidate it wins outright (Gemini is not tried first).
+        last = self.routing_state.last_successful()
+        if last:
+            for t in eligible:
+                if (_ns(t.provider_id) == last["provider"]
+                        and t.model_id == last["model"]):
+                    return t
+        # Otherwise (no/failed last_success): primary provider (Gemini)
+        # first, best health first; then every other target by health only.
         eligible.sort(key=lambda t: (0 if self._is_primary(t) else 1,
                                      *self._health_sort_key(t)))
         return eligible[0]

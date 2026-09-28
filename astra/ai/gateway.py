@@ -1520,6 +1520,11 @@ GATEWAY_CONNECTIONS = (
 )
 
 
+# Categories whose successes never become the sticky last_success target.
+_NON_STICKY_CATEGORIES = ("control", "image_generation", "image_editing",
+                          "image_inpainting")
+
+
 def _build_connection(cls, config=None):
     """Build one gateway connection iff EITHER its chat credentials OR its
     dedicated image credentials are configured.
@@ -1846,7 +1851,8 @@ class AstraAIGateway:
         from astra.ai.gateway_routing import (REQUEST_CATEGORIES,
                                               classify_gateway_request,
                                               eligible_targets, rank_targets,
-                                              rank_by_health)
+                                              rank_by_health,
+                                              prefer_last_successful)
         text, context_tokens, vision = self._classification_inputs(messages)
         if category in REQUEST_CATEGORIES:
             # Caller knows what kind of call this is (e.g. the chat
@@ -1877,17 +1883,23 @@ class AstraAIGateway:
             targets = eligible_targets(self._catalog, self.routing_state,
                                        category=category,
                                        context_tokens=context_tokens)
-        # Health-first: primary provider (Gemini) models best-health first,
-        # then every other provider's models ordered purely by measured
-        # health. No "last successful" jump to the front: a model that
-        # succeeded once must not outrank a healthier one. Image categories
-        # keep their own deterministic serial order (see rank_targets).
+        # Sticky last_success: while the last successful target is still
+        # eligible it is the only first choice (Gemini is NOT tried first).
+        # If it fails, record_failure clears it and the remaining targets
+        # follow: primary provider (Gemini) first, then measured health.
+        # Control calls and image categories never use / set the sticky
+        # target (they have their own rankings).
         if category in ("image_generation", "image_editing", "image_inpainting"):
             ranked = rank_targets(targets, category=category)
-        else:
+        elif category == "control":
             ranked = rank_by_health(targets, category=category,
                                     primary_provider=self.primary_provider,
                                     primary_max_models=self.primary_max_models)
+        else:
+            ranked = prefer_last_successful(
+                targets, self.routing_state.last_successful(),
+                category=category, primary_provider=self.primary_provider,
+                primary_max_models=self.primary_max_models)
         return category, ranked
 
     def _gateway_only_model(self, conn_name: str, model_id: str) -> bool:
@@ -1977,8 +1989,9 @@ class AstraAIGateway:
                           key_label=cred.label if cred else "")
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
-            self.routing_state.record_success(target_model.provider,
-                                              target_model.model_id, latency_ms)
+            self.routing_state.record_success(
+                target_model.provider, target_model.model_id, latency_ms,
+                mark_last=category not in _NON_STICKY_CATEGORIES)
             self.last_connection = conn.name
             self.last_model = target_model.model_id
             cred = (getattr(conn, "pool", None).last_key()
@@ -2131,8 +2144,9 @@ class AstraAIGateway:
                     return
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
-            self.routing_state.record_success(target_model.provider,
-                                              target_model.model_id, latency_ms)
+            self.routing_state.record_success(
+                target_model.provider, target_model.model_id, latency_ms,
+                mark_last=category not in _NON_STICKY_CATEGORIES)
             self.last_connection = conn.name
             self.last_model = target_model.model_id
             cred = (getattr(conn, "pool", None).last_key()
@@ -2312,7 +2326,8 @@ class AstraAIGateway:
         from astra.ai.shared_health import canonical_provider
         routing_provider = canonical_provider(conn.name)
         if ok:
-            self.routing_state.record_success(routing_provider, model_id, latency_ms)
+            self.routing_state.record_success(routing_provider, model_id,
+                                              latency_ms, mark_last=False)
         else:
             self.routing_state.record_failure(routing_provider, model_id)
         # A reused shared-health result means THIS Gateway caller did

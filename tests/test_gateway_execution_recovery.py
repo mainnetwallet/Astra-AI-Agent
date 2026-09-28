@@ -198,6 +198,7 @@ class TestGatewayExecutionRecovery(unittest.TestCase):
         # Deliberately listed worst-health-first, to prove list position and
         # provider name never drive the outcome — only measured health does.
         candidates = [worst, mid, best]
+        self.rec.routing_state.clear_last_successful()   # pure health order
         self.assertTrue(self.rec.is_eligible(worst))   # all three eligible
         self.assertTrue(self.rec.is_eligible(mid))
         self.assertTrue(self.rec.is_eligible(best))
@@ -215,16 +216,20 @@ class TestGatewayExecutionRecovery(unittest.TestCase):
             candidates, second, RATE_LIMIT, exclude={first.key(), second.key()})
         self.assertEqual(third.key(), worst.key(), "worst-but-still-healthy goes last")
 
-    def test_last_successful_is_recorded_but_never_reorders(self):
+    def test_last_successful_is_sticky_until_it_fails(self):
+        gem = _t("gemini", "model-g")
         a = _t("groq", "model-a")
         b = _t("cohere", "model-b")
-        for _ in range(3):
-            self.rec.report_execution_success(a, latency_ms=100)
+        self.rec.report_execution_success(a, latency_ms=100)
+        # sticky: `a` wins over Gemini and over a healthier candidate
+        self.assertEqual(self.rec.select_execution_target([gem, b, a]).key(), a.key())
+        # `a` fails -> cleared; Gemini (primary) goes first again
+        nxt = self.rec.recover_execution_target([gem, b, a], a, RATE_LIMIT)
+        self.assertEqual(nxt.key(), gem.key())
+        self.assertIsNone(self.rec.routing_state.last_successful())
+        # a success on any target becomes the new last_success
         self.rec.report_execution_success(b, latency_ms=100)
-        self.rec.report_execution_failure(b, RATE_LIMIT, cooldown_s=0)
-        self.rec.report_execution_success(b, latency_ms=100)  # b is the LAST success
-        self.assertEqual(self.rec.routing_state.last_successful()["model"], "model-b")
-        self.assertEqual(self.rec.select_execution_target([b, a]).key(), a.key())
+        self.assertEqual(self.rec.select_execution_target([gem, a, b]).key(), b.key())
 
     def test_required_capabilities_filter(self):
         a = _t("gemini", "model-a", caps=["chat"])

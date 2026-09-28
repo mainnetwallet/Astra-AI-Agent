@@ -13,7 +13,11 @@ def _gw(*conns):
     return AstraAIGateway(connections=list(conns), events=None)
 
 
-def _order(gw):
+def _order(gw, keep_last=False):
+    # Seeding health via record_success also sets the sticky last_success;
+    # the health-order tests want the pure fallback order, so drop it.
+    if not keep_last:
+        gw.routing_state.clear_last_successful()
     _cat, ranked = gw._select_order(MSG, None)
     return [(m.provider, m.model_id) for _c, m, _h in ranked]
 
@@ -43,11 +47,54 @@ class TestHealthFirstOrder(unittest.TestCase):
         self.assertEqual([p for p, _m in order],
                          ["gemini", "cerebras", "mistral", "groq"])
 
-    def test_last_successful_does_not_jump_the_queue(self):
-        gw = _gw(_Conn("astra-gw-groq", ["fast", "slow"]))
+    def test_last_successful_is_sticky_and_beats_gemini(self):
+        gw = _gw(_Conn("astra-gw-groq", ["fast", "slow"]),
+                 _Conn("astra-gw-gemini", ["gemini-2.0-flash"]))
         gw.routing_state.record_success("groq", "fast", 100.0)
+        gw.routing_state.record_success("gemini", "gemini-2.0-flash", 100.0)
         gw.routing_state.record_success("groq", "slow", 5000.0)   # last success
-        self.assertEqual(_order(gw)[0], ("groq", "fast"))
+        order = _order(gw, keep_last=True)
+        self.assertEqual(order[0], ("groq", "slow"))
+        # the rest is the normal fallback order: Gemini first, then health
+        self.assertEqual(order[1], ("gemini", "gemini-2.0-flash"))
+        self.assertEqual(order[2], ("groq", "fast"))
+
+    def test_sticky_target_used_alone_on_next_call_no_gemini(self):
+        gem = _Conn("astra-gw-gemini", ["gemini-2.0-flash"])
+        groq = _Conn("astra-gw-groq", ["llama-3.1-8b"])
+        gw = _gw(groq, gem)
+        gw.routing_state.record_success("groq", "llama-3.1-8b", 100.0)
+        gw.chat(MSG)
+        self.assertEqual(gw.last_connection, "astra-gw-groq")
+        self.assertEqual(gw.last_model, "llama-3.1-8b")
+
+    def test_sticky_failure_clears_and_retries_gemini_first(self):
+        gem = _Conn("astra-gw-gemini", ["gemini-2.0-flash"])
+        groq = _Conn("astra-gw-groq", ["llama-3.1-8b"])
+        other = _Conn("astra-gw-mistral", ["m-model"])
+        gw = _gw(groq, other, gem)
+        gw.routing_state.record_success("groq", "llama-3.1-8b", 100.0)
+        groq.fail = True
+        gw.chat(MSG)
+        # sticky target failed -> Gemini (primary) is tried next and wins
+        self.assertEqual(gw.last_connection, "astra-gw-gemini")
+        # ...and Gemini becomes the NEW last_success
+        last = gw.routing_state.last_successful()
+        self.assertEqual((last["provider"], last["model"]),
+                         ("gemini", "gemini-2.0-flash"))
+
+    def test_failure_clears_last_success(self):
+        rs = GatewayRoutingState(None)
+        rs.record_success("groq", "a", 10.0)
+        rs.record_failure("groq", "b")             # different target: keep
+        self.assertIsNotNone(rs.last_successful())
+        rs.record_failure("groq", "a")             # the sticky one: clear
+        self.assertIsNone(rs.last_successful())
+
+    def test_health_probe_does_not_set_last_success(self):
+        rs = GatewayRoutingState(None)
+        rs.record_success("groq", "a", 10.0, mark_last=False)
+        self.assertIsNone(rs.last_successful())
 
     def test_chat_falls_through_gemini_then_next_best_health(self):
         gem = _Conn("astra-gw-gemini", ["gemini-2.0-flash"])

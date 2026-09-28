@@ -23,6 +23,9 @@ Pieces:
     - `eligible_targets`          — capability/context/health filtering
     - `rank_by_health`            — text/chat order: primary provider (Gemini)
                                      first, then health only
+    - `prefer_last_successful`    — sticky: while the last successful target
+                                     is still eligible it is the ONLY first
+                                     choice; once it fails it is cleared
     - `rank_targets`              — image categories only
 
 `astra/ai/gateway.py` (AstraAIGateway) is the only caller; it owns the actual
@@ -445,15 +448,28 @@ class GatewayRoutingState:
                     "latency_ms": self._last_latency_ms}
 
     # -- record -------------------------------------------------------------
-    def record_success(self, provider: str, model: str, latency_ms: float) -> None:
+    def record_success(self, provider: str, model: str, latency_ms: float, *,
+                       mark_last: bool = True) -> None:
+        """Record a successful call. `mark_last=True` (default) also makes
+        this target the sticky `last_success`; pass False for probes /
+        control calls that must not steer the next real request."""
         with self._lock:
             h = self.get_health(provider, model)
             h.note_success(latency_ms)
-            self._last_provider = provider
-            self._last_model = model
-            self._last_timestamp = _now_iso()
-            self._last_latency_ms = int(latency_ms)
             self._persist_health(h)
+            if mark_last:
+                self._last_provider = provider
+                self._last_model = model
+                self._last_timestamp = _now_iso()
+                self._last_latency_ms = int(latency_ms)
+                self._persist_last()
+
+    def clear_last_successful(self) -> None:
+        with self._lock:
+            self._last_provider = ""
+            self._last_model = ""
+            self._last_timestamp = ""
+            self._last_latency_ms = 0
             self._persist_last()
 
     def record_failure(self, provider: str, model: str,
@@ -462,6 +478,11 @@ class GatewayRoutingState:
             h = self.get_health(provider, model)
             h.note_failure(cooldown_s=cooldown_s)
             self._persist_health(h)
+            # The sticky last_success target just failed: forget it, so the
+            # rest of this call (and the next one) falls back to the normal
+            # primary(Gemini)-first, then health-ordered ranking.
+            if (self._last_provider == provider and self._last_model == model):
+                self.clear_last_successful()
 
     # -- persistence (best-effort; never raises into the caller) --------------
     def _persist_last(self) -> None:
@@ -796,3 +817,29 @@ def rank_by_health(targets: list[tuple[object, Model, GatewayModelHealth]], *,
         k[0] = ((0 if id(k) in top else 1),) + k[0]
     keyed.sort(key=lambda k: k[0])
     return [k[1] for k in keyed]
+
+
+def prefer_last_successful(
+        targets: list[tuple[object, Model, GatewayModelHealth]],
+        last: dict | None, *, category: str,
+        primary_provider: str | None = DEFAULT_PRIMARY_PROVIDER,
+        primary_max_models: int = DEFAULT_PRIMARY_MAX_MODELS
+        ) -> list[tuple[object, Model, GatewayModelHealth]]:
+    """Sticky routing. If `last` (the last successful target) is among the
+    eligible `targets`, it is tried FIRST -- alone at the front, so the next
+    call does not go to Gemini. The remaining targets follow as the normal
+    fallback order (primary provider first, then health), used only if the
+    sticky target fails on this call. If `last` is missing/ineligible the
+    plain `rank_by_health` order is returned."""
+    if last:
+        for i, item in enumerate(targets):
+            _c, m, _h = item
+            if m.provider == last.get("provider") and \
+                    m.model_id == last.get("model"):
+                rest = targets[:i] + targets[i + 1:]
+                return [item] + rank_by_health(
+                    rest, category=category, primary_provider=primary_provider,
+                    primary_max_models=primary_max_models)
+    return rank_by_health(targets, category=category,
+                          primary_provider=primary_provider,
+                          primary_max_models=primary_max_models)

@@ -58,6 +58,33 @@ class WebCoreTests(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertTrue(data["request_id"])
 
+    def test_system_map_reports_agents_and_secret_free_security(self):
+        from astra.agents import SPECIALISTS, AgentManager
+        mgr = AgentManager()
+        mgr.register_many(SPECIALISTS)
+        self.stack["agent_manager"] = mgr
+        self.site.operator_token = ""
+        data = self._payload(self._call("GET", "/api/system-map"))["data"]
+        self.assertEqual([a["name"] for a in data["agents"]], [a["name"] for a in mgr.list()])
+        self.assertEqual(data["agent_manager"], {"available": True, "registered": len(mgr)})
+        sec = {r["k"]: r for r in data["security"]}
+        for key in ("Authentication", "Rate limiting", "CORS", "Request ID",
+                    "Secret redaction", "SSRF protection", "Body size limit"):
+            self.assertIn(key, sec)
+        self.assertEqual(sec["Authentication"]["s"], "degraded")  # open by default
+        # A configured token / origin list must never leak into the payload.
+        self.site.operator_token = "s3cret-token-value"
+        self.site._allowed_origins = {"https://evil.example"}
+        raw = self._call("GET", "/api/system-map").body.decode("utf-8")
+        self.assertNotIn("s3cret-token-value", raw)
+        self.assertNotIn("evil.example", raw)
+
+    def test_system_map_without_agent_manager_is_empty_not_fake(self):
+        self.stack.pop("agent_manager", None)
+        data = self._payload(self._call("GET", "/api/system-map"))["data"]
+        self.assertEqual(data["agents"], [])
+        self.assertEqual(data["agent_manager"], {"available": False, "registered": 0})
+
     def test_v1_alias_hits_the_same_route(self):
         a = self._payload(self._call("GET", "/api/tools"))
         b = self._payload(self._call("GET", "/api/v1/tools"))

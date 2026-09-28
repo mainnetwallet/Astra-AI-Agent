@@ -311,7 +311,7 @@
       providers: cards.length ? cards.map((p) => ({ k: p.name, v: p.modelCount + " models", s: p.status }))
         : [{ k: "No providers configured", v: "", s: "unknown" }],
       agents: arr(d.agents).length ? d.agents.map((a) => ({ k: a.name, v: a.description || "", s: "info" }))
-        : [{ k: "Agent registry", v: "Unavailable (no API exposes AgentManager yet)", s: "unknown" }],
+        : [{ k: "Agent registry", v: "Unavailable (/api/system-map did not return an agent registry)", s: "unknown" }],
       tools: tg.groups.length ? tg.groups.map((g) => ({ k: g.name, v: g.tools.length + " tools", s: "online" }))
         : [{ k: "ToolRegistry", v: "Unavailable", s: "unknown" }],
       external: [{ k: "Provider HTTP APIs", v: "Via providers", s: "info" }, { k: "Blockchain RPC", v: "Via Web3 tools", s: "info" }],
@@ -335,7 +335,7 @@
         { k: "Files", v: "Runtime file API", s: "info" },
         { k: "Browser", v: "Playwright (optional)", s: "info" },
       ],
-      security: d.security ? d.security : [{ k: "Status", v: "Unavailable (no security-status API yet)", s: "unknown" }],
+      security: d.security ? d.security : [{ k: "Status", v: "Unavailable (/api/system-map did not return security status)", s: "unknown" }],
       monitoring: [
         { k: "EventBus (SSE)", v: d.sseState || "Unavailable", s: d.sseState === "live" ? "online" : "unknown" },
         { k: "Events loaded", v: d.eventCount == null ? "Unavailable" : d.eventCount, s: "info" },

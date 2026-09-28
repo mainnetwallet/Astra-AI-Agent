@@ -2,10 +2,8 @@
 including a reply that finishes after the browser already went away."""
 from __future__ import annotations
 
-import base64
 import json
 import os
-import tempfile
 import threading
 import time
 import unittest
@@ -18,23 +16,9 @@ from astra.store import Store
 from tests.helpers import make_stack
 
 
-# A real 1x1 PNG: `latest_image_attachment` checks the upload exists on disk
-# AND that its bytes really are an image.
-_PNG_1X1 = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
-    "iZk9HQAAAABJRU5ErkJggg==")
-
-
 class ChatLogUnit(unittest.TestCase):
     def setUp(self):
         self.log = ChatLog(Store(":memory:"), redact=redact)
-
-    def _real_png(self, name):
-        path = os.path.join(tempfile.mkdtemp(prefix="astra-test-"), name)
-        with open(path, "wb") as fh:
-            fh.write(_PNG_1X1)
-        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
-        return path
 
     def test_round_trip_and_after_id(self):
         self.log.add_user("hello", files=["a.pdf"])
@@ -48,15 +32,23 @@ class ChatLogUnit(unittest.TestCase):
         self.assertEqual([m["text"] for m in self.log.history(after_id=first)["messages"]], ["hi"])
 
     def test_latest_image_attachment_reuses_upload_and_generated_artifact(self):
-        source = self._real_png("source.png")
-        generated = self._real_png("generated.png")
+        # latest_image_attachment() only returns images that really exist on
+        # disk and sniff as images, so the fixtures are real (tiny) PNG files.
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+        src = os.path.join(tmp.name, "source.png")
+        gen = os.path.join(tmp.name, "generated.png")
+        for path in (src, gen):
+            with open(path, "wb") as fh:
+                fh.write(png)
         self.log.add_user(
             "make an edit", files=["source.png"],
-            attachments=[{"family": "image", "storage_path": source,
-                          "mime_type": "image/png",
-                          "original_filename": "source.png"}])
+            attachments=[{"family": "image", "storage_path": src,
+                          "mime_type": "image/png"}])
         self.assertEqual(
-            self.log.latest_image_attachment()["storage_path"], source)
+            self.log.latest_image_attachment()["storage_path"], src)
 
         self.log.add_reply({
             "reply": "generated",
@@ -64,11 +56,11 @@ class ChatLogUnit(unittest.TestCase):
             "artifacts": [{
                 "id": "abc123", "filename": "generated.png",
                 "mime_type": "image/png", "artifact_type": "image",
-                "_storage_path": generated,
+                "_storage_path": gen,
             }],
         })
         latest = self.log.latest_image_attachment()
-        self.assertEqual(latest["storage_path"], generated)
+        self.assertEqual(latest["storage_path"], gen)
         self.assertNotIn("_storage_path", self.log.history()["messages"][-1]["artifacts"])
 
     def test_pending_lifecycle(self):

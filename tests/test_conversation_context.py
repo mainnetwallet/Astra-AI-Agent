@@ -370,7 +370,7 @@ class EndToEndConversationMemoryTests(unittest.TestCase):
         self.calls = []          # every (message, history-as-list) the agent saw
 
         def spy_handle(message, context="", history=None, attachments=None,
-                       conversation_id=None):
+                   conversation_id=None):
             hist = list(getattr(history, "messages", history) or [])
             self.calls.append({"message": message, "history": hist})
             n = len(self.calls)
@@ -483,7 +483,7 @@ class EndToEndTrimmingTests(unittest.TestCase):
         self.calls = []
 
         def spy_handle(message, context="", history=None, attachments=None,
-                       conversation_id=None):
+                   conversation_id=None):
             hist = list(getattr(history, "messages", history) or [])
             self.calls.append({"message": message, "history": hist})
             n = len(self.calls)
@@ -525,7 +525,7 @@ class RetryDoesNotDuplicateHistoryHttpTests(unittest.TestCase):
         self.calls = []
 
         def slow_spy_handle(message, context="", history=None, attachments=None,
-                             conversation_id=None):
+                   conversation_id=None):
             self.calls.append(message)
             self.release.wait(5)
             return {"reply": f"echo: {message}", "action": "none",

@@ -85,12 +85,6 @@ class FakeGateway:
     def is_usable(self):
         return self.usable
 
-    def classify_image_operation(self, message, attachments=None):
-        # The web layer asks the Gateway (deterministically, no AI call) for
-        # the image operation before every turn; use the real classifier.
-        from astra.ai.gateway import AstraAIGateway
-        return AstraAIGateway.classify_image_operation(self, message, attachments)
-
     def chat(self, messages, model=None, max_tokens=500, category=None,
              trace=""):
         self.calls.append(messages)
@@ -144,14 +138,11 @@ class FakeImageRouter:
     def generate(self, prompt, model=None, size="1024x1024", n=1, *,
                  editing=False, source_image=None, mask_image=None,
                  operation=None, trace="", discover=True):
-        # Mirrors astra.ai.image_router.ImageRouter.generate exactly, so a
-        # signature drift in ChatPipeline._route_image fails loudly here
-        # instead of being swallowed as "no image model".
+        # Mirrors astra.ai.image_router.ImageRouter.generate()'s signature.
         self.calls.append({"prompt": prompt, "model": model, "size": size,
                            "n": n, "editing": editing,
                            "source_image": source_image,
-                           "mask_image": mask_image,
-                           "operation": operation,
+                           "mask_image": mask_image, "operation": operation,
                            "trace": trace, "discover": discover})
         if isinstance(self.result, Exception):
             raise self.result
@@ -720,7 +711,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         self.assertEqual(rt.requests, [])
 
     def test_generated_image_reaches_the_user_as_a_real_artifact(self):
-        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
                                   [self._PNG_DATA_URI])
         out = pipe.run("generate an image of a sunset over the mountains")
         self.assertTrue(out["ok"])
@@ -788,7 +779,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         """The image is delivered via `artifacts`; the visible `reply` text
         must never contain the raw data URI (see
         astra.ai.response_boundary.sanitize_final_response)."""
-        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
                                   [self._PNG_DATA_URI])
         out = pipe.run("generate an image of a sunset over the mountains")
         self.assertNotIn("base64,", out["reply"])

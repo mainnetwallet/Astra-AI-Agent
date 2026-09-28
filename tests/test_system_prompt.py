@@ -112,6 +112,10 @@ def verdict(v="complete", missing=(), action="fix", instructions=""):
 TARGETS = [
     {"provider": "groq", "model": "llama-fast", "capabilities": ["chat"],
      "quality": "fast", "context_window": 8000},
+    # understand() defaults to gemini/gemini-pro; a targets[] plan is only
+    # trusted when it exists in the router's catalogue.
+    {"provider": "gemini", "model": "gemini-pro", "capabilities": ["chat"],
+     "quality": "high", "context_window": 100000},
 ]
 
 

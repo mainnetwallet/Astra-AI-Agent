@@ -142,10 +142,16 @@ class FakeImageRouter:
         self.calls = []                # every generate() call's arguments
 
     def generate(self, prompt, model=None, size="1024x1024", n=1, *,
-                 editing=False, source_images=None, trace="", discover=True):
+                 editing=False, source_image=None, mask_image=None,
+                 operation=None, trace="", discover=True):
+        # Mirrors astra.ai.image_router.ImageRouter.generate exactly, so a
+        # signature drift in ChatPipeline._route_image fails loudly here
+        # instead of being swallowed as "no image model".
         self.calls.append({"prompt": prompt, "model": model, "size": size,
                            "n": n, "editing": editing,
-                           "source_images": source_images or [],
+                           "source_image": source_image,
+                           "mask_image": mask_image,
+                           "operation": operation,
                            "trace": trace, "discover": discover})
         if isinstance(self.result, Exception):
             raise self.result
@@ -629,7 +635,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         # ... if rewrote else message`) — so it's the literal text below that
         # the Gateway's own task_type classification must recognize, not
         # anything scripted into understand().
-        pipe, gw, rt = self._make([understand(), verdict("complete")],
+        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
                                   [self._PNG_DATA_URI])
         pipe.run("generate an image of a sunset over the mountains")
         self.assertEqual(len(gw.image_router.calls), 1)
@@ -638,7 +644,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         self.assertEqual(rt.requests, [])          # old path never used
 
     def test_bangla_image_request_sets_output_modality(self):
-        pipe, gw, rt = self._make([understand(), verdict("complete")],
+        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
                                   [self._PNG_DATA_URI])
         pipe.run("akta chobi banao")
         self.assertEqual([c["prompt"] for c in gw.image_router.calls],
@@ -647,14 +653,14 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
 
     def test_bangla_script_image_request_sets_output_modality(self):
         """Real Bengali script, not just Latin-script Banglish."""
-        pipe, gw, rt = self._make([understand(), verdict("complete")],
+        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
                                   [self._PNG_DATA_URI])
         pipe.run("\u098f\u0995\u099f\u09be \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993")
         self.assertEqual(len(gw.image_router.calls), 1)
         self.assertEqual(rt.requests, [])
 
     def test_banglish_photo_create_koro_sets_output_modality(self):
-        pipe, gw, rt = self._make([understand(), verdict("complete")],
+        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
                                   [self._PNG_DATA_URI])
         pipe.run("photo create koro")
         self.assertEqual(len(gw.image_router.calls), 1)
@@ -706,7 +712,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         """Hard architectural guard: even when ImageRouter fails, ChatPipeline
         must NOT fall back to the Provider router's image dispatch -- the
         duplicate execution path this architecture forbids."""
-        pipe, gw, rt = self._make([understand(), verdict("complete")], [],
+        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")], [],
                                   image_router_result=RuntimeError("boom"))
         out = pipe.run("generate an image of a sunset")
         self.assertFalse(out["ok"])
@@ -714,7 +720,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         self.assertEqual(rt.requests, [])
 
     def test_generated_image_reaches_the_user_as_a_real_artifact(self):
-        pipe, gw, rt = self._make([understand(), verdict("complete")],
+        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
                                   [self._PNG_DATA_URI])
         out = pipe.run("generate an image of a sunset over the mountains")
         self.assertTrue(out["ok"])
@@ -744,7 +750,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         from astra.store import Store
 
         bus = EventBus(Store(":memory:"))
-        gw = FakeGateway([understand(), verdict("complete")])
+        gw = FakeGateway([understand(task_type="image_generation"), verdict("complete")])
         rt = FakeRouter([])
         gw.image_router = FakeImageRouter(self._PNG_DATA_URI)
         pipe = ChatPipeline(gw, rt, events=bus, max_tokens=800,
@@ -782,7 +788,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         """The image is delivered via `artifacts`; the visible `reply` text
         must never contain the raw data URI (see
         astra.ai.response_boundary.sanitize_final_response)."""
-        pipe, gw, rt = self._make([understand(), verdict("complete")],
+        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
                                   [self._PNG_DATA_URI])
         out = pipe.run("generate an image of a sunset over the mountains")
         self.assertNotIn("base64,", out["reply"])

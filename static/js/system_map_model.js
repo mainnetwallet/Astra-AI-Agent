@@ -170,7 +170,11 @@
       cur.step = ev.kind;
       cur.kind = ev.kind;
       const ts = Date.parse(String(ev.created_at || "").replace(" ", "T"));
-      if (!cur.startedAt && !isNaN(ts)) cur.startedAt = ts;
+      // Only a non-terminal event dates the start. If the window opens on a
+      // terminal event (the start is older than the loaded history) the start
+      // was never observed, so durationMs stays null -> "Unavailable" rather
+      // than a fabricated 0 ms.
+      if (!cur.startedAt && !isTerminalEvent(ev) && !isNaN(ts)) cur.startedAt = ts;
       if (isTerminalEvent(ev)) {
         cur.status = isErrorEvent(ev) ? "failed" : "completed";
         cur.endedAt = isNaN(ts) ? null : ts;

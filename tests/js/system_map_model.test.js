@@ -109,3 +109,27 @@ test("subsystem health reports Unavailable when nothing is known", () => {
   assert.deepStrictEqual(rows.map((r) => r.name), ["API", "Gateway", "Router", "Providers", "ToolRegistry", "Memory", "Workflow Engine", "EventBus", "Web3", "Terminal"]);
   assert.ok(rows.every((r) => r.status === "unavailable"));
 });
+
+test("replayed events never double-count an operation", () => {
+  const ev = (id, kind, op, extra) => ({ id, kind, agent: "", data: { op, ...extra }, created_at: "2026-09-28 09:00:0" + id });
+  const once = [ev(1, "tool.started", "a", { tool: "file_read" }), ev(2, "tool.completed", "a")];
+  const now = Date.parse("2026-09-28T09:00:09");
+  const single = M.operationsFromEvents(once, now);
+  // The SSE reference point is re-established on every reconnect and the
+  // history endpoint is re-read on every visit, so the same event can arrive
+  // many times; the derived operation must stay identical.
+  const replay = M.operationsFromEvents([...once, ...once, ...once], now);
+  assert.strictEqual(replay.length, 1);
+  assert.deepStrictEqual(replay[0], single[0]);
+  assert.strictEqual(replay[0].status, "completed");
+  assert.strictEqual(replay[0].durationMs, single[0].durationMs);
+});
+
+test("a terminal event without a start is not given an invented duration", () => {
+  const [op] = M.operationsFromEvents([
+    { id: 1, kind: "workflow.completed", agent: "wf", data: { op: "wf-1" }, created_at: "2026-09-28 09:00:03" },
+  ], Date.parse("2026-09-28T09:00:09"));
+  assert.strictEqual(op.status, "completed");
+  assert.strictEqual(op.startedAt, null);      // the start was never observed
+  assert.strictEqual(op.durationMs, null);     // so the duration is Unavailable, not guessed
+});

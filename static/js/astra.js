@@ -3186,7 +3186,10 @@ async function boot() {
   MANIFEST.tabs.forEach((t) => { TAB_LABELS[t.tab] = t.label; });
 
   // tab bar
-  $("#nav").innerHTML = MANIFEST.tabs.map((t) =>
+  // "assistant" is reachable from the sidebar's 💬 Chat entry (astra_os.js), so
+  // it is not repeated in this menu. The tab itself is unchanged.
+  const NAV_HIDDEN = new Set(["assistant"]);
+  $("#nav").innerHTML = MANIFEST.tabs.filter((t) => !NAV_HIDDEN.has(t.tab)).map((t) =>
     `<button data-tab="${esc(t.tab)}" class="tab${t.tab === "dashboard" ? " active" : ""}">${t.label}</button>`).join("");
   $$("#nav .tab").forEach((t) =>
     t.addEventListener("click", () => showTab(t.dataset.tab)));

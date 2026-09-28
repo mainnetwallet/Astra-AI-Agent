@@ -116,10 +116,16 @@ class _Capture:
 
 CF_ENV = dict(GW_CLOUDFLARE_API_KEYS="cf-token-under-test",
               GW_CLOUDFLARE_ACCOUNT_IDS="acct-1111",
+              # Image eligibility needs the DEDICATED IMAGE_* credentials;
+              # the chat GW_* pool is never consulted for images.
+              IMAGE_CLOUDFLARE_API_KEY="cf-token-under-test",
+              IMAGE_CLOUDFLARE_ACCOUNT_ID="acct-1111",
               CLOUDFLARE_IMAGE_MODELS=FLUX + "," + LUCID)
 GEMINI_ENV = dict(GW_GEMINI_API_KEYS="gem-key-under-test",
+                  IMAGE_GEMINI_API_KEY="gem-key-under-test",
                   GEMINI_IMAGE_MODELS=GEMINI_IMG)
-OR_ENV = dict(GW_OPENROUTER_API_KEYS="or-key-under-test")
+OR_ENV = dict(GW_OPENROUTER_API_KEYS="or-key-under-test",
+              IMAGE_OPENROUTER_API_KEY="or-key-under-test")
 
 
 def _bus():
@@ -212,6 +218,8 @@ class TestCredentialFailureIsNeverPerModel(unittest.TestCase):
         gw = build_astra_ai_gateway(_cfg(
             GW_CLOUDFLARE_API_KEYS="rejected-token",
             GW_CLOUDFLARE_ACCOUNT_IDS="acct-1111",
+            IMAGE_CLOUDFLARE_API_KEY="rejected-token",
+            IMAGE_CLOUDFLARE_ACCOUNT_ID="acct-1111",
             CLOUDFLARE_IMAGE_MODELS=self.CF7), events=bus)
         with _Capture(behavior) as cap:
             with self.assertRaises(ProviderError):
@@ -283,18 +291,21 @@ class TestGeminiRateLimitIsPreserved(unittest.TestCase):
                             for r in cap.requests))
 
 
-class TestImageGenerationNeverRetriesTheSameModel(unittest.TestCase):
-    """Image generation gives each (provider, model) exactly ONE provider
-    attempt per request: a 429/5xx must advance to the NEXT image model, not
-    burn another credential (or another retry) on the same one."""
+class TestImageGenerationNeverRetriesTheSameKey(unittest.TestCase):
+    """Image generation gives each (provider, model, key) exactly ONE
+    attempt per request. A 429 is a PER-KEY problem, so the same model is
+    tried once with each of its remaining keys (never the same key twice);
+    only when every key of that model has been tried does the request
+    advance to the NEXT image model (see `ImageRouter.generate`)."""
 
     def _multi_key_gemini(self):
-        # Three keys: without the single-attempt rule a retryable 429 would
-        # produce three HTTP requests against the SAME model.
+        # Three keys: a retryable 429 rotates through each key exactly once
+        # (three HTTP requests), never re-using a key.
         return dict(GW_GEMINI_API_KEYS="k1,k2,k3",
+                    IMAGE_GEMINI_API_KEY="k1,k2,k3",
                     GEMINI_IMAGE_MODELS=GEMINI_IMG)
 
-    def test_429_makes_exactly_one_provider_attempt_even_with_many_keys(self):
+    def test_429_tries_each_key_once_never_the_same_key_twice(self):
         bus = _bus()
         gw = build_astra_ai_gateway(_cfg(**self._multi_key_gemini()),
                                     events=bus)
@@ -302,17 +313,19 @@ class TestImageGenerationNeverRetriesTheSameModel(unittest.TestCase):
         with _Capture(behavior) as cap:
             with self.assertRaises(ProviderError):
                 gw.generate_image("a cat", discover=False)
-        self.assertEqual(cap.count, 1)                  # ONE attempt
-        self.assertEqual([r["headers"].get("x-goog-api-key")
-                          for r in cap.requests], ["k1"])
-        self.assertEqual(len(_data(bus, "astra_gateway.request")), 1)
-        self.assertEqual(len(_data(bus, "astra_gateway.error")), 1)
-        self.assertEqual(_data(bus, "astra_gateway.error")[0]["status_code"],
-                         429)
+        self.assertEqual(cap.count, 3)                  # one attempt per key
+        used = [r["headers"].get("x-goog-api-key") for r in cap.requests]
+        self.assertEqual(sorted(used), ["k1", "k2", "k3"])
+        self.assertEqual(len(set(used)), 3)             # no key re-used
+        self.assertEqual(len(_data(bus, "astra_gateway.request")), 3)
+        self.assertEqual(len(_data(bus, "astra_gateway.error")), 3)
+        for d in _data(bus, "astra_gateway.error"):
+            self.assertEqual(d["status_code"], 429)
 
-    def test_429_advances_to_the_next_model_not_the_same_one(self):
+    def test_429_exhausts_the_keys_then_advances_to_the_next_model(self):
         gw = build_astra_ai_gateway(_cfg(
             GW_GEMINI_API_KEYS="k1,k2,k3", GEMINI_IMAGE_MODELS=GEMINI_IMG,
+            IMAGE_GEMINI_API_KEY="k1,k2,k3",
             **CF_ENV))
         seen = []
 
@@ -327,9 +340,9 @@ class TestImageGenerationNeverRetriesTheSameModel(unittest.TestCase):
             uri = gw.generate_image("a cat", discover=False)
         self.assertTrue(uri.startswith("data:image/png;base64,"))
         gemini_calls = [s for s in seen if s[0] == "gemini"]
-        self.assertEqual(len(gemini_calls), 1)     # never retried same model
+        self.assertEqual(len(gemini_calls), 3)     # each of the 3 keys once
         self.assertGreaterEqual(len(seen), 2)      # fell over to Cloudflare
-        self.assertEqual(cap.count, 2)
+        self.assertEqual(cap.count, 4)             # 3 gemini + 1 cloudflare
 
 
 class TestOpenRouterEmptyFreePoolIsNeverFilled(unittest.TestCase):
@@ -356,6 +369,7 @@ class TestOpenRouterEmptyFreePoolIsNeverFilled(unittest.TestCase):
         # selectable unless it is a statically VERIFIED free image model.
         gw = build_astra_ai_gateway(_cfg(
             GW_OPENROUTER_API_KEYS="or-key-under-test",
+            IMAGE_OPENROUTER_API_KEY="or-key-under-test",
             OPENROUTER_IMAGE_MODELS=OR_LIVE_FREE))
         self.assertEqual(
             [t[1].model_id for t in gw.image_targets(discover=False)
@@ -397,9 +411,17 @@ class TestProviderAdapterCredentialFailure(unittest.TestCase):
         from astra.ai.gateway import AstraAIGateway
         from astra.ai.image_router import ImageRouter
         from astra.ai.models import Model
-        a = self._adapter(CLOUDFLARE_API_KEYS="rejected",
-                          CLOUDFLARE_ACCOUNT_IDS="acct-1111",
-                          CLOUDFLARE_IMAGE_MODELS=FLUX + "," + LUCID)
+        # ImageRouter dispatches to a real Gateway connection (whose
+        # `generate_image` takes source/mask images and owns the dedicated
+        # IMAGE_* credential pool), not to a bare provider adapter.
+        built = build_astra_ai_gateway(_cfg(
+            GW_CLOUDFLARE_API_KEYS="rejected",
+            GW_CLOUDFLARE_ACCOUNT_IDS="acct-1111",
+            IMAGE_CLOUDFLARE_API_KEY="rejected",
+            IMAGE_CLOUDFLARE_ACCOUNT_ID="acct-1111",
+            CLOUDFLARE_IMAGE_MODELS=FLUX + "," + LUCID))
+        a = [c for c in built.connections
+             if c.name == "astra-gw-cloudflare"][0]
         bus = _bus()
         targets = [Model("cloudflare", FLUX, capabilities=["chat"],
                          input_modalities=["text"],
@@ -432,7 +454,7 @@ class TestProviderAdapterCredentialFailure(unittest.TestCase):
             with self.assertRaises(ProviderError):
                 router = ImageRouter(_Host())
                 router.build_targets = (
-                    lambda *, editing=False, discover=True, operation=None:
+                    lambda *, editing=False, operation=None, discover=True:
                     [(a, m, None) for m in targets])
                 router.generate("akta cat photo banao")
         self.assertEqual(cap.count, 1)

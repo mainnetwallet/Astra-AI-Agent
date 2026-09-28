@@ -271,7 +271,14 @@ class WslRuntimeBackend(RuntimeBackend):
             return found
         candidate = os.path.join(os.environ.get("SystemRoot")
                                  or r"C:\Windows", "System32", "wsl.exe")
-        return candidate if os.path.exists(candidate) else ""
+        if os.path.exists(candidate):
+            return candidate
+        # An injected runner (the adapter seam) IS the transport: there is
+        # nothing on this host to discover, so name it by its own exe. This
+        # keeps the backend drivable without a real wsl.exe (tests, CI).
+        if self._runner is not None:
+            return str(getattr(self._runner, "exe", "") or "wsl.exe")
+        return ""
 
     def runner(self) -> WslRunner:
         if self._runner is None:

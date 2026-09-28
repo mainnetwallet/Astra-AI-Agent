@@ -94,8 +94,8 @@ class SpecializedConstantsCarryCoreTests(unittest.TestCase):
 
 
 # ── helpers shared with test_chat_pipeline.py's fake style ─────────────────
-def understand(final_request="", was_incomplete=False, provider="gemini",
-              model="gemini-pro", criteria=("answers the question",)):
+def understand(final_request="", was_incomplete=False, provider="groq",
+              model="llama-fast", criteria=("answers the question",)):
     return json.dumps({"final_request": final_request,
                        "was_incomplete": was_incomplete, "provider": provider,
                        "model": model,

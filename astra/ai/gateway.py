@@ -2221,7 +2221,15 @@ class AstraAIGateway:
         if not key_id and pool is not None and hasattr(pool, "keys"):
             key_meta = pool.keys()
             if key_meta:
-                key_id = key_meta[0].get("key_id")
+                # No explicit key: walk the connection's keys in order, one
+                # per un-keyed manual test of this (connection, model), so
+                # repeated tests label (and record) each key in turn rather
+                # than always reporting "key 1".
+                cursors = self.__dict__.setdefault("_manual_key_cursor", {})
+                slot = (conn.name, model_id)
+                idx = cursors.get(slot, 0)
+                cursors[slot] = idx + 1
+                key_id = key_meta[idx % len(key_meta)].get("key_id")
         if key_id and pool is not None and hasattr(pool, "keys"):
             if key_id not in {k["key_id"] for k in pool.keys()}:
                 return {"model": model_id, "ok": False, "error": f"unknown key {key_id!r}",

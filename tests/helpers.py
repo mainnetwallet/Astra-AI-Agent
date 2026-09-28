@@ -54,11 +54,36 @@ def runtime_python_has_pytest() -> bool:
         return False
 
 
+class _StubGateway:
+    """Just enough Gateway for the web layer: the REAL deterministic
+    image-operation classifier, no AI calls."""
+
+    def classify_image_operation(self, message, attachments=None):
+        from astra.ai.gateway import AstraAIGateway
+        return AstraAIGateway.classify_image_operation(self, message, attachments)
+
+
+class _StubPipeline:
+    """Minimal chat pipeline for tests that only need the HTTP/Agent wiring.
+
+    `astra.web` reads `agent.pipeline.gateway.classify_image_operation(...)`
+    before every chat turn, so an Agent without a pipeline can't serve
+    /api/chat. This answers with a fixed reply and never calls an AI."""
+
+    def __init__(self):
+        self.gateway = _StubGateway()
+        self.approvals = None
+
+    def run(self, message, context="", history=None, attachments=None,
+            conversation_id=None, session_id=None):
+        return {"reply": "ok", "action": "none", "ok": True, "data": {}}
+
+
 def make_agent():
     """Returns (store, plugins, agent) wired exactly like the real app."""
     store = Store(":memory:")
     plugins = []
-    agent = Agent()
+    agent = Agent(pipeline=_StubPipeline())
     return store, plugins, agent
 
 

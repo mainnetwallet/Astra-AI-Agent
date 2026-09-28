@@ -74,3 +74,41 @@ class TestHealthFirstOrder(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPrimaryMaxThree(unittest.TestCase):
+    def test_only_three_best_gemini_models_before_other_providers(self):
+        gem = _Conn("astra-gw-gemini", ["g1", "g2", "g3", "g4", "g5"])
+        gw = _gw(_Conn("astra-gw-groq", ["llama"]), gem)
+        for m, ms in (("g1", 100.0), ("g2", 200.0), ("g3", 300.0),
+                      ("g4", 400.0), ("g5", 500.0)):
+            gw.routing_state.record_success("gemini", m, ms)
+        gw.routing_state.record_success("groq", "llama", 50.0)
+        order = _order(gw)
+        self.assertEqual(order[:3], [("gemini", "g1"), ("gemini", "g2"),
+                                     ("gemini", "g3")])
+        # 4th slot is the next-best HEALTH model overall (groq, 50ms),
+        # not a 4th Gemini model.
+        self.assertEqual(order[3], ("groq", "llama"))
+        self.assertEqual(order[4], ("gemini", "g4"))
+
+    def test_fewer_than_three_gemini_models_all_come_first(self):
+        gw = _gw(_Conn("astra-gw-groq", ["llama"]),
+                 _Conn("astra-gw-gemini", ["g1", "g2"]))
+        gw.routing_state.record_success("groq", "llama", 10.0)
+        gw.routing_state.record_success("gemini", "g1", 900.0)
+        gw.routing_state.record_success("gemini", "g2", 800.0)
+        order = _order(gw)
+        self.assertEqual([p for p, _ in order[:2]], ["gemini", "gemini"])
+        self.assertEqual(order[2], ("groq", "llama"))
+
+    def test_config_can_change_the_cap(self):
+        gw = _gw(_Conn("astra-gw-groq", ["llama"]),
+                 _Conn("astra-gw-gemini", ["g1", "g2", "g3"]))
+        gw.primary_max_models = 1
+        for m in ("g1", "g2", "g3"):
+            gw.routing_state.record_success("gemini", m, 500.0)
+        gw.routing_state.record_success("groq", "llama", 50.0)
+        order = _order(gw)
+        self.assertEqual(order[0][0], "gemini")
+        self.assertEqual(order[1], ("groq", "llama"))

@@ -1633,6 +1633,14 @@ class AstraAIGateway:
         _pp = (config.get("GW_PRIMARY_PROVIDER", "gemini")
                if config is not None and hasattr(config, "get") else "gemini")
         self.primary_provider = str(_pp or "").strip().lower()
+        # How many of the primary provider's models (best health first) are
+        # tried before falling through to the next-best-health models.
+        try:
+            _pm = int(config.get("GW_PRIMARY_MAX_MODELS", 3)
+                      if config is not None and hasattr(config, "get") else 3)
+        except (TypeError, ValueError):
+            _pm = 3
+        self.primary_max_models = max(0, _pm)
         # Manual-health-check dedup with the Provider system (see
         # astra/ai/shared_health.py). `AstraRouter` adopts THIS instance
         # when it wires a Gateway in (see its __init__), so the two
@@ -1877,7 +1885,8 @@ class AstraAIGateway:
             ranked = rank_targets(targets, category=category)
         else:
             ranked = rank_by_health(targets, category=category,
-                                    primary_provider=self.primary_provider)
+                                    primary_provider=self.primary_provider,
+                                    primary_max_models=self.primary_max_models)
         return category, ranked
 
     def _gateway_only_model(self, conn_name: str, model_id: str) -> bool:

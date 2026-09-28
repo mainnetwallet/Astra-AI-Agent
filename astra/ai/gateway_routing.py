@@ -745,6 +745,7 @@ def rank_targets(targets: list[tuple[object, Model, GatewayModelHealth]], *,
 
 
 DEFAULT_PRIMARY_PROVIDER = "gemini"
+DEFAULT_PRIMARY_MAX_MODELS = 3
 
 
 def health_sort_key(model: Model, health: GatewayModelHealth):
@@ -760,13 +761,17 @@ def health_sort_key(model: Model, health: GatewayModelHealth):
 
 def rank_by_health(targets: list[tuple[object, Model, GatewayModelHealth]], *,
                    category: str,
-                   primary_provider: str | None = DEFAULT_PRIMARY_PROVIDER
+                   primary_provider: str | None = DEFAULT_PRIMARY_PROVIDER,
+                   primary_max_models: int = DEFAULT_PRIMARY_MAX_MODELS
                    ) -> list[tuple[object, Model, GatewayModelHealth]]:
     """Health-first serial order for the Gateway's OWN calls.
 
-    Tier 1: the primary provider's (Gemini's) models, best measured health
-            first. Key rotation across that provider's keys happens inside
-            the connection (`_run`) before the next model is tried.
+    Tier 1: the primary provider's (Gemini's) `primary_max_models` (default
+            3) best-health models, best first. Key rotation across that
+            provider's keys happens inside the connection (`_run`) before
+            the next model is tried. If all of them fail, the Gateway moves
+            on to tier 2; the primary provider's remaining models join
+            tier 2 and compete on health alone.
     Tier 2: every OTHER provider's models, ordered ONLY by measured health --
             the best-health model first, then the next best, regardless of
             which provider it belongs to or where it sits in the configured
@@ -781,13 +786,20 @@ def rank_by_health(targets: list[tuple[object, Model, GatewayModelHealth]], *,
     n = len(targets)
     keyed = []
     for idx, (conn, model, health) in enumerate(targets):
-        tier = 0 if (primary_provider and model.provider == primary_provider) else 1
         tie = -score_target(model, health, category=category,
                             priority_bonus=0.05 * (n - idx))
-        keyed.append(((tier,) + health_sort_key(model, health) + (tie,),
-                      (conn, model, health)))
-    keyed.sort(key=lambda t: t[0])
-    return [t for _, t in keyed]
+        keyed.append([health_sort_key(model, health) + (tie,),
+                      (conn, model, health)])
+    # Primary provider: only its `primary_max_models` best-health models get
+    # tier 0; the rest fall into tier 1 and compete on health with everyone.
+    primary = sorted((k for k in keyed
+                      if primary_provider and k[1][1].provider == primary_provider),
+                     key=lambda k: k[0])
+    top = {id(k) for k in primary[:max(0, int(primary_max_models))]}
+    for k in keyed:
+        k[0] = ((0 if id(k) in top else 1),) + k[0]
+    keyed.sort(key=lambda k: k[0])
+    return [k[1] for k in keyed]
 
 
 def prefer_last_successful(

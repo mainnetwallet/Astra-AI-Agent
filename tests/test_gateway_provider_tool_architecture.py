@@ -149,6 +149,18 @@ class Harness:
 
         self.router.route_request = route_request
 
+        # The pipeline only trusts a Gateway `targets[]` plan whose pairs are
+        # in the catalogue the Router supplied (`available_targets()`); the
+        # real bootstrap router has no providers in tests, so supply one.
+        self.router.available_targets = lambda: [
+            {"provider": "groq", "model": "llama-fast",
+             "capabilities": ["chat", "coding"], "quality": "fast",
+             "context_window": 8000, "health": "ok"},
+            {"provider": "gemini", "model": "gemini-pro",
+             "capabilities": ["chat", "coding"], "quality": "high",
+             "context_window": 100000, "health": "ok"},
+        ]
+
     # -- observation helpers -------------------------------------------------
     def kinds(self, prefix=""):
         return [r["kind"] for r in self.rows if r["kind"].startswith(prefix)]

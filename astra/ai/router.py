@@ -1057,11 +1057,14 @@ class AstraRouter:
             if pool is not None and hasattr(pool, "keys"):
                 for key_meta in pool.keys():
                     try:
-                        with pool.pinned(key_meta["key_id"]):
-                            self._record_key_model(
-                                adapter, model_id, result["ok"],
-                                result["latency_ms"], result["error"],
-                                req=RoutingRequest(task_type="health_check"))
+                        # Pass the credential explicitly: pinned() does not
+                        # change pool.last_key(), so without this every
+                        # iteration would rewrite the same (last picked) key.
+                        self._record_key_model(
+                            adapter, model_id, result["ok"],
+                            result["latency_ms"], result["error"],
+                            req=RoutingRequest(task_type="health_check"),
+                            cred=pool.credential(key_meta["key_id"]))
                     except Exception:
                         pass
             cred = id_cred or (pool.last_key() if pool is not None and hasattr(pool, "last_key") else None)
@@ -1123,12 +1126,13 @@ class AstraRouter:
             pass
 
     def _record_key_model(self, adapter, model_id: str, ok: bool,
-                          latency_ms, error: str, req=None) -> None:
+                          latency_ms, error: str, req=None, cred=None) -> None:
         """Save which key served (or failed) this model. Called for every
         provider attempt — live traffic and manual tests alike. Nothing is
         saved when no key was actually picked (e.g. "no healthy credential")."""
         pool = getattr(adapter, "pool", None)
-        cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
+        if cred is None:
+            cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
         if cred is None:
             return
         name = getattr(adapter, "name", "")

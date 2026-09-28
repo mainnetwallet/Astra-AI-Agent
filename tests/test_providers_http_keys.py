@@ -55,21 +55,20 @@ class ProviderKeysHttpTests(unittest.TestCase):
         self.assertNotIn("bad-key", json.dumps(groq))
 
         enc = urllib.parse.quote(MODEL, safe="")
-        res = {}
-        for label, kid in keys.items():
-            # each key test is a fresh manual run (shared health is
-            # provider+model scoped, not per key)
-            self.srv.site.router().shared_health.invalidate()
-            res[label] = self._req(
-                f"/api/v1/providers/groq/test/{enc}?key={kid}", "POST")["data"]
-        self.assertTrue(res["key 1"]["ok"])
-        self.assertEqual(res["key 1"]["model"], MODEL)
-        self.assertFalse(res["key 2"]["ok"])
-        self.assertIn("authorization denied", res["key 2"]["error"])
+        first = self._req(
+            f"/api/v1/providers/groq/test/{enc}?key={keys['key 1']}", "POST")["data"]
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["model"], MODEL)
+        # Same provider + model: the second key reuses that one real result
+        # (health is shared regardless of which key was tested).
+        second = self._req(
+            f"/api/v1/providers/groq/test/{enc}?key={keys['key 2']}", "POST")["data"]
+        self.assertTrue(second["ok"])
+        self.assertTrue(second["reused"])
 
         saved = self._req("/api/providers")["data"]["providers"]["groq"]["key_results"][MODEL]
         self.assertTrue(saved[keys["key 1"]]["ok"])
-        self.assertFalse(saved[keys["key 2"]]["ok"])
+        self.assertTrue(saved[keys["key 2"]]["ok"])
 
 
 if __name__ == "__main__":

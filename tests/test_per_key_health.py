@@ -79,25 +79,48 @@ class KeyIdentityTests(unittest.TestCase):
 
 
 class PerKeyTestingTests(unittest.TestCase):
-    def test_test_through_a_specific_key_is_saved_per_key(self):
+    def test_one_key_test_is_shared_by_every_key_of_that_provider_and_model(self):
         ad = _adapter()
         r = _router(ad)
         ids = _key_ids(ad)
-        post = _fake_post(bad_secrets=("bad",))
+        post = _fake_post()
         with mock.patch.object(CompatibleAdapter, "_post", post):
-            good = r.test_provider_model("groq", "m1", ids["key 1"])
-            r.shared_health.invalidate()     # each key test is a fresh manual run
-            bad = r.test_provider_model("groq", "m1", ids["key 2"])
-        self.assertTrue(good["ok"])
-        self.assertEqual((good["key"], good["key_id"]), ("key 1", ids["key 1"]))
-        self.assertFalse(bad["ok"])
-        self.assertIn("authorization denied", bad["error"])
-        self.assertEqual([c[0] for c in post.calls], ["good", "bad"])   # 1 attempt each, no rotation
+            first = r.test_provider_model("groq", "m1", ids["key 1"])
+            other = r.test_provider_model("groq", "m1", ids["key 2"])
+        self.assertTrue(first["ok"])
+        self.assertEqual((first["key"], first["key_id"]), ("key 1", ids["key 1"]))
+        self.assertEqual(len(post.calls), 1)          # ONE real call, key 2 reused it
+        self.assertTrue(other["ok"])
+        self.assertTrue(other["reused"])
         saved = r.key_health("groq")["m1"]
-        self.assertTrue(saved[ids["key 1"]]["ok"])
-        self.assertFalse(saved[ids["key 2"]]["ok"])
-        self.assertEqual(saved[ids["key 2"]]["source"], "test")
-        self.assertNotIn("bad", repr(r.health()))            # secrets never surface
+        for label in ("key 1", "key 2"):               # every key holds the shared result
+            self.assertTrue(saved[ids[label]]["ok"])
+            self.assertEqual(saved[ids[label]]["source"], "test")
+        self.assertNotIn("good", repr(r.health()))     # secrets never surface
+
+    def test_a_key_test_fills_every_key_slot_without_a_second_call(self):
+        ad = _adapter()
+        r = _router(ad)
+        ids = _key_ids(ad)
+        post = _fake_post()
+        with mock.patch.object(CompatibleAdapter, "_post", post):
+            r.test_provider_model("groq", "m1", ids["key 1"])
+        self.assertEqual(len(post.calls), 1)
+        self.assertEqual(sorted(r.key_health("groq")["m1"]), sorted(ids.values()))
+
+    def test_a_different_model_is_never_shared(self):
+        ad = _adapter()
+        r = _router(ad)
+        ids = _key_ids(ad)
+        post = _fake_post(bad_models=("m2",))
+        with mock.patch.object(CompatibleAdapter, "_post", post):
+            ok = r.test_provider_model("groq", "m1", ids["key 1"])
+            bad = r.test_provider_model("groq", "m2", ids["key 1"])
+        self.assertEqual([c[1] for c in post.calls], ["m1", "m2"])   # own real call each
+        self.assertTrue(ok["ok"])
+        self.assertFalse(bad["ok"])
+        self.assertTrue(r.key_health("groq")["m1"][ids["key 2"]]["ok"])
+        self.assertFalse(r.key_health("groq")["m2"][ids["key 2"]]["ok"])
 
     def test_pinned_test_revives_key_and_unknown_key_is_rejected(self):
         ad = _adapter(keys="only")
@@ -115,14 +138,12 @@ class PerKeyTestingTests(unittest.TestCase):
         ad = _adapter()
         r = _router(ad, store)
         ids = _key_ids(ad)
-        with mock.patch.object(CompatibleAdapter, "_post", _fake_post(bad_secrets=("bad",))):
+        with mock.patch.object(CompatibleAdapter, "_post", _fake_post()):
             r.test_provider_model("groq", "m1", ids["key 1"])
-            r.shared_health.invalidate()     # each key test is a fresh manual run
-            r.test_provider_model("groq", "m1", ids["key 2"])
         r2 = _router(_adapter(), store)                      # new process, same DB
         saved = r2.key_health("groq")["m1"]
         self.assertTrue(saved[ids["key 1"]]["ok"])
-        self.assertFalse(saved[ids["key 2"]]["ok"])
+        self.assertTrue(saved[ids["key 2"]]["ok"])           # shared slot survived too
         self.assertEqual(r2.health()["groq"]["key_results"]["m1"], saved)
 
 

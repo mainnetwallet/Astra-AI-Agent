@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from unittest.mock import MagicMock
 
 HAVE_PLAYWRIGHT = False
@@ -76,8 +77,13 @@ def _fresh_session_state():
 
 class TestBrowserUnavailable(unittest.TestCase):
     def test_tools_honest_on_unavailable(self):
-        if HAVE_PLAYWRIGHT:
-            self.skipTest("playwright installed — offline path not testable")
+        # Simulate "playwright not installed" even when it is, so the honest
+        # offline path is always exercised (not only on machines without it).
+        patcher = mock.patch.dict(sys.modules, {"playwright": None})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        _fresh_session_state()
+        self.addCleanup(_fresh_session_state)
         os.environ["DATA_DIR"] = tempfile.mkdtemp()
         from astra.bootstrap import build
         b = build()

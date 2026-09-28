@@ -352,13 +352,18 @@ class TestBackendSelection(unittest.TestCase):
             backend.require()
 
     def test_proot_on_a_pc_gets_a_platform_specific_hint(self):
-        if detect_platform() != "windows":
-            self.skipTest("Windows-specific hint")
-        info = select_backend(_Cfg({"RUNTIME_BACKEND": "proot"})).probe()
+        # Pin the host to Windows and point proot at a binary that does not
+        # exist, so the platform hint is exercised on every host OS.
+        from astra.runtime.backends import proot as proot_mod
+        with mock.patch.object(proot_mod, "detect_platform",
+                               lambda: "windows"):
+            info = select_backend(_Cfg({
+                "RUNTIME_BACKEND": "proot",
+                "RUNTIME_PROOT": "/nonexistent/proot"})).probe()
         self.assertEqual(info["backend"], "proot")
-        if not info["available"]:
-            self.assertIn("WSL2", info["hint"])
-            self.assertIn("NOT", info["hint"])
+        self.assertFalse(info["available"])
+        self.assertIn("WSL2", info["hint"])
+        self.assertIn("NOT", info["hint"])
 
 
 class TestRuntimeEngineFacade(unittest.TestCase):
@@ -667,7 +672,11 @@ class TestProotBackendIsUnchanged(unittest.TestCase):
         return prefix, proot
 
     def test_a_missing_proot_is_reported_with_a_reason(self):
-        backend = ProotRuntimeBackend(_Cfg(), prefix="/nonexistent-prefix")
+        # Point at a binary that cannot exist so the result does not depend
+        # on whether the host machine happens to have proot installed.
+        backend = ProotRuntimeBackend(
+            _Cfg({"RUNTIME_PROOT": "/nonexistent/proot"}),
+            prefix="/nonexistent-prefix")
         info = backend.probe()
         self.assertEqual(info["backend"], "proot")
         self.assertFalse(info["available"])

@@ -14,25 +14,25 @@
   /* ------------------------------- navigation ------------------------------ */
   // target: an EXISTING tab id (reused, not re-implemented) or a System Map focus.
   const NAV = [
-    { id: "command-center", label: "Command Center", ic: "🏠", tab: "command-center" },
     { id: "system-map", label: "System Map", ic: "🗺️", tab: "system-map" },
     { id: "chat", label: "Chat", ic: "💬", tab: "assistant" },
     { id: "agents", label: "Agents", ic: "🤖", tab: "system-map", focus: "agents" },
-    { id: "control", label: "AI Control Plane", ic: "🧠", children: [
-      { label: "Providers Health", tab: "providers" }, { label: "Router", tab: "router" }] },
+    { id: "sched", label: "Scheduler", ic: "⏱️", tab: "workflow" },
+    { id: "web3", label: "Web3 Center", ic: "⛓️", tab: "web3" },
     { id: "tools", label: "Tool Center", ic: "🔧", tab: "system-map", focus: "tools" },
     { id: "wf", label: "Workflow Studio", ic: "🔀", tab: "workflow" },
-    { id: "sched", label: "Scheduler", ic: "⏱️", tab: "workflow" },
+    { id: "control", label: "AI Control Plane", ic: "🧠", children: [
+      { label: "Providers Health", tab: "providers" }, { label: "Router", tab: "router" }] },
+    { id: "command-center", label: "Command Center", ic: "🏠", tab: "command-center" },
     { id: "mem", label: "Memory Center", ic: "🧬", tab: "system-map", focus: "memory" },
-    { id: "web3", label: "Web3 Center", ic: "⛓️", tab: "web3" },
+    { id: "sec", label: "Security Center", ic: "🛡️", tab: "system-map", focus: "security" },
+    { id: "health", label: "System Health", ic: "❤️", tab: "command-center", anchor: "cc-health" },
+    { id: "activity", label: "Activity Center", ic: "📡", tab: "logs" },
+    { id: "settings", label: "Settings", ic: "⚙️", children: [
+      { label: "Backup", tab: "backup" }, { label: "Legacy Dashboard", tab: "dashboard" }] },
     { id: "ws", label: "Workspace", ic: "🗂️", children: [
       { label: "Terminal", tab: "terminal" }, { label: "Files", tab: "terminal" },
       { label: "Browser", tab: "system-map", focus: "workspace" }] },
-    { id: "activity", label: "Activity Center", ic: "📡", tab: "logs" },
-    { id: "health", label: "System Health", ic: "❤️", tab: "command-center", anchor: "cc-health" },
-    { id: "sec", label: "Security Center", ic: "🛡️", tab: "system-map", focus: "security" },
-    { id: "settings", label: "Settings", ic: "⚙️", children: [
-      { label: "Backup", tab: "backup" }, { label: "Legacy Dashboard", tab: "dashboard" }] },
   ];
   const QUICK = [
     { label: "New Chat", ic: "💬", run: () => { go({ tab: "assistant" }); const b = document.getElementById("chat-clear"); if (b) b.click(); } },

@@ -308,16 +308,16 @@ class PlainChatUnaffectedTests(unittest.TestCase):
     def test_no_registry_single_call_path_unaffected(self):
         """When no terminal/registry is wired (many embedders), the
         original single-provider-call path runs — the boundary guard must
-        not alter a normal answer on that path either. The only thing added
-        is the deliberate missing-Gateway-key notice."""
+        not alter a normal answer on that path either. With no Gateway the
+        turn is `simple_chat` (a NO VERIFY task type), so the Provider result
+        is returned exactly as-is: nothing is appended."""
         gw = FakeGateway([], usable=False)
         rt = FakeRouter(["Paris is the capital of France."])
         pipe = ChatPipeline(gw, rt, max_tokens=800)
         result = pipe.run("capital of France?", conversation_id="c-noreg")
         self.assertTrue(result["ok"])
-        self.assertEqual(result["reply"],
-                         "Paris is the capital of France.\n\n" +
-                         _NO_GATEWAY_CONFIGURED_MESSAGE)
+        self.assertEqual(result["reply"], "Paris is the capital of France.")
+        self.assertNotIn(_NO_GATEWAY_CONFIGURED_MESSAGE, result["reply"])
 
 
 if __name__ == "__main__":

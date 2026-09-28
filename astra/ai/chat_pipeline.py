@@ -20,7 +20,10 @@
              SAME live ToolRegistry instead of describing how the user could
              do it themselves — and a fallback provider sees the identical
              requirement and tools.
-      -> Gateway call #2  VERIFY
+      -> Gateway call #2  VERIFY   (skipped for NO_VERIFY_TASK_TYPES:
+           simple_chat, general, translation, summarization,
+           image_generation, image_editing — the Provider result is returned
+           immediately with verification {"status": "not_applicable"})
            - the Gateway is handed everything call #1 decided (the request it
              assigned, the completion criteria, which provider/model got it)
              plus the provider's output, and judges: complete or not?
@@ -78,6 +81,17 @@ from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError
 from astra.core.events import new_op_id
 from astra.terminal.manager import default_session_id_for
+
+# Task types whose Provider result is returned as-is: they NEVER go through
+# Gateway call #2 (semantic VERIFY) and never enter the verify -> correct ->
+# re-verify loop. Their trace records {"status": "not_applicable"}. Every
+# other task type (reasoning, coding, long_context, structured_output,
+# tool_use, research, planning, vision) keeps the full verify behaviour.
+NO_VERIFY_TASK_TYPES = frozenset({
+    "simple_chat", "general", "translation", "summarization",
+    "image_generation", "image_editing",
+})
+
 
 # Plain-text replies for missing AI configuration. Shown as-is (no
 # markdown rendering in the chat UI — see the note on _run_turn's fail
@@ -1877,13 +1891,23 @@ class ChatPipeline:
                 "Provider theke kono uttor pawa jayni. Kichukkhon pore abar "
                 f"try korun. (`{err}`)", False, trace)
         trace["served_by"] = f"{rr.provider}/{rr.model}"
-        if task_type in ("image_generation", "image_editing"):
-            # An image turn is done the moment the real image API
-            # returned image bytes. There is nothing to semantically
-            # verify, and the base64 payload must never be shipped to a
-            # verifier model; the artifact card IS the answer. The reply
-            # text is sanitized downstream (the data URI is stripped).
-            self._emit("chat.pipeline.finished", status="image_ready",
+        if task_type in NO_VERIFY_TASK_TYPES:
+            # These task types skip Gateway call #2 (VERIFY) entirely: the
+            # Provider result is returned immediately, with no semantic
+            # verifier call and no verify -> correct -> re-verify loop.
+            #
+            # An image turn is done the moment the real image API returned
+            # image bytes; the base64 payload must never be shipped to a
+            # verifier model, and the artifact card IS the answer (the reply
+            # text is sanitized downstream — the data URI is stripped).
+            # This early return sits BEFORE the `gateway_ok` pass-through
+            # below on purpose: nothing is being verified, so there is no
+            # "Gateway not configured" verification caveat to append.
+            self._emit("chat.pipeline.finished",
+                       status=("image_ready"
+                               if task_type in ("image_generation",
+                                                "image_editing")
+                               else "not_applicable"),
                        op=f"chat:{req}", request=req, trace=req,
                        terminal=True)
             trace["verification"] = {"status": "not_applicable"}

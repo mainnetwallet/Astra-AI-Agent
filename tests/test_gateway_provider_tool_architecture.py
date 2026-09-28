@@ -46,7 +46,8 @@ FAKE_TOKEN = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
 
 def understand(final_request="", *, required=False, capability="", intent="",
                criteria=("the request was satisfied",), provider="groq",
-               model="llama-fast", was_incomplete=False, extra=None):
+               model="llama-fast", was_incomplete=False, extra=None,
+               task_type=None):
     data = {"final_request": final_request, "was_incomplete": was_incomplete,
             "provider": provider, "model": model, "criteria": list(criteria),
             "targets": [{"provider": provider, "model": model}],
@@ -55,6 +56,14 @@ def understand(final_request="", *, required=False, capability="", intent="",
                           "intent": intent}}
     if extra is not None:
         data["execution"] = extra
+    # An omitted task_type becomes `simple_chat`, a NO VERIFY type (Gateway
+    # call #2 never runs for it). A request the Gateway scripted as
+    # execution-required is what the real Gateway classifies as `tool_use`,
+    # which keeps the verify / execution-evidence gate these tests exercise.
+    if task_type is None and required:
+        task_type = "tool_use"
+    if task_type is not None:
+        data["task_type"] = task_type
     return json.dumps(data)
 
 

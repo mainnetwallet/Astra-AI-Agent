@@ -25,11 +25,17 @@ TARGETS = [{"provider": "groq", "model": "llama", "capabilities": ["chat", "codi
             "quality": "high", "context_window": 32000}]
 
 
-def understand(final_request="", provider="groq", model="llama"):
+def understand(final_request="", provider="groq", model="llama",
+               task_type="tool_use"):
+    # These tests drive the terminal tool loop and its verify/correction
+    # phase, so the turn is a `tool_use` one — a type that still goes through
+    # Gateway call #2 (an omitted task_type becomes the NO VERIFY
+    # `simple_chat`).
     return json.dumps({"final_request": final_request, "was_incomplete": False,
                        "provider": provider, "model": model,
                        "targets": [{"provider": provider, "model": model}],
-                       "criteria": ["answers"], "reason": "fit"})
+                       "criteria": ["answers"], "task_type": task_type,
+                       "reason": "fit"})
 
 
 def verdict(v="complete"):

@@ -95,12 +95,17 @@ class SpecializedConstantsCarryCoreTests(unittest.TestCase):
 
 # ── helpers shared with test_chat_pipeline.py's fake style ─────────────────
 def understand(final_request="", was_incomplete=False, provider="gemini",
-              model="gemini-pro", criteria=("answers the question",)):
+              model="gemini-pro", criteria=("answers the question",),
+              task_type="reasoning"):
+    # `task_type` defaults to a type that still goes through Gateway call #2
+    # (VERIFY): an omitted one becomes `simple_chat`, a NO VERIFY type, and
+    # these tests exercise the verify / correction prompts.
     return json.dumps({"final_request": final_request,
                        "was_incomplete": was_incomplete, "provider": provider,
                        "model": model,
                        "targets": [{"provider": provider, "model": model}],
                        "criteria": list(criteria),
+                       "task_type": task_type,
                        "reason": "best fit"})
 
 

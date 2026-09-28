@@ -21,6 +21,9 @@
     { id: "web3", label: "Web3 Center", ic: "⛓️", tab: "web3" },
     { id: "tools", label: "Tool Center", ic: "🔧", tab: "system-map", focus: "tools" },
     { id: "wf", label: "Workflow Studio", ic: "🔀", tab: "workflow" },
+    { id: "ws", label: "Workspace", ic: "🗂️", children: [
+      { label: "Terminal", tab: "terminal" }, { label: "Files", tab: "terminal" },
+      { label: "Browser", tab: "system-map", focus: "workspace" }] },
     { id: "control", label: "AI Control Plane", ic: "🧠", children: [
       { label: "Providers Health", tab: "providers" }, { label: "Router", tab: "router" }] },
     { id: "command-center", label: "Command Center", ic: "🏠", tab: "command-center" },
@@ -28,11 +31,11 @@
     { id: "sec", label: "Security Center", ic: "🛡️", tab: "system-map", focus: "security" },
     { id: "health", label: "System Health", ic: "❤️", tab: "command-center", anchor: "cc-health" },
     { id: "activity", label: "Activity Center", ic: "📡", tab: "logs" },
+  ];
+  // Rendered below the Quick Actions block (after "Add Tool").
+  const NAV_BOTTOM = [
     { id: "settings", label: "Settings", ic: "⚙️", children: [
       { label: "Backup", tab: "backup" }, { label: "Legacy Dashboard", tab: "dashboard" }] },
-    { id: "ws", label: "Workspace", ic: "🗂️", children: [
-      { label: "Terminal", tab: "terminal" }, { label: "Files", tab: "terminal" },
-      { label: "Browser", tab: "system-map", focus: "workspace" }] },
   ];
   const QUICK = [
     { label: "New Chat", ic: "💬", run: () => { go({ tab: "assistant" }); const b = document.getElementById("chat-clear"); if (b) b.click(); } },
@@ -55,12 +58,14 @@
     const side = document.getElementById("os-sidebar");
     const item = (n, sub) => `<button class="os-item${sub ? " sub" : ""}" data-t="${esc(n.tab || "")}" data-f="${esc(n.focus || "")}" data-a="${esc(n.anchor || "")}">` +
       (sub ? "" : `<span class="ic">${n.ic}</span>`) + `<span>${esc(n.label)}</span></button>`;
+    const navHtml = (n) => n.children
+      ? `<div class="os-group" data-g="${n.id}"><button class="os-item" data-toggle="${n.id}"><span class="ic">${n.ic}</span><span>${esc(n.label)}</span><span class="chev">⌄</span></button>` +
+        `<div class="os-children">${n.children.map((c) => item(c, true)).join("")}</div></div>`
+      : item(n, false);
     side.innerHTML = `<div class="os-brand"><img src="/static/img/logo_icon.png" alt=""><div><b>ASTRA</b><span>AI Agent OS</span></div></div>` +
-      NAV.map((n) => n.children
-        ? `<div class="os-group" data-g="${n.id}"><button class="os-item" data-toggle="${n.id}"><span class="ic">${n.ic}</span><span>${esc(n.label)}</span><span class="chev">⌄</span></button>` +
-          `<div class="os-children">${n.children.map((c) => item(c, true)).join("")}</div></div>`
-        : item(n, false)).join("") +
-      `<div class="os-quick"><h4>Quick Actions</h4>${QUICK.map((q, i) => `<button class="os-item" data-q="${i}"><span class="ic">${q.ic}</span><span>${esc(q.label)}</span></button>`).join("")}</div>`;
+      NAV.map(navHtml).join("") +
+      `<div class="os-quick"><h4>Quick Actions</h4>${QUICK.map((q, i) => `<button class="os-item" data-q="${i}"><span class="ic">${q.ic}</span><span>${esc(q.label)}</span></button>`).join("")}</div>` +
+      `<div class="os-bottom">${NAV_BOTTOM.map(navHtml).join("")}</div>`;
     side.addEventListener("click", (e) => {
       const tg = e.target.closest("[data-toggle]");
       if (tg) { tg.parentElement.classList.toggle("open"); return; }

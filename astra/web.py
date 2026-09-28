@@ -706,6 +706,9 @@ class AstraSite:
     def orchestrator(self):
         return self._get("orchestrator")
 
+    def agent_manager(self):
+        return self._get("agent_manager")
+
     def cfg(self):
         return self._get("config")
 
@@ -1224,6 +1227,43 @@ class WebApp:
                                         503, "runtime_unavailable", req.rid)
         return manager.default(), None
 
+    def _system_map(self, req) -> Response:
+        """Read-only aggregate for the System Map UI: the AgentManager's
+        registered specialists and the live security posture. Secret-free by
+        construction — it reports whether a control is on, never a token,
+        key, origin list or credential."""
+        site = self.site
+        mgr = site.agent_manager()
+        agents = mgr.list() if mgr is not None else []
+        tok = bool(site.operator_token)
+        rl = site.rate_limiter
+        origins = site._allowed_origins
+        if origins:
+            cors = "Allow-list (%d origin%s)" % (len(origins), "" if len(origins) == 1 else "s")
+        elif site.env == "production":
+            cors = "Same-origin only"
+        else:
+            cors = "Reflects request origin (development/LAN)"
+        security = [
+            {"k": "Authentication",
+             "v": "Operator token required" if tok else "Open (local-first, ASTRA_TOKEN unset)",
+             "s": "online" if tok else "degraded"},
+            {"k": "Rate limiting",
+             "v": ("%d requests / %ds per client" % (rl.limit, int(rl.window))) if rl else "Disabled",
+             "s": "online" if rl else "degraded"},
+            {"k": "CORS", "v": cors, "s": "online" if (origins or site.env == "production") else "info"},
+            {"k": "Request ID", "v": "X-Request-Id on every response", "s": "online"},
+            {"k": "Secret redaction", "v": "Enabled (events, logs, API bodies)", "s": "online"},
+            {"k": "SSRF protection", "v": "Enabled (private/loopback targets blocked)", "s": "online"},
+            {"k": "Body size limit", "v": "%d MB" % (site.max_body_bytes // (1024 * 1024)), "s": "online"},
+            {"k": "Environment", "v": site.env, "s": "info"},
+        ]
+        return json_response({"ok": True, "data": {
+            "agents": agents,
+            "agent_manager": {"available": mgr is not None, "registered": len(agents)},
+            "security": security,
+        }}, rid=req.rid)
+
     def _runtime_status(self, req) -> Response:
         runtime, err = self._runtime(req)
         if err is not None:
@@ -1721,6 +1761,8 @@ class WebApp:
         # sessions streamed over SSE, raw keyboard input, resize, and the
         # runtime-scoped file manager. Everything targets the isolated
         # runtime — no endpoint can address a host path.
+        if path == ["api", "system-map"] and method == "GET":
+            return self._system_map(req)
         if path == ["api", "runtime", "status"] and method == "GET":
             return self._runtime_status(req)
         if path == ["api", "runtime", "lifecycle"] and method == "POST":

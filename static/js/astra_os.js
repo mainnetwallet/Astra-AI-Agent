@@ -20,7 +20,6 @@
     { id: "agents", label: "Agents", ic: "🤖", tab: "system-map", focus: "agents" },
     { id: "control", label: "AI Control Plane", ic: "🧠", children: [
       { label: "Providers Health", tab: "providers" }, { label: "Router", tab: "router" }] },
-    { id: "exec", label: "Execution Console", ic: "⌨️", tab: "logs" },
     { id: "tools", label: "Tool Center", ic: "🔧", tab: "system-map", focus: "tools" },
     { id: "wf", label: "Workflow Studio", ic: "🔀", tab: "workflow" },
     { id: "sched", label: "Scheduler", ic: "⏱️", tab: "workflow" },

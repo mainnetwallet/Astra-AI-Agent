@@ -1500,6 +1500,10 @@ class WebApp:
             return self._static("index.html", req)
         if path[0] == "static":
             return self._static("/".join(path[1:]), req)
+        # SPA pages with their own address: serve the same shell; astra_os.js
+        # reads location.pathname and opens the matching view.
+        if path in (["system-map"], ["command-center"]) and method == "GET":
+            return self._static("index.html", req)
         if path[0] == "favicon.ico":
             return Response(204, cache=None, hardened=False)
 

@@ -8,8 +8,12 @@
 <link rel="stylesheet" href="/static/css/style.css">
 <link rel="stylesheet" href="/static/css/vendor/xterm.css">
 <link rel="stylesheet" href="/static/css/terminal.css">
+<link rel="stylesheet" href="/static/css/astra_os.css">
 </head>
 <body>
+<aside id="os-sidebar" aria-label="Main navigation"></aside>
+<div id="os-scrim"></div>
+<div id="os-drawer" aria-live="polite"></div>
 <header class="topbar">
   <div class="nav-menu" id="nav-menu">
     <button class="menu-btn" id="menu-btn" aria-label="Menu" aria-expanded="false" aria-haspopup="true">⋮</button>
@@ -25,6 +29,10 @@
   <section id="tab-dashboard" class="tabview active">
     <div id="dash-blocks" class="dash-blocks"></div>
   </section>
+
+  <!-- ======== COMMAND CENTER + SYSTEM MAP (static/js/astra_os.js) ======== -->
+  <section id="tab-command-center" class="tabview"></section>
+  <section id="tab-system-map" class="tabview"></section>
 
   <!-- plugin tabviews are created dynamically by astra.js -->
 
@@ -274,5 +282,7 @@
 <script src="/static/js/terminal.js"></script>
 <script src="/static/js/workflow_model.js"></script>
 <script src="/static/js/workflow.js"></script>
+<script src="/static/js/system_map_model.js"></script>
+<script src="/static/js/astra_os.js"></script>
 </body>
 </html>

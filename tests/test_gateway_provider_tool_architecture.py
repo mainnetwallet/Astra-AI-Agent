@@ -48,7 +48,9 @@ def understand(final_request="", *, required=False, capability="", intent="",
                criteria=("the request was satisfied",), provider="groq",
                model="llama-fast", was_incomplete=False, extra=None):
     data = {"final_request": final_request, "was_incomplete": was_incomplete,
-            "provider": provider, "model": model, "criteria": list(criteria),
+            "provider": provider, "model": model,
+            "targets": [{"provider": provider, "model": model}],
+            "criteria": list(criteria),
             "reason": "best fit",
             "execution": {"required": required, "capability": capability,
                           "intent": intent}}

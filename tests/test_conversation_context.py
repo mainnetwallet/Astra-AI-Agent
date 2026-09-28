@@ -225,7 +225,9 @@ def understand(final_request="", was_incomplete=False, provider="gemini",
                model="gemini-pro", criteria=("answers the question",)):
     return json.dumps({"final_request": final_request,
                        "was_incomplete": was_incomplete, "provider": provider,
-                       "model": model, "criteria": list(criteria),
+                       "model": model,
+                       "targets": [{"provider": provider, "model": model}],
+                       "criteria": list(criteria),
                        "reason": "best fit"})
 
 
@@ -367,7 +369,8 @@ class EndToEndConversationMemoryTests(unittest.TestCase):
         agent = self.stack["agent"]
         self.calls = []          # every (message, history-as-list) the agent saw
 
-        def spy_handle(message, context="", history=None, attachments=None):
+        def spy_handle(message, context="", history=None, attachments=None,
+                       conversation_id=None):
             hist = list(getattr(history, "messages", history) or [])
             self.calls.append({"message": message, "history": hist})
             n = len(self.calls)
@@ -479,7 +482,8 @@ class EndToEndTrimmingTests(unittest.TestCase):
         agent = self.stack["agent"]
         self.calls = []
 
-        def spy_handle(message, context="", history=None, attachments=None):
+        def spy_handle(message, context="", history=None, attachments=None,
+                       conversation_id=None):
             hist = list(getattr(history, "messages", history) or [])
             self.calls.append({"message": message, "history": hist})
             n = len(self.calls)
@@ -520,7 +524,8 @@ class RetryDoesNotDuplicateHistoryHttpTests(unittest.TestCase):
         self.release = threading.Event()
         self.calls = []
 
-        def slow_spy_handle(message, context="", history=None, attachments=None):
+        def slow_spy_handle(message, context="", history=None, attachments=None,
+                             conversation_id=None):
             self.calls.append(message)
             self.release.wait(5)
             return {"reply": f"echo: {message}", "action": "none",

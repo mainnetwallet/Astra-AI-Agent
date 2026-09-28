@@ -305,8 +305,19 @@ class LiveApiTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["data"][0]["content"], "live memo")
 
     def test_chat_turn(self):
+        class _StubGateway:
+            @staticmethod
+            def classify_image_operation(msg, attachments=None):
+                return "chat"       # not an image request
+
+        class _StubPipeline:
+            gateway = _StubGateway()
+
         class _StubAgent:
-            def handle(self, msg, context="", history=None, attachments=None):
+            pipeline = _StubPipeline()
+
+            def handle(self, msg, context="", history=None, attachments=None,
+                       conversation_id=None):
                 return {"ok": True, "reply": f"echo: {msg}",
                         "action": None, "data": {}}
 

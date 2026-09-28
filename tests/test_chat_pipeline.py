@@ -85,6 +85,12 @@ class FakeGateway:
     def is_usable(self):
         return self.usable
 
+    def classify_image_operation(self, message, attachments=None):
+        # The web layer asks the Gateway (deterministically, no AI call) for
+        # the image operation before every turn; use the real classifier.
+        from astra.ai.gateway import AstraAIGateway
+        return AstraAIGateway.classify_image_operation(self, message, attachments)
+
     def chat(self, messages, model=None, max_tokens=500, category=None,
              trace=""):
         self.calls.append(messages)

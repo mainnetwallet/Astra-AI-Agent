@@ -250,9 +250,20 @@ class TestGatewayImageApiCallLog(unittest.TestCase):
                 bus.emit(kind, **data)
 
         router = ImageRouter(_Host())
-        router.build_targets = lambda *, editing=False, discover=True: [
-            (cf, target, None)]
-        router.generate("edit this photo", editing=True)
+        router.build_targets = lambda *, editing=False, operation=None, \
+            discover=True: [(cf, target, None)]
+        # Editing needs a reusable source image on disk (storage_path).
+        import base64, os, tempfile
+        fd, src = tempfile.mkstemp(prefix="astra-edit-src-", suffix=".png")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
+                "iZk9HQAAAABJRU5ErkJggg=="))
+        self.addCleanup(lambda: os.path.exists(src) and os.remove(src))
+        router.generate("edit this photo", editing=True,
+                        source_image={"family": "image", "storage_path": src,
+                                      "mime_type": "image/png",
+                                      "original_filename": "source.png"})
         for kind in ("astra_gateway.request", "astra_gateway.success"):
             rows = _data(bus, kind)
             self.assertTrue(rows, kind)

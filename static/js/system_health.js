@@ -767,7 +767,7 @@
   }
 
   const TABS = [["overview", "Overview"], ["services", "Services"], ["providers", "Providers"],
-    ["models", "Models"], ["resources", "Resources"], ["logs", "Logs"]];
+    ["models", "Models"], ["resources", "Resources"]];
 
   function paintTabs() {
     const el = byId("sh-tabs"); if (!el) return;
@@ -836,10 +836,8 @@
   /* ------------------------------ interactions ------------------------------ */
   const SECTION_OF = { services: "sh-services", providers: "sh-providers", resources: "sh-resources", models: "sh-models" };
 
-  /** Tabs scroll to the real panel they name; "Logs" opens the existing
-   *  Activity Center page rather than duplicating an event list here. */
+  /** Tabs scroll to the real panel they name. */
   function selectTab(id) {
-    if (id === "logs") { if (typeof showTab === "function") showTab("logs"); return; }
     SH.tab = id;
     paintTabs();
     if (id === "overview") {

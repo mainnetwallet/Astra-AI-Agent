@@ -258,9 +258,10 @@ test("mount paints the real page shell into the command-center tabview", () => {
   const host = doc.getElementById("tab-command-center");
   assert.match(host.innerHTML, /id="sh-root"/);
   assert.match(host.innerHTML, /ASTRA System Health/);
-  // exactly the six tabs the design calls for
+  // exactly the five tabs (Logs is no longer part of System Health)
   const tabs = (doc.getElementById("sh-tabs").innerHTML.match(/data-sh-tab="/g) || []).length;
-  assert.strictEqual(tabs, 6);
+  assert.strictEqual(tabs, 5);
+  assert.doesNotMatch(doc.getElementById("sh-tabs").innerHTML, /Logs|data-sh-tab="logs"/);
 });
 
 test("mounted paint renders six KPI cards and six summary cards from real data", () => {

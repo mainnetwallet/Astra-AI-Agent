@@ -255,8 +255,23 @@ class WalletRegistry:
         return {"ok": False, "reason":
                 "expected a 64-hex-character private key or a 0x address"}
 
+    def _count_new(self, lines) -> int:
+        """How many of these lines would import as NEW wallets (valid,
+        not a duplicate of the batch or of the registry)."""
+        seen, n = set(), 0
+        for _, ln in lines:
+            p = self._parse_line(ln)
+            if not p["ok"]:
+                continue
+            if p["address"] in seen or self._row(p["address"]) is not None:
+                continue
+            seen.add(p["address"])
+            n += 1
+        return n
+
     def import_wallets(self, text: str, group_id: str | None = None,
-                       dry_run: bool = False) -> dict:
+                       dry_run: bool = False,
+                       group_name: str | None = None) -> dict:
         """Validate and (unless dry_run) import one wallet per line.
 
         Line formats (blank lines and `#` comments are ignored):
@@ -264,7 +279,12 @@ class WalletRegistry:
             <name> <64-hex private key>     name separated by space , : ; =
             <0x address>                    watch-only (cannot sign)
         Every line is validated individually; invalid and duplicate lines are
-        never imported; valid ones are imported even if others fail."""
+        never imported; valid ones are imported even if others fail.
+
+        Grouping: `group_id` adds every imported wallet to an existing group.
+        `group_name` (used when no group_id is given) creates ONE new group,
+        but only when 2+ wallets will really be imported — a single wallet
+        stays standalone and no group is created for it."""
         if not isinstance(text, str) or not text.strip():
             raise WalletError("nothing to import")
         if len(text) > MAX_IMPORT_CHARS:
@@ -278,6 +298,15 @@ class WalletRegistry:
                 f"too many wallets in one import (max {MAX_IMPORT_LINES})")
         if group_id and not self._group_row(group_id):
             raise WalletError("group not found")
+        new_group_name = None
+        if not group_id and isinstance(group_name, str) and group_name.strip():
+            cleaned = self._clean_group_name(group_name)
+            if self._count_new(lines) >= 2:
+                if self.store.fetchone(
+                        "SELECT 1 FROM web3_wallet_groups WHERE name_key=?",
+                        (cleaned.lower(),)):
+                    raise WalletError("a group with that name already exists")
+                new_group_name = cleaned
         if not dry_run:
             # keystore is only needed if at least one line carries a key, but
             # provisioning early keeps failure atomic and simple.
@@ -287,7 +316,11 @@ class WalletRegistry:
 
         results, seen = [], set()
         imported = rejected = 0
+        new_group = None
         with self.store._lock:
+            if new_group_name and not dry_run:
+                new_group = self.create_group(new_group_name)
+                group_id = new_group["id"]
             for lineno, line in lines:
                 p = self._parse_line(line)
                 res = {"line": lineno}
@@ -326,11 +359,19 @@ class WalletRegistry:
                         rejected += 1
                 results.append(res)
                 p.pop("_priv", None)
+        if new_group is not None and imported < 2:
+            # a store failure left fewer than 2 wallets: never keep a group
+            # for a single/no wallet (members stay as standalone wallets)
+            self.delete_group(new_group["id"])
+            new_group = None
         if not dry_run and imported:
             self._ensure_active()
         valid = sum(1 for r in results if r["status"] == "valid")
-        return {"dry_run": bool(dry_run), "imported": imported,
-                "rejected": rejected, "valid": valid, "results": results}
+        out = {"dry_run": bool(dry_run), "imported": imported,
+               "rejected": rejected, "valid": valid, "results": results}
+        if new_group is not None:
+            out["group"] = self._group_public(self._group_row(new_group["id"]))
+        return out
 
     def _insert_wallet(self, address: str, name: str, source: str,
                        priv: int | None) -> dict:

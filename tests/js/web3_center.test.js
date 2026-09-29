@@ -51,7 +51,7 @@ test("unsupported features are disabled, supported ones are enabled", () => {
   for (const l of ["Swap", "Bridge", "Buy", "Sell", "Stake"])
     assert.match(h, new RegExp(`<button class="w3-btn [^"]*" disabled title="[^"]*">${l}</button>`), l);
   // wallet import / create / groups are real now
-  for (const [l, k] of [["Import Wallet", "import"], ["Create Wallet", "create"], ["Manage Groups", "groups"]])
+  for (const [l, k] of [["Import Wallet", "import"], ["Create Wallet", "create"], ["Astra Wallets", "groups"]])
     assert.match(h, new RegExp(`<button class="w3-btn [^"]*" data-modal="${k}">${l}</button>`), l);
   assert.match(h, /data-act="tx_prepare">Send/);
   assert.match(h, /data-copy="0x1111[^"]*">Receive/);
@@ -59,7 +59,7 @@ test("unsupported features are disabled, supported ones are enabled", () => {
 
 test("without a wallet registry the wallet controls stay disabled", () => {
   const h = W.html(W.buildModel(pol, txs, tools, NOW), S());
-  for (const l of ["Import Wallet", "Create Wallet", "Manage Groups"])
+  for (const l of ["Import Wallet", "Create Wallet", "Astra Wallets"])
     assert.match(h, new RegExp(`<button class="w3-btn [^"]*" disabled title="[^"]*">${l}</button>`), l);
   assert.ok(!/data-modal=/.test(h));
 });
@@ -132,7 +132,7 @@ test("dashboard renders every target section for the overview", () => {
   const h = W.html(W.buildModel(pol, txs, tools, NOW, wal), S());
   for (const t of ["Overview", "Wallets", "Assets", "Transactions", "DeFi", "NFTs", "Networks", "Agent Actions"])
     assert.match(h, new RegExp(`data-view="[a-z]+"><i>[^<]*</i>${t}</button>`), "nav " + t);
-  for (const s of ["Total Portfolio Value", "My Wallets", "Add Wallet", "Active Wallet", "Recent Transactions", "Agent Web3 Actions", "Safety Policy"])
+  for (const s of ["Total Portfolio Value", "Astra Wallets", "Add Wallet", "Active Wallet", "Recent Transactions", "Agent Web3 Actions", "Safety Policy"])
     assert.ok(h.includes(s), s);
   for (const r of ["1D", "1W", "1M", "3M", "1Y"]) assert.ok(h.includes(`data-range="${r}"`), r);
   for (const l of ["Wallets", "Networks", "Tokens", "NFTs"]) assert.ok(h.includes(`<small>${l}</small>`), l);
@@ -181,7 +181,7 @@ test("assets tab/range clicks repaint without touching backend hooks", () => {
 });
 
 // ============================================================================
-// Wallet registry UI: Import Wallet / Create Wallet / Manage Groups
+// Wallet registry UI: Import Wallet / Create Wallet / Astra Wallets
 // ============================================================================
 const fs = require("node:fs");
 const SECRET = "0x" + "ab".repeat(32);
@@ -193,10 +193,12 @@ function harness(over = {}) {
   const { mk } = fakeDom();
   const handlers = {};
   const target = { addEventListener: (t, f) => (handlers[t] = f), querySelector: () => null, querySelectorAll: () => [], innerHTML: "" };
-  const calls = [];
-  const state = JSON.parse(JSON.stringify(wal.data));
+  const calls = [], gets = [];   // calls = mutations; gets = GET /api/v1/web3/wallets reads
+  const state = JSON.parse(JSON.stringify(over.wal || wal.data));
   const snap = () => JSON.parse(JSON.stringify(state));
+  const regroup = () => state.groups.forEach((x) => { x.wallet_ids = state.wallets.filter((w) => w.group_ids.includes(x.id)).map((w) => w.id); x.count = x.wallet_ids.length; });
   const backend = over.backend || (async (method, path, body) => {
+    if (method === "GET") { gets.push(path); return { ok: true, data: snap() }; }
     calls.push({ method, path, body });
     if (path.endsWith("/import")) {
       const lines = String(body.text).split(/\r?\n/).filter((l) => l.trim());
@@ -204,8 +206,13 @@ function harness(over = {}) {
         ? { line: i + 1, status: "valid", imported: !body.dry_run, address: "0x" + "c" + String(i).padStart(39, "0") }
         : { line: i + 1, status: "invalid", imported: false, reason: "expected a 64-hex-character private key or a 0x address" });
       const okc = results.filter((r) => r.status === "valid").length;
-      if (!body.dry_run) results.filter((r) => r.imported).forEach((r) => state.wallets.push({ id: "w_n" + r.line, address: r.address, name: "Imported wallet", source: "imported", can_sign: true, active: false, group_ids: [] }));
-      return { ok: true, data: { dry_run: !!body.dry_run, imported: body.dry_run ? 0 : okc, rejected: results.length - okc, valid: okc, results, ...(body.dry_run ? {} : snap()) } };
+      let group;
+      if (!body.dry_run) {
+        if (body.group_name && okc >= 2) { group = { id: "g_i" + state.groups.length, name: body.group_name, wallet_ids: [], count: 0 }; state.groups.push(group); }
+        results.filter((r) => r.imported).forEach((r) => state.wallets.push({ id: "w_n" + r.line, address: r.address, name: "Imported wallet", source: "imported", can_sign: true, active: false, group_ids: group ? [group.id] : [] }));
+        regroup();
+      }
+      return { ok: true, data: { dry_run: !!body.dry_run, imported: body.dry_run ? 0 : okc, rejected: results.length - okc, valid: okc, results, ...(group ? { group: { ...group } } : {}), ...(body.dry_run ? {} : snap()) } };
     }
     if (path.endsWith("/create")) {
       const w = { id: "w_new", address: "0x" + "d".repeat(40), name: body.name || "Created wallet", source: "created", can_sign: true, active: false, group_ids: [] };
@@ -247,7 +254,7 @@ function harness(over = {}) {
   const click = (attrs, cls) => handlers.click({ target: mk(attrs, cls || [], root) });
   const type = (attr, value) => handlers.input({ target: Object.assign(mk({ [attr]: "" }, [], root), { value }) });
   const change = (attr, value, extra = {}) => handlers.change({ target: Object.assign(mk({ [attr]: "", ...extra }, [], root), { value }) });
-  return { target, calls, state, click, type, change, handlers, mk, root };
+  return { target, calls, gets, state, click, type, change, handlers, mk, root };
 }
 
 test("wallet UI never uses browser storage and never persists secrets client-side", () => {
@@ -262,14 +269,14 @@ test("registry model maps wallets, groups and the active wallet", () => {
   assert.deepStrictEqual(m.groups.map((g) => [g.name, g.count]), [["Main Wallets", 1], ["Trading", 0]]);
 });
 
-test("My Wallets: group filter, search, active wallet and empty registry", () => {
+test("Astra Wallets: group filter, search, active wallet and empty registry", () => {
   const m = W.buildModel(pol, txs, tools, NOW, wal);
   const inGroup = W.walletsHtml(m, { ...S(), grp: "g_1" });
   assert.ok(inGroup.includes(A1) && !inGroup.includes(A2));
   assert.match(W.walletsHtml(m, { ...S(), grp: "g_2" }), /No wallets match/);
   assert.match(W.html(m, S()), /<option value="g_1">Main Wallets \(1\)<\/option>/);
   assert.match(W.html(m, { ...S(), grp: "g_1" }), /<option value="g_1" selected>/);
-  assert.match(W.walletsHtml(m, S()), /class="w3-wallet sel" data-wsel="0x1111/);   // backend-active wallet
+  assert.match(W.walletsHtml(m, { ...S(), open: { g_1: true } }), /class="w3-wallet w3-gitem sel" data-wsel="0x1111/);   // backend-active wallet
   const e = W.buildModel(pol, txs, tools, NOW, { ok: true, data: { wallets: [], groups: [], active_address: null } });
   assert.match(W.walletsHtml(e, S()), /No wallets yet/);
   assert.match(W.walletsHtml(e, S()), /data-modal="import"/);
@@ -285,6 +292,7 @@ test("import: paste, validate, import — per-line status, refresh, rejected lin
   await H.click({ "data-modal": "import" }, ["w3-btn"]);
   assert.match(H.target.innerHTML, /role="dialog"[^>]*aria-label="Import Wallet"/);
   H.type("data-mtext", ["ab".repeat(32), "not-a-key", "cd".repeat(32)].join("\n"));
+  H.type("data-mgname", "Exchange Wallets");
   await H.click({ "data-mvalidate": "" }, ["w3-btn"]);
   assert.deepStrictEqual(H.calls[0].body.dry_run, true);
   assert.match(H.target.innerHTML, /2 valid · 1 will be rejected/);
@@ -293,9 +301,12 @@ test("import: paste, validate, import — per-line status, refresh, rejected lin
   await H.click({ "data-mimport": "" }, ["w3-btn"]);
   assert.strictEqual(H.calls[1].body.dry_run, false);
   assert.match(H.target.innerHTML, /2 wallets imported · 1 rejected/);
-  // My Wallets refreshed immediately from the returned registry snapshot
-  assert.equal((H.target.innerHTML.match(/data-wsel=/g) || []).length, 4);
-  assert.match(H.target.innerHTML, /My Wallets <span class="w3-dim">\(4\)/);
+  assert.strictEqual(H.calls[1].body.group_name, "Exchange Wallets");
+  // Astra Wallets refreshed immediately from GET /wallets: 4 wallets, the 2 new ones inside ONE collapsed group
+  assert.equal(H.gets.length, 1);
+  assert.match(H.target.innerHTML, /Astra Wallets <span class="w3-dim">\(4\)/);
+  assert.equal((H.target.innerHTML.match(/data-gtoggle=/g) || []).length, 3);
+  assert.match(H.target.innerHTML, /Group “Exchange Wallets” created/);
   // valid secrets are dropped from the textarea; only the rejected line remains
   const ta = /<textarea[^>]*>([^<]*)<\/textarea>/.exec(H.target.innerHTML)[1];
   assert.equal(ta, "not-a-key");
@@ -330,7 +341,7 @@ test("create: key shown once, ack required, dropped from DOM after Done", async 
   await H.click({ "data-mdone": "" });
   assert.ok(!H.target.innerHTML.includes(SECRET), "secret gone after Done");
   assert.ok(!/w3-msecret/.test(H.target.innerHTML));
-  // the new wallet is in My Wallets straight away and selectable
+  // the new wallet is in Astra Wallets straight away (as a standalone wallet) and selectable
   assert.match(H.target.innerHTML, /data-wsel="0xd{40}"/);
 });
 
@@ -354,13 +365,14 @@ test("selecting a wallet persists via the backend and updates Active Wallet + pr
 test("selecting a wallet: backend failure reverts the selection", async () => {
   const H = harness({ backend: async () => ({ ok: false, error: "wallet not found" }) });
   await H.click({ "data-wsel": A2 }, ["w3-wallet"]);
-  assert.match(H.target.innerHTML, /class="w3-wallet sel" data-wsel="0x1111/);
+  assert.match(H.target.innerHTML, /class="w3-wallet" data-wsel="0x2222/);   // Beta is not selected
+  assert.match(H.target.innerHTML, /Active Wallet<\/h3><div class="w3-active">.*Alpha/s);
 });
 
 test("groups: create, rename, add, move, remove, delete (confirm), filter", async () => {
   const H = harness();
   await H.click({ "data-modal": "groups" });
-  assert.match(H.target.innerHTML, /aria-label="Manage Groups"/);
+  assert.match(H.target.innerHTML, /aria-label="Astra Wallets"/);
   H.type("data-gnew", "DeFi");
   await H.click({ "data-gcreate": "" });
   assert.match(H.calls[0].path, /\/wallet-groups$/);
@@ -394,7 +406,7 @@ test("groups: create, rename, add, move, remove, delete (confirm), filter", asyn
   assert.equal(H.state.wallets.length, 2, "deleting a group keeps its wallets");
 });
 
-test("groups: filtering My Wallets by group via the select, and reset when the group is deleted", async () => {
+test("groups: filtering Astra Wallets by group via the select, and reset when the group is deleted", async () => {
   const H = harness();
   await H.change("data-grp", "g_1");
   const grid = /id="w3-wallets"[^>]*>(.*?)<\/div><\/section>/s.exec(H.target.innerHTML)[1];
@@ -421,4 +433,169 @@ test("dialog content is escaped (names/group names cannot inject markup)", async
   await H.click({ "data-gcreate": "" });
   assert.ok(!H.target.innerHTML.includes("<img src=x"));
   assert.match(H.target.innerHTML, /&lt;img src=x/);
+});
+
+// ============================================================================
+// Astra Wallets: standalone wallets + collapsible, numbered groups
+// ============================================================================
+const KEY_A = "aa".repeat(32), KEY_B = "bb".repeat(32), KEY_C = "cc".repeat(32);
+const ex = (n) => "0x" + String(n).repeat(40);
+// registry with Main + 3 exchange wallets in one group + an empty second group
+const grouped = () => ({ active_id: "w_1", active_address: ex(1), wallets: [
+  { id: "w_1", address: ex(1), name: "Main Wallet", source: "created", can_sign: true, active: true, group_ids: [] },
+  { id: "w_2", address: ex(2), name: "Binance", source: "imported", can_sign: true, active: false, group_ids: ["g_x"] },
+  { id: "w_3", address: ex(3), name: "Coinbase", source: "imported", can_sign: true, active: false, group_ids: ["g_x"] },
+  { id: "w_4", address: ex(4), name: "Bybit", source: "imported", can_sign: true, active: false, group_ids: ["g_x"] },
+  { id: "w_5", address: ex(5), name: "Trader", source: "imported", can_sign: true, active: false, group_ids: ["g_y"] }],
+  groups: [{ id: "g_x", name: "Exchange Wallets", wallet_ids: ["w_2", "w_3", "w_4"], count: 3 },
+           { id: "g_y", name: "Trading Wallets", wallet_ids: ["w_5"], count: 1 }] });
+const gmodel = () => W.buildModel(pol, txs, tools, NOW, { ok: true, data: grouped() });
+const listOnly = (h) => /id="w3-wallets"[^>]*>(.*?)<\/div><\/section>/s.exec(h)[1];
+
+test("Astra Wallets: standalone wallets show name + short address; groups start collapsed", () => {
+  const h = W.walletsHtml(gmodel(), S());
+  assert.match(h, /data-wsel="0x1{40}"/);                               // standalone wallet card
+  assert.match(h, /Main Wallet<small>0x1111…1111 · Created wallet<\/small>/);   // name + shortened address
+  assert.equal((h.match(/data-gtoggle=/g) || []).length, 2);
+  assert.match(h, /<b>Exchange Wallets<\/b><small>3 wallets<\/small><i aria-hidden="true">▼<\/i>/);
+  assert.match(h, /aria-expanded="false"/);
+  for (const n of [2, 3, 4, 5]) assert.ok(!h.includes(ex(n)), "grouped wallets are hidden while collapsed");
+});
+
+test("Astra Wallets: an expanded group lists its wallets numbered 1, 2, 3 from render order", () => {
+  const h = W.walletsHtml(gmodel(), { ...S(), open: { g_x: true } });
+  assert.match(h, /<i aria-hidden="true">▲<\/i>/);
+  const nums = [...h.matchAll(/class="w3-gnum">(\d+)\.<\/span>\s*<span class="w3-wname">([^<]*)<small>([^<]*)<\/small>/g)].map((x) => x.slice(1));
+  assert.deepStrictEqual(nums, [["1", "Binance", "0x2222…2222"], ["2", "Coinbase", "0x3333…3333"], ["3", "Bybit", "0x4444…4444"]]);
+  assert.ok(!h.includes(ex(5)), "the other group stays collapsed");
+  assert.ok(!/serial|"number"/.test(JSON.stringify(W.buildModel(pol, txs, tools, NOW, { ok: true, data: grouped() }).wallets)), "numbers are not wallet data");
+});
+
+test("group header click expands/collapses; wallet click selects and never toggles a group", async () => {
+  const H = harness({ wal: grouped() });
+  const grpHtml = () => H.target.innerHTML;
+  assert.ok(!grpHtml().includes(ex(2)));
+  await H.click({ "data-gtoggle": "g_x" }, ["w3-ghead"]);
+  assert.ok(grpHtml().includes(ex(2)) && /aria-expanded="true"/.test(grpHtml()));
+  assert.equal(H.calls.length, 0, "toggling is pure UI state");
+  await H.click({ "data-wsel": ex(3) }, ["w3-wallet"]);                 // wallet click: selects only
+  assert.match(H.calls[0].path, /\/wallets\/0x3{40}\/select$/);
+  assert.ok(grpHtml().includes(ex(2)), "the group stayed open after a wallet click");
+  await H.click({ "data-gtoggle": "g_x" }, ["w3-ghead"]);              // header again: collapses
+  assert.ok(!grpHtml().includes(ex(2)));
+  assert.match(grpHtml(), /<b>Exchange Wallets<\/b><small>3 wallets<\/small><i aria-hidden="true">▼/);
+});
+
+test("multiple groups expand and collapse independently", async () => {
+  const H = harness({ wal: grouped() });
+  await H.click({ "data-gtoggle": "g_x" }, ["w3-ghead"]);
+  await H.click({ "data-gtoggle": "g_y" }, ["w3-ghead"]);
+  assert.ok(H.target.innerHTML.includes(ex(2)) && H.target.innerHTML.includes(ex(5)));
+  await H.click({ "data-gtoggle": "g_x" }, ["w3-ghead"]);
+  assert.ok(!H.target.innerHTML.includes(ex(2)) && H.target.innerHTML.includes(ex(5)), "closing one leaves the other open");
+  assert.equal((H.target.innerHTML.match(/class="w3-gnum">1\./g) || []).length, 1, "numbering restarts per group");
+});
+
+test("import of ONE wallet: no group name asked, no group requested, wallet appears standalone", async () => {
+  const H = harness({ wal: grouped() });
+  await H.click({ "data-modal": "import" }, ["w3-btn"]);
+  const one = W.modalHtml(gmodel(), { ...W.IDLE(), kind: "import", text: KEY_A });
+  assert.match(one, /data-mgwrap hidden/, "Group Name field is hidden for a single wallet");
+  assert.doesNotMatch(one, /data-mimport disabled/);
+  H.type("data-mtext", KEY_A);
+  await H.click({ "data-mimport": "" }, ["w3-btn"]);
+  assert.strictEqual(H.calls[0].body.group_name, undefined);
+  assert.strictEqual(H.calls[0].body.group_id, undefined);
+  assert.equal(H.state.groups.length, 2, "no group was created");
+  assert.equal(H.state.wallets.length, 6);
+  assert.match(listOnly(H.target.innerHTML), /data-wsel="0xc0{38}0"/);   // standalone card, visible without expanding
+});
+
+test("import of 2+ wallets: Group Name required, ONE group holds them, existing wallets stay", async () => {
+  const H = harness({ wal: grouped() });
+  await H.click({ "data-modal": "import" }, ["w3-btn"]);
+  const text = [KEY_A, KEY_B, KEY_C].join("\n");
+  const three = { ...W.IDLE(), kind: "import", text };
+  assert.doesNotMatch(W.modalHtml(gmodel(), three), /data-mgwrap hidden/, "Group Name field appears for 2+ wallets");
+  assert.match(W.modalHtml(gmodel(), three), /data-mimport disabled/, "cannot import until the group is named");
+  assert.doesNotMatch(W.modalHtml(gmodel(), { ...three, impGroup: "Binance Wallets" }), /data-mimport disabled/);
+  // live (no repaint) updates while typing: field revealed, Import enabled only once a name is entered
+  const wrap = { hidden: true }, btn = { disabled: true };
+  H.target.querySelector = (q) => (q === "[data-mgwrap]" ? wrap : null);
+  H.target.querySelectorAll = (q) => (q === "[data-mimport]" ? [btn] : []);
+  H.type("data-mtext", text);
+  assert.equal(wrap.hidden, false); assert.equal(btn.disabled, true);
+  H.type("data-mgname", "Binance Wallets");
+  assert.equal(btn.disabled, false);
+  await H.click({ "data-mimport": "" }, ["w3-btn"]);
+  assert.strictEqual(H.calls[0].body.group_name, "Binance Wallets");
+  assert.equal(H.state.groups.length, 3, "exactly one new group");
+  const g = H.state.groups.find((x) => x.name === "Binance Wallets");
+  assert.equal(g.count, 3);
+  const html = listOnly(H.target.innerHTML);
+  assert.match(html, /<b>Binance Wallets<\/b><small>3 wallets<\/small><i aria-hidden="true">▼/);   // collapsed
+  assert.equal((html.match(/data-wsel=/g) || []).length, 1, "only Main Wallet is top-level; the imported wallets are not loose items");
+  for (const n of [1]) assert.ok(html.includes(ex(n)), "existing standalone wallet still shown");
+  assert.ok(html.includes("Exchange Wallets") && html.includes("Trading Wallets"), "existing groups still shown");
+});
+
+test("every create/import/select/group mutation reconciles through GET /api/v1/web3/wallets", async () => {
+  const H = harness({ wal: grouped() });
+  await H.click({ "data-modal": "create" }, ["w3-btn"]);
+  await H.click({ "data-mcreate": "" });
+  assert.equal(H.gets.length, 1);
+  assert.match(H.target.innerHTML, /data-wsel="0xd{40}"/, "created wallet shows without a reload, as a standalone wallet");
+  H.handlers.change({ target: Object.assign(H.mk({ "data-mack": "" }, [], H.root), { checked: true }) });
+  await H.click({ "data-mdone": "" });
+  await H.click({ "data-wsel": ex(1) }, ["w3-wallet"]);
+  assert.equal(H.gets.length, 2);
+  await H.click({ "data-modal": "groups" });
+  H.type("data-gnew", "Fresh Group");
+  await H.click({ "data-gcreate": "" });
+  assert.equal(H.gets.length, 3);
+  await H.click({ "data-gadd": "w_1" });
+  H.type("data-gname", "Renamed");
+  await H.click({ "data-grename": "" });
+  await H.change("data-gmove", "g_x", { "data-gmove": "w_1" });
+  await H.click({ "data-gremove": "w_1" });
+  await H.click({ "data-gdel": "" }); await H.click({ "data-gdel": "" });
+  assert.equal(H.gets.length, 8, "one GET per successful mutation");
+  assert.ok(H.gets.every((p) => p === "/api/v1/web3/wallets"));
+});
+
+test("refresh keeps group expansion, keeps existing wallets, and drops state for deleted groups", async () => {
+  const H = harness({ wal: grouped() });
+  await H.click({ "data-gtoggle": "g_x" }, ["w3-ghead"]);
+  await H.click({ "data-modal": "create" }, ["w3-btn"]);
+  await H.click({ "data-mcreate": "" });
+  H.handlers.change({ target: Object.assign(H.mk({ "data-mack": "" }, [], H.root), { checked: true }) });
+  await H.click({ "data-mdone": "" });
+  assert.ok(H.target.innerHTML.includes(ex(2)), "open group stayed open across the refresh");
+  for (const n of [1, 5]) assert.ok(H.target.innerHTML.includes(n === 5 ? "Trading Wallets" : ex(n)));
+  // delete the open group: it disappears, its wallets remain as standalone wallets
+  await H.click({ "data-modal": "groups" });
+  await H.click({ "data-gsel": "g_x" });
+  await H.click({ "data-gdel": "" }); await H.click({ "data-gdel": "" });
+  await H.click({ "data-mclose": "" });
+  const html = listOnly(H.target.innerHTML);
+  assert.ok(!html.includes("Exchange Wallets"));
+  for (const n of [2, 3, 4]) assert.ok(html.includes(ex(n)), "wallet " + n + " survives its group");
+  assert.equal(H.state.wallets.length, 6);
+  assert.equal(W.groupOpen({ q: "", grp: "", open: {} }, "g_x"), false);
+});
+
+test("a fresh page load rebuilds the same tree from GET /wallets alone", () => {
+  const a = W.walletsHtml(gmodel(), S()), b = W.walletsHtml(W.buildModel(pol, txs, tools, NOW, { ok: true, data: JSON.parse(JSON.stringify(grouped())) }), S());
+  assert.equal(a, b);
+  assert.match(a, /Exchange Wallets/); assert.match(a, /Trading Wallets/);
+});
+
+test("secrets never render: only whitelisted public fields reach the Astra Wallets DOM", () => {
+  const d = grouped();
+  d.wallets[0].private_key = "0x" + KEY_A; d.wallets[1].seed_phrase = "abandon ability able about";
+  d.wallets[2].keystore_name = "ksecret-name"; d.wallets[3].secret = KEY_B; d.reveal = { private_key: "0x" + KEY_C };
+  const m = W.buildModel(pol, txs, tools, NOW, { ok: true, data: d });
+  const html = W.html(m, { ...S(), open: { g_x: true, g_y: true } });
+  for (const bad of [KEY_A, KEY_B, KEY_C, "abandon ability", "ksecret-name", "private_key", "seed"]) assert.ok(!html.includes(bad), bad);
+  assert.ok(!JSON.stringify(m).includes(KEY_A) && !JSON.stringify(m).includes(KEY_C));
 });

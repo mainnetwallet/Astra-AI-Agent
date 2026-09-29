@@ -100,6 +100,18 @@
 #tab-web3 .w3-wallets.list .w3-spark { display: none; }
 #tab-web3 .w3-wallets.list .w3-addw { min-height: 44px; flex-direction: row; }
 #tab-web3 .w3-wallets > .w3-empty { grid-column: 1 / -1; }
+/* Astra Wallets: collapsible wallet groups (header toggles; numbered members) */
+#tab-web3 .w3-wallets .w3-group { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
+#tab-web3 .w3-ghead { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; cursor: pointer; font: inherit; color: inherit;
+  background: rgba(8, 12, 26, .55); border: 1px solid var(--w3-line); border-radius: 12px; padding: 9px 12px; }
+#tab-web3 .w3-ghead:hover, #tab-web3 .w3-group.open > .w3-ghead { border-color: rgba(124, 92, 255, .6); }
+#tab-web3 .w3-ghead b { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tab-web3 .w3-ghead small { color: var(--w3-dim); font-size: 11px; }
+#tab-web3 .w3-ghead i { font-style: normal; font-size: 11px; color: var(--w3-dim); }
+#tab-web3 .w3-gbody { display: flex; flex-direction: column; gap: 6px; padding-left: 14px; }
+#tab-web3 .w3-wallets .w3-wallet.w3-gitem { display: flex; flex-direction: row; align-items: center; gap: 10px; width: 100%; }
+#tab-web3 .w3-gnum { flex: none; min-width: 22px; color: var(--w3-dim); font-size: 12px; font-weight: 600; }
+#tab-web3 .w3-gitem .w3-wname small { display: block; }
 #tab-web3 .w3-av, #tab-web3 .w3-chain { display: inline-grid; place-items: center; flex: none; width: 30px; height: 30px; border-radius: 50%; font-size: 11.5px; font-weight: 700; font-style: normal; background: linear-gradient(135deg, #5b45f0, #4f8bff); color: #fff; }
 #tab-web3 .w3-chain.sm { width: 22px; height: 22px; font-size: 10px; }
 #tab-web3 .w3-av.lg { width: 52px; height: 52px; font-size: 16px; }
@@ -149,7 +161,7 @@
 #tab-web3 .w3-toast { position: fixed; bottom: 22px; right: 22px; background: #1b2242; border: 1px solid var(--w3-acc); border-radius: 9px; padding: 8px 14px; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 60; }
 #tab-web3 .w3-toast.on { opacity: 1; }
 
-/* wallet dialogs: Import Wallet / Create Wallet / Manage Groups */
+/* wallet dialogs: Import Wallet / Create Wallet / Astra Wallets */
 #tab-web3 .w3-modal { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgba(4, 7, 18, .68); }
 #tab-web3 .w3-mbox { width: min(540px, 100%); max-height: 88vh; overflow-y: auto; background: #0d1326; border: 1px solid var(--w3-line); border-radius: 14px; padding: 16px; box-shadow: 0 18px 60px rgba(0, 0, 0, .55); }
 #tab-web3 .w3-mbox.wide { width: min(760px, 100%); }

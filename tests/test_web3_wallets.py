@@ -556,6 +556,93 @@ class TestAiLayerNeverSeesSecrets(unittest.TestCase):
         self.assertEqual(hits, [])
 
 
+# ── Astra Wallets: single wallet vs one group per multi-wallet import ───────
+class TestImportGrouping(RegistryCase):
+    def test_single_import_is_standalone_and_creates_no_group(self):
+        res = self.reg.import_wallets(K1, group_name="Ignored")
+        self.assertEqual(res["imported"], 1)
+        self.assertNotIn("group", res)
+        d = self.reg.describe()
+        self.assertEqual((len(d["wallets"]), d["groups"]), (1, []))
+        self.assertEqual(d["wallets"][0]["group_ids"], [])
+
+    def test_multi_import_creates_exactly_one_group_with_all_wallets(self):
+        res = self.reg.import_wallets(f"{K1}\n{K2}\n{K3}", group_name="Binance Wallets")
+        self.assertEqual(res["imported"], 3)
+        self.assertEqual(res["group"]["name"], "Binance Wallets")
+        d = self.reg.describe()
+        self.assertEqual(len(d["groups"]), 1)
+        g = d["groups"][0]
+        self.assertEqual((g["name"], g["count"]), ("Binance Wallets", 3))
+        self.assertEqual(sorted(g["wallet_ids"]), sorted(w["id"] for w in d["wallets"]))
+        self.assertTrue(all(w["group_ids"] == [g["id"]] for w in d["wallets"]))
+
+    def test_multi_import_without_a_name_stays_backward_compatible(self):
+        self.reg.import_wallets(f"{K1}\n{K2}")
+        self.assertEqual(self.reg.list_groups(), [])
+
+    def test_group_is_only_made_for_wallets_that_really_import(self):
+        self.reg.import_wallets(K1)
+        # one duplicate + one invalid + one new => a single NEW wallet: no group
+        res = self.reg.import_wallets(f"{K1}\nbad\n{K2}", group_name="Nope")
+        self.assertEqual(res["imported"], 1)
+        self.assertEqual(self.reg.list_groups(), [])
+
+    def test_dry_run_never_creates_a_group(self):
+        res = self.reg.import_wallets(f"{K1}\n{K2}", dry_run=True, group_name="Dry")
+        self.assertTrue(res["dry_run"])
+        self.assertEqual((self.reg.list_groups(), self.reg.count()), ([], 0))
+
+    def test_existing_wallets_and_groups_are_kept(self):
+        self.reg.import_wallets(K1)
+        old = self.reg.create_group("Old")
+        self.reg.import_wallets(f"{K2}\n{K3}", group_name="Exchange Wallets")
+        d = self.reg.describe()
+        self.assertEqual([g["name"] for g in d["groups"]], ["Old", "Exchange Wallets"])
+        self.assertEqual(len(d["wallets"]), 3)
+        self.assertEqual(d["groups"][0]["id"], old["id"])
+
+    def test_clashing_or_bad_group_name_imports_nothing(self):
+        self.reg.create_group("Taken")
+        with self.assertRaises(WalletError):
+            self.reg.import_wallets(f"{K1}\n{K2}", group_name="taken")
+        with self.assertRaises(WalletError):
+            self.reg.import_wallets(f"{K1}\n{K2}", group_name="x" * 500)
+        self.assertEqual(self.reg.count(), 0)
+
+    def test_deleting_the_group_keeps_the_wallets_as_standalone(self):
+        res = self.reg.import_wallets(f"{K1}\n{K2}", group_name="Temp")
+        self.reg.delete_group(res["group"]["id"])
+        d = self.reg.describe()
+        self.assertEqual((len(d["wallets"]), d["groups"]), (2, []))
+        self.assertTrue(all(w["group_ids"] == [] for w in d["wallets"]))
+        self.assertEqual(self.reg._ks().decrypt(A1), "0x" + K1)   # keys untouched
+
+    def test_created_wallet_is_standalone_and_listed(self):
+        w, _ = self.reg.create_wallet("Fresh")
+        d = self.reg.describe()
+        self.assertEqual([x["id"] for x in d["wallets"]], [w["id"]])
+        self.assertEqual((d["wallets"][0]["group_ids"], d["groups"]), ([], []))
+
+    def test_groups_and_membership_survive_a_restart(self):
+        self.reg.import_wallets(f"{K1}\n{K2}", group_name="Persisted")
+        before = self.reg.describe()
+        self.store.close()
+        store2, reg2 = self.env.open()
+        try:
+            self.assertEqual(reg2.describe(), before)
+        finally:
+            store2.close()
+        self.store, self.reg = self.env.open()      # for tearDown
+
+    def test_no_secret_in_the_wallet_list_payload(self):
+        self.reg.import_wallets(f"{K1}\n{K2}", group_name="G")
+        _, secret = self.reg.create_wallet("Fresh")
+        blob = json.dumps(self.reg.describe())
+        for s in (K1, K2, secret, secret[2:], "keystore_name", "private"):
+            self.assertNotIn(s, blob)
+
+
 # ── HTTP API (neutral router, no socket) ────────────────────────────────────
 class TestWalletApi(unittest.TestCase):
     def setUp(self):
@@ -641,6 +728,38 @@ class TestWalletApi(unittest.TestCase):
         self.assertEqual(len(j["data"]["wallets"]), 2)
         r, j = self.call("POST", "/api/v1/web3/wallet-groups", {"name": "defi"})
         self.assertEqual(r.status, 400)                    # duplicate name
+
+    def test_http_multi_import_makes_one_named_group_and_get_rebuilds_it(self):
+        r, j = self.call("POST", "/api/v1/web3/wallets/import",
+                         {"text": f"{K1}\n{K2}\n{K3}", "group_name": "Binance Wallets"})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(j["data"]["group"]["name"], "Binance Wallets")
+        self.assertEqual([g["count"] for g in j["data"]["groups"]], [3])
+        _, j2 = self.call("GET", "/api/v1/web3/wallets")           # canonical read
+        self.assertEqual(len(j2["data"]["wallets"]), 3)
+        self.assertEqual([(g["name"], g["count"]) for g in j2["data"]["groups"]],
+                         [("Binance Wallets", 3)])
+        for k in (K1, K2, K3):
+            self.assertNotIn(k, json.dumps(j2))
+
+    def test_http_single_import_and_create_are_standalone(self):
+        _, j = self.call("POST", "/api/v1/web3/wallets/import",
+                         {"text": K1, "group_name": "Whatever"})
+        self.assertEqual(j["data"]["groups"], [])
+        r, j = self.call("POST", "/api/v1/web3/wallets/create", {"name": "Fresh"})
+        self.assertEqual(r.status, 201)
+        self.assertEqual(j["data"]["groups"], [])
+        self.assertEqual(len(j["data"]["wallets"]), 2)             # nothing was lost
+        _, j2 = self.call("GET", "/api/v1/web3/wallets")
+        self.assertNotIn(j["data"]["reveal"]["private_key"], json.dumps(j2))
+
+    def test_http_group_delete_keeps_wallets(self):
+        _, j = self.call("POST", "/api/v1/web3/wallets/import",
+                         {"text": f"{K1}\n{K2}", "group_name": "Temp"})
+        gid = j["data"]["groups"][0]["id"]
+        _, j = self.call("POST", f"/api/v1/web3/wallet-groups/{gid}/delete")
+        self.assertEqual((j["data"]["groups"], len(j["data"]["wallets"])), ([], 2))
+
 
     def test_errors_are_generic_and_do_not_echo_input(self):
         r, j = self.call("POST", "/api/v1/web3/wallets/import",

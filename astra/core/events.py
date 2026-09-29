@@ -123,6 +123,9 @@ EVENT_KINDS = (
     "chat.pipeline.understand_failed", "chat.pipeline.verified",
     "chat.pipeline.verify_error", "chat.pipeline.finished",
     "chat.pipeline.failed",
+    # The deterministic final answer / generic text used because the
+    # provider's answer was unusable (astra.ai.execution_answer).
+    "chat.pipeline.final_answer_fallback",
     # The Gateway's ordered targets[] fallback plan (ChatPipeline._route()
     # for a normal turn; ProviderToolCaller for a task_type == "tool_use"
     # turn driven by the agent tool loop -- see astra/ai/agent_tool_loop.py).

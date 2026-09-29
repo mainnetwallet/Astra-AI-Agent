@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 
 from astra.ai.artifact_extraction import detect_output_type, extract_artifacts
 from astra.ai.capability_context import (RuntimeCapabilities,
@@ -75,7 +76,11 @@ from astra.ai.image_models import IMAGE_EXHAUSTED_MESSAGE
 from astra.ai.json_extract import loads_lenient
 from astra.ai.multimodal_messages import build_multimodal_content
 from astra.ai.execution_history import AgentExecutionHistory
-from astra.ai.response_boundary import sanitize_final_response
+from astra.ai.execution_answer import (NO_EVIDENCE_TEXT, evidence_snapshot,
+                                       has_sufficient_evidence,
+                                       summarize_execution)
+from astra.ai.response_boundary import (is_unusable_answer,
+                                        sanitize_final_response)
 from astra.ai.router import RoutingRequest, RoutingResult
 from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError
@@ -492,6 +497,42 @@ def _has_image(attachments) -> bool:
     return False
 
 
+# Default wall-clock allowance for the verify/correct/re-execute loop of ONE
+# turn. A correction that would START after this is refused, so an
+# empty-provider + verifier-incomplete cycle can never run unbounded (a real
+# run took ~262s); the deterministic summary of the real evidence is used.
+DEFAULT_TURN_DEADLINE_SECONDS = 150.0
+
+
+class _TurnExecution:
+    """Everything the tools ACTUALLY did this turn, across the first tool loop
+    AND every correction loop, plus the turn's execution budget.
+
+    Corrections re-enter the tool loop, so their steps must not vanish: the
+    final answer is derived from ALL of them. Invariant that guarantees
+    termination:  first loop (<= max_tool_steps + 1 recovery call)
+                + <= MAX_CORRECTION_ATTEMPTS corrections, together limited by
+                  `step_budget` tool steps and `deadline_s` seconds.
+    """
+
+    def __init__(self, step_budget: int, deadline_s: float):
+        self.steps: list = []
+        self.step_budget = max(1, int(step_budget))
+        self.deadline_s = float(deadline_s or 0)
+        self.started = time.monotonic()
+
+    def add(self, steps) -> None:
+        self.steps.extend(s for s in (steps or [])
+                          if getattr(s, "action", "") == "tool")
+
+    def remaining_steps(self) -> int:
+        return max(0, self.step_budget - len(self.steps))
+
+    def expired(self) -> bool:
+        return bool(self.deadline_s) and (
+            time.monotonic() - self.started) >= self.deadline_s
+
+
 class _ChatPort(ProviderExecutionPort):
     """Sends a correction back to the SAME provider/model that produced the
     output being corrected (never a different one — switching providers is
@@ -563,8 +604,9 @@ class _ToolLoopPort(ProviderExecutionPort):
 
     def __init__(self, pipeline, execution, *, hist_turns, task_type, vision,
                  scope, session_id, req="", system_prompt="",
-                 terminal_context="", exec_context=""):
+                 terminal_context="", exec_context="", turn=None):
         self._pipeline = pipeline
+        self.turn = turn
         self.execution = execution
         self.hist_turns = hist_turns or []
         self.task_type = task_type
@@ -580,6 +622,24 @@ class _ToolLoopPort(ProviderExecutionPort):
     def execute(self, target, messages: list, max_tokens: int | None = None,
                 **kwargs) -> str:
         from astra.ai.agent_tool_loop import AgentToolLoop
+        turn = self.turn
+        max_steps = self._pipeline.max_tool_steps
+        if turn is not None:
+            # The previous answer was empty/protocol-only/"(no reply)" but the
+            # tools ALREADY produced enough real evidence: another tool loop
+            # would only burn time. The answer is the deterministic summary
+            # of that evidence (no model call, no tool call).
+            if (is_unusable_answer(self.last_text)
+                    and has_sufficient_evidence(turn.steps, self.execution)):
+                summary = summarize_execution(turn.steps, self.execution)
+                if summary:
+                    self.last_text = summary
+                    return summary
+            if turn.expired():
+                raise ProviderError("turn time budget exhausted")
+            if turn.remaining_steps() <= 0:
+                raise ProviderError("tool-step budget exhausted")
+            max_steps = min(max_steps, turn.remaining_steps())
         # The correction instruction the supervisor appended as the last
         # user turn (see gateway_task_completion.build_task_completion_messages).
         task = (_last_user_text(messages) or self.execution.intent
@@ -592,7 +652,7 @@ class _ToolLoopPort(ProviderExecutionPort):
                              terminal=self._pipeline.terminal,
                              runtime=self._pipeline.runtime,
                              events=self._pipeline.events,
-                             max_steps=self._pipeline.max_tool_steps,
+                             max_steps=max_steps,
                              execution_history=self._pipeline.execution_history)
         blocks = []
         decision_block = self.execution.context_block()
@@ -606,6 +666,8 @@ class _ToolLoopPort(ProviderExecutionPort):
                           history=self.hist_turns, context_blocks=blocks,
                           session_id=self.session_id, scope=self.scope,
                           max_tokens=max_tokens, trace=self.req)
+        if turn is not None:
+            turn.add(result.steps)      # correction steps are real evidence
         if not result.ok:
             raise ProviderError(result.error or "tool loop correction failed")
         self.last_text = result.text
@@ -619,7 +681,8 @@ class ChatPipeline:
                  runtime=None, execution_history=None, max_tool_steps: int = 8,
                  approvals=None, fallback=None,
                  agent_brain: str = "provider",
-                 artifact_dir: str | None = None):
+                 artifact_dir: str | None = None,
+                 turn_deadline_s: float | None = None):
         self.gateway = gateway
         self.router = router
         self.events = events
@@ -647,6 +710,12 @@ class ChatPipeline:
         self.approvals = approvals
         self.fallback = fallback
         self.max_tool_steps = max(1, int(max_tool_steps or 8))
+        try:
+            env_deadline = float(os.environ.get("CHAT_TURN_DEADLINE_SECONDS") or 0)
+        except ValueError:
+            env_deadline = 0
+        self.turn_deadline_s = float(turn_deadline_s if turn_deadline_s is not None
+                                     else (env_deadline or DEFAULT_TURN_DEADLINE_SECONDS))
         self.execution_history = execution_history or AgentExecutionHistory()
         # Which AI drives the agent tool loop: the Provider system (default)
         # or the Gateway's own connections ("gateway"). Both reach the same
@@ -719,20 +788,30 @@ class ChatPipeline:
                                   model=model, trace=req, targets=targets,
                                   events=self.events)
 
-    def _execution_evidence(self, scope) -> dict:
+    def _execution_evidence(self, scope, turn=None, execution=None) -> dict:
         """LIVE execution evidence for the Gateway's completion gate: exactly
-        the tool actions the agent actually performed this turn, read from
-        the SAME `AgentExecutionHistory` the tool loop records into. Never a
+        the tool actions the agent actually performed this turn. Never a
         claim or a summary of prose — only observed tool executions.
 
-        Returns `{}` when no tool ran, which makes the deterministic evidence
-        gate fail a "requires tool execution" task instead of rubber-stamping
-        it from a nicely worded answer.
+        Runtime lifecycle tools (`runtime_status` / `runtime_start` / ...) are
+        NOT evidence of anything but the runtime itself, and a live Web3/RPC
+        request needs an actual RPC/network query
+        (`astra.ai.execution_answer.has_sufficient_evidence`).
+
+        Returns `{}` when there is no sufficient evidence, which makes the
+        deterministic evidence gate fail a "requires tool execution" task
+        instead of rubber-stamping it from a nicely worded answer.
         """
+        if turn is not None and turn.steps:
+            return evidence_snapshot(turn.steps, execution)
         try:
             rows = self.execution_history.entries(scope) if scope else []
         except Exception:
             rows = []
+        from astra.ai.agent_tool_loop import LIFECYCLE_TOOLS
+        if execution is None or (getattr(execution, "capability", "") or
+                                 "").lower() not in ("runtime", "system"):
+            rows = [r for r in rows if r.get("tool") not in LIFECYCLE_TOOLS]
         if not rows:
             return {}
         tools = []
@@ -1312,7 +1391,8 @@ class ChatPipeline:
 
     def _run_tool_loop(self, brief, hist_turns, ctx_text, task_type, vision,
                        scope, session_id, terminal_context, exec_context,
-                       req, trace, base_messages=None, task_content=None):
+                       req, trace, base_messages=None, task_content=None,
+                       turn=None):
         """Run the shared `AgentToolLoop` with the Provider system as the
         brain. Returns a `RoutingResult` (so the verify stage is unchanged)
         or None on failure. The loop's final message list is attached so
@@ -1379,6 +1459,8 @@ class ChatPipeline:
             self._emit("chat.pipeline.tool_loop_error", error=trace["error"],
                        op=f"chat:{req}", request=req, trace=req)
             return None
+        if turn is not None:
+            turn.add(result.steps)
         trace["tool_loop"] = {"tool_calls": result.tool_calls,
                               "stopped_reason": result.stopped_reason,
                               "final_source": result.final_source,
@@ -1685,6 +1767,36 @@ class ChatPipeline:
         except Exception:
             pass
 
+    def _final_execution_text(self, text, execution, turn, trace, req) -> str:
+        """The FINAL invariant for an execution task, applied at every exit of
+        the turn just before the response boundary.
+
+        verifier/correction exhausted -> real execution evidence ->
+        deterministic final answer -> response boundary -> user.
+
+        If the provider's answer is empty / "(no reply)" / protocol-only and
+        the tools produced sufficient evidence, the answer is the
+        deterministic summary of that evidence. The generic text is used only
+        when there is genuinely neither a valid answer nor usable evidence.
+        The verifier's state never becomes the user-visible answer."""
+        steps = turn.steps if turn is not None else []
+        summary = (summarize_execution(steps, execution)
+                   if execution.required else "")
+        loop_trace = trace.get("tool_loop")
+        if isinstance(loop_trace, dict):
+            # `_reply` falls back to this if the reply is stripped to nothing.
+            loop_trace["recovery_summary"] = summary
+        source = "model"
+        if execution.required and is_unusable_answer(text):
+            if summary:
+                text, source = summary, "deterministic_summary"
+            else:
+                text, source = NO_EVIDENCE_TEXT, "no_evidence"
+            self._emit("chat.pipeline.final_answer_fallback", source=source,
+                       evidence_steps=len(steps), request=req, trace=req)
+        trace["final_answer_source"] = source
+        return text
+
     def _run_turn(self, raw, context, hist_turns, attachments, req,
                   gateway_ok, trace, conversation_id=None,
                   session_id_override=None) -> dict:
@@ -1840,11 +1952,14 @@ class ChatPipeline:
         use_loop = (not is_image_task and
                     (self._tool_loop_usable() or (execution.required and
                                                   tools_available)))
+        # Every tool step of this turn (first loop + all correction loops)
+        # is recorded here; the final answer is derived from it.
+        turn = _TurnExecution(self.max_tool_steps * 2, self.turn_deadline_s)
         if use_loop:
             rr = self._run_tool_loop(
                 brief, hist_turns, ctx_text, task_type, vision, scope,
                 session_id, terminal_context, exec_context, req, trace,
-                messages, content)
+                messages, content, turn=turn)
         else:
             def _path_of(a):
                 # Public attachment dicts (astra.core.attachments.Attachment
@@ -1956,9 +2071,11 @@ class ChatPipeline:
             # Provider answered fine here (we're past the failure branch
             # above), so Gateway is the ONLY thing missing — flag it
             # plainly rather than silently skipping verification forever.
-            reply_text = rr.text + "\n\n" + _NO_GATEWAY_CONFIGURED_MESSAGE
+            answer = self._final_execution_text(rr.text, execution, turn,
+                                                trace, req)
+            reply_text = answer + "\n\n" + _NO_GATEWAY_CONFIGURED_MESSAGE
             return self._reply(reply_text, True, trace,
-                               self._artifacts(rr.text, raw))
+                               self._artifacts(answer, raw))
 
         # 3) Gateway verifies; fix/redo loop until complete or bound reached
         state = {"verifications": 0, "unavailable": "", "last_missing": []}
@@ -1977,7 +2094,7 @@ class ChatPipeline:
             completion_criteria=brief["criteria"], require_semantic=True,
             evidence_required=(("tool_execution",)
                                if execution.required else ()))
-        evidence = ((lambda: self._execution_evidence(scope))
+        evidence = ((lambda: self._execution_evidence(scope, turn, execution))
                     if execution.required else None)
         if execution.required and tools_available:
             # A correction to an execution task must be able to actually
@@ -1988,7 +2105,8 @@ class ChatPipeline:
                 self, execution, hist_turns=hist_turns, task_type=task_type,
                 vision=vision, scope=scope, session_id=session_id, req=req,
                 system_prompt=provider_system_prompt,
-                terminal_context=terminal_context, exec_context=exec_context)
+                terminal_context=terminal_context, exec_context=exec_context,
+                turn=turn)
         elif getattr(rr, "_port_kind", "") == "gateway":
             port = _GatewayPort(self.gateway, trace=req)
         else:
@@ -2008,13 +2126,18 @@ class ChatPipeline:
             self._emit("chat.pipeline.verify_error", error=str(e),
                        op=f"chat:{req}", request=req, trace=req, terminal=True)
             trace["verification"] = {"status": "error", "reason": str(e)}
+            answer = self._final_execution_text(rr.text, execution, turn,
+                                                trace, req)
             return self._reply(
-                rr.text, True, trace, self._artifacts(rr.text, raw),
+                answer, True, trace, self._artifacts(answer, raw),
                 note="\n\n⚠️ Gateway verification kaj korenni — uttor ta "
                      "verify kora hoyni.")
 
         text = (final.text if final.ok and (final.text or "").strip()
                 else port.last_text) or rr.text
+        # FINAL invariant: whatever the verifier/correction loop ended in,
+        # an execution task with real evidence never leaves empty.
+        text = self._final_execution_text(text, execution, turn, trace, req)
         trace["verification"] = {"status": outcome.status, "attempts": attempts,
                                  "checks": state["verifications"],
                                  "reason": outcome.reason,

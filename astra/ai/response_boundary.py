@@ -158,6 +158,30 @@ def _strip_protocol_fragments(text: str) -> tuple[str, bool]:
     return "".join(out), removed
 
 
+# The literal text every provider adapter returns when the model produced NO
+# content at all (see astra/ai/adapters/base.py, gateway.py, provider.py).
+# It is an adapter placeholder, never an answer: treating it as real text is
+# exactly how an empty provider reply reached the user as "(no reply)".
+NO_REPLY_SENTINEL = "(no reply)"
+
+
+def is_no_reply(text) -> bool:
+    """True when `text` is nothing but the adapters' empty-reply placeholder."""
+    return str(text or "").strip().strip("()[]").strip().lower() == "no reply"
+
+
+def is_unusable_answer(text) -> bool:
+    """True when `text` cannot be shown to a user as an answer: empty, the
+    adapters' `(no reply)` placeholder, or nothing left once every internal
+    protocol fragment / media data URI is stripped."""
+    if not text or not str(text).strip():
+        return True
+    if is_no_reply(text):
+        return True
+    cleaned = strip_internal_protocol(str(text))
+    return not cleaned or is_no_reply(cleaned)
+
+
 def strip_internal_protocol(text: str) -> str:
     """Public helper: `text` with all internal protocol removed (a `final`
     wrapper unwrapped to its answer), redacted and trimmed. May be empty."""
@@ -216,7 +240,7 @@ def sanitize_final_response(text: str, fallback: str | None = None) -> str:
         cleaned = strip_internal_protocol(fallback)
         return cleaned or None
 
-    if not text or not text.strip():
+    if not text or not text.strip() or is_no_reply(text):
         rec = _recovered()
         return rec if rec is not None else text
     cleaned, removed_protocol = _strip_protocol_fragments(text)

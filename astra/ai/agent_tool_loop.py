@@ -43,7 +43,7 @@ from astra.ai.execution_history import AgentExecutionHistory
 from astra.ai.json_extract import loads_lenient
 from astra.ai.system_prompt import ASTRA_CORE_SYSTEM_PROMPT, build_system_prompt
 from astra.core.context import ToolContext
-from astra.ai.response_boundary import strip_internal_protocol
+from astra.ai.response_boundary import is_unusable_answer, strip_internal_protocol
 from astra.core.events import new_op_id
 
 DEFAULT_MAX_STEPS = 8
@@ -58,6 +58,18 @@ DEFAULT_MAX_FINAL_RECOVERY_ATTEMPTS = 1
 # character cap.
 DEFAULT_MAX_TOOL_RESULT_CHARS = None
 DEFAULT_MAX_TOOLS_IN_PROMPT = 40
+
+# Runtime lifecycle/control tools. They report or change the sandbox itself
+# and are NOT evidence for any other task (see astra.ai.execution_answer).
+LIFECYCLE_TOOLS = frozenset({
+    "runtime_status", "runtime_start", "runtime_create", "runtime_stop",
+    "runtime_restart", "runtime_reset", "runtime_destroy"})
+
+LIFECYCLE_HINT = (
+    "\n\nNote: that only reports the runtime's own state; it does not answer "
+    "the user's request. Do not call runtime lifecycle/status tools again. "
+    "Perform the actual operation the user asked for now, then answer from "
+    "its real result.")
 DEFAULT_MAX_DESC_CHARS = 160
 
 TOOL_PROTOCOL = """You are Astra's coding agent. You may use tools to inspect and change the workspace, run commands and tests, and only then answer.
@@ -79,6 +91,7 @@ Rules:
 - Never invent tool output. Never mention this JSON action protocol, exact tool names, argument schemas, or other internal machinery in the final answer.
 - If the Gateway's execution decision (in the system prompt or the task context) says this request requires a capability, you MUST actually invoke the tool that performs it and use its real result before answering. Never reply with instructions describing how the user could do it themselves instead of doing it.
 - EXECUTION PRIORITY: the isolated Agent Runtime is the PRIMARY environment — use the runtime tools first, always, and a runtime failure is never a reason to leave it. The HOST terminal is a fallback ONLY: if (and only if) the Agent Runtime genuinely cannot perform the operation and a host command would really help, call `host_terminal_request` with the exact command, cwd and a one-line reason. That tool does NOT execute anything — it asks the user, in the Assistant Chat, to allow that exact command. After calling it, STOP and finish your turn with a short reply saying an approval is waiting in the chat; never claim the host command ran, never ask for approval twice, and never attempt a host command directly.
+- Runtime lifecycle tools (status/start/create/...) only describe or change the sandbox itself and are NOT evidence for any other request. Go straight to the operation the user asked for; for a live blockchain/RPC request use the chain tools if they are listed, otherwise query an RPC endpoint from the runtime (e.g. an `eth_blockNumber` JSON-RPC call), and answer from that real result.
 - If asked what you can do or which tools/capabilities are available, that is NOT a request to invent or to stay silent: answer from the runtime capability catalog you were given (in the system prompt, above this protocol) in clean, practical, plain language — never the literal tool names in this protocol, and never a category that catalog doesn't list."""
 
 
@@ -474,6 +487,13 @@ class ToolLoopResult:
                 "steps": [s.to_dict() for s in self.steps]}
 
 
+def _deterministic_summary(steps) -> str:
+    """RPC-aware, evidence-only summary of the recorded steps ('' when the
+    steps are not evidence of anything, e.g. lifecycle tools only)."""
+    from astra.ai.execution_answer import summarize_execution
+    return summarize_execution(steps)
+
+
 class AgentToolLoop:
     def __init__(self, registry, *, terminal=None, runtime=None, events=None,
                  approvals=None, fallback=None,
@@ -626,7 +646,7 @@ class AgentToolLoop:
                                       tool_calls=tool_calls,
                                       stopped_reason="final", messages=messages,
                                       final_source=source,
-                                      summary=summarize_tool_steps(steps))
+                                      summary=_deterministic_summary(steps))
 
             tool = str(action.get("tool") or "").strip()
             args = action.get("args") if isinstance(action.get("args"), dict) else {}
@@ -659,10 +679,16 @@ class AgentToolLoop:
                 self.execution_history.record(
                     scope, tool, ok=step.ok, status=step.status,
                     result=result_json, args=args, step=index)
+            hint = ""
+            if tool in LIFECYCLE_TOOLS and not any(
+                    s.tool not in LIFECYCLE_TOOLS and s.action == "tool"
+                    for s in steps):
+                hint = LIFECYCLE_HINT
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content":
                              "Tool result:\n" + _cap(
-                                 result_json, self.max_tool_result_chars)})
+                                 result_json, self.max_tool_result_chars)
+                             + hint})
             self._emit("agent.tool_loop.step", op=op, trace=trace, step=index,
                        tool=tool, ok=step.ok, terminal=False)
 
@@ -684,7 +710,7 @@ class AgentToolLoop:
                               tool_calls=tool_calls,
                               stopped_reason="max_steps", messages=messages,
                               final_source=source,
-                              summary=summarize_tool_steps(steps))
+                              summary=_deterministic_summary(steps))
 
     # -- final-answer contract ---------------------------------------------
     @staticmethod
@@ -697,9 +723,12 @@ class AgentToolLoop:
         `final`). "" means the reply was empty or protocol only."""
         if action and action.get("action") == "final":
             ans = str(action.get("answer") or "").strip()
-            if ans:
+            if ans and not is_unusable_answer(ans):
                 return ans
-        return strip_internal_protocol(raw or "")
+        text = strip_internal_protocol(raw or "")
+        # "(no reply)" is the provider adapters' placeholder for an empty
+        # model reply — never a readable answer.
+        return "" if is_unusable_answer(text) else text
 
     def _recover_final(self, messages, steps, caller, *, op, trace,
                        max_tokens, reason) -> tuple[str, str]:
@@ -707,10 +736,12 @@ class AgentToolLoop:
 
         Up to `max_final_recovery_attempts` extra model calls in the SAME
         conversation ask for a plain-language summary of the real tool
-        results. A reply is accepted only if it carries readable text; a
-        tool call in the reply is NEVER executed here. If recovery is
-        disabled, fails or is still protocol-only, the answer is the
-        deterministic summary of the recorded tool results. Returns
+        results. A reply is accepted only if it carries readable text (empty,
+        protocol-only and the adapters' `(no reply)` placeholder are all
+        rejected); a tool call in the reply is NEVER executed here. If
+        recovery is disabled, fails or is still unusable, the answer is the
+        deterministic summary of the recorded tool results
+        (`astra.ai.execution_answer.summarize_execution`). Returns
         (text, source)."""
         for attempt in range(1, self.max_final_recovery_attempts + 1):
             self._emit("agent.final_recovery", op=op, trace=trace,
@@ -733,7 +764,7 @@ class AgentToolLoop:
             text = self._final_text(act, raw)
             if text:
                 return text, "recovery"
-        return summarize_tool_steps(steps), "summary"
+        return _deterministic_summary(steps), "summary"
 
     def _execute(self, tool: str, args: dict, ctx, *, trace: str,
                  op: str) -> dict:

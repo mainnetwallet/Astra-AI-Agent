@@ -32,9 +32,7 @@ body.os {
 .os-group.open > .os-item .chev { transform: rotate(180deg); }
 .os-group .os-children { display: none; }
 .os-group.open .os-children { display: block; }
-.os-quick { margin-top: 12px; border: 1px solid var(--os-line); border-radius: 12px; padding: 8px; }
 .os-bottom { margin-top: 12px; }
-.os-quick h4 { margin: 2px 6px 6px; font-size: 13px; }
 #os-scrim { display: none; }
 /* ---- topbar ---- */
 body.os .topbar { padding-left: 16px; gap: 12px; background: rgba(6, 11, 22, .85); border-bottom: 1px solid var(--os-line); backdrop-filter: blur(8px); }

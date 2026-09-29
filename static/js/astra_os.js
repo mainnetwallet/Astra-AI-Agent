@@ -32,17 +32,10 @@
     { id: "health", label: "System Health", ic: "❤️", tab: "command-center", anchor: "cc-health" },
     { id: "activity", label: "Activity Center", ic: "📡", tab: "logs" },
   ];
-  // Rendered below the Quick Actions block (after "Add Tool").
+  // Rendered at the bottom of the sidebar, below the main navigation.
   const NAV_BOTTOM = [
     { id: "settings", label: "Settings", ic: "⚙️", children: [
       { label: "Backup", tab: "backup" }, { label: "Legacy Dashboard", tab: "dashboard" }] },
-  ];
-  const QUICK = [
-    { label: "New Chat", ic: "💬", run: () => { go({ tab: "assistant" }); const b = document.getElementById("chat-clear"); if (b) b.click(); } },
-    { label: "Run Workflow", ic: "▶️", run: () => go({ tab: "workflow" }) },
-    { label: "Open Terminal", ic: "🖥️", run: () => go({ tab: "terminal" }) },
-    { label: "Create Task", ic: "✅", run: () => go({ tab: "workflow" }) },
-    { label: "Add Tool", ic: "➕", run: () => go({ tab: "system-map", focus: "tools" }) },
   ];
   const PATH_TABS = { "/command-center": "command-center", "/system-map": "system-map" };
 
@@ -64,13 +57,10 @@
       : item(n, false);
     side.innerHTML = `<div class="os-brand"><img src="/static/img/logo_icon.png" alt=""><div><b>ASTRA</b><span>AI Agent OS</span></div></div>` +
       NAV.map(navHtml).join("") +
-      `<div class="os-quick"><h4>Quick Actions</h4>${QUICK.map((q, i) => `<button class="os-item" data-q="${i}"><span class="ic">${q.ic}</span><span>${esc(q.label)}</span></button>`).join("")}</div>` +
       `<div class="os-bottom">${NAV_BOTTOM.map(navHtml).join("")}</div>`;
     side.addEventListener("click", (e) => {
       const tg = e.target.closest("[data-toggle]");
       if (tg) { tg.parentElement.classList.toggle("open"); return; }
-      const q = e.target.closest("[data-q]");
-      if (q) { QUICK[+q.dataset.q].run(); closeSide(); return; }
       const b = e.target.closest("[data-t]");
       if (b && b.dataset.t) { go({ tab: b.dataset.t, focus: b.dataset.f, anchor: b.dataset.a }); closeSide(); }
     });

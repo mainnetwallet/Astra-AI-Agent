@@ -129,6 +129,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from .agent import Agent
 from .chat_log import ChatLog
+from .host_metrics import resources_snapshot
 from .ai.conversation_context import ConversationContextBuilder
 from .security import (REDACTED, ApiError, RateLimiter, make_request_id,
                      redact)
@@ -775,6 +776,8 @@ class AstraSite:
                            "stopped": bool(getattr(tx, "stopped", False))}
         if self.scheduler():
             out["scheduler"] = self.scheduler().stats()
+        # real host telemetry (psutil) — additive; never breaks the payload
+        out["resources"] = resources_snapshot()
         return out
 
     def health(self) -> dict:

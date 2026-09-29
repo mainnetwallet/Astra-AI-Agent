@@ -27,6 +27,8 @@
     fProvider: "",
     fStatus: "",
     fKey: "",
+    resHist: {},         // real resource samples, each series capped at RES_MAX
+    resLastAt: null,
   };
 
   /* --------------------------------- helpers -------------------------------- */
@@ -202,12 +204,72 @@
     });
   }
 
-  /** Host telemetry the backend does not expose -> honest empty state. */
-  function resourceRows() {
+  /* ------------------------ host resources (real telemetry) ------------------------ */
+  const RES_MAX = 60;   // bounded history: at most 60 real samples per series
+
+  const fmtBytes = (v) => {
+    const n = num(v); if (n == null || n < 0) return DASH;
+    const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0, x = n;
+    while (x >= 1024 && i < u.length - 1) { x /= 1024; i++; }
+    return (i === 0 || x >= 100 ? Math.round(x) : x.toFixed(1)) + " " + u[i];
+  };
+  const fmtRate = (v) => (num(v) == null || v < 0 ? DASH : fmtBytes(v) + "/s");
+
+  /** The `resources` block of /api/metrics, or null when the API has none. */
+  function resourcesOf(data) {
+    const m = data && isObj(data.metrics) ? data.metrics : null;
+    return m && isObj(m.resources) ? m.resources : null;
+  }
+
+  /** Append one REAL sample per distinct backend sample (sampled_at) — never invented. */
+  function pushResourceSample(res) {
+    if (!res || res.available !== true) return;
+    const at = num(res.sampled_at);
+    if (at != null && at === SH.resLastAt) return;   // same sample re-rendered (SSE batch etc.)
+    SH.resLastAt = at;
+    const put = (key, v) => {
+      if (num(v) == null) return;
+      const h = SH.resHist[key] || (SH.resHist[key] = []);
+      h.push(v);
+      while (h.length > RES_MAX) h.shift();
+    };
+    put("cpu", isObj(res.cpu) ? res.cpu.percent : null);
+    put("ram", isObj(res.memory) ? res.memory.percent : null);
+    put("disk", isObj(res.disk) ? res.disk.percent : null);
+    const n = isObj(res.network) ? res.network : null;
+    put("down", n ? n.download_bps : null);
+    put("up", n ? n.upload_bps : null);
+  }
+
+  /** Rows for the compact panel; every value comes from the backend sample. */
+  function resourceRows(data) {
+    const res = resourcesOf(data);
+    const ok = !!res && res.available === true;
+    const pctRow = (key, label, block) => {
+      const p = ok && isObj(block) ? num(block.percent) : null;
+      return { key: key, label: label, lines: [p == null ? DASH : Math.round(p) + "%"],
+               series: [SH.resHist[key] || []], scale: 100, live: p != null };
+    };
+    const net = ok && isObj(res.network) ? res.network : null;
+    const down = net ? num(net.download_bps) : null, up = net ? num(net.upload_bps) : null;
     return [
-      { key: "cpu", label: "CPU" }, { key: "ram", label: "Memory" },
-      { key: "disk", label: "Disk" }, { key: "net", label: "Network" },
+      pctRow("cpu", "CPU", ok ? res.cpu : null),
+      pctRow("ram", "Memory", ok ? res.memory : null),
+      pctRow("disk", "Disk", ok ? res.disk : null),
+      { key: "net", label: "Network",
+        lines: down == null && up == null ? [DASH] : ["\u2193 " + fmtRate(down), "\u2191 " + fmtRate(up)],
+        series: [SH.resHist.down || [], SH.resHist.up || []], scale: 0, live: down != null || up != null },
     ];
+  }
+
+  /** SVG path for a real series in a 76x26 box; a single sample is a short flat tick. */
+  function sparkPath(vals, scale) {
+    if (!vals.length) return "";
+    const W = 76, H = 26, top = 3, bot = H - 3;
+    const max = scale || Math.max.apply(null, vals.concat([1]));
+    const y = (v) => (bot - (Math.max(0, Math.min(v, max)) / max) * (bot - top)).toFixed(1);
+    if (vals.length === 1) return "M" + (W - 8) + "," + y(vals[0]) + " L" + W + "," + y(vals[0]);
+    return vals.map((v, i) => (i ? "L" : "M") + ((i / (vals.length - 1)) * W).toFixed(1) + "," + y(v)).join(" ");
   }
 
   /** The six headline cards — every value is one the backend reports. */
@@ -394,7 +456,7 @@
         <section class="sh-panel" id="sh-resources">
           <div class="sh-ph">
             ${ico("ic-cpu")}
-            <div class="sh-pht"><h3>System Resources</h3><p>Host metrics not exposed by the API</p></div>
+            <div class="sh-pht"><h3>System Resources</h3><p>Live host telemetry</p></div>
           </div>
           <div class="sh-res" id="sh-resources-body"></div>
         </section>
@@ -502,13 +564,24 @@
 
   function paintResources() {
     const el = byId("sh-resources-body"); if (!el) return;
-    el.innerHTML = resourceRows().map((r) => `
+    const res = resourcesOf(SH.data);
+    const ok = !!res && res.available === true;
+    el.innerHTML = resourceRows(SH.data).map((r) => {
+      const scale = r.scale || Math.max.apply(null, r.series[0].concat(r.series[1] || [], [1]));
+      const paths = r.series.map((vals, i) => {
+        const d = sparkPath(vals, scale);
+        return d ? `<path class="ln live${i ? " alt" : ""}" d="${d}"></path>` : "";
+      }).join("");
+      const flat = r.live ? paths : '<path class="ln" d="M0,13 L76,13"></path>';
+      return `
       <div class="sh-resrow">
         ${ico(RES_ICON[r.key], "sm")}
-        <div><div class="sh-rl">${E(r.label)}</div><div class="sh-rv sh-mut">${DASH}</div></div>
+        <div><div class="sh-rl">${E(r.label)}</div>${r.lines.map((t) =>
+          `<div class="sh-rv${r.live ? "" : " sh-mut"}">${E(t)}</div>`).join("")}</div>
         <svg class="sh-spark" viewBox="0 0 76 26" preserveAspectRatio="none" role="img"
-             aria-label="${E(r.label)}: not reported"><path class="ln" d="M0,13 L76,13"></path></svg>
-      </div>`).join("") + '<div class="sh-state" style="padding:10px">Not reported by the API.</div>';
+             aria-label="${E(r.label)}${r.live ? ": " + E(r.lines.join(" ")) : ": unavailable"}">${flat}</svg>
+      </div>`;
+    }).join("") + (ok ? "" : '<div class="sh-state" style="padding:10px">Host metrics unavailable</div>');
   }
 
   function optionList(values, allLabel, selected) {
@@ -574,7 +647,7 @@
 
   /** astra_os.js hands the refreshed aggregate in on every poll / SSE batch. */
   function render(data, events) {
-    if (data) SH.data = data;
+    if (data) { SH.data = data; pushResourceSample(resourcesOf(data)); }
     if (events) SH.events = events;
     if (!SH.mounted) mount();
     paint();
@@ -688,7 +761,7 @@
     if (user) flash(byId("sh-refresh") || byId("sh-mrefresh"));
     await loadModels();
     if (OS.hooks && typeof OS.hooks.refresh === "function") {
-      try { SH.data = await OS.hooks.refresh(); } catch (e) { /* keep last good data */ }
+      try { SH.data = await OS.hooks.refresh(); pushResourceSample(resourcesOf(SH.data)); } catch (e) { /* keep last good data */ }
     }
     paint();
   }
@@ -743,7 +816,8 @@
     norm: {
       services: services, providers: providers, keyStats: keyStats, models: models,
       sixKpis: sixKpis, sixSummary: sixSummary, visibleModels: visibleModels, capsOf: capsOf,
-      statusLabel: statusLabel, fmtUptime: fmtUptime, fmtClock: fmtClock, serviceIcon: serviceIcon,
+      statusLabel: statusLabel, fmtUptime: fmtUptime, resourceRows: resourceRows,
+      pushResourceSample: pushResourceSample, fmtBytes: fmtBytes, fmtRate: fmtRate, RES_MAX: RES_MAX, fmtClock: fmtClock, serviceIcon: serviceIcon,
     },
   };
 })();

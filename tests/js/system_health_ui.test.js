@@ -309,3 +309,81 @@ test("the icons use Astra glyph classes, not emoji", () => {
   const emoji = /[\u{1F300}-\u{1FAFF}\u{FE0F}]/u;
   assert.strictEqual(emoji.test(code), false, "System Health must not use emoji icons");
 });
+/* ---------------------------- system resources (real host telemetry) ---------------------------- */
+
+function resPayload(at, cpu, up, down) {
+  return {
+    available: true, sampled_at: at,
+    cpu: { percent: cpu },
+    memory: { percent: 41.7, used_bytes: 4e9, total_bytes: 9.6e9, available_bytes: 5.6e9 },
+    disk: { percent: 36.2, used_bytes: 1e11, total_bytes: 2.7e11, free_bytes: 1.7e11 },
+    network: { bytes_sent: 1000, bytes_recv: 2000, upload_bps: up, download_bps: down },
+  };
+}
+
+test("System Resources renders the backend's real CPU / memory / disk / network", () => {
+  const doc = new Doc(HTML);
+  globalThis.document = doc;
+  const SH = load();
+  const data = releasePayload();
+  data.metrics.resources = resPayload(1000.1, 27.4, 0.6 * 1048576, 1.8 * 1048576);
+  SH.render(data, []);
+  const html = doc.getElementById("sh-resources-body").innerHTML;
+  assert.match(html, />27%</);
+  assert.match(html, />42%</);
+  assert.match(html, />36%</);
+  assert.match(html, /\u2193 1\.8 MB\/s/);
+  assert.match(html, /\u2191 614 KB\/s/);
+  assert.doesNotMatch(html, /Not reported by the API|Host metrics unavailable/);
+  assert.match(html, /class="ln live"/);
+});
+
+test("missing or unavailable resources render an honest empty state, not numbers", () => {
+  const doc = new Doc(HTML);
+  globalThis.document = doc;
+  const SH = load();
+  SH.render(releasePayload(), []);           // older backend: no `resources`
+  let html = doc.getElementById("sh-resources-body").innerHTML;
+  assert.match(html, /Host metrics unavailable/);
+  assert.doesNotMatch(html, /\d+%/);
+  const data = releasePayload();
+  data.metrics.resources = { available: false, cpu: null, memory: null, disk: null, network: null };
+  SH.render(data, []);
+  html = doc.getElementById("sh-resources-body").innerHTML;
+  assert.match(html, /Host metrics unavailable/);
+  assert.doesNotMatch(html, /class="ln live"/);
+});
+
+test("resource history is real, deduplicated by sample, and never exceeds 60 samples", () => {
+  const doc = new Doc(HTML);
+  globalThis.document = doc;
+  const SH = load();
+  const data = releasePayload();
+  data.metrics.resources = resPayload(1, 10, 100, 200);
+  SH.render(data, []);
+  SH.render(data, []);                       // same sample re-rendered (SSE batch) -> no duplicate point
+  assert.strictEqual(SH.state.resHist.cpu.length, 1);
+  for (let i = 2; i <= 150; i++) {
+    data.metrics.resources = resPayload(i, i % 100, i, i * 2);
+    SH.render(data, []);
+  }
+  for (const k of ["cpu", "ram", "disk", "up", "down"]) {
+    assert.ok(SH.state.resHist[k].length <= 60, k + " history exceeds 60");
+  }
+  assert.strictEqual(SH.state.resHist.cpu.length, 60);
+  assert.strictEqual(SH.state.resHist.cpu[59], 150 % 100);
+});
+
+test("the first sample is a minimal line (no fabricated history); nothing random is used", () => {
+  const doc = new Doc(HTML);
+  globalThis.document = doc;
+  const SH = load();
+  const data = releasePayload();
+  data.metrics.resources = resPayload(5, 20, null, null);   // first network sample has no rate yet
+  SH.render(data, []);
+  const html = doc.getElementById("sh-resources-body").innerHTML;
+  assert.strictEqual(SH.state.resHist.cpu.length, 1);
+  assert.strictEqual(SH.state.resHist.down, undefined);
+  assert.match(html, /d="M68,\d+\.\d L76,\d+\.\d"/);
+  assert.doesNotMatch(JS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, ""), /Math\.random/);
+});

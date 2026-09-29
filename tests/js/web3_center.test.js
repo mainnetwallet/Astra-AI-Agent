@@ -104,3 +104,56 @@ test("clicks reach their handlers even though the container has data-view", () =
   handlers.click({ target: mk({ "data-act": "tx_prepare" }, ["w3-btn"], container) });
   assert.match(prompts[1], /from 0x2222/);
 });
+
+// ---- target-layout redesign coverage -------------------------------------
+test("dashboard renders every target section for the overview", () => {
+  const h = W.html(W.buildModel(pol, txs, tools, NOW), S());
+  for (const t of ["Overview", "Wallets", "Assets", "Transactions", "DeFi", "NFTs", "Networks", "Agent Actions"])
+    assert.match(h, new RegExp(`data-view="[a-z]+"><i>[^<]*</i>${t}</button>`), "nav " + t);
+  for (const s of ["Total Portfolio Value", "My Wallets", "Add Wallet", "Active Wallet", "Recent Transactions", "Agent Web3 Actions", "Safety Policy"])
+    assert.ok(h.includes(s), s);
+  for (const r of ["1D", "1W", "1M", "3M", "1Y"]) assert.ok(h.includes(`data-range="${r}"`), r);
+  for (const l of ["Wallets", "Networks", "Tokens", "NFTs"]) assert.ok(h.includes(`<small>${l}</small>`), l);
+  assert.ok(!/\$\d/.test(h), "still no invented dollar values");
+});
+
+test("views hide non-matching sections instead of leaving blank space", () => {
+  const m = W.buildModel(pol, txs, tools, NOW);
+  const hid = (h, sec) => new RegExp(`data-sec="${sec}" hidden`).test(h);
+  assert.ok(!/data-sec="[^"]*" hidden/.test(W.html(m, S())), "overview shows everything");
+  const w = W.html(m, { ...S(), view: "wallets" });
+  assert.ok(hid(w, "overview") && !hid(w, "overview wallets"));
+  const n = W.html(m, { ...S(), view: "nfts" });
+  assert.match(n, /NFT holdings aren’t indexed/);
+  assert.match(W.html(m, { ...S(), view: "defi" }), /DeFi positions aren’t indexed/);
+});
+
+test("timeframe controls drive a real activity series", () => {
+  const list = [{ created_at: "2026-09-29 11:30:00" }, { created_at: "2026-09-29 11:45:00" }, { created_at: "2026-09-20 08:00:00" }];
+  const day = W.seriesFor(list, "1D", NOW);
+  assert.strictEqual(day.length, 24); assert.strictEqual(day[23].count, 0); assert.strictEqual(day[22].count, 2);
+  assert.strictEqual(W.seriesFor(list, "1W", NOW).length, 7);
+  assert.strictEqual(W.seriesFor(list, "1M", NOW).length, 30);
+  assert.strictEqual(W.seriesFor(list, "1Y", NOW).length, 365);
+  assert.match(W.html(W.buildModel(pol, txs, tools, NOW), { ...S(), range: "1M" }), /class="w3-rng on" data-range="1M"/);
+});
+
+test("agent action grid: real tools enabled, unsupported ones disabled, capped outside the Agent tab", () => {
+  const m = W.buildModel(pol, txs, tools, NOW); // 2 registered tools
+  const over = W.html(m, S());
+  assert.match(over, /data-act="token_balance"/);
+  assert.match(over, /<button class="w3-action" disabled title="Not supported by the backend yet">/);
+  assert.strictEqual((over.match(/class="w3-action"/g) || []).length, 6);
+  assert.strictEqual((W.html(m, { ...S(), view: "agents" }).match(/class="w3-action"/g) || []).length, 6); // 2 real + 4 unsupported
+});
+
+test("assets tab/range clicks repaint without touching backend hooks", () => {
+  const { mk } = fakeDom();
+  const handlers = {}; const target = { addEventListener: (t, f) => (handlers[t] = f), querySelector: () => null, innerHTML: "" };
+  W.render(target, W.buildModel(pol, txs, tools, NOW), {});
+  const c = mk({ "data-view": "overview" }, ["w3"], null);
+  handlers.click({ target: mk({ "data-range": "3M" }, ["w3-rng"], c) });
+  assert.match(target.innerHTML, /class="w3-rng on" data-range="3M"/);
+  handlers.click({ target: mk({ "data-atab": "nfts" }, ["w3-pill"], c) });
+  assert.match(target.innerHTML, /NFT holdings aren’t indexed/);
+});

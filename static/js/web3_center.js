@@ -87,19 +87,46 @@
     };
   }
 
-  const btnOff = (label, why, cls) => `<button class="w3-btn ${cls || ""}" disabled title="${esc(why)}">${label}</button>`;
+  const btnOff = (label, why, cls, ic) => `<button class="w3-btn ${cls || ""}${ic ? ` ic-${ic}` : ""}" disabled title="${esc(why)}">${label}</button>`;
   const NOBE = "Not available: the backend has no wallet registry yet";
+  const NOSUP = "Not supported by the backend yet";
   const empty = (t) => `<div class="w3-empty">${t}</div>`;
+  const RANGES = { "1D": 1, "1W": 7, "1M": 30, "3M": 90, "1Y": 365 };
+  const AICON = { token_balance: "◎", chain_status: "◈", rpc_status: "⌁", tx_prepare: "↗", tx_status: "☰" };
+  const UNSUP = [["Swap Tokens", "Swap via DEX", "⇄"], ["Contract Interaction", "Interact with contracts", "▤"],
+    ["Bridge Assets", "Cross-chain bridge", "⛓"], ["Stake / DeFi", "Stake & earn", "✦"]];
+
+  function hourSeries(list, now) {
+    const n = now || new Date(), out = [];
+    for (let i = 23; i >= 0; i--) {
+      const d = new Date(n.getFullYear(), n.getMonth(), n.getDate(), n.getHours() - i);
+      out.push({ day: ymd(d) + " " + String(d.getHours()).padStart(2, "0"), count: 0 });
+    }
+    const idx = Object.fromEntries(out.map((p, i) => [p.day, i]));
+    (list || []).forEach((t) => { const k = String(t.created_at || "").replace("T", " ").slice(0, 13); if (k in idx) out[idx[k]].count++; });
+    return out;
+  }
+  const seriesFor = (list, range, now) => (range === "1D" ? hourSeries(list, now) : activitySeries(list, RANGES[range] || 7, now));
+
+  const chainDots = (m, max) => {
+    const cs = m.chains.slice(0, max || 3);
+    return cs.map((c) => `<i class="w3-chain sm" title="${esc(c.name)}">${esc(c.name.charAt(0))}</i>`).join("") +
+      (m.chains.length > cs.length ? `<em class="w3-more">+${m.chains.length - cs.length}</em>` : "");
+  };
 
   function walletsHtml(m, S) {
     const q = S.q.trim().toLowerCase();
     const ws = m.wallets.filter((w) => !q || w.address.toLowerCase().includes(q));
     if (!m.wallets.length) return empty("No wallets are registered with the transaction policy. Wallet import and creation aren’t available in this build — the backend has no wallet registry endpoint.");
     if (!ws.length) return empty("No wallets match your search.");
-    return ws.map((w) => `<button class="w3-wallet${w.address === S.sel ? " sel" : ""}" data-wsel="${esc(w.address)}" title="${esc(w.address)}">
-      <span class="w3-av">${esc(w.address.slice(2, 4).toUpperCase())}</span>
-      <span class="w3-wname">${esc(short(w.address))}<small>Allowlisted wallet</small></span>
-      <span class="w3-wval">—<small>balance not indexed</small></span></button>`).join("");
+    const on = S.sel || (m.wallets[0] && m.wallets[0].address);
+    return ws.map((w) => `<button class="w3-wallet${w.address === on ? " sel" : ""}" data-wsel="${esc(w.address)}" title="${esc(w.address)}">
+      <span class="w3-wtop"><span class="w3-av">${esc(w.address.slice(2, 4).toUpperCase())}</span>
+      <span class="w3-wname">${esc(short(w.address))}<small>Allowlisted wallet</small></span>${w.address === on ? `<i class="w3-dot" title="Active"></i>` : ""}</span>
+      <span class="w3-wval">—<small>balance not indexed</small></span>
+      <span class="w3-spark" aria-hidden="true"></span>
+      <span class="w3-wchains">${chainDots(m, 3)}</span></button>`).join("") +
+      `<button class="w3-btn w3-addw" disabled title="${esc(NOBE)}"><b>+</b>Add Wallet</button>`;
   }
 
   function html(m, S) {
@@ -108,54 +135,72 @@
     const ctx = { address: sel && sel.address, network: net && net.name };
     const txs = m.txs.filter((t) => S.net === "all" || String(t.chainId) === S.net);
     const shown = S.all ? txs : txs.slice(0, 6);
-    const chart = chartPaths(m.activity, 600, 110), active = m.activity.some((p) => p.count);
+    const range = RANGES[S.range] ? S.range : "1W";
+    const series = seriesFor(m.txs.map((t) => ({ created_at: t.at })), range, m.now);
+    const chart = chartPaths(series, 600, 120), active = series.some((p) => p.count);
+    const atab = S.view === "nfts" || S.view === "defi" ? S.view : S.atab || "tokens";
+    const chainsShown = m.chains.filter((c) => S.net === "all" || String(c.id) === S.net);
     const netOpts = `<option value="all">All networks</option>` + m.chains.map((c) => `<option value="${c.id}"${String(c.id) === S.net ? " selected" : ""}>${esc(c.name)}</option>`).join("");
-    const tabs = [["overview", "Overview"], ["wallets", "Wallets"], ["assets", "Assets"], ["transactions", "Transactions"], ["networks", "Networks"], ["agents", "Agent Actions"]];
+    const tabs = [["overview", "Overview"], ["wallets", "Wallets"], ["assets", "Assets"], ["transactions", "Transactions"], ["defi", "DeFi"], ["nfts", "NFTs"], ["networks", "Networks"], ["agents", "Agent Actions"]];
+    const TI = { overview: "◧", wallets: "▣", assets: "⇅", transactions: "☷", defi: "◎", nfts: "◍", networks: "⛓", agents: "☺" };
     const p = m.policy;
-    return `<div class="w3" data-view="${esc(S.view)}">
-<div class="w3-head"><div><h2>⛓️ Web3 Center</h2><p>Manage wallets, assets, networks and Web3 agent actions</p></div>
-<div class="w3-acts">${btnOff("Import Wallet", NOBE, "primary")}${btnOff("Create Wallet", NOBE)}${btnOff("Manage Groups", NOBE)}</div></div>
-<nav class="w3-tabs">${tabs.map((t) => `<button class="w3-tab${S.view === t[0] ? " on" : ""}" data-view="${t[0]}">${t[1]}</button>`).join("")}</nav>
-<div class="w3-grid"><div class="w3-main">
-<section class="w3-card w3-portfolio" data-sec="overview"><div class="w3-pf-l"><h3>Total Portfolio Value</h3><div class="w3-big">—</div>
-<p class="w3-note">Balances unavailable — no wallet registry is connected to the backend yet.</p>
-<div class="w3-chart-h">Transaction activity · last 14 days</div>
-<svg viewBox="0 0 600 110" preserveAspectRatio="none" class="w3-chart" role="img" aria-label="Transactions per day"><defs><linearGradient id="w3g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c5cff" stop-opacity=".45"/><stop offset="1" stop-color="#7c5cff" stop-opacity="0"/></linearGradient></defs>
+    const vis = (s) => S.view === "overview" || s.split(" ").includes(S.view);
+    const sec = (s) => `data-sec="${s}"${vis(s) ? "" : " hidden"}`;
+    const twoHidden = !vis("assets defi nfts") && !vis("transactions");
+    const assetsBody = atab === "nfts" || atab === "defi"
+      ? empty(`${atab === "nfts" ? "NFT holdings" : "DeFi positions"} aren’t indexed by the backend yet.`)
+      : (chainsShown.length ? chainsShown.map((c) => `<div class="w3-trow"><span class="w3-tk"><i class="w3-chain sm">${esc(c.name.charAt(0))}</i><b>${esc(c.name)}</b><small>${esc(c.symbol)}</small></span><span>—</span><span>—</span><span>—</span><span>—</span></div>`).join("") : "") +
+        empty(`Token balances, prices and NFT/DeFi positions aren’t indexed by the backend yet.${m.actions.includes("token_balance") ? `<br><button class="w3-btn" data-act="token_balance">Ask the agent for a balance</button>` : ""}`);
+    const actCards = m.actions.map((k) => `<button class="w3-action" data-act="${k}"><i class="w3-aic">${AICON[k] || "•"}</i><span><b>${esc(ACTIONS[k][0])}</b><small>${esc(ACTIONS[k][1])}</small></span></button>`).join("") +
+      (m.actions.length ? UNSUP.slice(0, S.view === "agents" ? 4 : Math.max(0, 6 - m.actions.length)).map((u) => `<button class="w3-action" disabled title="${esc(NOSUP)}"><i class="w3-aic">${u[2]}</i><span><b>${esc(u[0])}</b><small>${esc(u[1])}</small></span></button>`).join("") : "");
+    return `<div class="w3" data-view="${esc(S.view)}"><div class="w3-main">
+<div class="w3-head"><span class="w3-logo">⛓️</span><div class="w3-ht"><h2>Web3 Center</h2><p>Manage wallets, assets, networks and Web3 agent actions</p></div>
+<div class="w3-acts">${btnOff("Import Wallet", NOBE, "primary", "imp")}${btnOff("Create Wallet", NOBE, "", "cre")}${btnOff("Manage Groups", NOBE, "", "grp")}</div></div>
+<nav class="w3-tabs">${tabs.map((t) => `<button class="w3-tab${S.view === t[0] ? " on" : ""}" data-view="${t[0]}"><i>${TI[t[0]]}</i>${t[1]}</button>`).join("")}</nav>
+<section class="w3-card w3-portfolio" ${sec("overview")}><div class="w3-pf-l"><div class="w3-pf-top"><h3>Total Portfolio Value <i class="w3-eye">◉</i></h3>
+<div class="w3-ranges" role="group" aria-label="Chart range">${Object.keys(RANGES).map((r) => `<button class="w3-rng${r === range ? " on" : ""}" data-range="${r}">${r}</button>`).join("")}</div></div>
+<div class="w3-big">—</div>
+<p class="w3-delta">Balances unavailable · ${m.total} transaction${m.total === 1 ? "" : "s"} · ${m.awaiting} awaiting approval${active ? "" : " · no activity in this period"}</p>
+<svg viewBox="0 0 600 120" preserveAspectRatio="none" class="w3-chart" role="img" aria-label="Transactions over time"><defs><linearGradient id="w3g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c5cff" stop-opacity=".5"/><stop offset="1" stop-color="#7c5cff" stop-opacity="0"/></linearGradient></defs>
+<path d="M0 30H600M0 60H600M0 90H600" stroke="rgba(110,130,220,.12)" stroke-width="1" vector-effect="non-scaling-stroke" fill="none"/>
 <path d="${chart.area}" fill="url(#w3g)"/><path d="${chart.line}" fill="none" stroke="#8b7bff" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
-${active ? "" : `<p class="w3-note">No transactions in this period.</p>`}</div>
-<div class="w3-stats">${[["Networks", m.chains.length], ["Allowed wallets", m.wallets.length], ["Transactions", m.total], ["Awaiting approval", m.awaiting]].map((s) => `<div class="w3-stat"><small>${s[0]}</small><b>${s[1]}</b></div>`).join("")}</div></section>
-<section class="w3-card" data-sec="overview wallets"><div class="w3-row"><h3>Wallets <span class="w3-dim">(${m.wallets.length})</span></h3>
-<div class="w3-tools"><input data-q class="w3-in" placeholder="Search wallets…" value="${esc(S.q)}" aria-label="Search wallets">
+</div>
+<div class="w3-stats">${[["Wallets", m.wallets.length, "▣"], ["Networks", m.chains.length, "◍"], ["Tokens", "—", "◎"], ["NFTs", "—", "▨"]].map((s) => `<div class="w3-stat"${s[1] === "—" ? ` title="Not indexed by the backend yet"` : ""}><i>${s[2]}</i><span><small>${s[0]}</small><b>${s[1]}</b></span></div>`).join("")}</div></section>
+<section class="w3-card" ${sec("overview wallets")}><div class="w3-row"><h3>My Wallets <span class="w3-dim">(${m.wallets.length})</span></h3>
+<div class="w3-tools"><input data-q class="w3-in w3-search" placeholder="Search wallets…" value="${esc(S.q)}" aria-label="Search wallets">
+<select class="w3-in" disabled title="${esc(NOBE)}" aria-label="Wallet group"><option>All Groups</option></select>
 <button class="w3-ico${S.layout === "grid" ? " on" : ""}" data-layout="grid" title="Grid">▦</button><button class="w3-ico${S.layout === "list" ? " on" : ""}" data-layout="list" title="List">☰</button>
-${btnOff("+ Add Wallet", NOBE, "primary")}</div></div>
+${btnOff("Import Wallet", NOBE, "primary", "plus")}</div></div>
 <div id="w3-wallets" class="w3-wallets ${S.layout}">${walletsHtml(m, S)}</div></section>
-<div class="w3-two"><section class="w3-card" data-sec="overview assets"><div class="w3-row"><h3>Assets</h3><div class="w3-tools"><span class="w3-pill on">Tokens</span><select class="w3-in" data-net aria-label="Network filter">${netOpts}</select></div></div>
-<div class="w3-thead"><span>Token</span><span>Balance</span><span>Price</span><span>Value</span><span>24h</span></div>
-${empty(`Token balances, prices and NFT/DeFi positions aren’t indexed by the backend yet.${m.actions.includes("token_balance") ? `<br><button class="w3-btn" data-act="token_balance">Ask the agent for a balance</button>` : ""}`)}</section>
-<section class="w3-card" data-sec="overview transactions"><div class="w3-row"><h3>Recent Transactions</h3>${txs.length > 6 ? `<button class="w3-btn" data-all>${S.all ? "Show less" : "View All"}</button>` : ""}</div>
-<div id="web3-txs" class="w3-txs">${shown.map((t) => `<div class="w3-tx" title="${esc(t.error || t.id)}"><span class="w3-chain">${esc(t.network.charAt(0))}</span>
+<div class="w3-two"${twoHidden ? " hidden" : ""}><section class="w3-card" ${sec("overview assets defi nfts")}><div class="w3-row"><h3>Assets</h3><div class="w3-tools"><div class="w3-pills">${[["tokens", "Tokens"], ["nfts", "NFTs"], ["defi", "DeFi"], ["all", "All"]].map((t) => `<button class="w3-pill${atab === t[0] ? " on" : ""}" data-atab="${t[0]}">${t[1]}</button>`).join("")}</div><select class="w3-in" data-net aria-label="Network filter">${netOpts}</select></div></div>
+<div class="w3-thead"><span>Token</span><span>Balance</span><span>Price</span><span>Value</span><span>24h</span></div><div class="w3-abody">${assetsBody}</div></section>
+<section class="w3-card" ${sec("overview transactions")}><div class="w3-row"><h3>Recent Transactions</h3>${txs.length > 6 ? `<button class="w3-btn" data-all>${S.all ? "Show less" : "View All"}</button>` : ""}</div>
+<div id="web3-txs" class="w3-txs">${shown.map((t) => `<div class="w3-tx" title="${esc(t.error || t.id)}"><span class="w3-chain">↗</span>
 <span class="w3-tm">To ${esc(short(t.to))}<small>${esc(t.network)} · ${esc(ago(t.at, m.now))}</small></span>
-<span class="w3-ta">−${esc(t.amount)} ${esc(t.symbol)}<em class="w3-st ${TONE[t.status] || "warn"}">${esc(t.status)}</em></span></div>`).join("") || empty("No transactions yet.")}</div></section></div></div>
+<span class="w3-ta">−${esc(t.amount)} ${esc(t.symbol)}<em class="w3-st ${TONE[t.status] || "warn"}">${esc(t.status)}</em></span></div>`).join("") || empty("No transactions yet.")}</div></section></div>
+</div>
 <aside class="w3-side">
-<section class="w3-card" data-sec="overview wallets assets"><h3>Active Wallet</h3>${sel ? `<div class="w3-active"><span class="w3-av lg">${esc(sel.address.slice(2, 4).toUpperCase())}</span>
-<div><b title="${esc(sel.address)}">${esc(short(sel.address))}</b> <button class="w3-ico" data-copy="${esc(sel.address)}" title="Copy address">⧉</button><small>Allowlisted wallet · value not indexed</small></div></div>` : empty("No wallet selected.")}
-<div class="w3-qa">${m.actions.includes("tx_prepare") && sel ? `<button class="w3-btn" data-act="tx_prepare">Send</button>` : btnOff("Send", "Requires a wallet and the tx_prepare tool")}
-${sel ? `<button class="w3-btn" data-copy="${esc(sel.address)}">Receive</button>` : btnOff("Receive", "No wallet selected")}
-${m.actions.includes("token_balance") && sel ? `<button class="w3-btn" data-act="token_balance">Balance</button>` : btnOff("Balance", "Requires a wallet and the token_balance tool")}
-${["Swap", "Bridge", "Buy", "Sell", "Stake"].map((a) => btnOff(a, "Not supported by the backend yet")).join("")}</div></section>
-<section class="w3-card" data-sec="overview networks"><h3>Networks</h3>${m.chains.map((c) => `<button class="w3-net${String(c.id) === S.net ? " sel" : ""}" data-netpick="${c.id}"><span class="w3-chain">${esc(c.name.charAt(0))}</span><span>${esc(c.name)}<small>${esc(c.symbol)} · chain ${c.id}</small></span><em class="w3-st good">Allowed</em></button>`).join("") || empty("No networks reported by the policy.")}</section>
-<section class="w3-card" data-sec="overview agents"><h3>Agent Web3 Actions</h3><p class="w3-note">Opens Chat with a prepared prompt. Nothing runs until you send it; transfers stay gated by the transaction policy.</p>
-<div class="w3-actions">${m.actions.map((k) => `<button class="w3-action" data-act="${k}"><b>${esc(ACTIONS[k][0])}</b><small>${esc(ACTIONS[k][1])}</small></button>`).join("") || empty("No Web3 tools are registered.")}</div></section>
-<section class="w3-card" data-sec="overview agents transactions"><h3>Safety Policy</h3>
-<div id="web3-policy" class="table">${m.available ? `<div class="row"><b>Mode</b><span>${esc(m.mode)} (CONFIRM = review, AUTO = policy-approved)</span></div>
-<div class="row"><b>Status</b><span>${m.stopped ? "🚨 EMERGENCY STOP" : "running"}</span></div>
-<div class="row"><b>Max per tx</b><span>${esc(limit(p.tx_limit_wei))}</span></div><div class="row"><b>Max daily</b><span>${esc(limit(p.daily_limit_wei))}</span></div>
-<div class="row"><b>Allowlist</b><span>${(p.recipients_allowed || []).length} recipients · ${(p.contracts_allowed || []).length} contracts · ${(p.wallets_allowed || []).length} wallets</span></div>` : `<span class="muted">Web3 unavailable</span>`}</div></section>
-</aside></div><div id="w3-toast" class="w3-toast" role="status"></div></div>`;
+<section class="w3-card" ${sec("overview wallets assets defi nfts")}><h3><i class="w3-h3i">◈</i>Active Wallet</h3>${sel ? `<div class="w3-active"><span class="w3-av lg">${esc(sel.address.slice(2, 4).toUpperCase())}</span>
+<div class="w3-aw"><small>Allowlisted wallet</small><b title="${esc(sel.address)}">${esc(short(sel.address))}</b> <button class="w3-ico flat" data-copy="${esc(sel.address)}" title="Copy address">⧉</button>
+<div class="w3-wval">—<small>balance not indexed</small></div><div class="w3-wchains">${chainDots(m, 4)}</div></div></div>` : empty("No wallet selected.")}
+<div class="w3-qa">${m.actions.includes("tx_prepare") && sel ? `<button class="w3-btn ic-send" data-act="tx_prepare">Send</button>` : btnOff("Send", "Requires a wallet and the tx_prepare tool", "", "send")}
+${sel ? `<button class="w3-btn ic-recv" data-copy="${esc(sel.address)}">Receive</button>` : btnOff("Receive", "No wallet selected", "", "recv")}
+${[["Swap", "swap"], ["Bridge", "brg"]].map((a) => btnOff(a[0], NOSUP, "", a[1])).join("")}
+${[["Buy", "buy"], ["Sell", "sell"], ["Stake", "stk"]].map((a) => btnOff(a[0], NOSUP, "", a[1])).join("")}
+${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" data-act="token_balance">Balance</button>` : btnOff("Balance", "Requires a wallet and the token_balance tool", "", "bal")}</div>
+<select class="w3-in w3-netsel" data-net aria-label="Network">${netOpts}</select></section>
+<section class="w3-card" ${sec("overview agents")}><h3><i class="w3-h3i">☺</i>Agent Web3 Actions</h3><p class="w3-note">Prefills Chat — nothing runs until you send it. Transfers stay policy-gated.</p>
+<div class="w3-actions">${actCards || empty("No Web3 tools are registered.")}</div></section>
+<section class="w3-card" ${sec("overview networks")}><h3><i class="w3-h3i">⛓</i>Networks</h3><div class="w3-nets">${m.chains.map((c) => `<button class="w3-net${String(c.id) === S.net ? " sel" : ""}" data-netpick="${c.id}" title="Chain ${c.id}"><span class="w3-chain sm">${esc(c.name.charAt(0))}</span><span>${esc(c.name)}<small>${esc(c.symbol)} · chain ${c.id}</small></span><em class="w3-st good">Allowed</em></button>`).join("") || empty("No networks reported by the policy.")}</div></section>
+<section class="w3-card" ${sec("overview agents transactions")}><h3><i class="w3-h3i">🛡</i>Safety Policy</h3>
+<div id="web3-policy" class="w3-kv">${m.available ? `<span>Mode</span><b>${esc(m.mode)}</b><span>Status</span><b>${m.stopped ? "🚨 EMERGENCY STOP" : "running"}</b>
+<span>Max per tx</span><b>${esc(limit(p.tx_limit_wei))}</b><span>Max daily</span><b>${esc(limit(p.daily_limit_wei))}</b>
+<span>Allowlist</span><b>${(p.recipients_allowed || []).length} recipient(s) · ${(p.contracts_allowed || []).length} contracts · ${(p.wallets_allowed || []).length} wallets</b>` : `<span class="muted">Web3 unavailable</span>`}</div></section>
+</aside><div id="w3-toast" class="w3-toast" role="status"></div></div>`;
   }
 
   // ---- DOM binding (browser only) -----------------------------------------
-  const S = { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false };
+  const S = { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false, range: "1W", atab: "tokens" };
   let M = null, hooks = {}, el = null;
   const toast = (t) => { const n = el && el.querySelector("#w3-toast"); if (!n) return; n.textContent = t; n.classList.add("on"); setTimeout(() => n.classList.remove("on"), 2000); };
   function paint() { if (el && M) el.innerHTML = html(M, S); }
@@ -171,6 +216,8 @@ ${["Swap", "Bridge", "Buy", "Sell", "Stake"].map((a) => btnOff(a, "Not supported
         if ((x = g("[data-wsel]"))) { S.sel = x.dataset.wsel; return paint(); }
         if ((x = g("[data-layout]"))) { S.layout = x.dataset.layout; return paint(); }
         if ((x = g("[data-netpick]"))) { S.net = S.net === x.dataset.netpick ? "all" : x.dataset.netpick; return paint(); }
+        if ((x = g("[data-range]"))) { S.range = x.dataset.range; return paint(); }
+        if ((x = g("[data-atab]"))) { S.atab = x.dataset.atab; if (S.view === "nfts" || S.view === "defi") S.view = "assets"; return paint(); }
         if (g("[data-all]")) { S.all = !S.all; return paint(); }
         if ((x = g("[data-copy]"))) {
           const a = x.dataset.copy;
@@ -192,7 +239,7 @@ ${["Swap", "Bridge", "Buy", "Sell", "Stake"].map((a) => btnOff(a, "Not supported
     paint();
   }
 
-  const api = { buildModel, html, walletsHtml, activitySeries, chartPaths, nativeAmt, short, render, ACTIONS };
+  const api = { buildModel, html, walletsHtml, activitySeries, hourSeries, seriesFor, chartPaths, nativeAmt, short, render, ACTIONS };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.Web3Center = api;
 })(typeof window !== "undefined" ? window : globalThis);

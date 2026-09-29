@@ -38,17 +38,19 @@
   };
 
   /* Presentation-only maps (no data invented — a group/category the backend
-   * does not return simply never appears). */
-  const GROUP_ICONS = {
-    Browser: "🌐", File: "📄", Memory: "🧠", Research: "🔎", System: "⚙️",
-    Tasks: "🗒️", Terminal: "💻", Wallet: "👛", Web3: "⛓️", Ai: "✨",
-    "Built-in": "🧰", Custom: "🧩",
+   * does not return simply never appears). The icon is a monochrome glyph
+   * from Astra's existing `--ic` convention (see tool_center.css), not emoji,
+   * so the page stays flat and premium. */
+  const GROUP_ICON_CLASS = {
+    Browser: "ic-browser", File: "ic-file", Memory: "ic-memory", Research: "ic-research",
+    System: "ic-system", Tasks: "ic-tasks", Terminal: "ic-terminal", Wallet: "ic-wallet",
+    Web3: "ic-web3", Ai: "ic-ai", "Built-in": "ic-builtin", Custom: "ic-custom",
   };
   const RISK_LABEL = {
     read: "Read", low_risk_write: "Low-risk write", browser_action: "Browser action",
     financial_action: "Financial", system_action: "System", admin: "Admin",
   };
-  const iconFor = (g) => GROUP_ICONS[g] || "🔧";
+  const iconFor = (g) => "tc-ic " + (GROUP_ICON_CLASS[g] || "ic-tool");
   const slug = (g) => String(g || "").toLowerCase().replace(/[^a-z]/g, "");
   const riskLabel = (r) => RISK_LABEL[r] || (r ? String(r).replace(/_/g, " ") : "Read");
   /** Some tools carry their own name as the description; don't echo it twice. */
@@ -125,10 +127,10 @@
   function flagChips(t) {
     const out = [`<span class="tc-risk r-${esc(t.risk)}" title="Risk level">${esc(riskLabel(t.risk))}</span>`];
     if (t.requiresConfirmation) {
-      out.push(`<span class="tc-tag t-confirm" title="Requires confirmation">🔒 Confirm</span>`);
+      out.push(`<span class="tc-tag t-confirm" title="Requires confirmation">Confirm</span>`);
     }
     if (t.agentForbidden) {
-      out.push(`<span class="tc-tag t-host" title="Not callable by the Agent (host-only)">⛔ Host-only</span>`);
+      out.push(`<span class="tc-tag t-host" title="Not callable by the Agent (host-only)">Host-only</span>`);
     }
     return out.join("");
   }
@@ -137,7 +139,7 @@
     const sel = t.name === TC.selected;
     return `<button class="tc-row${sel ? " sel" : ""}" type="button" role="listitem"` +
       ` data-tool="${esc(t.name)}" aria-pressed="${sel}">` +
-      `<span class="tc-tool"><span class="tc-ic" aria-hidden="true">${iconFor(t.group)}</span>` +
+      `<span class="tc-tool"><span class="${iconFor(t.group)}" aria-hidden="true"></span>` +
       `<span class="tc-name">${esc(t.name)}</span></span>` +
       `<span class="tc-desc" title="${esc(describe(t) || t.name)}">${esc(describe(t) || "—")}</span>` +
       `<span class="tc-tag t-${slug(t.group)}">${esc(t.group)}</span>` +
@@ -232,22 +234,22 @@
     const hasOutput = isObj(t.outputSchema) && Object.keys(t.outputSchema).length > 0;
 
     box.innerHTML = `<div class="tc-dhead">` +
-      `<span class="tc-ic" aria-hidden="true">${iconFor(t.group)}</span>` +
+      `<span class="${iconFor(t.group)}" aria-hidden="true"></span>` +
       `<div class="tc-dt"><div class="tc-dname">${esc(t.name)}</div>` +
       `<div class="tc-dsub">${esc(describe(t) || "No description provided.")}</div></div>` +
-      `<button class="tc-x" type="button" data-close aria-label="Close details">✕</button></div>` +
-      `<div class="tc-flags" style="margin-top:10px">${flagChips(t)}</div>` +
+      `<div class="tc-da">` +
+      `<button class="tc-icobtn" type="button" data-copyname="${esc(t.name)}"` +
+      ` title="Copy tool name" aria-label="Copy tool name">⧉</button>` +
+      `<button class="tc-icobtn tc-x" type="button" data-close aria-label="Close details">✕</button>` +
+      `</div></div>` +
+      `<div class="tc-flags">${flagChips(t)}</div>` +
       `<div class="tc-sec"><h4>Basic information</h4>${kvHtml(basic)}</div>` +
       (exec.length ? `<div class="tc-sec"><h4>Execution</h4>${kvHtml(exec)}</div>` : "") +
       (hasSchema
         ? codeSec("Input schema", t.schema)
         : `<div class="tc-sec"><h4>Input schema</h4><div class="tc-none">None declared.</div></div>`) +
       (hasOutput ? codeSec("Output schema", t.outputSchema) : "") +
-      (usage.length ? `<div class="tc-sec"><h4>Usage</h4>${kvHtml(usage)}</div>` : "") +
-      `<div class="tc-sec"><div class="tc-flags">` +
-      `<button class="tc-btn" type="button" data-copyname="${esc(t.name)}">⧉ Copy tool name</button>` +
-      (hasSchema ? `<button class="tc-btn" type="button" data-copyschema="${esc(t.name)}">⧉ Copy input schema</button>` : "") +
-      `</div></div>`;
+      (usage.length ? `<div class="tc-sec"><h4>Usage</h4>${kvHtml(usage)}</div>` : "");
   }
 
   function renderAll() { renderCats(); renderList(); renderDetail(); }
@@ -304,7 +306,7 @@
     btn.textContent = text;
     setTimeout(() => { btn.textContent = prev; }, 1200);
   }
-  async function copyText(text, btn) {
+  async function copyText(text, btn, okLabel, failLabel) {
     try {
       if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(text || "");
@@ -316,8 +318,8 @@
         if (document.execCommand) document.execCommand("copy");
         document.body.removeChild(ta);
       }
-      flash(btn, "Copied");
-    } catch (e) { flash(btn, "Copy failed"); }
+      flash(btn, okLabel || "Copied");
+    } catch (e) { flash(btn, failLabel || "Copy failed"); }
   }
 
   /* ----------------------------------- wiring ------------------------------- */
@@ -326,7 +328,7 @@
       <div class="tc-scrim" data-scrim></div>
       <div class="tc-col">
         <header class="tc-head">
-          <div class="tc-logo" aria-hidden="true">🔧</div>
+          <div class="tc-logo" aria-hidden="true"><img src="/static/img/logo_icon.png" alt=""></div>
           <div class="tc-ht">
             <h1 class="tc-title">Tool Center</h1>
             <p class="tc-sub">Explore and inspect Astra's available tools</p>
@@ -334,7 +336,7 @@
           <button class="tc-btn" id="tc-refresh" type="button">⟳ Refresh</button>
         </header>
         <div class="tc-search">
-          <span class="tc-si" aria-hidden="true">🔍</span>
+          <span class="tc-si" aria-hidden="true"></span>
           <input class="tc-q" id="tc-q" type="search" autocomplete="off"
                  placeholder="Search tools by name, description or category…"
                  aria-label="Search tools">
@@ -364,12 +366,7 @@
         return;
       }
       const cn = closest(e, "[data-copyname]");
-      if (cn) { copyText(cn.dataset.copyname, cn); return; }
-      const cs = closest(e, "[data-copyschema]");
-      if (cs) {
-        const t = TC.rows.find((x) => x.name === cs.dataset.copyschema);
-        copyText(t ? JSON.stringify(t.schema, null, 2) : "", cs);
-      }
+      if (cn) { copyText(cn.dataset.copyname, cn, "✓", "✕"); return; }
     });
     const q = byId("tc-q");
     if (q && q.addEventListener) q.addEventListener("input", () => { TC.query = q.value; renderList(); });

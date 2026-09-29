@@ -242,6 +242,66 @@
       ${X.err ? `<p class="w3-merr">${esc(X.err)}</p>` : ""}`;
   }
 
+  // ---- Astra Wallets: the dedicated management screen ---------------------
+  // Web3 Center -> [Astra Wallets] -> this screen. Two sections: standalone
+  // wallets and wallet groups (click a group to list its members, numbered at
+  // render time only). Delete asks for confirmation first. Everything shown is
+  // whitelisted public metadata from GET /api/v1/web3/wallets.
+  function confirmHtml(m, S) {
+    const c = S.confirm;
+    if (!c) return "";
+    let title, label, body, okLabel;
+    if (c.kind === "wallet") {
+      const w = m.wallets.find((x) => x.id === c.id);
+      if (!w) return "";
+      title = label = "Delete Wallet?";
+      body = `<p class="w3-note"><b>${esc(w.name || short(w.address))}</b> · ${esc(short(w.address))}<br>This removes the wallet from Astra, including its saved signing key${w.canSign ? "" : " (none: watch-only)"}. It also leaves every group it was in.</p>`;
+      okLabel = "Delete";
+    } else {
+      const g = m.groups.find((x) => x.id === c.id);
+      if (!g) return "";
+      title = `Delete "${esc(g.name)}"?`; label = `Delete "${g.name}"?`;
+      body = `<p class="w3-note">This will remove the group but keep its wallets.</p>`;
+      okLabel = "Delete Group";
+    }
+    return `<div class="w3-modal" data-cbg><div class="w3-mbox aw-confirm" role="dialog" aria-modal="true" aria-label="${esc(label)}">
+      <div class="w3-mhead"><h3>${title}</h3></div>${body}${c.err ? `<p class="w3-merr">${esc(c.err)}</p>` : ""}
+      <div class="w3-mfoot"><button class="w3-btn" data-cancel${c.busy ? " disabled" : ""}>Cancel</button>
+      <button class="w3-btn primary aw-danger" data-cok${c.busy ? " disabled" : ""}>${c.busy ? "Deleting…" : okLabel}</button></div></div></div>`;
+  }
+
+  function astraHtml(m, S, X) {
+    const st = S.ast || "ready", open = S.aopen || {};
+    const back = `<button class="w3-btn aw-back" data-astra-back aria-label="Back to Web3 Center">←</button>`;
+    const head = `<div class="w3-head aw-head">${back}<div class="w3-ht"><h2>Astra Wallets</h2><p>Wallets and wallet groups</p></div>
+      <div class="w3-acts">${actBtn(m, "Import Wallet", "import", "primary", "imp")}${actBtn(m, "Create Wallet", "create", "", "cre")}${actBtn(m, "Manage Groups", "groups", "", "grp")}</div></div>`;
+    let body;
+    if (st === "loading") body = `<section class="w3-card">${empty("Loading wallets...")}</section>`;
+    else if (st === "error") body = `<section class="w3-card">${empty(`Unable to load wallets.<br><button class="w3-btn" data-astra-retry>Retry</button>`)}</section>`;
+    else {
+      const inGroup = new Set(m.groups.map((g) => g.id));
+      const solo = m.wallets.filter((w) => !w.groupIds.some((id) => inGroup.has(id)));
+      const byId = new Map(m.wallets.map((w) => [w.id, w]));
+      const row = (w, num) => `<div class="aw-row${w.address === m.activeAddress ? " sel" : ""}">${num ? `<span class="w3-gnum">${num}.</span>` : ""}
+        <button class="aw-main" data-wsel="${esc(w.address)}" title="${esc(w.address)}"><b>${esc(w.name || short(w.address))}</b><small>${esc(short(w.address))}${w.canSign ? "" : " · Watch-only"}</small></button>
+        ${w.address === m.activeAddress ? `<i class="w3-dot" title="Active"></i>` : ""}
+        <button class="aw-del" data-awdel="${esc(w.id)}" title="Delete wallet" aria-label="Delete wallet ${esc(w.name || short(w.address))}">🗑</button></div>`;
+      const grp = (g) => {
+        const isOpen = !!open[g.id], members = g.walletIds.map((id) => byId.get(id)).filter(Boolean);
+        return `<div class="aw-group${isOpen ? " open" : ""}" data-agroup="${esc(g.id)}"><div class="aw-row aw-grow">
+          <button class="aw-main" data-agtoggle="${esc(g.id)}" aria-expanded="${isOpen}"><b>${esc(g.name)}</b><small>${plural(g.count, "wallet")}</small></button>
+          <i class="aw-chev" aria-hidden="true">${isOpen ? "▲" : "▼"}</i>
+          <button class="aw-del" data-agdel="${esc(g.id)}" title="Delete group" aria-label="Delete group ${esc(g.name)}">🗑</button></div>
+          ${isOpen ? `<div class="aw-gbody">${members.map((w, i) => row(w, i + 1)).join("") || empty("This group has no wallets.")}</div>` : ""}</div>`;
+      };
+      body = `<section class="w3-card"><h3>Wallets <span class="w3-dim">(${solo.length})</span></h3>
+        <div class="aw-list" data-awlist>${solo.map((w) => row(w)).join("") || empty(m.wallets.length ? "No standalone wallets." : "No wallets yet.")}</div></section>
+        <section class="w3-card"><h3>Groups <span class="w3-dim">(${m.groups.length})</span></h3>
+        <div class="aw-list" data-aglist>${m.groups.map(grp).join("") || empty("No wallet groups yet.")}</div></section>`;
+    }
+    return `<div class="w3 aw3" data-view="astra"><div class="w3-main">${head}${body}</div>${modalHtml(m, X)}${confirmHtml(m, S)}<div id="w3-toast" class="w3-toast" role="status"></div></div>`;
+  }
+
   function modalHtml(m, X) {
     if (!X || !X.kind || !m.registry) return "";
     const T = { import: ["Import Wallet", importBody], create: ["Create Wallet", createBody], groups: ["Astra Wallets", groupsBody] }[X.kind];
@@ -251,6 +311,7 @@
   }
 
   function html(m, S, X) {
+    if (S.screen === "astra" && m.registry) return astraHtml(m, S, X);
     const sel = m.wallets.find((w) => w.address === S.sel) || m.wallets.find((w) => w.address === m.activeAddress) || m.wallets[0] || null;
     const net = m.chains.find((c) => String(c.id) === S.net);
     const ctx = { address: sel && sel.address, network: net && net.name };
@@ -276,7 +337,7 @@
       (m.actions.length ? UNSUP.slice(0, S.view === "agents" ? 4 : Math.max(0, 6 - m.actions.length)).map((u) => `<button class="w3-action" disabled title="${esc(NOSUP)}"><i class="w3-aic">${u[2]}</i><span><b>${esc(u[0])}</b><small>${esc(u[1])}</small></span></button>`).join("") : "");
     return `<div class="w3" data-view="${esc(S.view)}"><div class="w3-main">
 <div class="w3-head"><span class="w3-logo">⛓️</span><div class="w3-ht"><h2>Web3 Center</h2><p>Manage wallets, assets, networks and Web3 agent actions</p></div>
-<div class="w3-acts">${actBtn(m, "Import Wallet", "import", "primary", "imp")}${actBtn(m, "Create Wallet", "create", "", "cre")}${actBtn(m, "Astra Wallets", "groups", "", "grp")}</div></div>
+<div class="w3-acts">${actBtn(m, "Import Wallet", "import", "primary", "imp")}${actBtn(m, "Create Wallet", "create", "", "cre")}${m.registry ? `<button class="w3-btn ic-grp" data-astra-open>Astra Wallets</button>` : btnOff("Astra Wallets", NOBE, "", "grp")}</div></div>
 <nav class="w3-tabs">${tabs.map((t) => `<button class="w3-tab${S.view === t[0] ? " on" : ""}" data-view="${t[0]}"><i>${TI[t[0]]}</i>${t[1]}</button>`).join("")}</nav>
 <section class="w3-card w3-portfolio" ${sec("overview")}><div class="w3-pf-l"><div class="w3-pf-top"><h3>Total Portfolio Value <i class="w3-eye">◉</i></h3>
 <div class="w3-ranges" role="group" aria-label="Chart range">${Object.keys(RANGES).map((r) => `<button class="w3-rng${r === range ? " on" : ""}" data-range="${r}">${r}</button>`).join("")}</div></div>
@@ -287,7 +348,7 @@
 <path d="${chart.area}" fill="url(#w3g)"/><path d="${chart.line}" fill="none" stroke="#8b7bff" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
 </div>
 <div class="w3-stats">${[["Wallets", m.wallets.length, "▣"], ["Networks", m.chains.length, "◍"], ["Tokens", "—", "◎"], ["NFTs", "—", "▨"]].map((s) => `<div class="w3-stat"${s[1] === "—" ? ` title="Not indexed by the backend yet"` : ""}><i>${s[2]}</i><span><small>${s[0]}</small><b>${s[1]}</b></span></div>`).join("")}</div></section>
-<section class="w3-card" ${sec("overview wallets")}><div class="w3-row"><h3>Astra Wallets <span class="w3-dim">(${m.wallets.length})</span></h3>
+<section class="w3-card" ${sec("overview wallets")}><div class="w3-row"><h3${m.registry ? ` class="w3-hlink" data-astra-open role="button" tabindex="0" title="Open Astra Wallets"` : ""}>Astra Wallets <span class="w3-dim">(${m.wallets.length})</span></h3>
 <div class="w3-tools"><input data-q class="w3-in w3-search" placeholder="Search wallets…" value="${esc(S.q)}" aria-label="Search wallets">
 ${groupSel(m, S)}
 <button class="w3-ico${S.layout === "grid" ? " on" : ""}" data-layout="grid" title="Grid">▦</button><button class="w3-ico${S.layout === "list" ? " on" : ""}" data-layout="list" title="List">☰</button>
@@ -321,7 +382,8 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
   }
 
   // ---- DOM binding (browser only) -----------------------------------------
-  const S = { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false, range: "1W", atab: "tokens", grp: "", open: {} };
+  const S = { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false, range: "1W", atab: "tokens", grp: "", open: {},
+    screen: "", ast: "ready", aopen: {}, confirm: null };
   let M = null, hooks = {}, el = null, MS = IDLE();
   const W = "/api/v1/web3/wallets", G = "/api/v1/web3/wallet-groups";
   const toast = (t) => { const n = el && el.querySelector("#w3-toast"); if (!n) return; n.textContent = t; n.classList.add("on"); setTimeout(() => n.classList.remove("on"), 2000); };
@@ -337,6 +399,7 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
     else if (!M.wallets.some((w) => w.address === S.sel)) S.sel = M.wallets[0] ? M.wallets[0].address : null;
     if (S.grp && !M.groups.some((g) => g.id === S.grp)) S.grp = "";
     Object.keys(S.open).forEach((id) => { if (!M.groups.some((g) => g.id === id)) delete S.open[id]; });   // keep the rest
+    Object.keys(S.aopen).forEach((id) => { if (!M.groups.some((g) => g.id === id)) delete S.aopen[id]; });
   }
   // The ONE reconciliation path: re-read the canonical registry, then apply it.
   // `fallback` (the snapshot the mutating call returned) is used only if the
@@ -344,7 +407,30 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
   async function refreshAstraWallets(fallback) {
     const r = await call("GET", W);
     if (r && r.ok && r.data) apply(r.data); else if (fallback) apply(fallback);
+    paint();   // rerender whichever Astra Wallets view is showing
     return !!(r && r.ok);
+  }
+  // Open / retry the dedicated screen: always re-reads the registry from the backend.
+  async function openAstra() {
+    S.screen = "astra"; S.ast = "loading"; S.confirm = null; paint();
+    const ok = await refreshAstraWallets();
+    S.ast = ok ? "ready" : "error"; paint();
+  }
+  // Confirmed delete of one wallet or one group. Separate operations: a wallet
+  // delete removes the wallet; a group delete removes only the group.
+  async function doConfirm() {
+    const c = S.confirm;
+    if (!c || c.busy) return;
+    c.busy = true; c.err = ""; paint();
+    let r;
+    try {
+      r = c.kind === "wallet" ? await call("DELETE", W + "/" + encodeURIComponent(c.id))
+        : await call("POST", G + "/" + encodeURIComponent(c.id) + "/delete", {});
+    } catch (e) { r = { ok: false, error: "Request failed" }; }
+    if (!r || !r.ok) { c.busy = false; c.err = fail(r); return paint(); }
+    S.confirm = null;
+    await refreshAstraWallets(r.data);
+    toast(c.kind === "wallet" ? "Wallet deleted" : "Group deleted");
   }
   function closeModal(force) {
     if (MS.secret && !MS.ack && !force) { toast("Confirm you have saved the private key first"); return; }
@@ -389,6 +475,12 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
   function onClick(e) {
     const g = (s) => e.target.closest(s);
     let x;
+    if (S.confirm) {   // a delete confirmation is open: only it reacts
+      if (g("[data-cok]")) return doConfirm();
+      if (g("[data-cancel]") || (e.target.matches && e.target.matches("[data-cbg]"))) { if (!S.confirm.busy) { S.confirm = null; paint(); } }
+      return;
+    }
+    if (g("[data-astra-open]")) return openAstra();
     if ((x = g("[data-modal]"))) { MS = IDLE(); MS.kind = x.dataset.modal; if (S.grp) MS.group = S.grp; return paint(); }
     if (g("[data-mclose]") || (e.target.matches && e.target.matches("[data-mbg]"))) return closeModal();
     if (g("[data-mvalidate]")) return doImport(true);
@@ -411,6 +503,11 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
     if ((x = g("[data-gadd]"))) return doGroup("POST", G + "/" + encodeURIComponent(gid()) + "/members", { add: [x.dataset.gadd] });
     if ((x = g("[data-gremove]"))) return doGroup("POST", G + "/" + encodeURIComponent(gid()) + "/members", { remove: [x.dataset.gremove] });
     if (MS.kind) return;   // a modal is open: nothing behind it reacts
+    if (g("[data-astra-back]")) { S.screen = ""; S.confirm = null; return paint(); }
+    if (g("[data-astra-retry]")) return openAstra();
+    if ((x = g("[data-agtoggle]"))) { const id = x.dataset.agtoggle; S.aopen[id] = !S.aopen[id]; return paint(); }
+    if ((x = g("[data-awdel]"))) { S.confirm = { kind: "wallet", id: x.dataset.awdel, busy: false, err: "" }; return paint(); }
+    if ((x = g("[data-agdel]"))) { S.confirm = { kind: "group", id: x.dataset.agdel, busy: false, err: "" }; return paint(); }
     if ((x = g("[data-gtoggle]"))) { const id = x.dataset.gtoggle; S.open[id] = !groupOpen(S, id); return paint(); }   // header only, never a wallet
     if ((x = g(".w3-tab[data-view]"))) { S.view = x.dataset.view; return paint(); } // NOT bare [data-view]: the container carries it too
     if ((x = g("[data-wsel]"))) return doSelect(x.dataset.wsel);
@@ -436,7 +533,11 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
     if (!el.__w3) {
       el.__w3 = true;
       el.addEventListener("click", onClick);
-      el.addEventListener("keydown", (e) => { if (e.key === "Escape" && MS.kind) closeModal(); });
+      el.addEventListener("keydown", (e) => {
+        if ((e.key === "Enter" || e.key === " ") && e.target.matches && e.target.matches("[data-astra-open]") && e.target.tagName === "H3") { if (e.preventDefault) e.preventDefault(); return openAstra(); }
+        if (e.key !== "Escape") return;
+        if (S.confirm) { if (!S.confirm.busy) { S.confirm = null; paint(); } } else if (MS.kind) closeModal();
+      });
       el.addEventListener("input", (e) => {
         const t = e.target;
         if (t.matches("[data-q]")) { S.q = t.value; const w = el.querySelector("#w3-wallets"); if (w) w.innerHTML = walletsHtml(M, S); return; }
@@ -469,11 +570,12 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
   // Test hook: forget all UI state (selection, filters, any open dialog and
   // its in-memory secrets). The page itself never needs this.
   function resetState() {
-    Object.assign(S, { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false, range: "1W", atab: "tokens", grp: "", open: {} });
+    Object.assign(S, { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false, range: "1W", atab: "tokens", grp: "", open: {},
+      screen: "", ast: "ready", aopen: {}, confirm: null });
     MS = IDLE();
   }
 
-  const api = { resetState, buildModel, mapRegistry, html, walletsHtml, modalHtml, activitySeries, hourSeries, seriesFor, chartPaths, nativeAmt, short, render, ACTIONS, IDLE, groupOpen, refreshAstraWallets };
+  const api = { resetState, buildModel, mapRegistry, html, walletsHtml, modalHtml, activitySeries, hourSeries, seriesFor, chartPaths, nativeAmt, short, render, ACTIONS, IDLE, groupOpen, refreshAstraWallets, astraHtml, confirmHtml };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.Web3Center = api;
 })(typeof window !== "undefined" ? window : globalThis);

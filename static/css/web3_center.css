@@ -209,3 +209,25 @@
   #tab-web3 .w3-qa { grid-template-columns: repeat(4, 1fr); } #tab-web3 .w3-search { min-width: 0; flex: 1; }
   #view:has(#tab-web3.active) { padding: 10px; }
 }
+
+/* ---- Astra Wallets: dedicated management screen (Web3 Center > Astra Wallets) ---- */
+#tab-web3 .w3.aw3 { grid-template-columns: minmax(0, 1fr); }
+#tab-web3 .aw3 .w3-main { width: min(760px, 100%); margin: 0 auto; }
+#tab-web3 .aw-head { flex-wrap: nowrap; }
+#tab-web3 .aw-head .w3-acts { flex-wrap: wrap; justify-content: flex-end; }
+#tab-web3 .aw-back { flex: none; padding: 6px 12px; font-size: 16px; }
+#tab-web3 h3.w3-hlink { cursor: pointer; width: fit-content; }
+#tab-web3 h3.w3-hlink:hover { color: var(--w3-acc2); }
+#tab-web3 .aw-list { display: flex; flex-direction: column; gap: 6px; }
+#tab-web3 .aw-group { display: flex; flex-direction: column; gap: 6px; }
+#tab-web3 .aw-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--w3-line); border-radius: 10px; background: rgba(8, 12, 26, .55); }
+#tab-web3 .aw-row.sel, #tab-web3 .aw-group.open > .aw-grow { border-color: rgba(124, 92, 255, .6); }
+#tab-web3 .aw-main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; background: none; border: 0; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+#tab-web3 .aw-main b { max-width: 100%; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tab-web3 .aw-chev { font-style: normal; font-size: 11px; color: var(--w3-dim); }
+#tab-web3 .aw-del { flex: none; background: none; border: 1px solid transparent; border-radius: 8px; padding: 4px 7px; color: var(--w3-dim); font-size: 14px; line-height: 1; cursor: pointer; }
+#tab-web3 .aw-del:hover { border-color: var(--w3-bad); color: var(--w3-bad); }
+#tab-web3 .aw-gbody { display: flex; flex-direction: column; gap: 6px; padding-left: 14px; }
+#tab-web3 .aw-confirm { width: min(420px, 100%); }
+#tab-web3 .w3-btn.primary.aw-danger { background: linear-gradient(90deg, #dc2626, #f87171); }
+@media (max-width: 560px) { #tab-web3 .aw-head { flex-wrap: wrap; } }

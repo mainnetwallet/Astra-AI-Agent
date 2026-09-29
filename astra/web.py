@@ -112,6 +112,8 @@ New /api/v1 endpoints:
                                                 group_name creates ONE group only if 2+ wallets import)
   POST /api/v1/web3/wallets/create            ({name?, group_id?}; one-time key reveal)
   POST /api/v1/web3/wallets/{id}/select | move
+  DELETE /api/v1/web3/wallets/{id}            (also POST .../{id}/delete; removes the wallet, its group
+                                                memberships and its encrypted key record; returns the registry)
   POST /api/v1/web3/wallet-groups             ({name});  /{gid}/rename | delete | members
   GET  /api/metrics              server + subsystem metrics
 """
@@ -2559,6 +2561,10 @@ class WebApp:
                     reg.move_wallet(path[3], body.get("from_group") or None,
                                     body.get("to_group") or "")
                     return ok(reg.describe())
+                if len(path) == 4 and method == "DELETE":
+                    return ok(reg.delete_wallet(path[3]))
+                if len(path) == 5 and method == "POST" and path[4] == "delete":
+                    return ok(reg.delete_wallet(path[3]))
             elif path[2] == "wallet-groups":
                 if len(path) == 3 and method == "POST":
                     return ok({"group": reg.create_group(body.get("name")),

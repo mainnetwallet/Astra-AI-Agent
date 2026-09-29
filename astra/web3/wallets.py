@@ -16,7 +16,7 @@ Group model
 -----------
 Many-to-many: a wallet may belong to any number of groups (or none). "Move"
 is an atomic remove-from-A + add-to-B. Deleting a group never deletes
-wallets. Group names are unique, case-insensitively.
+wallets; deleting a wallet removes it from every group and drops its key record. Group names are unique, case-insensitively.
 
 Security invariants (asserted in tests/test_web3_wallets.py)
 ------------------------------------------------------------
@@ -216,6 +216,50 @@ class WalletRegistry:
                 "SELECT id FROM web3_wallets ORDER BY rowid LIMIT 1")
             if first:
                 self.set_active(first["id"])
+
+    # ── delete ───────────────────────────────────────────────────────────
+    def delete_wallet(self, ref: str) -> dict:
+        """Permanently remove ONE wallet (by id or address).
+
+        In a single SQLite transaction this removes the wallet's group
+        memberships, its registry row and — when it has a signing
+        credential — its encrypted keystore record, so no orphaned key
+        material is left behind. Groups themselves are never deleted (an
+        emptied group simply stays, with a lower count) and no other wallet
+        is touched.
+
+        If the deleted wallet was the active one, NO other wallet is
+        promoted: signing tools refuse with "no active wallet selected"
+        until the operator picks one on purpose, rather than silently
+        defaulting funds-moving actions to a different wallet.
+
+        Returns the same safe snapshot as `describe()`; no secret is ever
+        read, returned or logged here."""
+        with self.store._lock:
+            row = self._row(ref)
+            if row is None:
+                raise WalletError("wallet not found")
+            wid, ks_name = row["id"], row["keystore_name"] or ""
+            conn = self.store._conn
+            try:
+                now = _now()
+                conn.execute(
+                    "UPDATE web3_wallet_groups SET updated_at=? WHERE id IN "
+                    "(SELECT group_id FROM web3_wallet_group_members "
+                    "WHERE wallet_id=?)", (now, wid))
+                conn.execute(
+                    "DELETE FROM web3_wallet_group_members WHERE wallet_id=?",
+                    (wid,))
+                conn.execute("DELETE FROM web3_wallets WHERE id=?", (wid,))
+                if ks_name and self.store.table_exists("web3_keys"):
+                    conn.execute("DELETE FROM web3_keys WHERE name=?",
+                                 (ks_name,))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                # never include exception text in the message
+                raise WalletError("could not delete wallet") from None
+            return self.describe()
 
     # ── import ───────────────────────────────────────────────────────────
     @staticmethod

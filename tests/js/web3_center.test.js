@@ -51,8 +51,11 @@ test("unsupported features are disabled, supported ones are enabled", () => {
   for (const l of ["Swap", "Bridge", "Buy", "Sell", "Stake"])
     assert.match(h, new RegExp(`<button class="w3-btn [^"]*" disabled title="[^"]*">${l}</button>`), l);
   // wallet import / create / groups are real now
-  for (const [l, k] of [["Import Wallet", "import"], ["Create Wallet", "create"], ["Astra Wallets", "groups"]])
+  for (const [l, k] of [["Import Wallet", "import"], ["Create Wallet", "create"]])
     assert.match(h, new RegExp(`<button class="w3-btn [^"]*" data-modal="${k}">${l}</button>`), l);
+  // "Astra Wallets" opens the dedicated management screen, not the groups dialog
+  assert.match(h, /<button class="w3-btn ic-grp" data-astra-open>Astra Wallets<\/button>/);
+  assert.doesNotMatch(h, /data-modal="groups">Astra Wallets/);
   assert.match(h, /data-act="tx_prepare">Send/);
   assert.match(h, /data-copy="0x1111[^"]*">Receive/);
 });
@@ -245,6 +248,14 @@ function harness(over = {}) {
       const w = state.wallets.find((x) => x.id === m[1]);
       w.group_ids = w.group_ids.filter((i) => i !== body.from_group).concat(body.to_group);
       state.groups.forEach((x) => { x.wallet_ids = state.wallets.filter((ww) => ww.group_ids.includes(x.id)).map((ww) => ww.id); x.count = x.wallet_ids.length; });
+      return { ok: true, data: snap() };
+    }
+    if (method === "DELETE" && (m = /\/wallets\/([^/]+)$/.exec(path))) {
+      const w = state.wallets.find((x) => x.id === m[1] || x.address === m[1]);
+      if (!w) return { ok: false, error: "wallet not found" };
+      state.wallets = state.wallets.filter((x) => x !== w);
+      if (state.active_id === w.id) { state.active_id = null; state.active_address = null; }
+      regroup();
       return { ok: true, data: snap() };
     }
     return { ok: false, error: "not found" };
@@ -598,4 +609,276 @@ test("secrets never render: only whitelisted public fields reach the Astra Walle
   const html = W.html(m, { ...S(), open: { g_x: true, g_y: true } });
   for (const bad of [KEY_A, KEY_B, KEY_C, "abandon ability", "ksecret-name", "private_key", "seed"]) assert.ok(!html.includes(bad), bad);
   assert.ok(!JSON.stringify(m).includes(KEY_A) && !JSON.stringify(m).includes(KEY_C));
+});
+
+// ============================================================================
+// Astra Wallets: the DEDICATED management screen (Web3 Center > Astra Wallets)
+// ============================================================================
+const awList = (h, which) => new RegExp(`data-${which}>(.*?)</div></section>`, "s").exec(h)[1];
+const awNames = (h, which) => [...awList(h, which).matchAll(/<b>([^<]*)<\/b>/g)].map((x) => x[1]);
+const openAstra = async (H) => H.click({ "data-astra-open": "" }, ["w3-btn"]);
+
+test("Astra Wallets click opens a dedicated screen (not an inline list, not the groups dialog)", async () => {
+  const H = harness({ wal: grouped() });
+  assert.match(H.target.innerHTML, /Total Portfolio Value/, "starts on the Web3 Center dashboard");
+  await openAstra(H);
+  const h = H.target.innerHTML;
+  assert.match(h, /data-view="astra"/);
+  assert.match(h, /<h2>Astra Wallets<\/h2>/);
+  assert.doesNotMatch(h, /Total Portfolio Value|Agent Web3 Actions|Safety Policy/, "dashboard is replaced, not extended");
+  assert.doesNotMatch(h, /role="dialog"/, "no dialog opened");
+  assert.match(h, /<h3>Wallets /); assert.match(h, /<h3>Groups /);
+  assert.ok(!/id="w3-wallets"/.test(h));
+});
+
+test("the inline Astra Wallets card heading also opens the screen, and Enter/Space work on it", async () => {
+  const H = harness({ wal: grouped() });
+  assert.match(H.target.innerHTML, /<h3 class="w3-hlink" data-astra-open role="button" tabindex="0"[^>]*>Astra Wallets /);
+  await H.click({ "data-astra-open": "" }, ["w3-hlink"]);
+  assert.match(H.target.innerHTML, /data-view="astra"/);
+});
+
+test("dedicated screen loads the wallet list and the group list from GET /wallets", async () => {
+  const H = harness({ wal: grouped() });
+  await openAstra(H);
+  assert.deepStrictEqual(H.gets, ["/api/v1/web3/wallets"]);
+  const h = H.target.innerHTML;
+  assert.deepStrictEqual(awNames(h, "awlist"), ["Main Wallet"], "only STANDALONE wallets are in the wallet list");
+  assert.match(awList(h, "awlist"), /0x1111…1111/);
+  assert.deepStrictEqual(awNames(h, "aglist"), ["Exchange Wallets", "Trading Wallets"]);
+  assert.match(awList(h, "aglist"), /<small>3 wallets<\/small>/);
+  assert.match(awList(h, "aglist"), /<small>1 wallet<\/small>/);
+  assert.match(h, /Wallets <span class="w3-dim">\(1\)/); assert.match(h, /Groups <span class="w3-dim">\(2\)/);
+  // every row has its own delete action
+  assert.equal((awList(h, "awlist").match(/data-awdel=/g) || []).length, 1);
+  assert.equal((awList(h, "aglist").match(/data-agdel=/g) || []).length, 2);
+});
+
+test("a single wallet is standalone with NO group; members of a group stay out of the wallet list", async () => {
+  const H = harness({ wal: { active_id: null, active_address: null, groups: [], wallets: [
+    { id: "w_1", address: ex(1), name: "Solo", source: "created", can_sign: true, active: false, group_ids: [] }] } });
+  await openAstra(H);
+  assert.deepStrictEqual(awNames(H.target.innerHTML, "awlist"), ["Solo"]);
+  assert.match(awList(H.target.innerHTML, "aglist"), /No wallet groups yet\./);
+});
+
+test("group click expands / collapses; members are numbered 1,2,3 at render time only", async () => {
+  const H = harness({ wal: grouped() });
+  await openAstra(H);
+  assert.ok(!H.target.innerHTML.includes(ex(2)), "collapsed: members hidden");
+  assert.match(H.target.innerHTML, /data-agtoggle="g_x" aria-expanded="false"/);
+  await H.click({ "data-agtoggle": "g_x" }, ["aw-main"]);
+  const h = H.target.innerHTML;
+  assert.match(h, /aria-expanded="true"/);
+  const nums = [...awList(h, "aglist").matchAll(/class="w3-gnum">(\d+)\.<\/span>\s*<button[^>]*><b>([^<]*)<\/b><small>([^<]*)<\/small>/g)].map((x) => x.slice(1));
+  assert.deepStrictEqual(nums, [["1", "Binance", "0x2222…2222"], ["2", "Coinbase", "0x3333…3333"], ["3", "Bybit", "0x4444…4444"]]);
+  assert.ok(!h.includes(ex(5)), "the other group stays closed");
+  assert.equal(H.calls.length, 0, "expanding is pure UI state");
+  await H.click({ "data-agtoggle": "g_x" }, ["aw-main"]);
+  assert.ok(!H.target.innerHTML.includes(ex(2)), "collapsed again");
+  assert.ok(!/serial|"number"/.test(JSON.stringify(H.state)), "the numbers are never stored");
+});
+
+test("an empty group says so", async () => {
+  const d = grouped(); d.groups.push({ id: "g_z", name: "Empty", wallet_ids: [], count: 0 });
+  const H = harness({ wal: d });
+  await openAstra(H);
+  await H.click({ "data-agtoggle": "g_z" }, ["aw-main"]);
+  assert.match(H.target.innerHTML, /This group has no wallets\./);
+});
+
+test("delete wallet: confirmation first; Cancel changes nothing; Delete calls DELETE and the row vanishes", async () => {
+  const H = harness({ wal: grouped() });
+  await openAstra(H);
+  await H.click({ "data-awdel": "w_1" }, ["aw-del"]);
+  assert.match(H.target.innerHTML, /<h3>Delete Wallet\?<\/h3>/);
+  assert.match(H.target.innerHTML, /data-cancel[^>]*>Cancel<\/button>/); assert.match(H.target.innerHTML, /data-cok[^>]*>Delete<\/button>/);
+  assert.equal(H.calls.length, 0, "nothing is deleted before confirmation");
+  await H.click({ "data-cancel": "" }, ["w3-btn"]);
+  assert.doesNotMatch(H.target.innerHTML, /Delete Wallet\?/);
+  assert.equal(H.calls.length, 0); assert.equal(H.state.wallets.length, 5);
+  await H.click({ "data-awdel": "w_1" }, ["aw-del"]);
+  const gets = H.gets.length;
+  await H.click({ "data-cok": "" }, ["w3-btn"]);
+  assert.deepStrictEqual(H.calls.map((c) => [c.method, c.path]), [["DELETE", "/api/v1/web3/wallets/w_1"]]);
+  assert.equal(H.gets.length, gets + 1, "refreshAstraWallets() re-read the registry");
+  assert.doesNotMatch(H.target.innerHTML, /Main Wallet/);
+  assert.doesNotMatch(H.target.innerHTML, /Delete Wallet\?/, "dialog closed");
+  assert.match(awList(H.target.innerHTML, "awlist"), /No standalone wallets\./, "the grouped wallets are untouched");
+  assert.equal(H.state.wallets.length, 4);
+});
+
+test("delete a wallet inside a group: only that wallet goes; the group and its other members stay, renumbered", async () => {
+  const H = harness({ wal: grouped() });
+  await openAstra(H);
+  await H.click({ "data-agtoggle": "g_x" }, ["aw-main"]);
+  await H.click({ "data-awdel": "w_2" }, ["aw-del"]);
+  await H.click({ "data-cok": "" }, ["w3-btn"]);
+  const h = H.target.innerHTML;
+  assert.ok(!h.includes(ex(2)));
+  assert.match(h, /aria-expanded="true"/, "the group stayed open across the refresh");
+  const names = [...awList(h, "aglist").matchAll(/class="w3-gnum">(\d+)\.<\/span>\s*<button[^>]*><b>([^<]*)/g)].map((x) => x.slice(1));
+  assert.deepStrictEqual(names, [["1", "Coinbase"], ["2", "Bybit"]], "numbering restarts from render order");
+  assert.match(h, /<small>2 wallets<\/small>/);
+  assert.deepStrictEqual(H.state.wallets.map((w) => w.id), ["w_1", "w_3", "w_4", "w_5"], "no unrelated wallet deleted");
+  assert.ok(H.state.groups.every((g) => !g.wallet_ids.includes("w_2")), "memberships removed");
+});
+
+test("delete group: asks with the exact wording, removes ONLY the group, wallets remain and become standalone", async () => {
+  const H = harness({ wal: grouped() });
+  await openAstra(H);
+  await H.click({ "data-agdel": "g_x" }, ["aw-del"]);
+  assert.match(H.target.innerHTML, /<h3>Delete "Exchange Wallets"\?<\/h3>/);
+  assert.match(H.target.innerHTML, /This will remove the group but keep its wallets\./);
+  assert.match(H.target.innerHTML, /data-cok[^>]*>Delete Group<\/button>/);
+  assert.equal(H.calls.length, 0);
+  await H.click({ "data-cok": "" }, ["w3-btn"]);
+  assert.deepStrictEqual(H.calls.map((c) => [c.method, c.path]), [["POST", "/api/v1/web3/wallet-groups/g_x/delete"]]);
+  const h = H.target.innerHTML;
+  assert.deepStrictEqual(awNames(h, "aglist"), ["Trading Wallets"], "the group disappeared immediately");
+  assert.deepStrictEqual(awNames(h, "awlist"), ["Main Wallet", "Binance", "Coinbase", "Bybit"], "its wallets are now standalone wallets");
+  assert.equal(H.state.wallets.length, 5, "no wallet was deleted");
+  assert.ok(!H.calls.some((c) => c.method === "DELETE"), "a group delete never issues a wallet delete");
+});
+
+test("delete failure keeps the dialog open with the error; Escape and backdrop cancel", async () => {
+  let fail = true;
+  const H = harness({ backend: async (method, path) => {
+    if (method === "GET") return { ok: true, data: grouped() };
+    return fail ? { ok: false, error: "wallet not found" } : { ok: true, data: grouped() };
+  } });
+  await openAstra(H);
+  await H.click({ "data-awdel": "w_1" }, ["aw-del"]);
+  await H.click({ "data-cok": "" }, ["w3-btn"]);
+  assert.match(H.target.innerHTML, /Delete Wallet\?/); assert.match(H.target.innerHTML, /w3-merr">wallet not found/);
+  assert.match(H.target.innerHTML, /Main Wallet/, "nothing disappeared on failure");
+  H.handlers.keydown({ key: "Escape", target: H.mk({}, [], H.root) });
+  assert.doesNotMatch(H.target.innerHTML, /Delete Wallet\?/);
+  await H.click({ "data-agdel": "g_y" }, ["aw-del"]);
+  await H.click({ "data-cbg": "" }, ["w3-modal"]);   // backdrop click
+  assert.doesNotMatch(H.target.innerHTML, /Delete "Trading Wallets"/);
+});
+
+test("nothing behind an open delete confirmation reacts", async () => {
+  const H = harness({ wal: grouped() });
+  await openAstra(H);
+  await H.click({ "data-awdel": "w_1" }, ["aw-del"]);
+  await H.click({ "data-agtoggle": "g_x" }, ["aw-main"]);
+  await H.click({ "data-astra-back": "" }, ["aw-back"]);
+  await H.click({ "data-wsel": ex(3) }, ["aw-main"]);
+  assert.match(H.target.innerHTML, /Delete Wallet\?/); assert.match(H.target.innerHTML, /data-view="astra"/);
+  assert.equal(H.calls.length, 0);
+});
+
+test("Back returns to the Web3 Center dashboard without leaving the app; reopening keeps group expansion", async () => {
+  const H = harness({ wal: grouped() });
+  await openAstra(H);
+  await H.click({ "data-agtoggle": "g_x" }, ["aw-main"]);
+  assert.match(H.target.innerHTML, /aria-label="Back to Web3 Center"/);
+  await H.click({ "data-astra-back": "" }, ["aw-back"]);
+  assert.match(H.target.innerHTML, /Total Portfolio Value/);
+  assert.match(H.target.innerHTML, /<h2>Web3 Center<\/h2>/);
+  await openAstra(H);
+  assert.ok(H.target.innerHTML.includes(ex(2)), "open group state preserved");
+});
+
+test("loading, empty and error states (with Retry)", async () => {
+  const model = W.buildModel(pol, txs, tools, NOW, { ok: true, data: { wallets: [], groups: [] } });
+  assert.match(W.astraHtml(model, { ...S(), screen: "astra", ast: "loading" }), /Loading wallets\.\.\./);
+  const empty = W.astraHtml(model, { ...S(), screen: "astra", ast: "ready" });
+  assert.match(awList(empty, "awlist"), /No wallets yet\./); assert.match(awList(empty, "aglist"), /No wallet groups yet\./);
+  let up = false;
+  const H = harness({ wal: grouped(), backend: async (method) => (method === "GET" ? (up ? { ok: true, data: grouped() } : { ok: false, error: "network" }) : { ok: false }) });
+  await openAstra(H);
+  assert.match(H.target.innerHTML, /Unable to load wallets\./);
+  assert.match(H.target.innerHTML, /data-astra-retry>Retry<\/button>/);
+  up = true;
+  await H.click({ "data-astra-retry": "" }, ["w3-btn"]);
+  assert.doesNotMatch(H.target.innerHTML, /Unable to load wallets/);
+  assert.deepStrictEqual(awNames(H.target.innerHTML, "awlist"), ["Main Wallet"]);
+});
+
+test("loading state is painted before the registry answers", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const H = harness({ wal: grouped(), backend: async (method) => { if (method === "GET") await gate; return { ok: true, data: grouped() }; } });
+  const p = openAstra(H);
+  assert.match(H.target.innerHTML, /Loading wallets\.\.\./);
+  release(); await p;
+  assert.doesNotMatch(H.target.innerHTML, /Loading wallets/);
+});
+
+test("import / create / select / group edits refresh the dedicated screen with no reload", async () => {
+  const H = harness({ wal: grouped() });
+  await openAstra(H);
+  // create: one standalone wallet appears in the Wallets list, key never in the list
+  await H.click({ "data-modal": "create" }, ["w3-btn"]);
+  await H.click({ "data-mcreate": "" }, ["w3-btn"]);
+  assert.match(awList(H.target.innerHTML, "awlist"), new RegExp(ex("d")));
+  assert.match(H.target.innerHTML, /w3-msecret/, "one-time reveal still shows in its own dialog");
+  H.handlers.change({ target: Object.assign(H.mk({ "data-mack": "" }, [], H.root), { checked: true }) });
+  await H.click({ "data-mdone": "" });
+  assert.ok(!H.target.innerHTML.includes(SECRET), "key gone after Done");
+  assert.ok(!awList(H.target.innerHTML, "awlist").includes(SECRET));
+  assert.equal(H.state.groups.length, 2, "create made no group");
+  // import 3 wallets with a group name -> ONE new group of 3
+  await H.click({ "data-modal": "import" }, ["w3-btn"]);
+  H.type("data-mtext", [KEY_A, KEY_B, KEY_C].join("\n"));
+  H.type("data-mgname", "Fresh Exchange");
+  await H.click({ "data-mimport": "" }, ["w3-btn"]);
+  await H.click({ "data-mclose": "" });
+  assert.deepStrictEqual(awNames(H.target.innerHTML, "aglist"), ["Exchange Wallets", "Trading Wallets", "Fresh Exchange"]);
+  assert.match(awList(H.target.innerHTML, "aglist"), /Fresh Exchange<\/b><small>3 wallets/);
+  await H.click({ "data-agtoggle": "g_i2" }, ["aw-main"]);
+  assert.deepStrictEqual([...H.target.innerHTML.matchAll(/class="w3-gnum">(\d+)\./g)].map((x) => x[1]), ["1", "2", "3"]);
+  // select a wallet from the screen
+  const gets = H.gets.length;
+  await H.click({ "data-wsel": ex(1) }, ["aw-main"]);
+  assert.equal(H.gets.length, gets + 1);
+  // group edit through Manage Groups, rendered on top of the screen
+  await H.click({ "data-modal": "groups" }, ["w3-btn"]);
+  H.type("data-gnew", "Brand New");
+  await H.click({ "data-gcreate": "" });
+  await H.click({ "data-mclose": "" });
+  assert.ok(awNames(H.target.innerHTML, "aglist").includes("Brand New"));
+  assert.ok(H.gets.every((p) => p === "/api/v1/web3/wallets"), "every refresh is the one canonical GET");
+});
+
+test("reload: a fresh model from GET /wallets alone rebuilds the same screen", () => {
+  const st = { ...S(), screen: "astra", ast: "ready", aopen: { g_x: true } };
+  const a = W.astraHtml(gmodel(), st);
+  const b = W.astraHtml(W.buildModel(pol, txs, tools, NOW, { ok: true, data: JSON.parse(JSON.stringify(grouped())) }), st);
+  assert.equal(a, b);
+  const after = grouped(); after.wallets = after.wallets.filter((w) => w.id !== "w_1");   // backend state after a delete + reload
+  const c = W.astraHtml(W.buildModel(pol, txs, tools, NOW, { ok: true, data: after }), st);
+  assert.doesNotMatch(c, /Main Wallet/); assert.match(c, /Exchange Wallets/);
+});
+
+test("the dedicated screen never renders secrets, and stores nothing in the browser", () => {
+  const d = grouped();
+  d.wallets[0].private_key = "0x" + KEY_A; d.wallets[1].seed_phrase = "abandon ability able about";
+  d.wallets[2].keystore_name = "ksecret-name"; d.wallets[3].secret = KEY_B; d.reveal = { private_key: "0x" + KEY_C };
+  const m = W.buildModel(pol, txs, tools, NOW, { ok: true, data: d });
+  const html = W.astraHtml(m, { ...S(), screen: "astra", ast: "ready", aopen: { g_x: true, g_y: true }, confirm: { kind: "wallet", id: "w_1" } });
+  for (const bad of [KEY_A, KEY_B, KEY_C, "abandon ability", "ksecret-name", "private_key", "seed", "keystore"]) assert.ok(!html.includes(bad), bad);
+  const src = fs.readFileSync(require.resolve("../../static/js/web3_center.js"), "utf8");
+  assert.ok(!/localStorage|sessionStorage|indexedDB/.test(src.replace(/\/\*[\s\S]*?\*\//, "")), "no browser storage");
+});
+
+test("names and group names are escaped on the dedicated screen and in the confirmation", () => {
+  const d = grouped(); d.wallets[0].name = "<img src=x onerror=alert(1)>"; d.groups[0].name = 'Bad "name" <b>';
+  const m = W.buildModel(pol, txs, tools, NOW, { ok: true, data: d });
+  const a = W.astraHtml(m, { ...S(), screen: "astra", ast: "ready", confirm: { kind: "wallet", id: "w_1" } });
+  const b = W.astraHtml(m, { ...S(), screen: "astra", ast: "ready", confirm: { kind: "group", id: "g_x" } });
+  for (const h of [a, b]) {
+    assert.ok(!h.includes("<img src=x") && !h.includes('Bad "name" <b>'), "no injected markup");
+    assert.match(h, /&lt;img src=x|&lt;b&gt;/, "shown as text instead");
+  }
+  assert.match(b, /Delete "Bad &quot;name&quot; &lt;b&gt;"\?/);
+});
+
+test("without a wallet registry the Astra Wallets entry is disabled", () => {
+  const h = W.html(W.buildModel(pol, txs, tools, NOW), S());
+  assert.match(h, /<button class="w3-btn[^"]*" disabled title="[^"]*">Astra Wallets<\/button>/);
+  assert.doesNotMatch(h, /data-astra-open/);
 });

@@ -43,9 +43,14 @@ from astra.ai.execution_history import AgentExecutionHistory
 from astra.ai.json_extract import loads_lenient
 from astra.ai.system_prompt import ASTRA_CORE_SYSTEM_PROMPT, build_system_prompt
 from astra.core.context import ToolContext
+from astra.ai.response_boundary import strip_internal_protocol
 from astra.core.events import new_op_id
 
 DEFAULT_MAX_STEPS = 8
+# After tools already ran, a final reply that is empty / protocol-only
+# gets this many extra model calls to write the user-facing answer.
+# Bounded on purpose: recovery must never become a second loop.
+DEFAULT_MAX_FINAL_RECOVERY_ATTEMPTS = 1
 # None => NO artificial cap on the tool result fed back to the model. The
 # result is kept whole whenever the provider's real context window permits
 # (provider-aware fitting happens at the router/gateway boundary — see
@@ -202,6 +207,81 @@ def _cap(text: str, limit: int) -> str:
     if limit and len(text) > limit:
         return text[:limit] + "…(truncated)"
     return text
+
+
+# Keys of a tool result that are internal plumbing, never user-facing.
+_INTERNAL_RESULT_KEYS = frozenset({
+    "session_id", "runtime", "runtime_id", "process_id", "trace", "trace_id",
+    "request_id", "op", "op_id", "blob_id", "stdout_blob_id", "stderr_blob_id",
+    "duration_ms", "truncated", "decision", "cwd", "shell", "ok", "status",
+    "exit_code", "command", "stdout", "stderr", "content", "error",
+    "provider", "model", "credential", "key", "api_key", "token"})
+
+FINAL_RECOVERY_PROMPT = (
+    "Your last reply could not be shown to the user because it contained no "
+    "readable answer. The tool actions above already ran and their real "
+    "results are in this conversation. Write the final answer for the user "
+    "now: a concise plain-language summary of what those results show. Use "
+    "only the real results, do not run any more tools, and reply in plain "
+    "text only (no JSON).")
+
+
+def _one_line(text, limit: int) -> str:
+    out = " ".join(str(text or "").split())
+    out = _redact_text(out)
+    return out if len(out) <= limit else out[:limit].rstrip() + "…"
+
+
+def _step_detail(step) -> str:
+    """One safe, human-readable line of REAL evidence from a tool step:
+    the command's output / error / structured result. No plumbing fields
+    (session ids, trace ids, ...), redacted, bounded."""
+    res = step.result if isinstance(step.result, dict) else {}
+    bits = []
+    code = res.get("exit_code")
+    if code not in (None, 0):
+        bits.append(f"exit code {code}")
+    out = res.get("stdout") or res.get("content")
+    if out:
+        bits.append(_one_line(out, 220))
+    err = res.get("stderr") or step.error or res.get("error")
+    if err and (not step.ok or not out):
+        bits.append(_one_line(err, 220))
+    extra = {k: v for k, v in res.items()
+             if k not in _INTERNAL_RESULT_KEYS and v not in (None, "", [], {})}
+    if extra:
+        try:
+            bits.append(_one_line(json.dumps(extra, ensure_ascii=False,
+                                             default=str), 300))
+        except Exception:
+            pass
+    if not bits:
+        bits.append("no output" if step.ok else (step.status or "failed"))
+    return "; ".join(bits)
+
+
+def summarize_tool_steps(steps) -> str:
+    """Deterministic, user-safe summary of what the tools ACTUALLY returned.
+
+    Used when the model never produced a readable final answer after tools
+    ran (see AgentToolLoop's final-answer contract): the user still gets the
+    real findings instead of a generic error. Built purely from recorded
+    step results — never invents anything — and never exposes the internal
+    action protocol, tool names, session/trace ids or credentials."""
+    steps = [s for s in (steps or []) if getattr(s, "action", "") == "tool"]
+    if not steps:
+        return ""
+    ok_n = sum(1 for s in steps if s.ok)
+    head = (f"I ran {len(steps)} check{'s' if len(steps) != 1 else ''} "
+            f"({ok_n} succeeded, {len(steps) - ok_n} failed) but could not "
+            "write a full summary, so here are the raw results:")
+    lines = [head]
+    for i, s in enumerate(steps, 1):
+        cmd = (s.args or {}).get("command") if isinstance(s.args, dict) else ""
+        label = _one_line(cmd, 120) if cmd else f"step {i}"
+        mark = "✓" if s.ok else "✗"
+        lines.append(f"{i}. {mark} {label} — {_step_detail(s)}")
+    return "\n".join(lines)
 
 
 class ToolCaller:
@@ -380,9 +460,16 @@ class ToolLoopResult:
     stopped_reason: str = "final"
     error: str = ""
     messages: list = field(default_factory=list)
+    # "model" (the model's own answer) | "recovery" (bounded recovery
+    # call) | "summary" (deterministic summary of real tool results)
+    final_source: str = "model"
+    # Deterministic tool-result summary; the response boundary uses it
+    # instead of a generic error if the reply is ever stripped to nothing.
+    summary: str = ""
 
     def to_dict(self) -> dict:
         return {"ok": self.ok, "text": self.text, "tool_calls": self.tool_calls,
+                "final_source": self.final_source,
                 "stopped_reason": self.stopped_reason, "error": self.error,
                 "steps": [s.to_dict() for s in self.steps]}
 
@@ -392,7 +479,8 @@ class AgentToolLoop:
                  approvals=None, fallback=None,
                  max_steps: int = DEFAULT_MAX_STEPS,
                  max_tool_result_chars: int | None = DEFAULT_MAX_TOOL_RESULT_CHARS,
-                 execution_history: AgentExecutionHistory | None = None):
+                 execution_history: AgentExecutionHistory | None = None,
+                 max_final_recovery_attempts: int = DEFAULT_MAX_FINAL_RECOVERY_ATTEMPTS):
         self.registry = registry
         self.terminal = terminal
         # The approval-gated HOST fallback (astra/terminal/fallback.py +
@@ -411,6 +499,8 @@ class AgentToolLoop:
         self.max_tool_result_chars = (None if max_tool_result_chars is None
                                       else int(max_tool_result_chars))
         self.execution_history = execution_history or AgentExecutionHistory()
+        self.max_final_recovery_attempts = max(
+            0, int(max_final_recovery_attempts))
 
     # -- events --------------------------------------------------------------
     def _emit(self, kind: str, **data) -> None:
@@ -512,10 +602,20 @@ class AgentToolLoop:
             last_text = raw or last_text
             action = _parse_action(raw)
             if action is None or action.get("action") != "tool":
-                text = ""
-                if action and action.get("action") == "final":
-                    text = str(action.get("answer") or "").strip()
-                text = text or (raw or "").strip()
+                # A reply that is not an executable tool call ends the loop.
+                # Final-answer contract: after tools ran, the user must get a
+                # readable answer built from the real results, never raw or
+                # stripped protocol.
+                text = self._final_text(action, raw)
+                source = "model"
+                if not text and tool_calls == 0:
+                    # Nothing ran, so nothing to recover from: keep the old
+                    # behaviour (the response boundary guards the raw reply).
+                    text = (raw or "").strip()
+                elif not text:
+                    text, source = self._recover_final(
+                        messages, steps, caller, op=op, trace=trace,
+                        max_tokens=max_tokens, reason="protocol_only_final")
                 self._emit("agent.tool_loop.finished", op=op, trace=trace,
                            scope=scope or "", steps=len(steps),
                            tool_calls=tool_calls, stopped_reason="final",
@@ -524,7 +624,9 @@ class AgentToolLoop:
                                (time.monotonic() - started) * 1000.0, 2))
                 return ToolLoopResult(text=text, ok=True, steps=steps,
                                       tool_calls=tool_calls,
-                                      stopped_reason="final", messages=messages)
+                                      stopped_reason="final", messages=messages,
+                                      final_source=source,
+                                      summary=summarize_tool_steps(steps))
 
             tool = str(action.get("tool") or "").strip()
             args = action.get("args") if isinstance(action.get("args"), dict) else {}
@@ -564,14 +666,74 @@ class AgentToolLoop:
             self._emit("agent.tool_loop.step", op=op, trace=trace, step=index,
                        tool=tool, ok=step.ok, terminal=False)
 
+        # Step budget spent while the model was still calling tools: `last_text`
+        # is a tool call, not an answer. Same contract as above — read what the
+        # tools actually returned instead of handing back protocol.
+        text = self._final_text(None, last_text) if tool_calls else last_text
+        source = "model"
+        if not text and tool_calls:
+            text, source = self._recover_final(
+                messages, steps, caller, op=op, trace=trace,
+                max_tokens=max_tokens, reason="max_steps")
         self._emit("agent.tool_loop.finished", op=op, trace=trace,
                    scope=scope or "", steps=len(steps), tool_calls=tool_calls,
                    stopped_reason="max_steps", terminal=True,
                    duration_ms=round(
                        (time.monotonic() - started) * 1000.0, 2))
-        return ToolLoopResult(text=last_text, ok=True, steps=steps,
+        return ToolLoopResult(text=text, ok=True, steps=steps,
                               tool_calls=tool_calls,
-                              stopped_reason="max_steps", messages=messages)
+                              stopped_reason="max_steps", messages=messages,
+                              final_source=source,
+                              summary=summarize_tool_steps(steps))
+
+    # -- final-answer contract ---------------------------------------------
+    @staticmethod
+    def _final_text(action, raw) -> str:
+        """The human-readable final text of a non-tool reply, or "".
+
+        Order: a well-formed `final` answer; otherwise whatever readable text
+        survives once every internal-protocol fragment is stripped (plain
+        text, prose around malformed JSON, the answer of a truncated
+        `final`). "" means the reply was empty or protocol only."""
+        if action and action.get("action") == "final":
+            ans = str(action.get("answer") or "").strip()
+            if ans:
+                return ans
+        return strip_internal_protocol(raw or "")
+
+    def _recover_final(self, messages, steps, caller, *, op, trace,
+                       max_tokens, reason) -> tuple[str, str]:
+        """Bounded final-answer recovery after tools already succeeded.
+
+        Up to `max_final_recovery_attempts` extra model calls in the SAME
+        conversation ask for a plain-language summary of the real tool
+        results. A reply is accepted only if it carries readable text; a
+        tool call in the reply is NEVER executed here. If recovery is
+        disabled, fails or is still protocol-only, the answer is the
+        deterministic summary of the recorded tool results. Returns
+        (text, source)."""
+        for attempt in range(1, self.max_final_recovery_attempts + 1):
+            self._emit("agent.final_recovery", op=op, trace=trace,
+                       status="started", attempt=attempt, reason=reason,
+                       max_attempts=self.max_final_recovery_attempts)
+            convo = list(messages) + [
+                {"role": "user", "content": FINAL_RECOVERY_PROMPT}]
+            try:
+                raw = caller.chat(convo, max_tokens=max_tokens, trace=trace)
+            except Exception as e:
+                self._emit("agent.final_recovery", op=op, trace=trace,
+                           status="failed", attempt=attempt,
+                           reason=type(e).__name__)
+                continue
+            act = _parse_action(raw)
+            if act is not None and act.get("action") == "tool":
+                # Never execute (or accept prose wrapped around) another
+                # tool call here: recovery is for WRITING the answer.
+                continue
+            text = self._final_text(act, raw)
+            if text:
+                return text, "recovery"
+        return summarize_tool_steps(steps), "summary"
 
     def _execute(self, tool: str, args: dict, ctx, *, trace: str,
                  op: str) -> dict:

@@ -225,6 +225,24 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "\"execution\": {\"required\": true, \"capability\": \"<category "
     "id>\", \"environment\": \"agent_runtime\", \"intent\": \"<one "
     "short line of what must be done>\"}.\n"
+    "   - LIVE / CURRENT EXTERNAL STATE (general rule, applies to any "
+    "topic): when the user asks Astra to CHECK, VERIFY, TEST, QUERY, "
+    "MONITOR or LOOK UP the current state of something outside this "
+    "conversation — a blockchain network or RPC endpoint, an account or "
+    "wallet balance, whether a transaction confirmed, the latest block, "
+    "whether a service is reachable — the answer exists only by really "
+    "running a tool, never from memory. If the live catalog lists a "
+    "capability that can reach it, set required true with that "
+    "capability: `web3` for chain / wallet / RPC / transaction state, "
+    "`terminal` for generic network or shell probing. Such a request is "
+    "NEVER ordinary text-only chat. Examples: 'check RPC health of a "
+    "chain', 'what is the current ETH balance', 'check this wallet's "
+    "token balance', 'has this transaction confirmed', 'what is the "
+    "latest block', 'test these RPC endpoints'. By contrast, EXPLAINING "
+    "how something works ('explain how RPC works', 'what is a nonce') "
+    "stays required false. Do not choose or name a specific tool: the "
+    "Provider picks the right one for what was actually asked (an RPC "
+    "check is not a wallet-balance request).\n"
     "   - `capability` MUST be one of the exact category IDs the live "
     "catalog lists (e.g. \"terminal\", \"files\", \"browser\"). If the "
     "task needs a capability the catalog does NOT list, set required false, "
@@ -256,7 +274,10 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "downstream ChatPipeline must not re-guess the task when this field is "
     "present. Use exactly ONE of: simple_chat, general, reasoning, coding, "
     "long_context, structured_output, tool_use, research, planning, "
-    "translation, summarization, vision, image_generation, image_editing. "
+    "translation, summarization, vision, image_generation, image_editing, "
+    "web3. Use web3 for blockchain / wallet / RPC / on-chain requests, both "
+    "explanations and live checks (`execution.required` below, not the task "
+    "type, says which). "
     "Use image_generation when the user asks Astra to CREATE/GENERATE/DRAW "
     "an image and there is no source image being edited. Use image_editing "
     "when the user asks to change/retouch/modify an uploaded, previous, or "
@@ -820,7 +841,7 @@ class ChatPipeline:
             "simple_chat", "general", "reasoning", "coding", "long_context",
             "structured_output", "tool_use", "research", "planning",
             "translation", "summarization", "vision", "image_generation",
-            "image_editing",
+            "image_editing", "web3",
         }
         task_type = _clean(data.get("task_type"))
         if task_type not in allowed_task_types:
@@ -1360,6 +1381,11 @@ class ChatPipeline:
             return None
         trace["tool_loop"] = {"tool_calls": result.tool_calls,
                               "stopped_reason": result.stopped_reason,
+                              "final_source": result.final_source,
+                              # Deterministic, redacted summary of the REAL tool
+                              # results: `_reply` falls back to it if the final
+                              # text is ever stripped to nothing.
+                              "recovery_summary": result.summary,
                               "steps": [s.to_dict() for s in result.steps]}
         if not result.ok:
             trace["error"] = (result.error or getattr(caller, "last_error", "")
@@ -1559,7 +1585,10 @@ class ChatPipeline:
         guard belongs: strip any internal tool-call protocol JSON that
         slipped through, and redact anything credential-shaped. See
         astra/ai/response_boundary.py."""
-        text = sanitize_final_response(text)
+        loop_trace = (data or {}).get("tool_loop") if isinstance(data, dict) else None
+        recovery = (loop_trace.get("recovery_summary")
+                    if isinstance(loop_trace, dict) else "") or None
+        text = sanitize_final_response(text, fallback=recovery)
         out = {"reply": text, "action": "none", "ok": ok, "data": data}
         if note:
             data["internal_note"] = note.strip()

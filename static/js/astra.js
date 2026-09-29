@@ -2923,30 +2923,18 @@ loaders.router = async function () {
 
 /* ------------------------------ wallet / web3 (core) ----------------------- */
 loaders.web3 = async function () {
-  const [pol, txs] = await Promise.all([
-    api("/api/v1/web3/transaction-policy"), api("/api/v1/web3/transactions")]);
-  const lim = (n) => n == null ? "—" : (Number(n) / 1e18).toFixed(4) + " ETH";
-  if (pol.ok) {
-    const d = pol.data, p = d.policy || {};
-    const stopped = d.stopped ? "🚨 EMERGENCY STOP" : "running";
-    $("#web3-policy").innerHTML =
-      `<div class="table">` +
-      `<div class="row"><b>Mode</b><span>${esc(d.mode)} (CONFIRM = review, AUTO = policy-approved)</span></div>` +
-      `<div class="row"><b>Status</b><span>${esc(stopped)}</span></div>` +
-      `<div class="row"><b>Max per tx</b><span>${esc(lim(p.tx_limit_wei))}</span></div>` +
-      `<div class="row"><b>Max daily</b><span>${esc(lim(p.daily_limit_wei))}</span></div>` +
-      `<div class="row"><b>Allowlist</b><span>${p.recipients_allowed?.length || 0} recipients · ${p.contracts_allowed?.length || 0} contracts · ${p.wallets_allowed?.length || 0} wallets</span></div>` +
-      `</div>`;
-  } else {
-    $("#web3-policy").innerHTML = `<span class="muted">Web3 unavailable</span>`;
-  }
-  if (txs.ok) {
-    const rows = (txs.data.transactions || []).map((t) =>
-      `<div class="row"><b>${esc(String(t.tx_id || t.tx_hash || "").slice(0, 12))}…</b>` +
-      `<span>${esc(t.status || "?")}</span>` +
-      `<span>${esc(lim(t.value_wei))}</span></div>`).join("");
-    $("#web3-txs").innerHTML = rows || `<span class="muted">kono transaction nei</span>`;
-  }
+  // Same three existing endpoints; rendering lives in web3_center.js.
+  const [pol, txs, tools] = await Promise.all([
+    api("/api/v1/web3/transaction-policy"), api("/api/v1/web3/transactions"), api("/api/tools")]);
+  const model = Web3Center.buildModel(pol, txs, tools, new Date());
+  Web3Center.render($("#w3-root"), model, {
+    // Agent actions only PREFILL the chat box; the user must press send.
+    toChat(text) {
+      showTab("assistant");
+      const i = $("#chat-input"); if (!i) return;
+      i.value = text; i.dispatchEvent(new Event("input", { bubbles: true })); i.focus();
+    },
+  });
 };
 
 async function eventsPoll() {

@@ -11,6 +11,7 @@ itself never depends on telemetry being present, and nothing is estimated.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -26,7 +27,18 @@ except ImportError:          # pragma: no cover - exercised via monkeypatch in t
 _MAX_RATE_WINDOW_S = 120.0
 # Two samples closer than this share the previous rate (avoids jitter/div-by-0
 # when several clients hit /api/metrics at once).
-_MIN_RATE_WINDOW_S = 0.5
+_MIN_RATE_WINDOW_S = 0.2
+# psutil.cpu_percent(None) measures since the previous call; below ~0.1s the
+# reading is dominated by scheduler noise, so closer calls (several tabs at
+# once) reuse the last real reading instead of taking a meaningless one.
+_MIN_CPU_WINDOW_S = 0.1
+
+
+_LOOPBACK = re.compile(r"^(lo\d*|loopback.*)$", re.I)   # lo, lo0, "Loopback Pseudo-Interface 1"
+
+
+def _is_loopback(name) -> bool:
+    return bool(_LOOPBACK.match(str(name).strip()))
 
 
 def _pct(value) -> float | None:
@@ -75,11 +87,12 @@ class HostMetrics:
         self._lock = threading.Lock()
         self._net_prev = None          # (monotonic_ts, bytes_sent, bytes_recv)
         self._net_rates = (None, None)  # (upload_bps, download_bps)
+        self._cpu_last = None          # (monotonic_ts, percent) of the last real reading
         if self._ps is not None:
             # Prime both baselines so the FIRST real request is already a
             # meaningful delta (psutil's first cpu_percent() call is always 0.0).
             try:
-                self._ps.cpu_percent(interval=None)
+                self._ps.cpu_percent(interval=None)     # warm-up; value discarded
             except Exception:
                 pass
             try:
@@ -89,11 +102,20 @@ class HostMetrics:
 
     # ----------------------------------------------------------- sections
     def _cpu(self) -> dict | None:
+        # Non-blocking: interval=None compares against the previous call, so no
+        # request ever sleeps. The baseline is primed in __init__.
+        now = time.monotonic()
+        last = self._cpu_last
+        if last is not None and now - last[0] < _MIN_CPU_WINDOW_S:
+            return {"percent": last[1]}
         try:
             p = _pct(self._ps.cpu_percent(interval=None))
         except Exception:
             return None
-        return None if p is None else {"percent": p}
+        if p is None:
+            return None
+        self._cpu_last = (now, p)
+        return {"percent": p}
 
     def _memory(self) -> dict | None:
         try:
@@ -120,6 +142,18 @@ class HostMetrics:
         return None
 
     def _net_sample(self):
+        """Host network counters EXCLUDING loopback: local traffic (including this
+        panel's own polling) is not network activity, and counting it would keep
+        an idle machine from ever measuring 0 B/s. Falls back to psutil's
+        aggregate counter where per-interface data is unavailable (e.g. Android)."""
+        try:
+            per = self._ps.net_io_counters(pernic=True)
+        except Exception:
+            per = None
+        if isinstance(per, dict):
+            real = [c for name, c in per.items() if not _is_loopback(name)]
+            return (time.monotonic(), sum(int(c.bytes_sent) for c in real),
+                    sum(int(c.bytes_recv) for c in real))
         c = self._ps.net_io_counters()
         if c is None:
             return None

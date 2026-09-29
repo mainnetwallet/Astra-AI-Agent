@@ -64,9 +64,15 @@ class SystemHealthAssets(unittest.TestCase):
     def test_one_data_source_reuses_the_shared_poll_and_feed(self):
         js = _read("static", "js", "system_health.js")
         self.assertNotIn("new EventSource", js)          # reuses the shared feed
-        # no timer of its own — it drives astra_os.js's ONE poll via the hooks
+        # the 30s aggregate is astra_os.js's ONE poll; this module never runs an
+        # interval. Its only timer is the single managed, self-scheduling
+        # live-resource loop (host telemetry only), which cannot stack.
         self.assertIsNone(re.search(r"(^|[^.\w])setInterval\s*\(", js),
                           "System Health must not start its own interval")
+        code = _code(js)
+        self.assertEqual(len(re.findall(r"timer = setTimeout\(resourceTick", code)), 1)
+        self.assertIn("if (L.loop || docHidden()) return false", code)
+        self.assertIn('const RES_URL = "/api/system-resources"', code)
         self.assertIn("OS.hooks.setAuto", js)
         self.assertIn("OS.hooks.setInterval", js)
         # the model registry is read from the real endpoint, nothing else

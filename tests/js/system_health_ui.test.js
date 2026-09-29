@@ -330,10 +330,10 @@ test("System Resources renders the backend's real CPU / memory / disk / network"
   SH.render(data, []);
   const html = doc.getElementById("sh-resources-body").innerHTML;
   assert.match(html, />27%</);
-  assert.match(html, />42%</);
+  assert.match(html, />41\.7%</);
   assert.match(html, />36%</);
   assert.match(html, /\u2193 1\.8 MB\/s/);
-  assert.match(html, /\u2191 614 KB\/s/);
+  assert.match(html, /\u2191 614\.4 KB\/s/);
   assert.doesNotMatch(html, /Not reported by the API|Host metrics unavailable/);
   assert.match(html, /class="ln live"/);
 });
@@ -354,7 +354,7 @@ test("missing or unavailable resources render an honest empty state, not numbers
   assert.doesNotMatch(html, /class="ln live"/);
 });
 
-test("resource history is real, deduplicated by sample, and never exceeds 60 samples", () => {
+test("resource history is real, deduplicated by sample, and never exceeds 120 samples", () => {
   const doc = new Doc(HTML);
   globalThis.document = doc;
   const SH = load();
@@ -363,15 +363,15 @@ test("resource history is real, deduplicated by sample, and never exceeds 60 sam
   SH.render(data, []);
   SH.render(data, []);                       // same sample re-rendered (SSE batch) -> no duplicate point
   assert.strictEqual(SH.state.resHist.cpu.length, 1);
-  for (let i = 2; i <= 150; i++) {
+  for (let i = 2; i <= 250; i++) {
     data.metrics.resources = resPayload(i, i % 100, i, i * 2);
     SH.render(data, []);
   }
   for (const k of ["cpu", "ram", "disk", "up", "down"]) {
-    assert.ok(SH.state.resHist[k].length <= 60, k + " history exceeds 60");
+    assert.ok(SH.state.resHist[k].length <= 120, k + " history exceeds 120");
   }
-  assert.strictEqual(SH.state.resHist.cpu.length, 60);
-  assert.strictEqual(SH.state.resHist.cpu[59], 150 % 100);
+  assert.strictEqual(SH.state.resHist.cpu.length, 120);
+  assert.strictEqual(SH.state.resHist.cpu[119], 250 % 100);
 });
 
 test("the first sample is a minimal line (no fabricated history); nothing random is used", () => {
@@ -386,4 +386,238 @@ test("the first sample is a minimal line (no fabricated history); nothing random
   assert.strictEqual(SH.state.resHist.down, undefined);
   assert.match(html, /d="M68,\d+\.\d L76,\d+\.\d"/);
   assert.doesNotMatch(JS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, ""), /Math\.random/);
+});
+
+/* ------------------------- live resource polling (one managed loop) ------------------------- */
+
+/** Controllable clock + timers + api(): drives the REAL lifecycle code with no real waiting. */
+function liveEnv(opts) {
+  opts = opts || {};
+  const env = { now: 1000000, timers: [], calls: [], aborted: 0, pending: [], hidden: false, listeners: [] };
+  const doc = new Doc(HTML);
+  doc.hidden = false;
+  doc.addEventListener = (t, fn) => { if (t === "visibilitychange") env.listeners.push(fn); };
+  globalThis.document = doc;
+  env.doc = doc;
+  env.realNow = Date.now;
+  Date.now = () => env.now;
+  env.setTimeout = globalThis.setTimeout; env.clearTimeout = globalThis.clearTimeout;
+  let id = 0;
+  globalThis.setTimeout = (fn, ms) => { const t = { id: ++id, fn, ms, live: true }; env.timers.push(t); return t.id; };
+  globalThis.clearTimeout = (h) => { env.timers.forEach((t) => { if (t.id === h) t.live = false; }); };
+  env.sample = 0;
+  globalThis.api = (url, o) => {
+    env.calls.push({ url, o });
+    return new Promise((resolve) => {
+      const respond = () => {
+        if (env.fail) return resolve({ ok: false, error: "network: down" });
+        env.sample++;
+        resolve({ ok: true, data: resPayload(env.now / 1000 + env.sample, 10 + env.sample, 100 * env.sample, 200 * env.sample) });
+      };
+      if (o && o.signal) o.signal.addEventListener("abort", () => { env.aborted++; resolve({ ok: false, error: "network: aborted" }); });
+      if (opts.manual) env.pending.push(respond); else respond();
+    });
+  };
+  env.restore = () => {
+    globalThis.setTimeout = env.setTimeout; globalThis.clearTimeout = env.clearTimeout;
+    Date.now = env.realNow; delete globalThis.api;
+  };
+  env.live = () => env.timers.filter((t) => t.live && t.ms !== 3000);      // the poll timers (not per-request guards)
+  env.fire = async () => { const t = env.live()[0]; t.live = false; env.now += t.ms; t.fn(); await flush(); };
+  return env;
+}
+const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+
+test("live: start polls once immediately and schedules exactly one ~500ms timer", async () => {
+  const env = liveEnv();
+  try {
+    const SH = load(); SH.mount();
+    assert.strictEqual(SH.live.start(), true);
+    await flush();
+    assert.strictEqual(env.calls.length, 1);
+    assert.strictEqual(env.calls[0].url, "/api/system-resources");
+    assert.strictEqual(env.live().length, 1);
+    assert.ok(env.live()[0].ms <= 500 && env.live()[0].ms >= 0);
+    assert.strictEqual(SH.state.live.last.cpu.percent, 11);
+  } finally { env.restore(); }
+});
+
+test("live: calling start repeatedly never creates duplicate loops or timers", async () => {
+  const env = liveEnv();
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); SH.live.start(); SH.live.start();
+    await flush();
+    assert.strictEqual(env.calls.length, 1);
+    assert.strictEqual(env.live().length, 1);
+    SH.live.start();                                   // while a timer is pending
+    await flush();
+    assert.strictEqual(env.calls.length, 1);
+    assert.strictEqual(env.live().length, 1);
+  } finally { env.restore(); }
+});
+
+test("live: each timer tick fetches once, updates values from the server sample and reschedules", async () => {
+  const env = liveEnv();
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); await flush();
+    for (let i = 0; i < 5; i++) await env.fire();
+    assert.strictEqual(env.calls.length, 6);
+    assert.strictEqual(env.live().length, 1);
+    assert.strictEqual(SH.state.live.last.cpu.percent, 16);           // the 6th REAL server sample
+    assert.deepStrictEqual(SH.state.resHist.cpu, [11, 12, 13, 14, 15, 16]);
+    assert.match(env.doc.getElementById("sh-resources-body").innerHTML, />16%</);
+  } finally { env.restore(); }
+});
+
+test("live: overlapping requests are prevented while one is still pending", async () => {
+  const env = liveEnv({ manual: true });
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); await flush();
+    assert.strictEqual(env.calls.length, 1);
+    assert.strictEqual(await SH.live.refreshOnce(), false);           // blocked by the in-flight guard
+    SH.live.start(); await flush();
+    assert.strictEqual(env.calls.length, 1);
+    env.pending.shift()(); await flush();
+    assert.strictEqual(env.live().length, 1);                          // resumes only after it settles
+  } finally { env.restore(); }
+});
+
+test("live: the request is aborted if it hangs (AbortController guard)", async () => {
+  const env = liveEnv({ manual: true });
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); await flush();
+    const guard = env.timers.find((t) => t.live && t.ms === 3000);
+    assert.ok(guard, "a request timeout guard must exist");
+    guard.fn(); await flush();
+    assert.strictEqual(env.aborted, 1);
+    assert.strictEqual(SH.state.live.fails, 1);
+    assert.strictEqual(SH.state.live.inflight, null);
+  } finally { env.restore(); }
+});
+
+test("live: stale detection LIVE -> DELAYED -> STALE -> OFFLINE keeps the last values and recovers", async () => {
+  const env = liveEnv();
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); await flush();
+    assert.strictEqual(SH.live.status().label, "LIVE");
+    env.fail = true;
+    await env.fire();                                                  // one failure: degraded, last values kept
+    assert.strictEqual(SH.live.status().label, "DELAYED");
+    assert.match(env.doc.getElementById("sh-resources-body").innerHTML, />11%</);
+    env.now += 3000; assert.strictEqual(SH.live.status().label, "DELAYED");
+    env.now += 3000; assert.strictEqual(SH.live.status().label, "STALE");
+    env.now += 20000; assert.strictEqual(SH.live.status().label, "OFFLINE");
+    assert.match(env.doc.getElementById("sh-resources-body").innerHTML, />11%</);   // still the last REAL value
+    env.fail = false;
+    await env.fire();                                                  // endpoint recovers -> LIVE at once
+    assert.strictEqual(SH.live.status().label, "LIVE");
+    assert.strictEqual(SH.state.live.fails, 0);
+    assert.match(env.doc.getElementById("sh-res-live").innerHTML, /LIVE/);
+    assert.match(env.doc.getElementById("sh-res-live").className, /healthy/);
+  } finally { env.restore(); }
+});
+
+test("live: a hidden tab pauses polling and becoming visible resumes immediately, without duplicates", async () => {
+  const env = liveEnv();
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); await flush();
+    assert.strictEqual(env.live().length, 1);
+    env.doc.hidden = true; SH.live.onVisibility();
+    assert.strictEqual(env.live().length, 0);                          // timer cleared
+    const before = env.calls.length;
+    env.doc.hidden = false; SH.live.onVisibility(); await flush();
+    assert.strictEqual(env.calls.length, before + 1);                  // immediate fetch on resume
+    assert.strictEqual(env.live().length, 1);
+    SH.live.onVisibility(); SH.live.onVisibility(); await flush();     // repeated visibility events
+    assert.strictEqual(env.calls.length, before + 1);
+    assert.strictEqual(env.live().length, 1);
+  } finally { env.restore(); }
+});
+
+test("live: leaving System Health stops polling; opening it again restarts once", async () => {
+  const env = liveEnv();
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); await flush();
+    SH.onTab("system-map");
+    assert.strictEqual(env.live().length, 0);
+    const n = env.calls.length;
+    await flush();
+    assert.strictEqual(env.calls.length, n);
+    SH.onTab("command-center");                                        // navigating TO it does not itself start a 2nd loop
+    assert.strictEqual(env.live().length, 0);
+    SH.live.start(); SH.live.start(); await flush();
+    assert.strictEqual(env.calls.length, n + 1);
+    assert.strictEqual(env.live().length, 1);
+  } finally { env.restore(); }
+});
+
+test("live: a stopped loop discards a late response and never repaints stale data", async () => {
+  const env = liveEnv({ manual: true });
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); await flush();
+    SH.live.stop();
+    env.pending.shift()(); await flush();
+    assert.strictEqual(SH.state.live.last, null);
+    assert.strictEqual(env.live().length, 0);
+  } finally { env.restore(); }
+});
+
+test("live: the only thing the loop requests is /api/system-resources (no aggregate, models or providers)", async () => {
+  const env = liveEnv();
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); await flush();
+    for (let i = 0; i < 4; i++) await env.fire();
+    assert.ok(env.calls.length >= 5);
+    for (const c of env.calls) assert.strictEqual(c.url, "/api/system-resources");
+    assert.strictEqual(SH.live.pollMs, 500);
+  } finally { env.restore(); }
+});
+
+test("live: 30s aggregate renders no longer add samples once the live feed is delivering", async () => {
+  const env = liveEnv();
+  try {
+    const SH = load(); SH.mount();
+    SH.live.start(); await flush();
+    const data = releasePayload();
+    data.metrics.resources = resPayload(424242, 99, 1, 1);
+    SH.render(data, []);
+    assert.deepStrictEqual(SH.state.resHist.cpu, [11]);                // aggregate cpu=99 was NOT mixed in
+  } finally { env.restore(); }
+});
+
+test("live: formatting is compact and real (bytes, 1-decimal KB/MB, memory decimals only when present)", () => {
+  const doc = new Doc(HTML);
+  globalThis.document = doc;
+  const SH = load();
+  const f = SH.norm.fmtRate, b = SH.norm.fmtBytes;
+  assert.strictEqual(f(0), "0 B/s");
+  assert.strictEqual(f(512), "512 B/s");
+  assert.strictEqual(f(8.2 * 1024), "8.2 KB/s");
+  assert.strictEqual(f(1.4 * 1048576), "1.4 MB/s");
+  assert.strictEqual(f(12.7 * 1048576), "12.7 MB/s");
+  assert.strictEqual(f(null), "\u2014");
+  assert.strictEqual(b(1023), "1023 B");
+  const data = releasePayload();
+  data.metrics.resources = resPayload(1, 0.4, 0, 0);
+  data.metrics.resources.memory.percent = 31.0;
+  SH.render(data, []);
+  let html = doc.getElementById("sh-resources-body").innerHTML;
+  assert.match(html, />0%</);
+  assert.match(html, />31%</);
+  assert.match(html, /\u2193 0 B\/s/);                                  // a measured zero is shown as a zero
+  data.metrics.resources = resPayload(2, 87.2, 0, 0);
+  data.metrics.resources.memory.percent = 30.4;
+  SH.render(data, []);
+  html = doc.getElementById("sh-resources-body").innerHTML;
+  assert.match(html, />87%</);
+  assert.match(html, />30\.4%</);
 });

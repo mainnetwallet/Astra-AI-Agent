@@ -20,6 +20,12 @@ Pieces:
                                      only, never used for ordering), backed by the
                                      project's existing Store (SQLite) when
                                      one is supplied, in-memory otherwise
+    - `OperationRoutingContext`   — TEMPORARY, per-user-operation fallback
+                                     state (attempted / failed provider+model
+                                     targets). Never persisted; isolated per
+                                     operation. See its docstring.
+    - `OperationRoutingRegistry`  — bounded per-Gateway lookup of contexts by
+                                     operation id
     - `eligible_targets`          — capability/context/health filtering
     - `rank_by_health`            — text/chat order: primary provider (Gemini)
                                      first, then health only
@@ -536,6 +542,126 @@ class GatewayRoutingState:
                 "model_health": {f"{p}:{m}": h.to_dict()
                                  for (p, m), h in self._health.items()},
             }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Operation-scoped routing state
+# ═══════════════════════════════════════════════════════════════════════════
+class OperationRoutingContext:
+    """Temporary routing context for ONE user operation.
+
+    Two scopes exist and must not be confused:
+
+    * GLOBAL  (`GatewayRoutingState`) -- persistent across operations: the
+      sticky last-successful target, per-target health, latency, cooldowns.
+      It decides where a NEW operation starts.
+    * OPERATION (this class) -- lives only for one user operation (one chat
+      message, however many Gateway calls it makes: understand, generate,
+      verify, correct, tool-loop steps ...). It records which provider+model
+      targets were attempted / failed so fallback is MONOTONIC: once a target
+      failed in this operation it is never the next fallback candidate again,
+      even if global state was cleared or the target's health recovered in
+      the meantime (e.g. another concurrent operation succeeded on it).
+
+    Target identity is `(provider, model)` only. Individual credential keys
+    are NOT targets: key rotation stays inside the connection's
+    CredentialPool, and a target is recorded as failed only after the
+    connection has exhausted its keys and raised.
+
+    Instances are independent of one another and thread-safe; nothing here is
+    persisted, and nothing here touches `GatewayRoutingState`.
+    """
+
+    def __init__(self, operation_id: str = ""):
+        self.operation_id = operation_id or ""
+        self._lock = threading.Lock()
+        self._attempted: list[tuple[str, str]] = []
+        self._failed: set[tuple[str, str]] = set()
+        self.last_used = time.monotonic()
+
+    def mark_attempted(self, provider: str, model: str) -> None:
+        key = (provider, model)
+        with self._lock:
+            self.last_used = time.monotonic()
+            if key not in self._attempted:
+                self._attempted.append(key)
+
+    def mark_failed(self, provider: str, model: str) -> None:
+        """A complete provider+model attempt failed in this operation."""
+        key = (provider, model)
+        with self._lock:
+            self.last_used = time.monotonic()
+            if key not in self._attempted:
+                self._attempted.append(key)
+            self._failed.add(key)
+
+    def has_failed(self, provider: str, model: str) -> bool:
+        with self._lock:
+            return (provider, model) in self._failed
+
+    @property
+    def failed_targets(self) -> frozenset:
+        with self._lock:
+            return frozenset(self._failed)
+
+    @property
+    def attempted_targets(self) -> tuple:
+        with self._lock:
+            return tuple(self._attempted)
+
+    def exclude_failed(self, targets: list) -> list:
+        """Drop every (conn, model, health) whose provider+model already
+        failed in this operation. Order of the rest is preserved."""
+        with self._lock:
+            self.last_used = time.monotonic()
+            if not self._failed:
+                return list(targets)
+            failed = set(self._failed)
+        return [t for t in targets
+                if (t[1].provider, t[1].model_id) not in failed]
+
+
+class OperationRoutingRegistry:
+    """Per-Gateway lookup of `OperationRoutingContext` by operation id.
+
+    An empty operation id never shares state: every call gets a brand-new
+    throw-away context (the pre-existing per-call behavior). Contexts are
+    memory-only and pruned by age / count so an operation that never
+    announces its end cannot leak."""
+
+    TTL_S = 1800.0
+    MAX_CONTEXTS = 1024
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._contexts: dict[str, OperationRoutingContext] = {}
+
+    def get(self, operation_id: str) -> OperationRoutingContext:
+        operation_id = (operation_id or "").strip()
+        if not operation_id:
+            return OperationRoutingContext("")
+        with self._lock:
+            ctx = self._contexts.get(operation_id)
+            if ctx is None:
+                self._prune_locked()
+                ctx = OperationRoutingContext(operation_id)
+                self._contexts[operation_id] = ctx
+            return ctx
+
+    def _prune_locked(self) -> None:
+        now = time.monotonic()
+        for key in [k for k, c in self._contexts.items()
+                    if now - c.last_used > self.TTL_S]:
+            del self._contexts[key]
+        overflow = len(self._contexts) - self.MAX_CONTEXTS + 1
+        if overflow > 0:
+            for key, _c in sorted(self._contexts.items(),
+                                  key=lambda kv: kv[1].last_used)[:overflow]:
+                del self._contexts[key]
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._contexts)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

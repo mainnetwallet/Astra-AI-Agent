@@ -1631,8 +1631,13 @@ class AstraAIGateway:
                 if conn is not None:
                     self.connections.append(conn)
         from astra.ai.gateway_routing import (GatewayRoutingState,
+                                              OperationRoutingRegistry,
                                               build_gateway_catalog)
         self.routing_state = GatewayRoutingState(store)
+        # Temporary per-user-operation fallback state (failed / attempted
+        # provider+model targets), keyed by operation id. Memory-only and
+        # separate from the persistent global `routing_state` above.
+        self.operation_routing = OperationRoutingRegistry()
         # Provider whose models are always tried first (best health first,
         # rotating through its keys) before any other provider is used.
         _pp = (config.get("GW_PRIMARY_PROVIDER", "gemini")
@@ -1847,7 +1852,21 @@ class AstraAIGateway:
         return fit_messages(messages, context_window=ctx,
                             reserve_tokens=reserve)
 
-    def _select_order(self, messages, max_tokens, category=None):
+    def _operation_context(self, operation_id="", trace=""):
+        """Routing context for the current user operation. `operation_id`
+        wins; otherwise `trace` (the chat pipeline threads its per-message
+        request id as `trace` through every Gateway call it makes). With
+        neither, a fresh throw-away context is returned, i.e. no state is
+        shared between such calls."""
+        return self.operation_routing.get(operation_id or trace)
+
+    def _select_order(self, messages, max_tokens, category=None,
+                      op_ctx=None):
+        """`op_ctx` (optional `OperationRoutingContext`): targets that
+        already failed in the current user operation are excluded, so a
+        later Gateway call in the same operation never falls back to them
+        again. Global state (sticky last_successful, health) still decides
+        the first preference and the order of everything that remains."""
         from astra.ai.gateway_routing import (REQUEST_CATEGORIES,
                                               classify_gateway_request,
                                               eligible_targets, rank_targets,
@@ -1867,6 +1886,8 @@ class AstraAIGateway:
         targets = eligible_targets(self._catalog, self.routing_state,
                                    category=category,
                                    context_tokens=context_tokens)
+        if op_ctx is not None:
+            targets = op_ctx.exclude_failed(targets)
         if not targets and context_tokens:
             # The prompt does not fit any candidate's window AS-IS, but
             # astra.ai.context_budget will fit it to whichever model is
@@ -1875,6 +1896,8 @@ class AstraAIGateway:
             # provider-aware fitting shrink the prompt to the chosen model.
             targets = eligible_targets(self._catalog, self.routing_state,
                                        category=category, context_tokens=0)
+            if op_ctx is not None:
+                targets = op_ctx.exclude_failed(targets)
         if not targets and category == "control":
             # No configured model declares JSON support: control calls must
             # still work, so fall back to the ordinary soft "general" ranking.
@@ -1883,6 +1906,8 @@ class AstraAIGateway:
             targets = eligible_targets(self._catalog, self.routing_state,
                                        category=category,
                                        context_tokens=context_tokens)
+            if op_ctx is not None:
+                targets = op_ctx.exclude_failed(targets)
         # Sticky last_success: while the last successful target is still
         # eligible it is the only first choice (Gemini is NOT tried first).
         # If it fails, record_failure clears it and the remaining targets
@@ -1919,11 +1944,16 @@ class AstraAIGateway:
                 pass
 
     def chat(self, messages, model=None, max_tokens=None, category=None,
-             trace="") -> str:
+             trace="", operation_id="") -> str:
         """`category` (optional, one of gateway_routing.REQUEST_CATEGORIES)
         overrides the keyword classification of the user-role text; leave it
         unset for ordinary requests. `max_tokens` unset means the provider /
-        model decides (no Astra-imposed cap)."""
+        model decides (no Astra-imposed cap).
+
+        `operation_id` (optional) names the USER operation this call belongs
+        to (defaults to `trace`). Calls sharing an operation id share one
+        monotonic fallback history: a provider+model that failed earlier in
+        the operation is not chosen again. Calls with neither start clean."""
         op = new_op_id()
         if model:
             target = self._catalog_model(model)
@@ -1934,7 +1964,9 @@ class AstraAIGateway:
                 model=model, messages=fitted, max_tokens=max_tokens,
                 op=op, trace=trace)
 
-        category, ranked = self._select_order(messages, max_tokens, category)
+        op_ctx = self._operation_context(operation_id, trace)
+        category, ranked = self._select_order(messages, max_tokens, category,
+                                              op_ctx=op_ctx)
         self._emit("astra_gateway.request", category=category,
                    candidates=len(ranked), op=op, trace=trace,
                    input=_gw_log_input(messages))
@@ -1954,6 +1986,8 @@ class AstraAIGateway:
         for conn, target_model, health in ranked:
             attempts += 1
             self.last_attempts = attempts
+            op_ctx.mark_attempted(target_model.provider,
+                                  target_model.model_id)
             start = time.perf_counter()
             try:
                 result = conn.chat(
@@ -1963,6 +1997,8 @@ class AstraAIGateway:
                 last_error = getattr(e, "message", None) or str(e)
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
+                op_ctx.mark_failed(target_model.provider,
+                                   target_model.model_id)
                 cred = (getattr(conn, "pool", None).last_key()
                         if getattr(conn, "pool", None) is not None
                         and hasattr(conn.pool, "last_key") else None)
@@ -1977,6 +2013,8 @@ class AstraAIGateway:
                 last_error = f"{type(e).__name__}: {e}"
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
+                op_ctx.mark_failed(target_model.provider,
+                                   target_model.model_id)
                 cred = (getattr(conn, "pool", None).last_key()
                         if getattr(conn, "pool", None) is not None
                         and hasattr(conn.pool, "last_key") else None)
@@ -2013,7 +2051,8 @@ class AstraAIGateway:
         raise ProviderError(
             f"Astra AI Gateway: all suitable targets failed —— {last_error}")
 
-    def stream(self, messages, model=None, max_tokens=None, trace=""):
+    def stream(self, messages, model=None, max_tokens=None, trace="",
+               operation_id=""):
         op = new_op_id()
         if model:
             # Generator fallback: first connection's stream that starts wins
@@ -2081,7 +2120,9 @@ class AstraAIGateway:
                        op=op, trace=trace, terminal=True)
             return
 
-        category, ranked = self._select_order(messages, max_tokens)
+        op_ctx = self._operation_context(operation_id, trace)
+        category, ranked = self._select_order(messages, max_tokens,
+                                              op_ctx=op_ctx)
         self._emit("astra_gateway.request", category=category,
                    candidates=len(ranked), op=op, trace=trace,
                    input=_gw_log_input(messages))
@@ -2094,6 +2135,8 @@ class AstraAIGateway:
         # interruption ends the call cleanly instead of falling over.
         emitted_any = False
         for conn, target_model, health in ranked:
+            op_ctx.mark_attempted(target_model.provider,
+                                  target_model.model_id)
             start = time.perf_counter()
             full = []
             try:
@@ -2106,6 +2149,8 @@ class AstraAIGateway:
             except (ProviderError, TimeoutError) as e:
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
+                op_ctx.mark_failed(target_model.provider,
+                                   target_model.model_id)
                 reason = getattr(e, "message", None) or str(e)
                 cred = (getattr(conn, "pool", None).last_key()
                         if getattr(conn, "pool", None) is not None
@@ -2126,6 +2171,8 @@ class AstraAIGateway:
             except Exception as e:
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
+                op_ctx.mark_failed(target_model.provider,
+                                   target_model.model_id)
                 reason = f"{type(e).__name__}: {e}"
                 cred = (getattr(conn, "pool", None).last_key()
                         if getattr(conn, "pool", None) is not None

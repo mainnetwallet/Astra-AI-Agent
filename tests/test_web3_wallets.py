@@ -643,6 +643,146 @@ class TestImportGrouping(RegistryCase):
             self.assertNotIn(s, blob)
 
 
+# ── delete one wallet ───────────────────────────────────────────────────────
+class TestDeleteWallet(RegistryCase):
+    def _keys(self):
+        return [r["name"] for r in self.store.fetch(
+            "SELECT name FROM web3_keys ORDER BY id")]
+
+    def _seed(self):
+        self.reg.import_wallets(f"Alpha {K1}\nBeta {K2}\nGamma {K3}",
+                                group_name="Exchange")
+        self.reg.import_wallets(f"Solo {K4}")
+        ids = {w["name"]: w["id"] for w in self.reg.list_wallets()}
+        return ids
+
+    def test_delete_removes_wallet_memberships_and_key_record(self):
+        ids = self._seed()
+        self.assertEqual(sorted(self._keys()), sorted([A1, A2, A3, A4]))
+        out = self.reg.delete_wallet(ids["Beta"])
+        self.assertEqual([w["name"] for w in out["wallets"]],
+                         ["Alpha", "Gamma", "Solo"])
+        self.assertIsNone(self.reg.get(ids["Beta"]))
+        self.assertIsNone(self.reg.get(A2))
+        self.assertNotIn(A2, self._keys(), "no orphaned encrypted key record")
+        self.assertEqual(sorted(self._keys()), sorted([A1, A3, A4]))
+        rows = self.store.fetch(
+            "SELECT * FROM web3_wallet_group_members WHERE wallet_id=?",
+            (ids["Beta"],))
+        self.assertEqual(rows, [], "its group memberships are gone")
+
+    def test_delete_keeps_group_and_every_other_wallet(self):
+        ids = self._seed()
+        out = self.reg.delete_wallet(ids["Beta"])
+        (g,) = out["groups"]
+        self.assertEqual((g["name"], g["count"]), ("Exchange", 2))
+        self.assertEqual(g["wallet_ids"], [ids["Alpha"], ids["Gamma"]])
+        for n in ("Alpha", "Gamma", "Solo"):
+            self.assertIsNotNone(self.reg.get(ids[n]))
+        # other wallets can still be decrypted (their keys were not touched)
+        ks = self.reg._ks()
+        self.assertEqual(ks.decrypt(A1), "0x" + K1)
+        self.assertEqual(ks.decrypt(A4), "0x" + K4)
+        with self.assertRaises(Exception):
+            ks.decrypt(A2)
+
+    def test_delete_last_member_leaves_an_empty_group_not_a_deleted_one(self):
+        ids = self._seed()
+        for n in ("Alpha", "Beta", "Gamma"):
+            out = self.reg.delete_wallet(ids[n])
+        self.assertEqual([(g["name"], g["count"]) for g in out["groups"]],
+                         [("Exchange", 0)])
+
+    def test_delete_by_address_and_watch_only(self):
+        self.reg.import_wallets(f"Keyed {K1}\nWatch {RECIPIENT}")
+        w = [x for x in self.reg.list_wallets() if x["source"] == "watch"][0]
+        self.reg.delete_wallet(RECIPIENT.upper().replace("0X", "0x"))
+        self.assertIsNone(self.reg.get(w["id"]))
+        self.assertEqual(self._keys(), [A1], "watch-only had no key; others kept")
+        self.reg.delete_wallet(A1)
+        self.assertEqual((self.reg.count(), self._keys()), (0, []))
+
+    def test_unknown_wallet_is_refused_and_changes_nothing(self):
+        self._seed()
+        for ref in ("w_nope", "", "0x" + "9" * 40):
+            with self.assertRaises(WalletError):
+                self.reg.delete_wallet(ref)
+        self.assertEqual(self.reg.count(), 4)
+        self.assertEqual(len(self._keys()), 4)
+
+    def test_deleting_the_active_wallet_does_not_promote_another(self):
+        ids = self._seed()
+        self.assertEqual(self.reg.active()["id"], ids["Alpha"])
+        out = self.reg.delete_wallet(ids["Alpha"])
+        self.assertIsNone(out["active_id"])
+        self.assertIsNone(out["active_address"])
+        with self.assertRaises(WalletError):
+            self.reg.resolve("")               # signing tools refuse, not default
+        # deleting a NON-active wallet keeps the selection
+        self.reg.set_active(ids["Gamma"])
+        self.reg.delete_wallet(ids["Solo"])
+        self.assertEqual(self.reg.active()["id"], ids["Gamma"])
+
+    def test_deleted_wallet_cannot_be_resolved_for_signing(self):
+        ids = self._seed()
+        self.reg.delete_wallet(ids["Beta"])
+        with self.assertRaises(WalletError):
+            self.reg.resolve(A2, need_signer=True)
+
+    def test_same_address_can_be_imported_again_after_delete(self):
+        ids = self._seed()
+        self.reg.delete_wallet(ids["Beta"])
+        res = self.reg.import_wallets(f"Beta again {K2}")
+        self.assertEqual((res["imported"], res["rejected"]), (1, 0))
+        self.assertEqual(self.reg._ks().decrypt(A2), "0x" + K2)
+
+    def test_delete_is_atomic(self):
+        ids = self._seed()
+        real = self.store.table_exists
+
+        def boom(name):
+            raise RuntimeError("disk on fire " + K2)
+        self.store.table_exists = boom
+        try:
+            with self.assertRaises(WalletError) as cm:
+                self.reg.delete_wallet(ids["Beta"])
+        finally:
+            self.store.table_exists = real
+        self.assertNotIn(K2, str(cm.exception))          # no exception text
+        self.assertIsNotNone(self.reg.get(ids["Beta"]))  # wallet still there
+        self.assertIn(A2, self._keys())                  # ...with its key
+        self.assertEqual(self.reg.list_groups()[0]["count"], 3)   # ...and membership
+
+    def test_persists_across_restart(self):
+        ids = self._seed()
+        self.reg.delete_wallet(ids["Beta"])
+        self.reg.delete_group(self.reg.list_groups()[0]["id"])
+        self.store.close()
+        self.store, self.reg = self.env.open()
+        d = self.reg.describe()
+        self.assertEqual([w["name"] for w in d["wallets"]],
+                         ["Alpha", "Gamma", "Solo"])
+        self.assertEqual(d["groups"], [])
+
+    def test_result_and_state_never_contain_secrets(self):
+        ids = self._seed()
+        blob = json.dumps(self.reg.delete_wallet(ids["Beta"]))
+        for k in KEYS:
+            self.assertNotIn(k, blob)
+        self.assertNotIn("keystore", blob)
+        self.assertNotIn("private", blob)
+
+    def test_group_delete_and_wallet_delete_are_separate_operations(self):
+        ids = self._seed()
+        gid = self.reg.list_groups()[0]["id"]
+        self.reg.delete_group(gid)
+        self.assertEqual(self.reg.count(), 4)              # group delete: wallets stay
+        self.assertEqual(len(self._keys()), 4)
+        self.reg.delete_wallet(ids["Alpha"])
+        self.assertEqual(self.reg.count(), 3)              # wallet delete: one wallet
+        self.assertEqual(self.reg.list_groups(), [])
+
+
 # ── HTTP API (neutral router, no socket) ────────────────────────────────────
 class TestWalletApi(unittest.TestCase):
     def setUp(self):
@@ -760,6 +900,85 @@ class TestWalletApi(unittest.TestCase):
         _, j = self.call("POST", f"/api/v1/web3/wallet-groups/{gid}/delete")
         self.assertEqual((j["data"]["groups"], len(j["data"]["wallets"])), ([], 2))
 
+
+    def _seed_http(self):
+        _, j = self.call("POST", "/api/v1/web3/wallets/import",
+                         {"text": f"A {K1}\nB {K2}\nC {K3}",
+                          "group_name": "Exchange Wallets"})
+        self.assertEqual(j["data"]["group"]["name"], "Exchange Wallets")
+        self.call("POST", "/api/v1/web3/wallets/import", {"text": f"Solo {K4}"})
+        _, j = self.call("GET", "/api/v1/web3/wallets")
+        return {w["name"]: w["id"] for w in j["data"]["wallets"]}
+
+    def test_http_delete_wallet_returns_registry_and_persists(self):
+        ids = self._seed_http()
+        r, j = self.call("DELETE", f"/api/v1/web3/wallets/{ids['B']}")
+        self.assertEqual(r.status, 200)
+        self.assertEqual([w["name"] for w in j["data"]["wallets"]],
+                         ["A", "C", "Solo"])
+        self.assertEqual([(g["name"], g["count"]) for g in j["data"]["groups"]],
+                         [("Exchange Wallets", 2)])
+        for k in KEYS:
+            self.assertNotIn(k, json.dumps(j))
+        _, j2 = self.call("GET", "/api/v1/web3/wallets")          # "reload"
+        self.assertEqual(j2["data"]["wallets"], j["data"]["wallets"])
+        self.assertEqual(j2["data"]["groups"], j["data"]["groups"])
+        keys = self.stack["store"].fetch("SELECT name FROM web3_keys")
+        self.assertNotIn(A2, [k["name"] for k in keys])
+        self.assertEqual(len(keys), 3)
+
+    def test_http_delete_wallet_post_alias_and_by_address(self):
+        ids = self._seed_http()
+        r, j = self.call("POST", f"/api/v1/web3/wallets/{ids['A']}/delete")
+        self.assertEqual((r.status, len(j["data"]["wallets"])), (200, 3))
+        r, j = self.call("DELETE", f"/api/v1/web3/wallets/{A4}")
+        self.assertEqual((r.status, len(j["data"]["wallets"])), (200, 2))
+
+    def test_http_delete_unknown_wallet_is_a_generic_400(self):
+        self._seed_http()
+        r, j = self.call("DELETE", "/api/v1/web3/wallets/w_nope")
+        self.assertEqual(r.status, 400)
+        self.assertEqual((j["ok"], j["error"], j["error_code"]),
+                         (False, "wallet not found", "wallet_error"))
+        _, j2 = self.call("GET", "/api/v1/web3/wallets")
+        self.assertEqual(len(j2["data"]["wallets"]), 4)
+
+    def test_http_delete_wallet_then_group_flows_stay_separate(self):
+        ids = self._seed_http()
+        _, j = self.call("GET", "/api/v1/web3/wallets")
+        gid = j["data"]["groups"][0]["id"]
+        _, j = self.call("POST", f"/api/v1/web3/wallet-groups/{gid}/delete")
+        self.assertEqual((j["data"]["groups"], len(j["data"]["wallets"])), ([], 4))
+        _, j = self.call("DELETE", f"/api/v1/web3/wallets/{ids['C']}")
+        self.assertEqual([w["name"] for w in j["data"]["wallets"]],
+                         ["A", "B", "Solo"])
+
+    def test_http_delete_wallet_requires_the_operator_token(self):
+        ids = self._seed_http()
+        self.site.operator_token = "tok"
+        r, _ = self.call("DELETE", f"/api/v1/web3/wallets/{ids['A']}")
+        self.assertEqual(r.status, 401)
+        self.site.operator_token = None
+        _, j = self.call("GET", "/api/v1/web3/wallets")
+        self.assertEqual(len(j["data"]["wallets"]), 4, "unauthorised call deleted nothing")
+
+    def test_http_delete_wallet_emits_no_secret_to_events_or_logs(self):
+        ids = self._seed_http()
+        before = self.stack["events"].last_id()
+        buf = io.StringIO()
+        h = logging.StreamHandler(buf)
+        logging.getLogger().addHandler(h)
+        old = logging.getLogger().level
+        logging.getLogger().setLevel(logging.DEBUG)
+        try:
+            self.call("DELETE", f"/api/v1/web3/wallets/{ids['B']}")
+        finally:
+            logging.getLogger().removeHandler(h)
+            logging.getLogger().setLevel(old)
+        ev = json.dumps(self.stack["events"].since(before), default=str)
+        for k in KEYS:
+            self.assertNotIn(k, ev)
+            self.assertNotIn(k, buf.getvalue())
 
     def test_errors_are_generic_and_do_not_echo_input(self):
         r, j = self.call("POST", "/api/v1/web3/wallets/import",

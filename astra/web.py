@@ -108,7 +108,8 @@ New /api/v1 endpoints:
   POST /api/v1/web3/transactions/{tx_id}/authorize  (CONFIRM-mode approve; operator token required)
   POST /api/v1/web3/transactions/{tx_id}/reject     (CONFIRM-mode reject; operator token required)
   GET  /api/v1/web3/wallets                   (wallet registry: wallets + groups + active)
-  POST /api/v1/web3/wallets/import            ({text, group_id?, dry_run?} one wallet per line)
+  POST /api/v1/web3/wallets/import            ({text, group_id?, group_name?, dry_run?} one wallet per line;
+                                                group_name creates ONE group only if 2+ wallets import)
   POST /api/v1/web3/wallets/create            ({name?, group_id?}; one-time key reveal)
   POST /api/v1/web3/wallets/{id}/select | move
   POST /api/v1/web3/wallet-groups             ({name});  /{gid}/rename | delete | members
@@ -2529,7 +2530,8 @@ class WebApp:
                 if len(path) == 4 and path[3] == "import" and method == "POST":
                     res = reg.import_wallets(
                         body.get("text"), group_id=body.get("group_id") or None,
-                        dry_run=bool(body.get("dry_run")))
+                        dry_run=bool(body.get("dry_run")),
+                        group_name=body.get("group_name") or None)
                     res.update(reg.describe() if not res["dry_run"] else {})
                     return ok(res)
                 if len(path) == 4 and path[3] == "create" and method == "POST":

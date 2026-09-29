@@ -139,6 +139,16 @@
       (m.chains.length > cs.length ? `<em class="w3-more">+${m.chains.length - cs.length}</em>` : "");
   };
 
+  // A group is open when the user toggled it; otherwise it is collapsed
+  // (a search or an explicit group filter opens the matching groups).
+  const groupOpen = (S, gid) => {
+    const o = S.open || {};
+    return gid in o ? !!o[gid] : !!(S.q.trim() || S.grp);
+  };
+
+  // Astra Wallets: standalone wallets (no group) as cards, then one collapsible
+  // header per group. The serial numbers are generated here from the rendered
+  // order — they are never stored as wallet data.
   function walletsHtml(m, S) {
     const q = S.q.trim().toLowerCase();
     if (!m.registry) return empty("The wallet registry is unavailable, so wallets can’t be imported or created.");
@@ -148,31 +158,53 @@
       (!S.grp || w.groupIds.includes(S.grp)));
     if (!ws.length) return empty("No wallets match your search or group filter.");
     const on = S.sel || m.activeAddress || (m.wallets[0] && m.wallets[0].address);
+    const inGroup = new Set(m.groups.map((g) => g.id));
     const gname = (w) => w.groupIds.map((id) => (m.groups.find((g) => g.id === id) || {}).name).filter(Boolean).join(", ");
-    return ws.map((w) => `<button class="w3-wallet${w.address === on ? " sel" : ""}" data-wsel="${esc(w.address)}" title="${esc(w.address + (gname(w) ? " · " + gname(w) : ""))}">
+    const card = (w) => `<button class="w3-wallet${w.address === on ? " sel" : ""}" data-wsel="${esc(w.address)}" title="${esc(w.address + (gname(w) ? " · " + gname(w) : ""))}">
       <span class="w3-wtop"><span class="w3-av">${esc(w.address.slice(2, 4).toUpperCase())}</span>
       <span class="w3-wname">${esc(w.name || short(w.address))}<small>${esc(short(w.address))} · ${esc(srcLabel(w))}</small></span>${w.address === on ? `<i class="w3-dot" title="Active"></i>` : ""}</span>
       <span class="w3-wval">—<small>balance not indexed</small></span>
       <span class="w3-spark" aria-hidden="true"></span>
-      <span class="w3-wchains">${chainDots(m, 3)}</span></button>`).join("") + add;
+      <span class="w3-wchains">${chainDots(m, 3)}</span></button>`;
+    const solo = ws.filter((w) => !w.groupIds.some((id) => inGroup.has(id)));
+    const shown = new Map(ws.map((w) => [w.id, w]));
+    const groups = m.groups.map((g) => {
+      const ids = g.walletIds.concat(ws.filter((w) => w.groupIds.includes(g.id) && !g.walletIds.includes(w.id)).map((w) => w.id));
+      return { g, members: ids.map((id) => shown.get(id)).filter(Boolean) };
+    }).filter((x) => x.members.length || (!q && !S.grp));
+    const grp = ({ g, members }) => {
+      const open = groupOpen(S, g.id);
+      return `<div class="w3-group${open ? " open" : ""}" data-group="${esc(g.id)}">
+      <button class="w3-ghead" data-gtoggle="${esc(g.id)}" aria-expanded="${open}"><b>${esc(g.name)}</b><small>${plural(g.count, "wallet")}</small><i aria-hidden="true">${open ? "▲" : "▼"}</i></button>
+      ${open ? `<div class="w3-gbody">${members.map((w, i) => `<button class="w3-wallet w3-gitem${w.address === on ? " sel" : ""}" data-wsel="${esc(w.address)}" title="${esc(w.address)}"><span class="w3-gnum">${i + 1}.</span>
+      <span class="w3-wname">${esc(w.name || short(w.address))}<small>${esc(short(w.address))}</small></span>${w.address === on ? `<i class="w3-dot" title="Active"></i>` : ""}</button>`).join("") || empty("No wallets in this group yet.")}</div>` : ""}</div>`;
+    };
+    return solo.map(card).join("") + groups.map(grp).join("") + add;
   }
 
-  // ---- modals (Import Wallet / Create Wallet / Manage Groups) -------------
+  // ---- modals (Import Wallet / Create Wallet / Astra Wallets) -------------
   const IDLE = () => ({ kind: null, text: "", name: "", group: "", results: null, busy: false, err: "",
-    secret: null, created: null, ack: false, gsel: null, gnew: "", gname: null, confirmDel: false });
+    secret: null, created: null, ack: false, gsel: null, gnew: "", gname: null, confirmDel: false, impGroup: "" });
   const gopts = (m, sel) => `<option value="">No group</option>` + m.groups.map((g) => `<option value="${esc(g.id)}"${sel === g.id ? " selected" : ""}>${esc(g.name)}</option>`).join("");
   const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
+
+  // Non-blank, non-comment lines = wallets in this import. One → standalone
+  // wallet; two or more → one group, which needs a name.
+  const importCount = (t) => String(t || "").split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith("#")).length;
+  const importNeedsGroup = (X) => importCount(X.text) >= 2;
+  const importBlocked = (X) => X.busy || !X.text.trim() || (importNeedsGroup(X) && !X.impGroup.trim());
 
   function importBody(m, X) {
     const rs = X.results;
     const rows = rs ? `<div class="w3-mres">${rs.results.map((r) => `<div class="w3-mrow ${r.status === "valid" ? "ok" : "bad"}"><i>${r.status === "valid" ? "✓" : "✕"}</i><span>Line ${r.line}${r.address ? ` · ${esc(short(r.address))}` : ""}<small>${esc(r.status === "valid" ? (rs.dry_run ? "valid — ready to import" : "imported") : (r.reason || r.status))}</small></span></div>`).join("")}</div>
-      <p class="w3-msum">${rs.dry_run ? `${rs.valid} valid · ${rs.rejected} will be rejected` : `${plural(rs.imported, "wallet")} imported · ${rs.rejected} rejected`}</p>` : "";
+      <p class="w3-msum">${rs.dry_run ? `${rs.valid} valid · ${rs.rejected} will be rejected` : `${plural(rs.imported, "wallet")} imported · ${rs.rejected} rejected`}</p>${rs.group ? `<p class="w3-msum">Group “${esc(rs.group.name)}” created</p>` : ""}` : "";
     return `<p class="w3-note">One wallet per line: a private key (<code>64 hex</code>, optional <code>0x</code>), <code>name key</code>, or a <code>0x…</code> address for a watch-only wallet. Keys are encrypted at rest and never sent to the AI. Seed phrases and JSON keystores aren’t supported.</p>
       <textarea class="w3-in w3-mta" data-mtext rows="6" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Wallets to import" placeholder="One wallet per line">${esc(X.text)}</textarea>
-      <div class="w3-mform"><label>Add to group<select class="w3-in" data-mgroup>${gopts(m, X.group)}</select></label></div>
+      <div class="w3-mform" data-mgwrap${importNeedsGroup(X) ? "" : " hidden"}><label>Group Name<input class="w3-in" data-mgname maxlength="40" value="${esc(X.impGroup)}" placeholder="e.g. Binance Wallets" aria-label="Group Name" autocomplete="off"></label>
+      <small class="w3-dim">You’re importing more than one wallet, so they’re saved together as one group.</small></div>
       ${X.err ? `<p class="w3-merr">${esc(X.err)}</p>` : ""}${rows}
       <div class="w3-mfoot"><button class="w3-btn" data-mvalidate${X.busy || !X.text.trim() ? " disabled" : ""}>Validate</button>
-      <button class="w3-btn primary" data-mimport${X.busy || !X.text.trim() ? " disabled" : ""}>${X.busy ? "Working…" : "Import"}</button></div>`;
+      <button class="w3-btn primary" data-mimport${importBlocked(X) ? " disabled" : ""}>${X.busy ? "Working…" : "Import"}</button></div>`;
   }
 
   function createBody(m, X) {
@@ -212,7 +244,7 @@
 
   function modalHtml(m, X) {
     if (!X || !X.kind || !m.registry) return "";
-    const T = { import: ["Import Wallet", importBody], create: ["Create Wallet", createBody], groups: ["Manage Groups", groupsBody] }[X.kind];
+    const T = { import: ["Import Wallet", importBody], create: ["Create Wallet", createBody], groups: ["Astra Wallets", groupsBody] }[X.kind];
     if (!T) return "";
     return `<div class="w3-modal" data-mbg><div class="w3-mbox${X.kind === "groups" ? " wide" : ""}" role="dialog" aria-modal="true" aria-label="${esc(T[0])}">
       <div class="w3-mhead"><h3>${esc(T[0])}</h3><button class="w3-ico flat" data-mclose title="Close" aria-label="Close">✕</button></div>${T[1](m, X)}</div></div>`;
@@ -244,7 +276,7 @@
       (m.actions.length ? UNSUP.slice(0, S.view === "agents" ? 4 : Math.max(0, 6 - m.actions.length)).map((u) => `<button class="w3-action" disabled title="${esc(NOSUP)}"><i class="w3-aic">${u[2]}</i><span><b>${esc(u[0])}</b><small>${esc(u[1])}</small></span></button>`).join("") : "");
     return `<div class="w3" data-view="${esc(S.view)}"><div class="w3-main">
 <div class="w3-head"><span class="w3-logo">⛓️</span><div class="w3-ht"><h2>Web3 Center</h2><p>Manage wallets, assets, networks and Web3 agent actions</p></div>
-<div class="w3-acts">${actBtn(m, "Import Wallet", "import", "primary", "imp")}${actBtn(m, "Create Wallet", "create", "", "cre")}${actBtn(m, "Manage Groups", "groups", "", "grp")}</div></div>
+<div class="w3-acts">${actBtn(m, "Import Wallet", "import", "primary", "imp")}${actBtn(m, "Create Wallet", "create", "", "cre")}${actBtn(m, "Astra Wallets", "groups", "", "grp")}</div></div>
 <nav class="w3-tabs">${tabs.map((t) => `<button class="w3-tab${S.view === t[0] ? " on" : ""}" data-view="${t[0]}"><i>${TI[t[0]]}</i>${t[1]}</button>`).join("")}</nav>
 <section class="w3-card w3-portfolio" ${sec("overview")}><div class="w3-pf-l"><div class="w3-pf-top"><h3>Total Portfolio Value <i class="w3-eye">◉</i></h3>
 <div class="w3-ranges" role="group" aria-label="Chart range">${Object.keys(RANGES).map((r) => `<button class="w3-rng${r === range ? " on" : ""}" data-range="${r}">${r}</button>`).join("")}</div></div>
@@ -255,7 +287,7 @@
 <path d="${chart.area}" fill="url(#w3g)"/><path d="${chart.line}" fill="none" stroke="#8b7bff" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
 </div>
 <div class="w3-stats">${[["Wallets", m.wallets.length, "▣"], ["Networks", m.chains.length, "◍"], ["Tokens", "—", "◎"], ["NFTs", "—", "▨"]].map((s) => `<div class="w3-stat"${s[1] === "—" ? ` title="Not indexed by the backend yet"` : ""}><i>${s[2]}</i><span><small>${s[0]}</small><b>${s[1]}</b></span></div>`).join("")}</div></section>
-<section class="w3-card" ${sec("overview wallets")}><div class="w3-row"><h3>My Wallets <span class="w3-dim">(${m.wallets.length})</span></h3>
+<section class="w3-card" ${sec("overview wallets")}><div class="w3-row"><h3>Astra Wallets <span class="w3-dim">(${m.wallets.length})</span></h3>
 <div class="w3-tools"><input data-q class="w3-in w3-search" placeholder="Search wallets…" value="${esc(S.q)}" aria-label="Search wallets">
 ${groupSel(m, S)}
 <button class="w3-ico${S.layout === "grid" ? " on" : ""}" data-layout="grid" title="Grid">▦</button><button class="w3-ico${S.layout === "list" ? " on" : ""}" data-layout="list" title="List">☰</button>
@@ -289,7 +321,7 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
   }
 
   // ---- DOM binding (browser only) -----------------------------------------
-  const S = { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false, range: "1W", atab: "tokens", grp: "" };
+  const S = { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false, range: "1W", atab: "tokens", grp: "", open: {} };
   let M = null, hooks = {}, el = null, MS = IDLE();
   const W = "/api/v1/web3/wallets", G = "/api/v1/web3/wallet-groups";
   const toast = (t) => { const n = el && el.querySelector("#w3-toast"); if (!n) return; n.textContent = t; n.classList.add("on"); setTimeout(() => n.classList.remove("on"), 2000); };
@@ -304,6 +336,15 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
     if (M.activeAddress) S.sel = M.activeAddress;
     else if (!M.wallets.some((w) => w.address === S.sel)) S.sel = M.wallets[0] ? M.wallets[0].address : null;
     if (S.grp && !M.groups.some((g) => g.id === S.grp)) S.grp = "";
+    Object.keys(S.open).forEach((id) => { if (!M.groups.some((g) => g.id === id)) delete S.open[id]; });   // keep the rest
+  }
+  // The ONE reconciliation path: re-read the canonical registry, then apply it.
+  // `fallback` (the snapshot the mutating call returned) is used only if the
+  // GET itself fails. Expansion state lives in S.open, so it survives this.
+  async function refreshAstraWallets(fallback) {
+    const r = await call("GET", W);
+    if (r && r.ok && r.data) apply(r.data); else if (fallback) apply(fallback);
+    return !!(r && r.ok);
   }
   function closeModal(force) {
     if (MS.secret && !MS.ack && !force) { toast("Confirm you have saved the private key first"); return; }
@@ -315,11 +356,12 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
     MS.busy = false; paint();
   }
   const doImport = (dry) => run(async () => {
-    const r = await call("POST", W + "/import", { text: MS.text, dry_run: !!dry, group_id: MS.group || undefined });
+    const gn = importNeedsGroup(MS) ? MS.impGroup.trim() : "";
+    const r = await call("POST", W + "/import", { text: MS.text, dry_run: !!dry, group_name: gn || undefined });
     if (!r.ok) { MS.results = null; MS.err = fail(r); return; }
     MS.results = r.data;
     if (!dry) {
-      apply(r.data);
+      await refreshAstraWallets(r.data);
       const bad = new Set(r.data.results.filter((x) => x.status !== "valid").map((x) => x.line));
       MS.text = MS.text.split(/\r?\n/).filter((_, i) => bad.has(i + 1)).join("\n");   // keep only rejected lines
       toast(plural(r.data.imported, "wallet") + " imported");
@@ -330,18 +372,18 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
     if (!r.ok) { MS.err = fail(r); return; }
     MS.created = r.data.wallet; MS.secret = r.data.reveal && r.data.reveal.private_key; MS.ack = false;
     r.data.reveal = null;   // the model/registry snapshot never holds it
-    apply(r.data);
+    await refreshAstraWallets(r.data);
   });
   const doSelect = async (address, id) => {
     S.sel = address; paint();
     const r = await call("POST", W + "/" + encodeURIComponent(id || address) + "/select");
-    if (r.ok) { apply(r.data); paint(); } else { S.sel = M.activeAddress; paint(); toast(fail(r)); }
+    if (r.ok) { await refreshAstraWallets(r.data); paint(); } else { S.sel = M.activeAddress; paint(); toast(fail(r)); }
   };
   // group operations: post, then apply the returned registry snapshot
   const doGroup = (method, path, body, after) => run(async () => {
     const r = await call(method, path, body);
     if (!r.ok) { MS.err = fail(r); return; }
-    apply(r.data); if (after) after(r.data);
+    await refreshAstraWallets(r.data); if (after) after(r.data);
   });
 
   function onClick(e) {
@@ -369,6 +411,7 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
     if ((x = g("[data-gadd]"))) return doGroup("POST", G + "/" + encodeURIComponent(gid()) + "/members", { add: [x.dataset.gadd] });
     if ((x = g("[data-gremove]"))) return doGroup("POST", G + "/" + encodeURIComponent(gid()) + "/members", { remove: [x.dataset.gremove] });
     if (MS.kind) return;   // a modal is open: nothing behind it reacts
+    if ((x = g("[data-gtoggle]"))) { const id = x.dataset.gtoggle; S.open[id] = !groupOpen(S, id); return paint(); }   // header only, never a wallet
     if ((x = g(".w3-tab[data-view]"))) { S.view = x.dataset.view; return paint(); } // NOT bare [data-view]: the container carries it too
     if ((x = g("[data-wsel]"))) return doSelect(x.dataset.wsel);
     if ((x = g("[data-layout]"))) { S.layout = x.dataset.layout; return paint(); }
@@ -398,7 +441,12 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
         const t = e.target;
         if (t.matches("[data-q]")) { S.q = t.value; const w = el.querySelector("#w3-wallets"); if (w) w.innerHTML = walletsHtml(M, S); return; }
         // modal fields update state only (no repaint: keeps focus + caret)
-        if (t.matches("[data-mtext]")) { MS.text = t.value; const on = !!t.value.trim(); el.querySelectorAll("[data-mvalidate],[data-mimport]").forEach((b) => { b.disabled = !on || MS.busy; }); }
+        if (t.matches("[data-mtext]") || t.matches("[data-mgname]")) {
+          if (t.matches("[data-mtext]")) MS.text = t.value; else MS.impGroup = t.value;
+          const wrap = el.querySelector("[data-mgwrap]"); if (wrap) wrap.hidden = !importNeedsGroup(MS);
+          el.querySelectorAll("[data-mvalidate]").forEach((b) => { b.disabled = !MS.text.trim() || MS.busy; });
+          el.querySelectorAll("[data-mimport]").forEach((b) => { b.disabled = importBlocked(MS); });
+        }
         else if (t.matches("[data-mname]")) MS.name = t.value;
         else if (t.matches("[data-gnew]")) MS.gnew = t.value;
         else if (t.matches("[data-gname]")) MS.gname = t.value;
@@ -421,11 +469,11 @@ ${m.actions.includes("token_balance") && sel ? `<button class="w3-btn ic-bal" da
   // Test hook: forget all UI state (selection, filters, any open dialog and
   // its in-memory secrets). The page itself never needs this.
   function resetState() {
-    Object.assign(S, { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false, range: "1W", atab: "tokens", grp: "" });
+    Object.assign(S, { view: "overview", q: "", layout: "grid", sel: null, net: "all", all: false, range: "1W", atab: "tokens", grp: "", open: {} });
     MS = IDLE();
   }
 
-  const api = { resetState, buildModel, mapRegistry, html, walletsHtml, modalHtml, activitySeries, hourSeries, seriesFor, chartPaths, nativeAmt, short, render, ACTIONS, IDLE };
+  const api = { resetState, buildModel, mapRegistry, html, walletsHtml, modalHtml, activitySeries, hourSeries, seriesFor, chartPaths, nativeAmt, short, render, ACTIONS, IDLE, groupOpen, refreshAstraWallets };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.Web3Center = api;
 })(typeof window !== "undefined" ? window : globalThis);

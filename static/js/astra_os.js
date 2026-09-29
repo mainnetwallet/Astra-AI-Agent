@@ -28,7 +28,6 @@
       { label: "Browser", tab: "system-map", focus: "workspace" }] },
     { id: "control", label: "AI Control Plane", ic: "🧠", children: [
       { label: "Providers Health", tab: "providers" }, { label: "Router", tab: "router" }] },
-    { id: "command-center", label: "Command Center", ic: "🏠", tab: "command-center" },
     { id: "mem", label: "Memory Center", ic: "🧬", tab: "system-map", focus: "memory" },
     { id: "sec", label: "Security Center", ic: "🛡️", tab: "system-map", focus: "security" },
     { id: "health", label: "System Health", ic: "❤️", tab: "command-center", anchor: "cc-health" },
@@ -135,11 +134,11 @@
   const dot = (s) => `<span class="dot ${esc(s)}"></span>`;
   const isActive = (name) => OS.tab === name;
 
-  /* ---------------------------- Command Center ------------------------------ */
+  /* ----------------------------- System Health ------------------------------- */
   function ccShell() {
     $("#tab-command-center").innerHTML = `<div class="os-page">
-      <h1 class="os-title">ASTRA <em>Command Center</em></h1>
-      <div class="os-sub">Real-time control center for your Personal AI OS</div>
+      <h1 class="os-title">ASTRA <em>System Health</em></h1>
+      <div class="os-sub">Real-time health and operational status for your Personal AI OS</div>
       <div class="os-grid os-kpis" id="cc-kpis"></div>
       <div class="os-grid cc-cols">
         <div class="os-panel"><h3>⚡ LIVE OPERATIONS</h3><div id="cc-ops"></div></div>

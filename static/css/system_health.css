@@ -229,6 +229,8 @@
 #tab-command-center .sh-resrow .sh-rl { font-size: 11px; color: var(--muted); }
 #tab-command-center .sh-resrow .sh-rv { font-size: 14px; font-weight: 700; line-height: 1.15; }
 #tab-command-center .sh-spark { margin-left: auto; width: 76px; height: 26px; flex: none; display: block; }
+#tab-command-center .sh-spark .ln.live { stroke: #6f9cff; stroke-dasharray: none; }
+#tab-command-center .sh-spark .ln.live.alt { stroke: rgba(140, 160, 200, .55); }
 #tab-command-center .sh-spark .ln { fill: none; stroke: rgba(140, 160, 200, .5); stroke-width: 1.6; stroke-dasharray: 3 3; stroke-linecap: round; }
 
 /* --------------------------------- filters -------------------------------- */

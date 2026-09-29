@@ -6,6 +6,10 @@
 # ASGI app in astra/web_fastapi.py, which serves the shared router in
 # astra/web.py. There is no stdlib http.server path any more.
 #
+# psutil supplies the real host telemetry (CPU/memory/disk/network) shown in
+# System Health. It is optional at runtime: without it Astra still starts and
+# the panel reports "Host metrics unavailable".
+#
 # Everything else the agent uses is the Python 3.9+ standard library
 # (urllib, sqlite3, threading, ...), so there is nothing else to install.
 #
@@ -28,3 +32,4 @@
 # requests>=2.31
 fastapi>=0.110
 uvicorn>=0.27
+psutil>=5.9

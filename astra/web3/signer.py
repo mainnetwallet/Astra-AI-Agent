@@ -181,7 +181,10 @@ def private_to_public(priv: int) -> tuple[int, int]:
 def private_to_address(priv: int) -> str:
     """Ethereum payment address from a private key (Keccak last-20)."""
     x, y = private_to_public(priv)
-    pub = b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
+    # Ethereum hashes the 64-byte X||Y public key WITHOUT the 0x04 SEC1
+    # uncompressed-point prefix. (Including it yields an address no wallet
+    # or chain agrees with — funds sent there would be unrecoverable.)
+    pub = x.to_bytes(32, "big") + y.to_bytes(32, "big")
     return "0x" + keccak_256(pub)[-20:].hex()
 
 

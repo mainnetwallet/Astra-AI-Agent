@@ -151,6 +151,11 @@ EVENT_KINDS = (
     "agent.tool_loop.started", "agent.tool_loop.step",
     "agent.tool_loop.finished", "agent.tool_loop.failed",
     "agent.tool_call", "agent.tool_result",
+    # Bounded final-answer recovery (agent_tool_loop._recover_final): tools
+    # ran but the model's final reply was empty/protocol-only, so ONE extra
+    # call asks it to write the answer. Safe metadata only: attempt, reason,
+    # status — never model output, args or credentials.
+    "agent.final_recovery",
     # Startup reconciliation (EventBus.reconcile_stale_operations): closes an
     # operation that began in a previous run and can therefore never finish,
     # so its start row does not stay "… running" in the Activity Log forever.

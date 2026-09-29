@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="/static/css/terminal.css">
 <link rel="stylesheet" href="/static/css/astra_os.css">
 <link rel="stylesheet" href="/static/css/web3_center.css">
+<link rel="stylesheet" href="/static/css/tool_center.css">
 </head>
 <body>
 <aside id="os-sidebar" aria-label="Main navigation"></aside>
@@ -34,6 +35,11 @@
   <!-- ======== COMMAND CENTER + SYSTEM MAP (static/js/astra_os.js) ======== -->
   <section id="tab-command-center" class="tabview"></section>
   <section id="tab-system-map" class="tabview"></section>
+
+  <!-- ======== TOOL CENTER (static/js/tool_center.js) ========
+       Dedicated tool-browsing page over the ONE /api/tools registry. The
+       System Map keeps its own Tool System node; this is a separate view. -->
+  <section id="tab-tool-center" class="tabview"></section>
 
   <!-- plugin tabviews are created dynamically by astra.js -->
 
@@ -278,5 +284,6 @@
 <script src="/static/js/workflow.js"></script>
 <script src="/static/js/system_map_model.js"></script>
 <script src="/static/js/astra_os.js"></script>
+<script src="/static/js/tool_center.js"></script>
 </body>
 </html>

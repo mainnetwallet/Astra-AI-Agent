@@ -19,7 +19,9 @@
     { id: "agents", label: "Agents", ic: "🤖", tab: "system-map", focus: "agents" },
     { id: "sched", label: "Scheduler", ic: "⏱️", tab: "workflow" },
     { id: "web3", label: "Web3 Center", ic: "⛓️", tab: "web3" },
-    { id: "tools", label: "Tool Center", ic: "🔧", tab: "system-map", focus: "tools" },
+    // Tool Center is its own dedicated page (static/js/tool_center.js),
+    // not a System Map focus — the System Map keeps its Tool System node.
+    { id: "tools", label: "Tool Center", ic: "🔧", tab: "tool-center" },
     { id: "wf", label: "Workflow Studio", ic: "🔀", tab: "workflow" },
     { id: "ws", label: "Workspace", ic: "🗂️", children: [
       { label: "Terminal", tab: "terminal" }, { label: "Files", tab: "terminal" },

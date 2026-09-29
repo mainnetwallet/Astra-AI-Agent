@@ -197,7 +197,19 @@ def build(store: Store | None = None, config=None,
     tx_manager = TransactionManager(store, keystore=keystore,
                                     policy=policy_engine, events=events,
                                     config=config)
-    register_web3_tools(registry, manager=tx_manager)
+    # Canonical wallet registry (metadata + groups in SQLite; secrets only in
+    # the encrypted keystore). When no master secret exists yet, the keystore
+    # is provisioned lazily on the first wallet import/create and handed to
+    # the transaction manager so it can sign for registered wallets.
+    from astra.web3.wallets import WalletRegistry
+
+    def _adopt_keystore(ks):
+        tx_manager.keystore = ks
+    wallet_registry = WalletRegistry(
+        store, keystore=keystore,
+        master_key_path=_ks.DEFAULT_MASTER_KEY_FILE,
+        on_keystore=_adopt_keystore)
+    register_web3_tools(registry, manager=tx_manager, wallets=wallet_registry)
 
     # AI providers + router
     # Provider adapters (Gemini/Groq/Mistral/…/Bedrock) are built by the
@@ -353,6 +365,7 @@ def build(store: Store | None = None, config=None,
         "approvals": approval_manager,
         "fallback": host_fallback,
         "tx_manager": tx_manager, "keystore": keystore,
+        "wallet_registry": wallet_registry,
         "web3_policy": policy_engine,
         "gateway_intelligence": gateway_intelligence,
     }

@@ -107,6 +107,11 @@ New /api/v1 endpoints:
   POST /api/v1/web3/transaction-policy/mode   (operator token required)
   POST /api/v1/web3/transactions/{tx_id}/authorize  (CONFIRM-mode approve; operator token required)
   POST /api/v1/web3/transactions/{tx_id}/reject     (CONFIRM-mode reject; operator token required)
+  GET  /api/v1/web3/wallets                   (wallet registry: wallets + groups + active)
+  POST /api/v1/web3/wallets/import            ({text, group_id?, dry_run?} one wallet per line)
+  POST /api/v1/web3/wallets/create            ({name?, group_id?}; one-time key reveal)
+  POST /api/v1/web3/wallets/{id}/select | move
+  POST /api/v1/web3/wallet-groups             ({name});  /{gid}/rename | delete | members
   GET  /api/metrics              server + subsystem metrics
 """
 from __future__ import annotations
@@ -2322,6 +2327,9 @@ class WebApp:
         if (len(path) == 5 and path[:3] == ["api", "web3", "transactions"]
                 and method == "POST" and path[4] in ("authorize", "reject")):
             return self._web3_tx_action(req, path[3], path[4], body)
+        if path[:2] == ["api", "web3"] and len(path) >= 3 \
+                and path[2] in ("wallets", "wallet-groups"):
+            return self._web3_wallets(req, path, body)
         return None
 
     def _models(self, req: Request) -> Response:
@@ -2496,6 +2504,78 @@ class WebApp:
                                   "gateway_unavailable", req.rid)
         result = gw.test_connection_model_by_name(name, model_id)
         return json_response({"ok": True, "data": result}, rid=req.rid)
+
+    # -- wallet registry (Web3 Center: import / create / groups) ------------
+    def _web3_wallets(self, req: Request, path, body) -> Response:
+        """Wallet registry API. Secrets only ever ENTER here (import text)
+        and leave ONCE (create). No request body is logged or evented, no
+        error message echoes input, and none of this is reachable by the
+        model: these are HTTP endpoints, not tools."""
+        from .web3.wallets import WalletError
+        reg = self.site._get("wallet_registry")
+        if reg is None:
+            return error_response("wallet registry unavailable", 400,
+                                  "web3_unavailable", req.rid)
+        method = req.method
+        body = body if isinstance(body, dict) else {}
+
+        def ok(data, status=200):
+            return json_response({"ok": True, "data": data}, status,
+                                 rid=req.rid)
+        try:
+            if path[2] == "wallets":
+                if len(path) == 3 and method == "GET":
+                    return ok(reg.describe())
+                if len(path) == 4 and path[3] == "import" and method == "POST":
+                    res = reg.import_wallets(
+                        body.get("text"), group_id=body.get("group_id") or None,
+                        dry_run=bool(body.get("dry_run")))
+                    res.update(reg.describe() if not res["dry_run"] else {})
+                    return ok(res)
+                if len(path) == 4 and path[3] == "create" and method == "POST":
+                    wallet, secret = reg.create_wallet(
+                        str(body.get("name") or ""),
+                        group_id=body.get("group_id") or None)
+                    # DELIBERATE, NARROW EXCEPTION to json_response()'s
+                    # redact(): the operator must see a brand-new wallet's
+                    # private key exactly once to back it up. This response
+                    # is built by hand (redact would mask it), is no-store,
+                    # and no other endpoint can return a key.
+                    payload = {"ok": True, "request_id": req.rid,
+                               "data": {"wallet": wallet,
+                                        "reveal": {"private_key": secret,
+                                                   "shown_once": True},
+                                        **reg.describe()}}
+                    return Response(
+                        201, json.dumps(payload, ensure_ascii=False).encode(
+                            "utf-8"),
+                        "application/json; charset=utf-8", cors=True)
+                if len(path) == 5 and method == "POST" and path[4] == "select":
+                    return ok({"wallet": reg.set_active(path[3]),
+                               **reg.describe()})
+                if len(path) == 5 and method == "POST" and path[4] == "move":
+                    reg.move_wallet(path[3], body.get("from_group") or None,
+                                    body.get("to_group") or "")
+                    return ok(reg.describe())
+            elif path[2] == "wallet-groups":
+                if len(path) == 3 and method == "POST":
+                    return ok({"group": reg.create_group(body.get("name")),
+                               **reg.describe()}, 201)
+                if len(path) == 5 and method == "POST":
+                    gid, action = path[3], path[4]
+                    if action == "rename":
+                        reg.rename_group(gid, body.get("name"))
+                        return ok(reg.describe())
+                    if action == "delete":
+                        reg.delete_group(gid)
+                        return ok(reg.describe())
+                    if action == "members":
+                        reg.set_members(gid, add=body.get("add") or [],
+                                        remove=body.get("remove") or [])
+                        return ok(reg.describe())
+        except WalletError as exc:
+            return error_response(exc.message, 400, "wallet_error", req.rid)
+        return error_response("not found", 404, "not_found", req.rid)
 
     def _web3_tx_list(self, req: Request, path):
         s = self.site

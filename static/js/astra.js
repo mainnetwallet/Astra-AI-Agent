@@ -2923,11 +2923,15 @@ loaders.router = async function () {
 
 /* ------------------------------ wallet / web3 (core) ----------------------- */
 loaders.web3 = async function () {
-  // Same three existing endpoints; rendering lives in web3_center.js.
-  const [pol, txs, tools] = await Promise.all([
-    api("/api/v1/web3/transaction-policy"), api("/api/v1/web3/transactions"), api("/api/tools")]);
-  const model = Web3Center.buildModel(pol, txs, tools, new Date());
+  // The three existing endpoints plus the wallet registry (the single source
+  // of wallet state); rendering lives in web3_center.js.
+  const [pol, txs, tools, wal] = await Promise.all([
+    api("/api/v1/web3/transaction-policy"), api("/api/v1/web3/transactions"), api("/api/tools"),
+    api("/api/v1/web3/wallets")]);
+  const model = Web3Center.buildModel(pol, txs, tools, new Date(), wal);
   Web3Center.render($("#w3-root"), model, {
+    // Wallet import/create/select and group edits go through the backend registry.
+    call: (method, path, body) => api(path, { method, body }),
     // Agent actions only PREFILL the chat box; the user must press send.
     toChat(text) {
       showTab("assistant");

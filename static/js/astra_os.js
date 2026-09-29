@@ -9,6 +9,9 @@
 (function () {
   const M = window.SystemMapModel;
   const OS = (window.AstraOS = { data: {}, events: [], seen: new Set(), tab: null });
+  // Defaults for the ONE shared poll. The System Health header's Auto refresh
+  // switch and interval picker flip these instead of starting a second timer.
+  OS.poll = OS.poll || { enabled: true, intervalMs: 30000 };
   const MAX_EVENTS = 500;
 
   /* ------------------------------- navigation ------------------------------ */
@@ -30,7 +33,7 @@
       { label: "Providers Health", tab: "providers" }, { label: "Router", tab: "router" }] },
     { id: "mem", label: "Memory Center", ic: "🧬", tab: "system-map", focus: "memory" },
     { id: "sec", label: "Security Center", ic: "🛡️", tab: "system-map", focus: "security" },
-    { id: "health", label: "System Health", ic: "❤️", tab: "command-center", anchor: "cc-health" },
+    { id: "health", label: "System Health", ic: "❤️", tab: "command-center", anchor: "sh-root" },
     { id: "activity", label: "Activity Center", ic: "📡", tab: "logs" },
   ];
   // Rendered at the bottom of the sidebar, below the main navigation.
@@ -82,11 +85,11 @@
   const get = async (p) => { const r = await api(p); return r && r.ok ? r.data : null; };
 
   async function refreshData() {
-    const [health, prov, gw, rstat, rstatus, tools, mem, exp, wfs, sch, tasks, rt, web3, metrics, sm] = await Promise.all([
+    const [health, prov, gw, rstat, rstatus, tools, mem, exp, wfs, sch, tasks, rt, web3, metrics, sm, mdl] = await Promise.all([
       get("/api/health"), get("/api/providers"), get("/api/gateway/health"), get("/api/router/stats"),
       get("/api/router/status"), get("/api/tools"), get("/api/memory"), get("/api/experiences"),
       get("/api/workflows"), get("/api/schedules"), get("/api/tasks"), get("/api/runtime/status"),
-      get("/api/web3/transaction-policy"), get("/api/metrics"), get("/api/system-map"),
+      get("/api/web3/transaction-policy"), get("/api/metrics"), get("/api/system-map"), get("/api/models"),
     ]);
     const d = OS.data;
     d.health = health; d.providersRaw = prov; d.providerCards = M.providerCards(prov);
@@ -96,6 +99,7 @@
     d.experiences = exp; d.workflows = Array.isArray(wfs) ? wfs : null; d.workflowsOk = Array.isArray(wfs);
     d.schedules = Array.isArray(sch) ? sch : null; d.tasks = Array.isArray(tasks) ? tasks : null;
     d.runtime = rt; d.metrics = metrics;
+    d.models = mdl;                       // /api/models: the model registry + per-model status
     d.web3 = web3 ? { mode: web3.mode, stopped: !!web3.stopped, chains: web3.policy && web3.policy.chains_allowed ? web3.policy.chains_allowed.length : null } : null;
     // Optional aggregate endpoint (agents registry / security flags). Absent => Unavailable.
     d.agents = sm && Array.isArray(sm.agents) ? sm.agents : [];
@@ -135,133 +139,24 @@
   const isActive = (name) => OS.tab === name;
 
   /* ----------------------------- System Health ------------------------------- */
-  function ccShell() {
-    $("#tab-command-center").innerHTML = `<div class="os-page">
-      <h1 class="os-title">ASTRA <em>System Health</em></h1>
-      <div class="os-sub">Real-time health and operational status for your Personal AI OS</div>
-      <div class="os-grid os-kpis" id="cc-kpis"></div>
-      <div class="os-grid cc-cols">
-        <div class="os-panel"><h3>⚡ LIVE OPERATIONS</h3><div id="cc-ops"></div></div>
-        <div class="os-panel"><h3>🧭 AI ROUTING</h3><div id="cc-routing"></div></div>
-      </div>
-      <div class="os-grid cc-cols3">
-        <div class="os-panel"><h3>🔌 PROVIDER HEALTH</h3><div id="cc-prov"></div></div>
-        <div class="os-panel"><h3>🤖 ACTIVE AGENTS</h3><div id="cc-agents"></div></div>
-        <div class="os-panel"><h3>🔧 TOOL ACTIVITY</h3><div id="cc-tools"></div></div>
-      </div>
-      <div class="os-grid cc-cols3">
-        <div class="os-panel"><h3>🔀 WORKFLOW ACTIVITY</h3><div id="cc-wf"></div></div>
-        <div class="os-panel"><h3>🧬 MEMORY / EXPERIENCE</h3><div id="cc-mem"></div></div>
-        <div class="os-panel" id="cc-health"><h3>❤️ SYSTEM HEALTH</h3><div id="cc-hgrid"></div></div>
-      </div>
-      <div class="os-panel" style="margin-top:14px"><h3>📡 LIVE EVENT STREAM <span class="small muted" id="cc-sse"></span></h3>
-        <div class="os-chips" id="cc-filters">${["all", "Gateway", "Router", "Provider", "Agent", "Tool", "Memory", "Workflow", "Web3", "errors"].map((f, i) => `<button class="os-chip${i ? "" : " active"}" data-f="${f}">${f === "all" ? "All" : f === "errors" ? "Errors" : f}</button>`).join("")}</div>
-        <div class="os-feed" id="cc-feed"></div></div></div>`;
-    $("#cc-filters").addEventListener("click", (e) => {
-      const c = e.target.closest("[data-f]"); if (!c) return;
-      OS.evFilter = c.dataset.f; $$("#cc-filters .os-chip").forEach((x) => x.classList.toggle("active", x === c)); renderFeed();
-    });
-    $("#tab-command-center").addEventListener("click", (e) => {
-      const r = e.target.closest("[data-op]"); if (r) return openTrace(r.dataset.op);
-      const h = e.target.closest("[data-goto]"); if (h) return go({ tab: h.dataset.goto });
-      const p = e.target.closest("[data-prov]"); if (p) return openProvider(p.dataset.prov);
-    });
-    OS.ccBuilt = true;
+  // The page itself lives in static/js/system_health.js and is built from the
+  // REAL endpoints (health, providers, models, metrics, tasks, agents). This
+  // shell keeps only what it owns: navigation, the ONE aggregate refresh and
+  // the anchor scroll. The old Command Center markup is gone.
+  function renderCC() {
+    OS.ops = M.operationsFromEvents(OS.events);
+    const SH = window.SystemHealth;
+    if (SH) { SH.render(OS.data, OS.events); return; }
+    const host = $("#tab-command-center");
+    if (host) host.innerHTML = `<div class="os-page"><div class="os-empty">System Health UI unavailable.</div></div>`;
   }
 
   function empty(msg) { return `<div class="os-empty">${esc(msg)}</div>`; }
 
-  function renderCC() {
-    if (!OS.ccBuilt) ccShell();
-    const d = OS.data, ops = M.operationsFromEvents(OS.events);
-    OS.ops = ops;
-    $("#cc-kpis").innerHTML = M.kpis(d, ops).map((k) =>
-      `<div class="os-kpi ${k.tone}"><div class="l">${esc(k.label)}</div><div class="v">${esc(k.value)}</div><div class="s">${esc(k.sub)}</div></div>`).join("");
-    renderOps(); renderRouting(); renderProviders(); renderAgents(); renderToolActivity();
-    renderWorkflow(); renderMemory(); renderHealth(); renderFeed();
-  }
-
-  function renderOps() {
-    const running = (OS.ops || []).slice(0, 25);
-    $("#cc-ops").innerHTML = running.length ? `<table class="os-table"><tr><th>ID</th><th>Type</th><th>Status</th><th>Provider</th><th>Model</th><th>Agent</th><th>Duration</th><th>Step</th></tr>` +
-      running.map((o) => `<tr class="click" data-op="${esc(o.id)}"><td class="mono">${esc(o.id)}</td><td>${esc(o.type)}</td><td>${dot(o.status)}${esc(o.status)}</td><td>${esc(o.provider || "—")}</td><td>${esc(o.model || "—")}</td><td>${esc(o.agent || "—")}</td><td>${dur(o.durationMs)}</td><td>${esc(o.step || "—")}</td></tr>`).join("") + `</table>`
-      : empty(OS.eventsLoaded ? "No operations in the recent event history" : "Unavailable — event history could not be loaded");
-  }
-
-  function renderRouting() {
-    const d = OS.data, gw = d.gateway, last = (d.routerStats && d.routerStats.last_route) || {};
-    const kv = (k, v) => `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`;
-    $("#cc-routing").innerHTML =
-      kv("Gateway (orchestration + verification)", gw ? gw.state : "Unavailable") +
-      kv("AstraRouter (routing brain)", d.router ? "active" : "Unavailable") +
-      kv("Selected provider", last.provider || "None yet") + kv("Selected model", last.model || "None yet") +
-      kv("Last route reason", last.reason || last.task_type || "Unavailable") +
-      `<div class="small muted" style="margin-top:8px">Gateway ≠ Provider · AstraRouter ≠ Provider</div>`;
-  }
-
-  function renderProviders() {
-    const c = OS.data.providerCards || [];
-    $("#cc-prov").innerHTML = c.length ? c.map((p) =>
-      `<div class="kv" data-prov="${esc(p.name)}" style="cursor:pointer"><span>${dot(p.status)}${esc(p.name)} <span class="small muted">${p.modelCount} models</span></span>` +
-      `<span>${p.latencyMs == null ? "—" : Math.round(p.latencyMs) + " ms"} · ${p.successRate == null ? "—" : p.successRate + "%"}</span></div>`).join("")
-      : empty("No providers configured");
-  }
-
-  function renderAgents() {
-    const run = (OS.ops || []).filter((o) => o.type === "Agent" && o.status === "running");
-    $("#cc-agents").innerHTML = run.length ? run.map((o) =>
-      `<div class="kv" data-op="${esc(o.id)}" style="cursor:pointer"><span>${dot("running")}${esc(o.agent || "agent")}</span><span>${esc(o.step)} · ${dur(o.durationMs)}</span></div>`).join("")
-      : empty("No agents running");
-  }
-
-  function renderToolActivity() {
-    const rows = (OS.ops || []).filter((o) => o.type === "Tool" || o.type === "Terminal").slice(0, 8);
-    $("#cc-tools").innerHTML = rows.length ? rows.map((o) =>
-      `<div class="kv" data-op="${esc(o.id)}" style="cursor:pointer"><span>${dot(o.status)}${esc(o.tool || o.step)}</span><span>${esc(o.agent || "—")} · ${dur(o.durationMs)}</span></div>`).join("")
-      : empty("No recent tool calls");
-  }
-
-  function renderWorkflow() {
-    const d = OS.data, wfOps = (OS.ops || []).filter((o) => o.type === "Workflow");
-    const n = (s) => wfOps.filter((o) => o.status === s).length;
-    $("#cc-wf").innerHTML =
-      `<div class="kv"><span>Defined</span><span>${val(d.workflows && d.workflows.length)}</span></div>` +
-      `<div class="kv"><span>Scheduled</span><span>${val(d.schedules && d.schedules.length)}</span></div>` +
-      `<div class="kv"><span>Running</span><span>${d.eventsOk ? n("running") : "Unavailable"}</span></div>` +
-      `<div class="kv"><span>Completed (recent)</span><span>${d.eventsOk ? n("completed") : "Unavailable"}</span></div>` +
-      `<div class="kv"><span>Failed (recent)</span><span>${d.eventsOk ? n("failed") : "Unavailable"}</span></div>` +
-      `<div class="os-bar" style="margin-top:8px"><button class="os-btn" data-goto="workflow">Run Workflow</button><button class="os-btn" data-goto="workflow">Create Workflow</button><button class="os-btn" data-goto="workflow">Open Scheduler</button></div>`;
-  }
-
-  function renderMemory() {
-    const d = OS.data, e = d.experiences;
-    const recent = (d.memory || []).slice(0, 4).map((m) => `<div class="small muted">• ${esc(String(m.content || m.text || m.key || "").slice(0, 80))}</div>`).join("");
-    $("#cc-mem").innerHTML =
-      `<div class="kv"><span>Memories (recent list)</span><span>${val(d.memoryCount)}</span></div>` +
-      `<div class="kv"><span>Experience records</span><span>${e ? e.total : "Unavailable"}</span></div>` +
-      `<div class="kv"><span>Successful outcomes</span><span>${e ? e.successful : "Unavailable"}</span></div>` + (recent || "");
-  }
-
-  function renderHealth() {
-    const rows = M.subsystemHealth(OS.data);
-    $("#cc-hgrid").innerHTML = rows.map((h) =>
-      `<div class="kv"><span>${dot(h.status === "healthy" ? "online" : h.status === "degraded" ? "degraded" : "")}${esc(h.name)}</span><span>${esc(h.status)}${h.detail ? " · " + esc(h.detail) : ""}</span></div>`).join("");
-  }
-
-  function renderFeed() {
-    const rows = M.filterEvents(OS.events.slice(-150).map(M.eventRow), OS.evFilter || "all").slice(-60).reverse();
-    const el = $("#cc-feed"); if (!el) return;
-    el.innerHTML = rows.length ? rows.map((r) => `<div class="row${r.error ? " err" : ""}">${esc(r.time)}<span class="src">[${esc(r.source)}]</span>${esc(r.text)}</div>`).join("") : empty("Listening for events…");
-    const s = $("#cc-sse"); if (s) s.textContent = "● " + (typeof SSE_STATE !== "undefined" ? SSE_STATE : "unavailable");
-  }
-
   // SSE → touch only the panels that depend on events (no full re-render).
   function liveUpdate() {
     OS.data.eventCount = OS.events.length; OS.data.eventsOk = true;
-    if (isActive("command-center") && OS.ccBuilt) {
-      OS.ops = M.operationsFromEvents(OS.events);
-      renderOps(); renderAgents(); renderToolActivity(); renderFeed();
-    }
+    if (isActive("command-center")) { OS.ops = M.operationsFromEvents(OS.events); renderCC(); }
     if (isActive("system-map") && OS.mapBuilt) mapLive();
   }
 
@@ -470,15 +365,20 @@
   function startPolling() {
     clearInterval(pollTimer);
     pollTimer = setInterval(async () => {
+      if (!OS.poll.enabled) return;                     // System Health "Auto refresh" off
       if (document.hidden || !(isActive("command-center") || isActive("system-map"))) return;
       await refreshData();
       isActive("command-center") ? renderCC() : renderMap(false);
-    }, 30000);
+    }, OS.poll.intervalMs);
   }
   async function open(tab) {
     if (!OS.eventsLoaded) await loadHistory();
     await refreshData();
-    if (tab === "command-center") { renderCC(); if (OS.pendingAnchor) { const a = document.getElementById(OS.pendingAnchor); if (a) a.scrollIntoView({ behavior: "smooth" }); OS.pendingAnchor = null; } }
+    if (tab === "command-center") {
+      renderCC();
+      if (window.SystemHealth) await window.SystemHealth.open();
+      if (OS.pendingAnchor) { const a = document.getElementById(OS.pendingAnchor); if (a) a.scrollIntoView({ behavior: "smooth", block: "start" }); OS.pendingAnchor = null; }
+    }
     else renderMap(true);
     startPolling();
   }
@@ -521,5 +421,7 @@
     document.getElementById("os-search").addEventListener("keydown", (e) => { if (e.key === "Enter" && isActive("system-map")) { OS.search = e.target.value; applyDim(); } });
   }
   initShell();
-  OS.hooks = { initialTab };
+  const setAuto = (on) => { OS.poll.enabled = !!on; };
+  const setPollInterval = (ms) => { const n = parseInt(ms, 10); if (n >= 5000) { OS.poll.intervalMs = n; startPolling(); } };
+  OS.hooks = { initialTab, refresh: refreshData, setAuto, setInterval: setPollInterval };
 })();

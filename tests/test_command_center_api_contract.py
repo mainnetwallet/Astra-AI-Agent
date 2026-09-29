@@ -51,6 +51,7 @@ ENDPOINTS = [
     ("/api/web3/transaction-policy", dict),
     ("/api/metrics", dict),
     ("/api/system-map", dict),
+    ("/api/models", dict),
     ("/api/events?limit=200", list),
 ]
 

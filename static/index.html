@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="/static/css/astra_os.css">
 <link rel="stylesheet" href="/static/css/web3_center.css">
 <link rel="stylesheet" href="/static/css/tool_center.css">
+<link rel="stylesheet" href="/static/css/system_health.css">
 </head>
 <body>
 <aside id="os-sidebar" aria-label="Main navigation"></aside>
@@ -32,7 +33,9 @@
     <div id="dash-blocks" class="dash-blocks"></div>
   </section>
 
-  <!-- ======== COMMAND CENTER + SYSTEM MAP (static/js/astra_os.js) ======== -->
+  <!-- ======== SYSTEM HEALTH (static/js/system_health.js, on the
+       `command-center` tabview so the /command-center route keeps working)
+       + SYSTEM MAP (static/js/astra_os.js) ======== -->
   <section id="tab-command-center" class="tabview"></section>
   <section id="tab-system-map" class="tabview"></section>
 
@@ -285,5 +288,6 @@
 <script src="/static/js/system_map_model.js"></script>
 <script src="/static/js/astra_os.js"></script>
 <script src="/static/js/tool_center.js"></script>
+<script src="/static/js/system_health.js"></script>
 </body>
 </html>

@@ -29,6 +29,10 @@
     fKey: "",
     resHist: {},         // real resource samples, each series capped at RES_MAX
     resLastAt: null,
+    live: {              // live resource polling lifecycle (see startResourcePolling)
+      want: false, loop: false, timer: 0, gen: 0, inflight: null, raf: 0,
+      last: null, lastOk: null, fails: 0, everOk: false,
+    },
   };
 
   /* --------------------------------- helpers -------------------------------- */
@@ -205,15 +209,24 @@
   }
 
   /* ------------------------ host resources (real telemetry) ------------------------ */
-  const RES_MAX = 60;   // bounded history: at most 60 real samples per series
+  const RES_MAX = 120;          // bounded history: at most 120 real samples per series
+  const RES_URL = "/api/system-resources";   // the ONLY endpoint the live loop touches
+  const RES_POLL_MS = 500;      // live cadence (~2 samples/s), independent of the 30s aggregate refresh
+  const RES_SLOW_MS = 5000;     // cadence while the host reports telemetry as unavailable
+  const RES_TIMEOUT_MS = 3000;  // a request that hangs is aborted so it can never pile up
+  const RES_DELAYED_MS = 2000;  // age of last good sample: < 2s LIVE, 2-5s DELAYED, > 5s STALE
+  const RES_STALE_MS = 5000;
+  const RES_OFFLINE_MS = 15000; // no good sample for this long -> OFFLINE
 
   const fmtBytes = (v) => {
     const n = num(v); if (n == null || n < 0) return DASH;
     const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0, x = n;
     while (x >= 1024 && i < u.length - 1) { x /= 1024; i++; }
-    return (i === 0 || x >= 100 ? Math.round(x) : x.toFixed(1)) + " " + u[i];
+    return (i === 0 ? Math.round(x) : x.toFixed(1)) + " " + u[i];
   };
   const fmtRate = (v) => (num(v) == null || v < 0 ? DASH : fmtBytes(v) + "/s");
+  /** 31 -> "31%", 30.4 -> "30.4%" (one decimal only when there is one). */
+  const fmtPct1 = (v) => (num(v) == null ? DASH : String(Number(v.toFixed(1))) + "%");
 
   /** The `resources` block of /api/metrics, or null when the API has none. */
   function resourcesOf(data) {
@@ -241,25 +254,146 @@
     put("up", n ? n.upload_bps : null);
   }
 
+  const fmtRound = (v) => Math.round(v) + "%";
+
   /** Rows for the compact panel; every value comes from the backend sample. */
   function resourceRows(data) {
-    const res = resourcesOf(data);
+    const res = currentResources(data);
     const ok = !!res && res.available === true;
-    const pctRow = (key, label, block) => {
+    const pctRow = (key, label, block, fmt) => {
       const p = ok && isObj(block) ? num(block.percent) : null;
-      return { key: key, label: label, lines: [p == null ? DASH : Math.round(p) + "%"],
+      return { key: key, label: label, lines: [p == null ? DASH : (fmt || fmtRound)(p)],
                series: [SH.resHist[key] || []], scale: 100, live: p != null };
     };
     const net = ok && isObj(res.network) ? res.network : null;
     const down = net ? num(net.download_bps) : null, up = net ? num(net.upload_bps) : null;
     return [
       pctRow("cpu", "CPU", ok ? res.cpu : null),
-      pctRow("ram", "Memory", ok ? res.memory : null),
+      pctRow("ram", "Memory", ok ? res.memory : null, fmtPct1),
       pctRow("disk", "Disk", ok ? res.disk : null),
       { key: "net", label: "Network",
         lines: down == null && up == null ? [DASH] : ["\u2193 " + fmtRate(down), "\u2191 " + fmtRate(up)],
         series: [SH.resHist.down || [], SH.resHist.up || []], scale: 0, live: down != null || up != null },
     ];
+  }
+
+  /* --------------------- live resource polling (one managed loop) --------------------- */
+  const nowMs = () => Date.now();
+  const docHidden = () => typeof document !== "undefined" && document.hidden === true;
+
+  /** The freshest REAL sample: the live feed once it has delivered, else the 30s aggregate. */
+  function currentResources(data) {
+    return SH.live.last || resourcesOf(data);
+  }
+
+  /** LIVE / DELAYED / STALE / OFFLINE / CONNECTING, derived only from real request outcomes. */
+  function liveStatus() {
+    const L = SH.live;
+    if (L.last && L.last.available === false) return { id: "unavailable", label: "UNAVAILABLE" };
+    if (L.lastOk == null) return L.fails >= 3 ? { id: "offline", label: "OFFLINE" } : { id: "connecting", label: "CONNECTING" };
+    const age = nowMs() - L.lastOk;
+    if (age > RES_OFFLINE_MS) return { id: "offline", label: "OFFLINE" };
+    if (age > RES_STALE_MS) return { id: "stale", label: "STALE" };
+    if (age >= RES_DELAYED_MS || L.fails > 0) return { id: "delayed", label: "DELAYED" };
+    return { id: "live", label: "LIVE" };
+  }
+
+  const LIVE_CLASS = { live: "healthy", delayed: "degraded", stale: "offline", offline: "offline",
+                       unavailable: "unavailable", connecting: "unknown" };
+
+  function paintLive() {
+    const el = byId("sh-res-live"); if (!el) return;
+    const st = liveStatus();
+    el.className = "sh-st " + LIVE_CLASS[st.id];
+    el.innerHTML = '<span class="sh-dot"></span>' + E(st.label);
+  }
+
+  /** Coalesce repaints to one per frame; rendering only, never a source of values. */
+  function schedulePaintResources() {
+    const L = SH.live;
+    if (typeof requestAnimationFrame !== "function") { paintResources(); return; }
+    if (L.raf) return;
+    L.raf = requestAnimationFrame(() => { L.raf = 0; paintResources(); });
+  }
+
+  /** One fetch of GET /api/system-resources. Never overlaps: a pending request blocks the next. */
+  async function refreshResourceOnce() {
+    const L = SH.live;
+    if (L.inflight || typeof api !== "function") return false;
+    const ctl = typeof AbortController === "function" ? new AbortController() : null;
+    const mine = ctl || {};
+    L.inflight = mine;
+    const gen = L.gen;
+    const guard = ctl ? setTimeout(() => ctl.abort(), RES_TIMEOUT_MS) : 0;
+    let good = false;
+    try {
+      const r = await api(RES_URL, ctl ? { signal: ctl.signal, cache: "no-store" } : { cache: "no-store" });
+      if (gen !== L.gen) return false;                 // stopped/paused meanwhile: discard
+      if (r && r.ok === true && isObj(r.data)) {
+        good = true;
+        L.last = r.data; L.lastOk = nowMs(); L.fails = 0; L.everOk = true;
+        pushResourceSample(r.data);
+      } else {
+        L.fails++;
+      }
+    } catch (e) {
+      if (gen === L.gen) L.fails++;                    // keep the last valid telemetry on screen
+    } finally {
+      if (guard) clearTimeout(guard);
+      if (L.inflight === mine) L.inflight = null;
+    }
+    if (gen === L.gen) { schedulePaintResources(); paintLive(); }
+    return good;
+  }
+
+  async function resourceTick() {
+    const L = SH.live, gen = L.gen;
+    L.timer = 0;
+    if (!L.want || docHidden()) { L.loop = false; return; }
+    const t0 = nowMs();
+    await refreshResourceOnce();
+    if (gen !== L.gen || !L.want || docHidden()) return;     // stop()/pause() already reset the loop
+    const gap = L.last && L.last.available === false ? RES_SLOW_MS : RES_POLL_MS;
+    L.timer = setTimeout(resourceTick, Math.max(0, gap - (nowMs() - t0)));
+  }
+
+  /** Idempotent: calling it again while a loop is alive never creates a second one. */
+  function startResourcePolling() {
+    const L = SH.live;
+    L.want = true;
+    if (L.loop || docHidden()) return false;
+    L.loop = true;
+    resourceTick();
+    return true;
+  }
+
+  function haltResourceLoop() {
+    const L = SH.live;
+    L.gen++;                                           // any pending result is now ignored
+    if (L.timer) { clearTimeout(L.timer); L.timer = 0; }
+    if (L.inflight && typeof L.inflight.abort === "function") { try { L.inflight.abort(); } catch (e) { /* ignore */ } }
+    L.inflight = null; L.loop = false;
+  }
+
+  function stopResourcePolling() {
+    SH.live.want = false;
+    haltResourceLoop();
+  }
+
+  /** Hidden tab: pause (want stays true). Visible again: resume immediately. */
+  function onVisibility() {
+    const L = SH.live;
+    if (docHidden()) { haltResourceLoop(); return; }
+    if (L.want) startResourcePolling();
+  }
+
+  /** astra_os.js tells us which tab is showing; polling only lives on System Health. */
+  function onTab(name) {
+    if (name !== "command-center") stopResourcePolling();
+  }
+
+  if (typeof document !== "undefined" && document && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", onVisibility);   // registered once per module load
   }
 
   /** SVG path for a real series in a 76x26 box; a single sample is a short flat tick. */
@@ -457,6 +591,7 @@
           <div class="sh-ph">
             ${ico("ic-cpu")}
             <div class="sh-pht"><h3>System Resources</h3><p>Live host telemetry</p></div>
+            <span class="sh-st unknown" id="sh-res-live" style="margin-left:auto" aria-live="off"></span>
           </div>
           <div class="sh-res" id="sh-resources-body"></div>
         </section>
@@ -564,8 +699,9 @@
 
   function paintResources() {
     const el = byId("sh-resources-body"); if (!el) return;
-    const res = resourcesOf(SH.data);
+    const res = currentResources(SH.data);
     const ok = !!res && res.available === true;
+    paintLive();
     el.innerHTML = resourceRows(SH.data).map((r) => {
       const scale = r.scale || Math.max.apply(null, r.series[0].concat(r.series[1] || [], [1]));
       const paths = r.series.map((vals, i) => {
@@ -647,7 +783,7 @@
 
   /** astra_os.js hands the refreshed aggregate in on every poll / SSE batch. */
   function render(data, events) {
-    if (data) { SH.data = data; pushResourceSample(resourcesOf(data)); }
+    if (data) { SH.data = data; if (!SH.live.everOk) pushResourceSample(resourcesOf(data)); }
     if (events) SH.events = events;
     if (!SH.mounted) mount();
     paint();
@@ -761,7 +897,7 @@
     if (user) flash(byId("sh-refresh") || byId("sh-mrefresh"));
     await loadModels();
     if (OS.hooks && typeof OS.hooks.refresh === "function") {
-      try { SH.data = await OS.hooks.refresh(); pushResourceSample(resourcesOf(SH.data)); } catch (e) { /* keep last good data */ }
+      try { SH.data = await OS.hooks.refresh(); if (!SH.live.everOk) pushResourceSample(resourcesOf(SH.data)); } catch (e) { /* keep last good data */ }
     }
     paint();
   }
@@ -803,6 +939,7 @@
     mount();
     syncAuto();
     if (!SH.mounted) return;
+    startResourcePolling();                 // idempotent; stops again when another tab opens
     if (!SH.data) { const b = byId("sh-models-body"); if (b) b.innerHTML = skeleton(6); }
     paint();
     await loadModels();
@@ -811,8 +948,12 @@
 
   window.SystemHealth = {
     state: SH,
-    mount: mount, open: open, render: render, paint: paint, refresh: refresh,
+    mount: mount, open: open, onTab: onTab, render: render, paint: paint, refresh: refresh,
     loadModels: loadModels, selectTab: selectTab, toggleAuto: toggleAuto, syncAuto: syncAuto,
+    live: {
+      start: startResourcePolling, stop: stopResourcePolling, refreshOnce: refreshResourceOnce,
+      status: liveStatus, onVisibility: onVisibility, pollMs: RES_POLL_MS,
+    },
     norm: {
       services: services, providers: providers, keyStats: keyStats, models: models,
       sixKpis: sixKpis, sixSummary: sixSummary, visibleModels: visibleModels, capsOf: capsOf,

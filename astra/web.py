@@ -116,6 +116,7 @@ New /api/v1 endpoints:
                                                 memberships and its encrypted key record; returns the registry)
   POST /api/v1/web3/wallet-groups             ({name});  /{gid}/rename | delete | members
   GET  /api/metrics              server + subsystem metrics
+  GET  /api/system-resources     live host telemetry only (CPU/mem/disk/net), no-store
 """
 from __future__ import annotations
 
@@ -130,6 +131,8 @@ from urllib.parse import urlparse, parse_qs, unquote
 from .agent import Agent
 from .chat_log import ChatLog
 from .host_metrics import resources_snapshot
+
+LIVE_RESOURCES_PATH = ["api", "system-resources"]
 from .ai.conversation_context import ConversationContextBuilder
 from .security import (REDACTED, ApiError, RateLimiter, make_request_id,
                      redact)
@@ -676,6 +679,9 @@ class AstraSite:
         except Exception:
             rl = 300
         self.rate_limiter = RateLimiter(rl, 60.0)
+        # live host telemetry is polled ~2x/s by the System Health panel; it gets its
+        # own bucket so it can neither starve nor be starved by normal API traffic
+        self.live_rate_limiter = RateLimiter(max(rl * 4, 1200), 60.0)
         self._allowed_origins = set(
             (cfg.getlist("ASTRA_CORS_ORIGINS") if cfg else None) or [])
         # -- observability: tiny in-memory request counters --------------------
@@ -902,8 +908,8 @@ class WebApp:
                          or req.query.get("token", ""))
         return bool(candidate) and hmac.compare_digest(candidate, token)
 
-    def _rate_limited(self, req: Request) -> bool:
-        limiter = self.site.rate_limiter
+    def _rate_limited(self, req: Request, live: bool = False) -> bool:
+        limiter = self.site.live_rate_limiter if live else self.site.rate_limiter
         if not limiter:
             return False
         return not limiter.allow(req.remote_ip)
@@ -916,7 +922,7 @@ class WebApp:
         if not self._authorized(req):
             return error_response("authentication required", 401,
                                   "authentication", req.rid)
-        if self._rate_limited(req):
+        if self._rate_limited(req, live=(path == LIVE_RESOURCES_PATH)):
             return error_response("rate limit exceeded", 429,
                                   "rate_limit", req.rid)
         return None
@@ -932,6 +938,8 @@ class WebApp:
         gated = self._gate(req, path)
         if gated is not None:
             return gated
+        if path == LIVE_RESOURCES_PATH:
+            return self._live_resources(req)      # cheap path: no counters, no routing
         site.note_request(req.method, path)
         try:
             return self._route(req, path)
@@ -943,6 +951,13 @@ class WebApp:
             detail = str(e) if site.env != "production" else ""
             msg = f"internal error{': ' + detail if detail else ''}"
             return error_response(msg, 500, "internal", req.rid)
+
+    def _live_resources(self, req: Request) -> Response:
+        """GET /api/system-resources — host telemetry ONLY (psutil), no
+        provider/model/router/gateway work. Non-blocking sampling; no-store."""
+        if req.method != "GET":
+            return error_response("method not allowed", 405, "bad_request", req.rid)
+        return json_response({"ok": True, "data": resources_snapshot()}, rid=req.rid)
 
     # -- static / stored files ----------------------------------------------
     def _static(self, rel: str, req: Request) -> Response:

@@ -396,6 +396,7 @@
   window.showTab = function (name) {
     if (first) { first = false; name = initialTab(name); }
     OS.tab = name;
+    if (window.SystemHealth && window.SystemHealth.onTab) window.SystemHealth.onTab(name);   // live resource polling lives only on System Health
     origShowTab(name);
     syncSidebar(name);
     const pill = document.getElementById("os-online");

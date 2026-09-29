@@ -7,6 +7,7 @@ longer points at the System Map.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import unittest
@@ -71,6 +72,20 @@ class ToolCenterAssets(unittest.TestCase):
         src = _read("static", "js", "tool_center.js").lower()
         for name in ("openrouter", "cerebras", "sambanova", "groq", "mistral"):
             self.assertNotIn(name, src)
+
+    def test_icons_use_the_astra_glyph_system_not_emoji(self):
+        js = _read("static", "js", "tool_center.js")
+        self.assertIn('"ic-browser"', js)                 # group -> --ic glyph class
+        self.assertIn('"tc-ic "', js)
+        # ignore comments (the file header follows the repo's emoji convention)
+        code = re.sub(r"/\*.*?\*/", "", js, flags=re.S)
+        code = re.sub(r"//[^\n]*", "", code)
+        # pictographs / variation selector: the emoji set the icons came from
+        emoji = re.compile("[\U0001F300-\U0001FAFF\uFE0F]")
+        self.assertIsNone(emoji.search(code), "Tool Center must not use emoji icons")
+        css = _read("static", "css", "tool_center.css")
+        self.assertIn("--ic:", css, "the monochrome glyph convention must be used")
+        self.assertIsNone(emoji.search(css), "Tool Center CSS must not use emoji icons")
 
 
 if __name__ == "__main__":

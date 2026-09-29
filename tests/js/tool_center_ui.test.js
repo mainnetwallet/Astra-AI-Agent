@@ -123,6 +123,21 @@ test("category chips and counts are derived from the data, never hardcoded", asy
   assert.ok(!/data-cat="Wallet"/.test(cats), "a category with no tools must not appear");
 });
 
+test("tool icons use Astra's monochrome glyph classes, not emoji", async () => {
+  const env = await booted();
+  const list = env.doc.getElementById("tc-list").innerHTML;
+  assert.match(list, /class="tc-ic ic-browser"/);
+  assert.match(list, /class="tc-ic ic-terminal"/);
+  assert.match(list, /class="tc-ic ic-custom"/);          // plugin tool -> Custom group
+  // no emoji anywhere in the rendered rows (pictographs / variation selector)
+  const emoji = /[\u{1F300}-\u{1FAFF}\u{FE0F}]/u;
+  assert.ok(!emoji.test(list), "the list must not contain emoji icons");
+  await click(env.doc.getElementById("tab-tool-center"), "[data-tool]", { dataset: { tool: "browser_open" } });
+  const detail = env.doc.getElementById("tc-detail").innerHTML;
+  assert.match(detail, /class="tc-ic ic-browser"/);
+  assert.ok(!emoji.test(detail), "the detail panel must not contain emoji icons");
+});
+
 test("search matches name, description and category and updates immediately", async () => {
   const env = await booted();
   const q = env.doc.getElementById("tc-q");

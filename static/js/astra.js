@@ -2895,32 +2895,6 @@ function renderGatewayCard(core) {
   }
 }
 
-/* -------------------------------- router (core) ---------------------------- */
-loaders.router = async function () {
-  const [m, sr] = await Promise.all([api("/api/v1/models"), api("/api/v1/router/stats")]);
-  const list = $("#router-list");
-  const blocks = [];
-  if (m.ok) {
-    const models = m.data.models || [];
-    blocks.push(`<div class="panel"><div class="panel-head"><h3>Model registry</h3></div><div class="table">` +
-      (models.length ? models.map((md) =>
-        `<div class="row"><b>${esc(md.display_name || md.model_id)}</b>` +
-        `<span>${esc(md.provider)}</span>` +
-        `<span>${esc((md.capabilities || []).slice(0, 5).join("・"))}</span>` +
-        `<span>${md.preferred ? "★" : ""}</span></div>`).join("")
-        : `<span class="muted">no models — provider API key add korle ekhane asbe</span>`) +
-      `</div></div>`);
-  }
-  if (sr.ok) {
-    const task = sr.data.task || {};
-    const rows = Object.entries(task).map(([k, v]) =>
-      `<div class="row"><b>${esc(k)}</b><span>${esc(String(v))}</span></div>`).join("");
-    blocks.push(`<div class="panel"><div class="panel-head"><h3>Task routing stats</h3></div>` +
-      `<div class="table">${rows || `<span class="muted">routing kora ekhono bondho — kotha bolo age</span>`}</div></div>`);
-  }
-  list.innerHTML = blocks.join("");
-};
-
 /* ------------------------------ wallet / web3 (core) ----------------------- */
 loaders.web3 = async function () {
   // The three existing endpoints plus the wallet registry (the single source

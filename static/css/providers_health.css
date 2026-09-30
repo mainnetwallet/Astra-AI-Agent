@@ -6,6 +6,13 @@
    Loaded after style.css / astra_os.css, so it only adds to the ASTRA
    dark-navy control-panel look: thin low-contrast blue/purple borders,
    subtle glass surfaces, green/red/amber used ONLY for real health state.
+
+   Density contract (operations-console target):
+     page gap 10px · panel radius 9px · control radius 8px
+     section header 38px · table header 32px · data row 38px
+     model row 32px · summary card 62px · activity row ~48px
+   Every value below is tuned so more real rows fit on a 1080p viewport
+   without giving up the row chrome the tests and the user rely on.
    ========================================================================== */
 
 #view:has(#tab-providers.active) { max-width: none; margin: 0; padding: 0; }
@@ -15,158 +22,203 @@
   --ph-line-soft: rgba(84, 122, 205, .14);
   --ph-surface: rgba(13, 21, 38, .78);
   --ph-surface2: rgba(18, 28, 50, .72);
+  --ph-solid: #0d1628;          /* opaque navy: masks the activity timeline rail */
   --ph-green: #22c55e;
   --ph-red: #ef4444;
   --ph-amber: #f59e0b;
   --ph-blue: #3b82f6;
   --ph-purple: #a855f7;
   --ph-cyan: #22d3ee;
-  display: flex; flex-direction: column; gap: 12px;
-  padding: 12px 16px 40px;
+  --ph-radius: 9px;             /* panels */
+  --ph-radius-ctl: 8px;         /* controls, chips, buttons */
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 10px 14px 32px;
 }
 
 /* ------------------------------- header ---------------------------------- */
 .ph-head {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
   background: linear-gradient(120deg, rgba(30, 24, 66, .55), rgba(12, 20, 38, .75) 55%);
-  border: 1px solid var(--ph-line); border-radius: 12px; padding: 12px 16px;
+  border: 1px solid var(--ph-line); border-radius: var(--ph-radius); padding: 9px 13px;
 }
-.ph-head-title { display: flex; align-items: center; gap: 12px; min-width: 260px; }
+.ph-head-title { display: flex; align-items: center; gap: 11px; min-width: 240px; }
 .ph-head-ic {
-  display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px;
-  border-radius: 11px; color: #c9b6ff; border: 1px solid rgba(168, 85, 247, .45);
+  display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px;
+  border-radius: var(--ph-radius-ctl); color: #c9b6ff; border: 1px solid rgba(168, 85, 247, .45);
   background: radial-gradient(circle at 30% 25%, rgba(168, 85, 247, .35), rgba(59, 130, 246, .12));
-  box-shadow: 0 0 18px rgba(124, 77, 255, .28);
+  box-shadow: 0 0 16px rgba(124, 77, 255, .24);
 }
-.ph-h1 { margin: 0; font-size: 24px; letter-spacing: .3px; }
-.ph-sub { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
-.ph-head-right { margin-left: auto; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.ph-overall { display: flex; align-items: center; gap: 10px; }
+.ph-h1 { margin: 0; font-size: 19px; line-height: 1.2; letter-spacing: .2px; }
+.ph-sub { margin: 1px 0 0; font-size: 11.5px; line-height: 1.3; color: var(--muted); }
+.ph-head-right { margin-left: auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ph-overall { display: flex; align-items: center; gap: 9px; }
 .ph-ring { position: relative; display: inline-flex; align-items: center; justify-content: center; }
-.ph-ring svg { transform: rotate(-90deg); }
-.ph-ring circle { fill: none; stroke-width: 3.4; }
+.ph-ring svg { width: 44px; height: 44px; transform: rotate(-90deg); }
+.ph-ring circle { fill: none; stroke-width: 3.6; }
 .ph-ring-bg { stroke: rgba(84, 122, 205, .18); }
 .ph-ring-fg { stroke: #22d3ee; stroke-linecap: round; transition: stroke-dashoffset .5s ease; filter: drop-shadow(0 0 5px rgba(34, 211, 238, .5)); }
-.ph-ring b { position: absolute; font-size: 12.5px; font-weight: 700; color: #e6f6ff; }
-.ph-overall-txt { display: flex; flex-direction: column; }
-.ph-overall-l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
-.ph-overall-txt b { font-size: 13px; }
-.ph-cta { padding: 10px 18px; }
+.ph-ring b { position: absolute; font-size: 11.5px; font-weight: 700; color: #e6f6ff; }
+.ph-overall-txt { display: flex; flex-direction: column; line-height: 1.25; }
+.ph-overall-l { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+.ph-overall-txt b { font-size: 12.5px; }
+.ph-cta { padding: 8px 16px; }
 
-/* ---------------------------- summary metric cards ------------------------ */
-.ph-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+/* ---------------------------- summary metric cards ------------------------
+   One row of short cards. minmax(150px) lets seven sit across a desktop
+   content area (7 x 150 = 1050px) and still wrap gracefully below that. */
+.ph-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
 .ph-metric {
-  border: 1px solid var(--ph-line); border-radius: 12px; padding: 10px 12px;
-  background: var(--ph-surface); display: flex; flex-direction: column; gap: 2px;
-  box-shadow: 0 0 18px rgba(34, 211, 238, .03) inset;
+  border: 1px solid var(--ph-line); border-radius: var(--ph-radius); padding: 7px 11px;
+  background: var(--ph-surface); display: flex; flex-direction: column; justify-content: center;
+  min-height: 62px; box-shadow: 0 0 18px rgba(34, 211, 238, .03) inset;
 }
-.ph-metric-k { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ph-metric-v { font-size: 21px; font-weight: 700; line-height: 1.15; }
-.ph-metric-s { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ph-metric-k { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ph-metric-v { font-size: 19px; font-weight: 700; line-height: 1.15; }
+.ph-metric-s { font-size: 10px; line-height: 1.25; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ph-metric.green .ph-metric-v { color: #4ade80; }
-.ph-metric.red .ph-metric-v { color: #f87171; }
+.ph-metric.red .ph-metric-v { color: #ef4444; }
 .ph-metric.amber .ph-metric-v { color: #fbbf24; }
 .ph-metric.blue .ph-metric-v { color: #60a5fa; }
 .ph-metric.purple .ph-metric-v { color: #c084fc; }
 
-/* -------------------------------- toolbar -------------------------------- */
-.ph-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; position: relative; }
-.ph-seg { display: inline-flex; border: 1px solid var(--ph-line); border-radius: 10px; overflow: hidden; background: var(--ph-surface); }
+/* -------------------------------- toolbar --------------------------------
+   One compact horizontal strip. Each filter group is a row of independent
+   pills (no segmented box), which is what keeps the bar a single line at
+   desktop widths instead of stacking into extra rows. */
+.ph-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; position: relative; }
+.ph-seg { display: inline-flex; align-items: center; gap: 6px; }
 .ph-seg button {
-  background: none; border: 0; color: #c8d0e6; font: inherit; font-size: 12.5px;
-  padding: 7px 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  background: var(--ph-surface); border: 1px solid var(--ph-line); color: #c8d0e6;
+  font: inherit; font-size: 12px; padding: 5px 10px; border-radius: var(--ph-radius-ctl);
+  cursor: pointer; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  line-height: 1.35;
 }
-.ph-seg button + button { border-left: 1px solid var(--ph-line-soft); }
-.ph-seg button:hover { background: rgba(80, 120, 220, .12); }
-.ph-seg button.active { background: linear-gradient(90deg, rgba(124, 77, 255, .85), rgba(59, 130, 246, .6)); color: #fff; }
+.ph-seg button:hover { background: rgba(80, 120, 220, .14); border-color: rgba(124, 77, 255, .4); }
+.ph-seg button.active {
+  background: linear-gradient(90deg, rgba(124, 77, 255, .9), rgba(79, 123, 255, .72));
+  border-color: rgba(150, 170, 255, .5); color: #fff;
+}
 .ph-seg-n {
-  font-size: 10.5px; border-radius: 999px; padding: 0 6px; background: rgba(120, 150, 255, .18); color: #cfd8ff;
+  font-size: 10px; line-height: 1.5; border-radius: 999px; padding: 0 5px;
+  background: rgba(120, 150, 255, .18); color: #cfd8ff;
 }
-.ph-seg button.active .ph-seg-n { background: rgba(255, 255, 255, .22); color: #fff; }
-.ph-search { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--ph-line); border-radius: 10px; background: var(--ph-surface); padding: 0 10px; min-width: 210px; }
-.ph-search-ic { color: var(--muted); font-size: 14px; }
-.ph-search input { background: none; border: 0; outline: none; color: var(--text); font: inherit; font-size: 12.5px; padding: 8px 0; width: 100%; }
-.ph-keysel { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--ph-line); border-radius: 10px; background: var(--ph-surface); padding: 0 4px 0 10px; }
-.ph-keysel-l { font-size: 11px; color: var(--muted); }
-.ph-keysel select { background: none; border: 0; color: var(--text); font: inherit; font-size: 12.5px; padding: 7px 4px; outline: none; }
-.ph-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.ph-seg button.active .ph-seg-n { background: rgba(255, 255, 255, .24); color: #fff; }
+.ph-seg-status button .status-dot { margin: 0; width: 6px; height: 6px; }
+
+.ph-search {
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--ph-line);
+  border-radius: var(--ph-radius-ctl); background: var(--ph-surface); padding: 0 9px;
+  flex: 0 1 230px; min-width: 148px; max-width: 300px;
+}
+.ph-search-ic { color: var(--muted); font-size: 13px; }
+.ph-search input { background: none; border: 0; outline: none; color: var(--text); font: inherit; font-size: 12px; padding: 6px 0; width: 100%; }
+
+.ph-keysel { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--ph-line); border-radius: var(--ph-radius-ctl); background: var(--ph-surface); padding: 0 3px 0 9px; }
+.ph-keysel-l { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.ph-keysel select { background: none; border: 0; color: var(--text); font: inherit; font-size: 12px; padding: 6px 3px; outline: none; max-width: 150px; }
+
+.ph-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; }
+.ph-toolbar .btn { padding: 5px 10px; font-size: 12px; border-radius: var(--ph-radius-ctl); line-height: 1.35; }
 .ph-icon-btn { display: inline-flex; align-items: center; gap: 6px; }
+#ph-refresh { padding: 5px 8px; }
 #btn-providers-test-all, #ph-test-all {
   background: linear-gradient(90deg, #7c4dff, #4f7bff); border-color: rgba(150, 170, 255, .45);
   color: #fff; font-weight: 600;
 }
 #btn-providers-test-all::before, #ph-test-all::before { content: "\25B6"; font-size: 10px; margin-right: 6px; opacity: .9; }
+#btn-providers-test-all { padding: 9px 17px; font-size: 13px; border-radius: var(--ph-radius-ctl); }
 #btn-providers-test-all:disabled { opacity: .6; }
 
 /* --------------------------- sections + activity -------------------------- */
-.ph-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; align-items: start; }
-.ph-main { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.ph-section { border: 1px solid var(--ph-line); border-radius: 12px; background: var(--ph-surface); overflow: hidden; }
-.ph-sec-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--ph-line-soft); flex-wrap: wrap; }
-.ph-sec-title { display: flex; align-items: center; gap: 9px; }
-.ph-sec-title b { font-size: 14px; display: block; }
-.ph-sec-sub { font-size: 11px; color: var(--muted); }
+.ph-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 10px; align-items: start; }
+.ph-main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ph-section { border: 1px solid var(--ph-line); border-radius: var(--ph-radius); background: var(--ph-surface); overflow: hidden; }
+.ph-sec-head {
+  display: flex; align-items: center; gap: 9px; padding: 7px 11px; min-height: 38px;
+  border-bottom: 1px solid var(--ph-line-soft); flex-wrap: wrap;
+}
+.ph-sec-title { display: flex; align-items: center; gap: 8px; line-height: 1.25; min-width: 0; }
+.ph-sec-title > div { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex-wrap: wrap; }
+/* title and subtitle on ONE line, as in the reference — stacked, the subtitle
+   span inherited the body line-height strut and the header grew to 53px. */
+.ph-sec-title b { font-size: 13.5px; line-height: 1.25; }
+.ph-sec-sub { font-size: 10.5px; line-height: 1.25; color: var(--muted); }
 .ph-sec-ic {
-  display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px;
-  border-radius: 8px; color: #b9a8ff; border: 1px solid rgba(168, 85, 247, .35); background: rgba(168, 85, 247, .12);
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
+  border-radius: 6px; color: #b9a8ff; border: 1px solid rgba(168, 85, 247, .35); background: rgba(168, 85, 247, .12);
 }
-.ph-badges { margin-left: auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ph-sec-ic svg { width: 14px; height: 14px; }
+.ph-badges { margin-left: auto; display: flex; align-items: center; gap: 5px; flex-wrap: nowrap; }
 
-/* ------------------------------- tables ---------------------------------- */
-/* One shared grid so the sticky header and every row line up; the table
-   scrolls horizontally on narrow screens instead of squashing the columns. */
+/* ------------------------------- tables ----------------------------------
+   ONE shared grid so the sticky header, every provider row and every Gateway
+   row land on exactly the same columns. Slack is spread over FIVE flexible
+   tracks rather than dumped into Provider alone: a single 1fr Provider column
+   left a ~540px void before Status on a 1920px screen, which is exactly the
+   "empty space between columns" this pass removes. Rows stay flat — a row is
+   a row, never a card — and only scroll horizontally below ~880px. */
 .ph-table { display: block; overflow-x: auto; }
-.ph-tr {
-  display: grid; align-items: center; gap: 8px;
-  grid-template-columns: 26px 32px minmax(140px, 1fr) 116px 62px 54px 156px 88px 84px 132px;
+.ph-tr,
+#providers-list > .ph-thead,
+#gateway-card > .ph-thead {
+  display: grid; align-items: center; gap: 9px;
+  grid-template-columns:
+    20px 26px minmax(180px, 1.35fr) 104px 62px 56px
+    minmax(120px, 1fr) minmax(66px, .72fr) minmax(74px, .8fr) minmax(88px, .92fr);
 }
-#providers-list > .ph-thead, #gateway-card > .ph-thead, #providers-list > .provider-card,
-#gateway-card > .provider-card { min-width: 920px; }
-#providers-list > .ph-thead, #gateway-card > .ph-thead {
-  display: grid; align-items: center; gap: 8px;
-  grid-template-columns: 26px 32px minmax(140px, 1fr) 116px 62px 54px 156px 88px 84px 132px;
-}
-.ph-detail .ph-thead, .model-health-row {
-  display: grid; align-items: center; gap: 8px;
-  grid-template-columns: minmax(160px, 1fr) 116px 170px 132px 84px 84px 132px;
-}
+#providers-list > .ph-thead, #gateway-card > .ph-thead,
+#providers-list > .provider-card, #gateway-card > .provider-card { min-width: 880px; }
+
 .ph-thead {
-  font-size: 10.5px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted);
-  padding: 7px 12px; background: rgba(9, 15, 30, .6); border-bottom: 1px solid var(--ph-line-soft);
+  font-size: 10px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted);
+  padding: 5px 10px; min-height: 32px; background: rgba(9, 15, 30, .6);
+  border-bottom: 1px solid var(--ph-line-soft);
 }
 .ph-th { text-align: left; }
 .ph-c-num, .ph-c-idx, .ph-c-lat, .ph-c-when, .ph-c-act, .ph-c-result { text-align: left; }
 .ph-caret {
-  background: none; border: 1px solid transparent; color: #9fb0d8; cursor: pointer; font-size: 12px;
-  width: 22px; height: 22px; border-radius: 6px; line-height: 1; display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid transparent; color: #9fb0d8; cursor: pointer; font-size: 11px;
+  width: 20px; height: 20px; border-radius: 5px; line-height: 1; display: inline-flex; align-items: center; justify-content: center;
 }
 .ph-caret:hover { background: rgba(80, 120, 220, .18); color: #fff; }
 .ph-caret:focus-visible { outline: 2px solid var(--ph-cyan); outline-offset: 1px; }
 
-.provider-card { border-bottom: 1px solid var(--ph-line-soft); }
+/* style.css still carries the PRE-redesign "one rounded card per provider"
+   rules — .provider-card {padding: 10px 12px; border; border-radius;
+   background} and .model-health-table {margin/padding-top: 8px; dashed top
+   border}. Those leftovers added exactly 22px to every provider row and 17px
+   to every expanded block, and are what made each row read as a card. Zero
+   them here so a row is a flat table row inside one section container. */
+.provider-card {
+  background: none; border: 0; border-radius: 0; padding: 0;
+  border-bottom: 1px solid var(--ph-line-soft);
+}
 .provider-card:last-child { border-bottom: 0; }
 .provider-card:hover > .ph-tr { background: rgba(80, 120, 220, .07); }
-.ph-tr { padding: 8px 12px; }
-.ph-cell { font-size: 12px; color: #c8d0e6; min-width: 0; }
+.ph-detail.model-health-table { margin-top: 0; border-top: 0; padding-top: 0; }
+.ph-tr { padding: 6px 10px; min-height: 38px; }
+.ph-cell { font-size: 12px; line-height: 1.3; color: #c8d0e6; min-width: 0; }
 .ph-cell.ph-cell-na { color: var(--muted); }
 .ph-c-name { display: flex; align-items: center; gap: 7px; }
-.ph-c-name b, .ph-c-name .ph-name { font-size: 13px; color: var(--text); }
-.ph-c-sxe { display: flex; align-items: center; gap: 8px; }
-.ph-c-act { display: flex; align-items: center; gap: 6px; }
+.ph-c-name b, .ph-c-name .ph-name { font-size: 12.5px; color: var(--text); }
+.ph-c-name .status-dot { margin: 0; width: 7px; height: 7px; }
+.ph-c-sxe { display: flex; align-items: center; gap: 7px; }
+.ph-c-act { display: flex; align-items: center; gap: 5px; }
 .ph-c-idx, .ph-c-num, .ph-c-lat, .ph-c-when { font-variant-numeric: tabular-nums; color: #b6c0da; }
 
-.ph-sxe { display: flex; align-items: center; gap: 8px; width: 100%; }
-.ph-bar { display: inline-flex; height: 6px; width: 78px; border-radius: 999px; overflow: hidden; background: rgba(120, 150, 255, .16); flex: 0 0 auto; }
+.ph-sxe { display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0; }
+.ph-bar { display: inline-flex; height: 5px; width: 68px; border-radius: 999px; overflow: hidden; background: rgba(120, 150, 255, .16); flex: 0 0 auto; }
 .ph-bar i { display: block; height: 100%; }
 .ph-bar-ok { background: var(--ph-green); }
 .ph-bar-bad { background: var(--ph-red); }
-.ph-sxe-txt { font-variant-numeric: tabular-nums; font-size: 12px; }
+.ph-sxe-txt { font-variant-numeric: tabular-nums; font-size: 11.5px; white-space: nowrap; }
 
 .ph-badge {
-  display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 2px 9px; border-radius: 999px;
-  border: 1px solid var(--ph-line); color: #c8d0e6; white-space: nowrap; background: rgba(120, 150, 255, .07);
+  display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; line-height: 1;
+  height: 22px; padding: 0 8px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid var(--ph-line); color: #c8d0e6; background: rgba(120, 150, 255, .07);
 }
-.ph-badge .status-dot { margin: 0; }
+.ph-badge .status-dot { margin: 0; width: 6px; height: 6px; }
 .ph-badge.healthy { color: #86efac; border-color: rgba(34, 197, 94, .45); background: rgba(34, 197, 94, .1); }
 .ph-badge.failed { color: #fca5a5; border-color: rgba(239, 68, 68, .45); background: rgba(239, 68, 68, .1); }
 .ph-badge.degraded { color: #fcd34d; border-color: rgba(245, 158, 11, .45); background: rgba(245, 158, 11, .1); }
@@ -184,24 +236,39 @@
 #providers-list .provider-card.force-show > .ph-detail,
 #gateway-card .provider-card.force-show > .ph-detail { display: block; }
 .ph-detail { background: rgba(8, 14, 28, .5); }
-.ph-detail .ph-thead { padding-left: 48px; background: none; }
-.model-health-row { padding: 6px 12px 6px 48px; border-top: 1px solid rgba(84, 122, 205, .08); }
-.model-health-row .model-name { font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
-.model-health-row .key-results { display: inline-flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
-.model-health-row .key-chip { font-size: 10.5px; display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ph-detail .ph-thead { padding: 4px 10px 4px 46px; min-height: 28px; font-size: 9.5px; background: none; }
+.ph-detail .ph-thead, .model-health-row {
+  display: grid; align-items: center; gap: 8px;
+  grid-template-columns: minmax(170px, 1fr) 100px 196px 104px 68px 80px 90px;
+}
+/* 4px vertical padding keeps a model row at the 26px Test button's height
+   (+1px separator) => ~35px, instead of the 49px a wrapped key list forced. */
+.model-health-row { padding: 4px 10px 4px 46px; min-height: 34px; border-top: 1px solid rgba(84, 122, 205, .08); }
+.model-health-row .model-name { font-size: 11.5px; color: var(--text); overflow-wrap: anywhere; }
+/* style.css gives .key-results a 16px indent and wrapping; inside a table cell
+   that stole a third of the column and double-lined the row. One chip line,
+   clipped by the cell's own overflow:hidden if a model has more keys than fit. */
+.model-health-row .key-results { display: flex; flex-wrap: nowrap; gap: 4px; padding-left: 0; overflow: hidden; max-width: 100%; }
+.model-health-row .key-chip { font-size: 10px; display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* a long upstream error inside a key chip must never bleed into the next column */
 .model-health-row .ph-c-key, .model-health-row .ph-c-result, .ph-tr .ph-c-name { overflow: hidden; }
+
 .ph-mtest, .ph-more {
   background: rgba(14, 22, 40, .9); border: 1px solid var(--ph-line); color: #c8d0e6;
-  border-radius: 8px; font: inherit; font-size: 11.5px; padding: 3px 10px; cursor: pointer;
+  border-radius: 7px; font: inherit; font-size: 11px; padding: 0 8px; cursor: pointer;
+  height: 26px; display: inline-flex; align-items: center; justify-content: center;
 }
+/* the row Test button is <button class="btn mini ph-test">: style.css's
+   .btn.mini (0,2,0) must not win, so the compact row height is set from a
+   (0,3,0) selector rather than relying on stylesheet order. */
+.ph-c-act .btn.ph-test { min-width: 54px; height: 26px; padding: 0 9px; font-size: 11.5px; border-radius: 7px; }
 .ph-mtest:hover, .ph-more:hover { border-color: rgba(124, 77, 255, .6); color: #fff; }
-.ph-mtest:disabled { opacity: .5; cursor: default; }
+.ph-mtest:disabled, .ph-c-act .btn.ph-test:disabled { opacity: .5; cursor: default; }
 .ph-mtest:focus-visible, .ph-more:focus-visible { outline: 2px solid var(--ph-cyan); outline-offset: 1px; }
-.ph-more { padding: 3px 8px; }
+.ph-more { width: 24px; padding: 0; }
 .ph-more-menu {
   position: absolute; z-index: 30; margin-top: 4px; display: flex; flex-direction: column; min-width: 168px;
-  background: #0d1628; border: 1px solid var(--ph-line); border-radius: 10px; padding: 4px;
+  background: var(--ph-solid); border: 1px solid var(--ph-line); border-radius: var(--ph-radius); padding: 4px;
   box-shadow: 0 12px 28px rgba(0, 0, 0, .5);
 }
 .ph-more-menu button {
@@ -212,50 +279,81 @@
 
 /* filter results */
 .ph-filtered { display: none !important; }
-.ph-empty { border: 1px dashed var(--ph-line); border-radius: 12px; padding: 16px; text-align: center; color: var(--muted); font-size: 12.5px; }
+.ph-empty { border: 1px dashed var(--ph-line); border-radius: var(--ph-radius); padding: 12px; text-align: center; color: var(--muted); font-size: 12px; }
+#providers-list > .empty, #gateway-card > .empty { padding: 12px; font-size: 12px; border: 0; }
 
-/* ---------------------------- Live Test Activity -------------------------- */
+/* ---------------------------- Live Test Activity --------------------------
+   A real operations timeline: one continuous rail behind the event dots,
+   compact two-line rows, and a centred empty state instead of a tall void. */
 .ph-activity {
-  border: 1px solid var(--ph-line); border-radius: 12px; background: var(--ph-surface);
+  border: 1px solid var(--ph-line); border-radius: var(--ph-radius); background: var(--ph-surface);
   position: sticky; top: 64px; max-height: calc(100vh - 96px); display: flex; flex-direction: column;
 }
-.ph-activity-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--ph-line-soft); }
-.ph-activity-title { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.ph-activity-head {
+  display: flex; align-items: center; gap: 8px; padding: 7px 11px; min-height: 38px;
+  border-bottom: 1px solid var(--ph-line-soft);
+}
+.ph-activity-title { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
 .ph-live {
-  display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: #86efac;
-  border: 1px solid rgba(34, 197, 94, .45); background: rgba(34, 197, 94, .1); border-radius: 999px; padding: 1px 8px;
+  display: inline-flex; align-items: center; gap: 5px; font-size: 10px; line-height: 1;
+  height: 18px; padding: 0 7px; color: #86efac;
+  border: 1px solid rgba(34, 197, 94, .45); background: rgba(34, 197, 94, .1); border-radius: 999px;
 }
 .ph-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ph-green); box-shadow: 0 0 6px var(--ph-green); }
-.ph-activity-head .btn.mini { margin-left: auto; }
-.ph-activity-feed { overflow-y: auto; padding: 6px 10px 10px; }
-.ph-act-empty { color: var(--muted); font-size: 12px; padding: 12px 4px; }
-.ph-act-row { display: flex; gap: 8px; padding: 7px 2px; }
-.ph-act-line { width: 9px; display: flex; justify-content: center; }
-.ph-act-line::before { content: ""; width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; background: #64748b; }
-.ph-act-row.ok .ph-act-line::before { background: var(--ph-green); box-shadow: 0 0 6px var(--ph-green); }
-.ph-act-row.bad .ph-act-line::before { background: var(--ph-red); box-shadow: 0 0 6px var(--ph-red); }
-.ph-act-row.run .ph-act-line::before { background: var(--ph-blue); box-shadow: 0 0 6px var(--ph-blue); }
-.ph-act-body { min-width: 0; flex: 1; border-bottom: 1px solid rgba(84, 122, 205, .1); padding-bottom: 6px; }
-.ph-act-head { display: flex; align-items: baseline; gap: 5px; font-size: 12px; flex-wrap: wrap; }
+.ph-activity-head .btn.mini { margin-left: auto; padding: 4px 9px; font-size: 11.5px; border-radius: 7px; }
+.ph-activity-feed { position: relative; overflow-y: auto; padding: 3px 10px 8px; }
+
+/* the rail is drawn once for the whole feed, so it reads as one timeline
+   rather than a dashed line per row; it only exists when there are rows. */
+.ph-activity-feed:has(.ph-act-row)::before {
+  content: ""; position: absolute; left: 15px; top: 10px; bottom: 16px; width: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(180deg, rgba(84, 122, 205, .06), rgba(84, 122, 205, .34) 10%,
+                                      rgba(84, 122, 205, .34) 90%, rgba(84, 122, 205, .06));
+}
+
+.ph-act-empty { display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; padding: 26px 8px; }
+.ph-act-empty b { font-size: 12.5px; font-weight: 600; color: #b6c0da; }
+.ph-act-empty span { font-size: 11px; line-height: 1.35; color: var(--muted); }
+
+.ph-act-row { display: flex; gap: 9px; padding: 5px 0; }
+.ph-act-line { position: relative; flex: 0 0 10px; width: 10px; display: flex; justify-content: center; }
+.ph-act-line::after {
+  content: ""; position: relative; z-index: 1; width: 7px; height: 7px; border-radius: 50%;
+  margin-top: 5px; background: #64748b; box-shadow: 0 0 0 3px var(--ph-solid);
+}
+.ph-act-row.ok .ph-act-line::after { background: var(--ph-green); box-shadow: 0 0 0 3px var(--ph-solid), 0 0 6px var(--ph-green); }
+.ph-act-row.bad .ph-act-line::after { background: var(--ph-red); box-shadow: 0 0 0 3px var(--ph-solid), 0 0 6px var(--ph-red); }
+.ph-act-row.run .ph-act-line::after { background: var(--ph-blue); box-shadow: 0 0 0 3px var(--ph-solid), 0 0 6px var(--ph-blue); }
+.ph-act-body { min-width: 0; flex: 1; border-bottom: 1px solid rgba(84, 122, 205, .1); padding-bottom: 5px; }
+.ph-act-row:last-child .ph-act-body { border-bottom: 0; }
+.ph-act-head { display: flex; align-items: baseline; gap: 4px; font-size: 11.5px; line-height: 1.3; flex-wrap: wrap; }
 .ph-act-head b { color: var(--text); }
 .ph-act-dot, .ph-act-model { color: var(--muted); }
 .ph-act-model { overflow-wrap: anywhere; }
-.ph-act-time { margin-left: auto; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
-.ph-act-text { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.ph-act-time { margin-left: auto; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.ph-act-text { font-size: 11px; line-height: 1.3; color: var(--muted); margin-top: 1px; }
 .ph-act-row.ok .ph-act-text { color: #86efac; }
 .ph-act-row.bad .ph-act-text { color: #fca5a5; }
 .ph-act-row.run .ph-act-text { color: #93c5fd; }
 
 /* ------------------------------ responsive ------------------------------- */
+/* Narrower desktops keep the rail beside the tables at the slim end of the
+   spec's 290-320px range, so the tables keep the width they need. */
+@media (max-width: 1500px) {
+  .ph-grid { grid-template-columns: minmax(0, 1fr) 300px; }
+}
 @media (max-width: 1240px) {
   .ph-grid { grid-template-columns: minmax(0, 1fr); }
-  .ph-activity { position: static; max-height: 420px; }
+  .ph-activity { position: static; max-height: 460px; }
+  .ph-keysel-l { display: none; }
 }
 @media (max-width: 900px) {
   .ph-head { flex-direction: column; align-items: flex-start; }
   .ph-head-right { margin-left: 0; width: 100%; }
   .ph-actions { margin-left: 0; width: 100%; justify-content: flex-start; }
-  .ph-metrics { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+  .ph-metrics { grid-template-columns: repeat(auto-fit, minmax(134px, 1fr)); }
+  .ph-badges { flex-wrap: wrap; }
   /* phones keep caret / name / status / counts and the Test action visible;
      the wider columns scroll horizontally instead of squeezing the buttons. */
   .ph-tr, #providers-list > .ph-thead, #gateway-card > .ph-thead {
@@ -270,4 +368,6 @@
   .model-health-row { padding-left: 34px; padding-right: 10px; }
   .ph-detail .ph-thead { padding-left: 34px; }
   .model-health-row .ph-c-lat, .model-health-row .ph-c-when { display: none; }
+  /* phones: wrap rather than clip, there is no room for a second chip line */
+  .model-health-row .key-results { flex-wrap: wrap; }
 }

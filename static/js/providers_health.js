@@ -260,7 +260,10 @@
     const feed = $("#ph-activity-feed");
     if (!feed) return;
     if (!ACTIVITY.length) {
-      feed.innerHTML = `<div class="ph-act-empty">No test activity yet. Run a test to see live results.</div>`;
+      // Compact centred empty state — never a tall void, and never a
+      // fabricated event just to fill the rail.
+      feed.innerHTML = `<div class="ph-act-empty"><b>No recent test activity</b>` +
+        `<span>Run a provider or gateway test to see results here.</span></div>`;
       return;
     }
     feed.innerHTML = ACTIVITY.slice(0, MAX_ACTIVITY).map(activityRow).join("");

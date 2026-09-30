@@ -342,7 +342,7 @@ The **🖥️ Agent Terminal** tab is a real terminal onto the Agent Runtime (se
 |-----|-------------|
 | **Dashboard** | Overview cards — empty placeholder (no plugin registers data today) |
 | **Assistant** | Chat interface, with multi-chat history persisted server-side |
-| **AI Providers health** | Provider health, latency, calls/errors, per-key and per-model tests |
+| **Providers Health Test** | Direct AI providers + Astra AI Gateway health, latency, calls/errors, per-key and per-model tests from one page |
 | **Router** | Model registry + task routing stats (the AstraRouter's view) |
 | **Wallet** | Web3 transaction policy (mode, limits, allowlists) + recent txs |
 | **Backup** | Export/import as one JSON file — currently a placeholder (`_exports: {}`) |

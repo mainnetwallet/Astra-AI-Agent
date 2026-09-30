@@ -198,7 +198,7 @@ CORE_TABS = [
     # SchedulerManager (astra/workflows/) and the ONE ToolRegistry. It is a
     # core tab, not a plugin — the plugin system was removed.
     {"tab": "workflow", "label": "\U0001f500 Agent Workflow", "core": True},
-    {"tab": "providers", "label": "\U0001f50c AI Providers health", "core": True},
+    {"tab": "providers", "label": "\U0001f50c Providers Health Test", "core": True},
     {"tab": "web3", "label": "\u26d3\ufe0f Wallet", "core": True},
     {"tab": "backup", "label": "\U0001f4be Backup", "core": True},
 ]

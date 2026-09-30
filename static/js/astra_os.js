@@ -29,8 +29,7 @@
     { id: "ws", label: "Workspace", ic: "🗂️", children: [
       { label: "Terminal", tab: "terminal" }, { label: "Files", tab: "terminal" },
       { label: "Browser", tab: "system-map", focus: "workspace" }] },
-    { id: "control", label: "AI Control Plane", ic: "🧠", children: [
-      { label: "Providers Health", tab: "providers" }, { label: "Router", tab: "router" }] },
+    { id: "providers-health", label: "Providers Health Test", ic: "🔌", tab: "providers" },
     { id: "mem", label: "Memory Center", ic: "🧬", tab: "system-map", focus: "memory" },
     // Security Center is its own dedicated page (static/js/security_center.js).
     { id: "sec", label: "Security Center", ic: "🛡️", tab: "security-center" },
@@ -193,7 +192,7 @@
     let extra = "";
     if (id === "providers") extra = (OS.data.providerCards || []).map((p) => `<div class="kv" data-dprov="${esc(p.name)}" style="cursor:pointer"><span>${dot(p.status)}${esc(p.name)}</span><span>${p.modelCount} models ›</span></div>`).join("");
     if (id === "tools") extra = ((OS.data.tools || {}).groups || []).map((g) => `<h4>${esc(g.name)} (${g.tools.length})</h4>` + g.tools.map((t) => `<div class="kv" data-dtool="${esc(t.name)}" style="cursor:pointer"><span>${esc(t.name)}</span><span>›</span></div>`).join("")).join("");
-    const tabFor = { workflows: "workflow", web3: "web3", workspace: "terminal", router: "router", monitoring: "logs" }[id];
+    const tabFor = { workflows: "workflow", web3: "web3", workspace: "terminal", monitoring: "logs" }[id];
     drawer(n.title, kvHtml(n.lines.map((l) => [l.k, l.v])) + extra + (tabFor ? `<div class="os-bar" style="margin-top:12px"><button class="os-btn" data-dgo="${tabFor}">Open page ›</button></div>` : ""));
   }
   document.addEventListener("click", (e) => {

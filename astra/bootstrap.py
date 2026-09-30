@@ -347,7 +347,7 @@ def build(store: Store | None = None, config=None,
     # through the chat pipeline (never a fresh user turn).
     approval_manager.set_resumer(chat_pipeline.resume_host_fallback)
 
-    return {
+    stack = {
         "config": config, "store": store,
         "events": events, "policy": policy, "memory": memory,
         "experiences": experiences, "tasks": tasks, "registry": registry,
@@ -369,3 +369,13 @@ def build(store: Store | None = None, config=None,
         "web3_policy": policy_engine,
         "gateway_intelligence": gateway_intelligence,
     }
+    # Global emergency shutdown latch (astra/emergency.py). It stops running
+    # work through the same managers held in `stack` and is consulted by the
+    # tool registry, the chat agent and the workflow engine before they run.
+    from .emergency import EmergencyShutdown
+    emergency = EmergencyShutdown(store, stack, events=events)
+    stack["emergency"] = emergency
+    registry.emergency = emergency
+    agent.emergency = emergency
+    workflows.emergency = emergency
+    return stack

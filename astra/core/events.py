@@ -49,6 +49,8 @@ EVENT_KINDS = (
     "web3.transaction.prepared", "web3.transaction.submitted",
     "web3.transaction.broadcast", "web3.transaction.rejected",
     "web3.transaction.confirmed", "web3.transaction.failed",
+    # global emergency shutdown (astra/emergency.py)
+    "security.emergency_shutdown", "security.emergency_released",
     # plugins / providers (contract for future modules)
     "plugin.loaded", "plugin.failed", "plugin.disabled",
     "provider.selected", "provider.failed", "provider.health_changed",

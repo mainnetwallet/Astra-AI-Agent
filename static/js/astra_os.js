@@ -32,7 +32,8 @@
     { id: "control", label: "AI Control Plane", ic: "🧠", children: [
       { label: "Providers Health", tab: "providers" }, { label: "Router", tab: "router" }] },
     { id: "mem", label: "Memory Center", ic: "🧬", tab: "system-map", focus: "memory" },
-    { id: "sec", label: "Security Center", ic: "🛡️", tab: "system-map", focus: "security" },
+    // Security Center is its own dedicated page (static/js/security_center.js).
+    { id: "sec", label: "Security Center", ic: "🛡️", tab: "security-center" },
     { id: "health", label: "System Health", ic: "❤️", tab: "command-center", anchor: "sh-root" },
     { id: "activity", label: "Activity Center", ic: "📡", tab: "logs" },
   ];

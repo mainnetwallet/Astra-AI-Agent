@@ -480,6 +480,9 @@ class WorkflowEngine:
 
         If `steps` is provided and no definition exists, run ad-hoc (used by
         scheduler deadline workflows and tests)."""
+        em = getattr(self, "emergency", None)
+        if em is not None:
+            em.guard("workflow execution")
         if run_id is None:
             if workflow_id:
                 run = self.create_run(workflow_id, params)

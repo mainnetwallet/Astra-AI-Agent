@@ -53,6 +53,12 @@ System endpoints:
 
   GET  /api/health          database/providers/tools/scheduler diagnostics
   GET  /api/config          public (non-secret) config snapshot
+  GET  /api/security/status                 Security Center aggregate (real data only)
+  POST /api/security/emergency-shutdown     {confirm:true} latch + stop all agent execution
+  POST /api/security/emergency-release      {confirm:true} lift the latch
+  POST /api/security/backup/create          -> astra_backup_*.zip (secret-free, versioned)
+  POST /api/security/backup/inspect         multipart file -> validation + restore preview
+  POST /api/security/backup/restore         multipart file + strategy/categories/confirm
   GET  /api/events          recent live events; ?after_id= for tailing
   GET  /api/events/stream   Server-Sent Events feed (Live tab)
   GET  /api/tools           universal tool registry listing
@@ -1253,6 +1259,74 @@ class WebApp:
                                         503, "runtime_unavailable", req.rid)
         return manager.default(), None
 
+    # -- Security Center ------------------------------------------------------
+    def _security(self, req: Request, path: list) -> Response:
+        """/api/security/* — status, emergency shutdown, total backup/import.
+
+        Every route sits behind the normal operator-token gate + rate
+        limiter (`_gate`). Destructive actions need an explicit
+        `confirm: true`; nothing here is reachable from the LLM tool surface.
+        """
+        from . import backup as _backup
+        from .security_center import build_status
+        site, method, body = self.site, req.method, req.body
+        sub = path[2:]
+        if sub == ["status"] and method == "GET":
+            return json_response({"ok": True, "data": build_status(site)},
+                                 rid=req.rid)
+        em = site._get("emergency")
+        if sub in (["emergency-shutdown"], ["emergency-release"]) and method == "POST":
+            if em is None:
+                return error_response("emergency shutdown is unavailable", 400,
+                                      "emergency_unavailable", req.rid)
+            if body.get("confirm") is not True:
+                return error_response("confirm must be true", 400,
+                                      "validation", req.rid)
+            if sub == ["emergency-shutdown"]:
+                return json_response({"ok": True, "data": em.engage("operator")},
+                                     rid=req.rid)
+            return json_response({"ok": True, "data": em.release("operator")},
+                                 rid=req.rid)
+        if sub[:1] == ["backup"] and len(sub) == 2 and method == "POST":
+            stack = site._stack
+            try:
+                if sub[1] == "create":
+                    blob, manifest = _backup.create_backup(site.store, stack)
+                    name = _backup.backup_filename()
+                    meta = json.dumps({"filename": name, "manifest": manifest},
+                                      ensure_ascii=True, separators=(",", ":"))
+                    return Response(
+                        200, blob, "application/zip", cache="no-store",
+                        headers=[("Content-Disposition",
+                                  'attachment; filename="%s"' % name),
+                                 ("X-Astra-Backup", meta)])
+                if sub[1] in ("inspect", "restore"):
+                    files = req.files or []
+                    if not files:
+                        return error_response("attach a backup file", 400,
+                                              "validation", req.rid)
+                    blob = files[0].get("data") or b""
+                    if sub[1] == "inspect":
+                        return json_response(
+                            {"ok": True,
+                             "data": _backup.inspect_backup(site.store, blob)},
+                            rid=req.rid)
+                    fields = req.fields or {}
+                    if str(fields.get("confirm", "")).lower() != "true":
+                        return error_response("confirm must be true", 400,
+                                              "validation", req.rid)
+                    cats = [c for c in str(fields.get("categories", "")).split(",")
+                            if c] or None
+                    result = _backup.restore_backup(
+                        site.store, blob, fields.get("strategy") or "keep_existing",
+                        cats, stack)
+                    return json_response({"ok": True, "data": result},
+                                         rid=req.rid)
+            except _backup.BackupError as e:
+                status = 409 if e.code == "backup_incompatible" else 400
+                return error_response(str(e), status, e.code, req.rid)
+        return error_response("not found", 404, "not_found", req.rid)
+
     def _system_map(self, req) -> Response:
         """Read-only aggregate for the System Map UI: the AgentManager's
         registered specialists and the live security posture. Secret-free by
@@ -1261,29 +1335,8 @@ class WebApp:
         site = self.site
         mgr = site.agent_manager()
         agents = mgr.list() if mgr is not None else []
-        tok = bool(site.operator_token)
-        rl = site.rate_limiter
-        origins = site._allowed_origins
-        if origins:
-            cors = "Allow-list (%d origin%s)" % (len(origins), "" if len(origins) == 1 else "s")
-        elif site.env == "production":
-            cors = "Same-origin only"
-        else:
-            cors = "Reflects request origin (development/LAN)"
-        security = [
-            {"k": "Authentication",
-             "v": "Operator token required" if tok else "Open (local-first, ASTRA_TOKEN unset)",
-             "s": "online" if tok else "degraded"},
-            {"k": "Rate limiting",
-             "v": ("%d requests / %ds per client" % (rl.limit, int(rl.window))) if rl else "Disabled",
-             "s": "online" if rl else "degraded"},
-            {"k": "CORS", "v": cors, "s": "online" if (origins or site.env == "production") else "info"},
-            {"k": "Request ID", "v": "X-Request-Id on every response", "s": "online"},
-            {"k": "Secret redaction", "v": "Enabled (events, logs, API bodies)", "s": "online"},
-            {"k": "SSRF protection", "v": "Enabled (private/loopback targets blocked)", "s": "online"},
-            {"k": "Body size limit", "v": "%d MB" % (site.max_body_bytes // (1024 * 1024)), "s": "online"},
-            {"k": "Environment", "v": site.env, "s": "info"},
-        ]
+        from .security_center import system_map_security
+        security = system_map_security(site)
         return json_response({"ok": True, "data": {
             "agents": agents,
             "agent_manager": {"available": mgr is not None, "registered": len(agents)},
@@ -1750,6 +1803,8 @@ class WebApp:
         if path == ["api", "import"] and method == "POST":
             result = site.agent.import_all(body.get("data", body))
             return json_response({"ok": True, "data": result}, rid=req.rid)
+        if path[:2] == ["api", "security"] and len(path) >= 3:
+            return self._security(req, path)
         if path == ["api", "health"] and method == "GET":
             return json_response({"ok": True, "data": site.health()}, rid=req.rid)
         if path == ["api", "config"] and method == "GET":

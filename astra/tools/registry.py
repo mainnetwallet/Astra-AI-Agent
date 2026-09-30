@@ -28,7 +28,7 @@ import time
 from astra.core.exceptions import PermissionError as ToolPermissionError
 from astra.core.exceptions import TimeoutError as ToolTimeoutError
 from astra.core.events import new_op_id
-from astra.core.permissions import Policy
+from astra.core.permissions import Level, Policy
 from astra.tools.schemas import Tool
 
 
@@ -41,6 +41,8 @@ class ToolRegistry:
         self._stats: dict[str, dict] = {}
         self._rate_limit_last: dict[str, float] = {}
         self._lock = threading.Lock()
+        # Set by bootstrap (astra/emergency.py); None = no shutdown latch.
+        self.emergency = None
 
     # -- registration --------------------------------------------------------
     def register(self, tool: Tool) -> None:
@@ -203,6 +205,20 @@ class ToolRegistry:
                                "to Agent execution; run the command inside "
                                "the isolated Agent Runtime instead "
                                "(runtime_command)")}
+
+        # EMERGENCY SHUTDOWN: while the latch is engaged no Agent/Provider/
+        # workflow tool call runs at all, and no non-read/low-risk tool
+        # (browser, financial, system, admin) runs for ANY caller. Plain
+        # reads stay available so the UI can still inspect and release it.
+        em = self.emergency
+        if em is not None and em.active and (
+                self._is_agent_execution(ctx) or tool.risk >= Level.BROWSER_ACTION):
+            self._emit_tool("tool.blocked", tool, trace=trace,
+                            input=self._brief(args),
+                            reason="emergency_shutdown")
+            return {"ok": False, "decision": "blocked", "tool": name,
+                    "reason": (f"tool '{name}' is disabled: emergency "
+                               "shutdown is active")}
 
         delegate = tool.confirmation_delegate if allow_confirmation else ""
         decision = self.policy.decision(

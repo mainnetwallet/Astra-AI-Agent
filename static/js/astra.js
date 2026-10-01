@@ -2674,6 +2674,7 @@ async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
         BULK_HEALTH_RUN.providerModels.add(token);
         BULK_HEALTH_RUN.providerResults.set(token, result);
         _flushBulkGatewayResult(name, result.model, result);
+        _reconcileBulkGatewayProviderResult(name, result.model, result);
       }
     }, !!resume);
 }
@@ -2726,6 +2727,7 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
           BULK_HEALTH_RUN.providerModels.add(token);
           BULK_HEALTH_RUN.providerResults.set(token, result);
           _flushBulkGatewayResult(name, modelId, result);
+          _reconcileBulkGatewayProviderResult(name, modelId, result);
         }
         if (onResult) onResult(result);
       })
@@ -2821,6 +2823,26 @@ function _flushBulkGatewayResult(provider, modelId, result) {
     if (deferred.token !== token) continue;
     _applyGatewayBulkResult(deferred.gatewayKey, modelId, result);
     BULK_HEALTH_RUN.deferredGatewayResults.delete(deferredKey);
+  }
+}
+
+// Reconcile by the actual Provider↔Gateway intersection, not by timing or
+// deferred-map registration. This closes the race where a Provider result
+// lands just before a Gateway row is initialized (or after a re-render): every
+// matching Gateway model is updated immediately, while non-matching Gateway
+// models remain real Gateway probes.
+function _reconcileBulkGatewayProviderResult(provider, modelId, result) {
+  if (!BULK_HEALTH_RUN.active) return;
+  for (const key of Object.keys(GATEWAY_MODELS)) {
+    const gatewayProvider = _bulkProviderNameForGateway(key);
+    if (gatewayProvider !== provider) continue;
+    if (!(GATEWAY_MODELS[key] || []).includes(modelId)) continue;
+    _applyGatewayBulkResult(key, modelId, result);
+    for (const [deferredKey, deferred] of BULK_HEALTH_RUN.deferredGatewayResults) {
+      if (deferred.gatewayKey === key && deferred.token === _bulkModelToken(provider, modelId)) {
+        BULK_HEALTH_RUN.deferredGatewayResults.delete(deferredKey);
+      }
+    }
   }
 }
 

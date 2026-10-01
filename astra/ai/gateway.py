@@ -2422,6 +2422,20 @@ class AstraAIGateway:
             from astra.ai.shared_health import canonical_provider
             self.shared_health.invalidate(canonical_provider(conn.name))
 
+    def record_shared_health_result(self, provider: str, model: str,
+                                   ok: bool, latency_ms: float = 0.0,
+                                   error: str = "") -> None:
+        """Materialize a Provider-owned shared probe in Gateway health.
+
+        No upstream request or Activity Log event is generated here. The
+        Provider/Gateway shared-health coordinator already ensured that the
+        result came from exactly one real probe; this only persists that
+        result under the Gateway's canonical (provider, model) health state.
+        """
+        from astra.ai.shared_health import canonical_provider
+        self.routing_state.record_health_result(
+            canonical_provider(provider), model, bool(ok), latency_ms, error)
+
     def test_connection_by_name(self, name: str) -> dict:
         """Probe exactly one connection by its name (e.g. 'astra-gw-gemini'),
         or every model of every connection sharing that name."""

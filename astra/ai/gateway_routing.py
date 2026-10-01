@@ -490,6 +490,21 @@ class GatewayRoutingState:
             if (self._last_provider == provider and self._last_model == model):
                 self.clear_last_successful()
 
+    def record_health_result(self, provider: str, model: str, ok: bool,
+                            latency_ms: float = 0.0,
+                            error: str = "") -> None:
+        """Persist a manual/shared health result without emitting a probe.
+
+        Provider-owned shared probes use this bridge to materialize the same
+        result in Gateway routing health. That makes a Gateway model whose
+        test was intentionally skipped (because Provider already tested the
+        exact provider+model) survive refresh just like a real Gateway probe.
+        """
+        if ok:
+            self.record_success(provider, model, latency_ms)
+        else:
+            self.record_failure(provider, model)
+
     # -- persistence (best-effort; never raises into the caller) --------------
     def _persist_last(self) -> None:
         if not self.store:

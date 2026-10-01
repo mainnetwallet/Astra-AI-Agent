@@ -284,6 +284,27 @@ class PersistenceTests(_Base):
         self.assertEqual(len(calls), 1)                # no duplicate upstream call
         self.assertTrue(result["ok"])
 
+    def test_provider_owned_result_is_persisted_in_gateway_health(self):
+        calls = []
+        self._patched(calls)
+        store = Store(":memory:")
+        router, gateway, provider, conn = _stack(store=store)
+        result = router.test_provider_model("groq", "m1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 1)
+        health = gateway.health()["astra-gw-groq"]["model_health"]["m1"]
+        self.assertEqual(health["success_count"], 1)
+        self.assertEqual(health["failure_count"], 0)
+
+        # A recreated Gateway must read the Provider-owned shared result from
+        # its own persisted gateway_model_health state, even though the
+        # Gateway never made a second upstream call for this matching model.
+        gateway2 = AstraAIGateway(connections=[_gw_conn()], store=store)
+        health2 = gateway2.health()["astra-gw-groq"]["model_health"]["m1"]
+        self.assertEqual(health2["success_count"], 1)
+        self.assertEqual(health2["failure_count"], 0)
+        self.assertEqual(len(calls), 1)
+
 
 class IsolationTests(_Base):
     """§13/§15/§16 — local health state, image generation and normal

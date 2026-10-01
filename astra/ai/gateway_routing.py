@@ -534,6 +534,52 @@ class GatewayRoutingState:
         except Exception:
             pass
 
+    # -- reset -----------------------------------------------------------------
+    def reset_provider_health(self, provider: str) -> None:
+        """Clear one canonical Gateway provider's local model health rows."""
+        with self._lock:
+            doomed = [key for key in self._health if key[0] == provider]
+            for key in doomed:
+                self._health.pop(key, None)
+            clear_last = self._last_provider == provider
+            if clear_last:
+                self._last_provider = ""
+                self._last_model = ""
+                self._last_timestamp = ""
+                self._last_latency_ms = 0
+            if self.store:
+                try:
+                    self.store.exec(
+                        "DELETE FROM gateway_model_health WHERE provider=?",
+                        (provider,))
+                    if clear_last:
+                        self.store.exec("DELETE FROM gateway_routing_state WHERE id = 1")
+                except Exception:
+                    pass
+
+    def reset_all_health(self) -> None:
+        """Clear Gateway's local manual-test health state for a fresh bulk run.
+
+        This does not perform or cancel any API request. The caller resets
+        shared-health separately so Provider/Gateway matching probes can start
+        from one clean shared result. Clearing the Gateway-local rows here is
+        important because matching Gateway models intentionally do not issue
+        their own API call; their next visible result comes from the Provider's
+        shared probe instead of from stale Gateway routing_state data.
+        """
+        with self._lock:
+            self._health.clear()
+            self._last_provider = ""
+            self._last_model = ""
+            self._last_timestamp = ""
+            self._last_latency_ms = 0
+            if self.store:
+                try:
+                    self.store.exec("DELETE FROM gateway_model_health")
+                    self.store.exec("DELETE FROM gateway_routing_state WHERE id = 1")
+                except Exception:
+                    pass
+
     # -- reporting --------------------------------------------------------------
     def snapshot(self) -> dict:
         with self._lock:

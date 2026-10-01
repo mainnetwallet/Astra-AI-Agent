@@ -2415,12 +2415,23 @@ class AstraAIGateway:
 
     def reset_connection_health(self, name: str) -> None:
         """Start a fresh manual test run for one Gateway connection."""
-        if self.shared_health is None:
-            return
         conn = next((c for c in self.connections if c.name == name), None)
         if conn is not None:
             from astra.ai.shared_health import canonical_provider
-            self.shared_health.invalidate(canonical_provider(conn.name))
+            provider = canonical_provider(conn.name)
+            # Clear this Gateway connection's durable/local model rows too.
+            # A fresh manual run must not leave stale Gateway health visible
+            # when a matching Provider result is reused instead of making a
+            # second upstream call.
+            self.routing_state.reset_provider_health(provider)
+            if self.shared_health is not None:
+                self.shared_health.invalidate(provider)
+
+    def reset_all_health(self) -> None:
+        """Reset Gateway-local + shared manual health for bulk Test All."""
+        self.routing_state.reset_all_health()
+        if self.shared_health is not None:
+            self.shared_health.invalidate()
 
     def test_connection_by_name(self, name: str) -> dict:
         """Probe exactly one connection by its name (e.g. 'astra-gw-gemini'),

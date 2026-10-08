@@ -64,9 +64,9 @@ how the user could do it. See ARCHITECTURE.md §1.3.
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-The Gateway is a **separate, isolated system** with its own eleven AI
+The Gateway is a **separate, isolated system** with its own ten AI
 connections (`GW_*` config: Gemini, Groq, Cloudflare, Bedrock, OpenRouter,
-Mistral, Cerebras, SambaNova, Cohere, Z.AI, Hugging Face). It is *not* a provider and is
+Mistral, Cerebras, SambaNova, Cohere, Z.AI). It is *not* a provider and is
 never in the provider registry; if it is unusable the pipeline **fails open**
 — the message still reaches a provider via the router and the reply is
 returned with an
@@ -89,11 +89,10 @@ you have keys for; unconfigured ones are simply absent):
 | SambaNova | `GW_SAMBANOVA_` (or `GW_SAMBA_`) | `api.sambanova.ai/v1` | `Meta-Llama-3.3-70B-Instruct` |
 | Cohere | `GW_COHERE_` | `api.cohere.ai/compatibility/v1` | `command-a-03-2025` |
 | Z.AI (GLM) | `GW_ZAI_` | `api.z.ai/api/paas/v4` | `glm-4.7-flash` |
-| Hugging Face | `GW_HUGGINGFACE_` | `router.huggingface.co/v1` | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` |
 
 Each connection takes a comma-separated key pool and a model list
 (`GW_<NAME>_API_KEYS` / `GW_<NAME>_MODELS`), and each model id can be
-overridden per install. All eleven share one contract: Bearer auth from the
+overridden per install. All ten share one contract: Bearer auth from the
 connection's own pool, per-key health/cooldown, 60s (120s streaming)
 timeouts, bounded transient retries (`GW_MAX_RETRIES`), HTTP
 error/rate-limit classification, failover to the next healthy target, and
@@ -177,7 +176,6 @@ rotated per request — plus an optional model list:
 | Cohere | `astra/ai/adapters/cohere.py` | `COHERE_API_KEYS` | `COHERE_MODELS` |
 | Z.ai | `astra/ai/adapters/zai.py` | `ZAI_API_KEYS` | `ZAI_MODELS` |
 | Bedrock | `astra/ai/adapters/bedrock.py` | `BEDROCK_API_KEYS` (bearer token) **or** `BEDROCK_CREDENTIALS` (`access_key:secret_key` IAM pairs) | `BEDROCK_MODELS` |
-| Hugging Face | `astra/ai/adapters/huggingface.py` | `HF_API_KEYS` | `HF_MODELS` |
 
 Bedrock's region comes from `BEDROCK_BASE_URL` / `AWS_REGION` (default
 `us-east-1`).
@@ -342,7 +340,7 @@ The **🖥️ Agent Terminal** tab is a real terminal onto the Agent Runtime (se
 |-----|-------------|
 | **Dashboard** | Overview cards — empty placeholder (no plugin registers data today) |
 | **Assistant** | Chat interface, with multi-chat history persisted server-side |
-| **Providers Health Test** | Direct AI providers + Astra AI Gateway health, latency, calls/errors, per-key and per-model tests from one page |
+| **AI Providers health** | Provider health, latency, calls/errors, per-key and per-model tests |
 | **Router** | Model registry + task routing stats (the AstraRouter's view) |
 | **Wallet** | Web3 transaction policy (mode, limits, allowlists) + recent txs |
 | **Backup** | Export/import as one JSON file — currently a placeholder (`_exports: {}`) |

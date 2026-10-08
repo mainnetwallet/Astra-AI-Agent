@@ -2,9 +2,8 @@
 
 Most Astra providers speak the OpenAI chat/completions dialect (or a superset
 of it): Gemini, Groq, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova,
-Cohere, Z.AI and Hugging Face all accept `{model, messages, max_tokens}` and
-return `choices[].message.content`, with SSE `data:` frames when
-`stream: true`.
+Cohere and Z.AI all accept `{model, messages, max_tokens}` and return
+`choices[].message.content`, with SSE `data:` frames when `stream: true`.
 
 This base adapter normalises request/response/streaming/errors/usage across
 them: one interface for the AstraRouter, provider-specific details confined to
@@ -295,8 +294,7 @@ class CompatibleAdapter(AIProvider):
 
         Default implementation: the OpenAI-compatible Images API
         (`POST /images/generations` + `response_format=b64_json`), the
-        documented image API for Z.AI's GLM-Image/CogView and for Hugging
-        Face's unified Inference Providers router. Providers with a
+        documented image API for Z.AI's GLM-Image/CogView. Providers with a
         different documented protocol override this method, so protocol
         ownership is explicit:
           * OpenRouter -> ``POST /api/v1/images`` (dedicated Images API)

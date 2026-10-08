@@ -8,17 +8,8 @@
 <link rel="stylesheet" href="/static/css/style.css">
 <link rel="stylesheet" href="/static/css/vendor/xterm.css">
 <link rel="stylesheet" href="/static/css/terminal.css">
-<link rel="stylesheet" href="/static/css/astra_os.css">
-<link rel="stylesheet" href="/static/css/web3_center.css">
-<link rel="stylesheet" href="/static/css/tool_center.css">
-<link rel="stylesheet" href="/static/css/system_health.css">
-<link rel="stylesheet" href="/static/css/security_center.css">
-<link rel="stylesheet" href="/static/css/providers_health.css">
 </head>
 <body>
-<aside id="os-sidebar" aria-label="Main navigation"></aside>
-<div id="os-scrim"></div>
-<div id="os-drawer" aria-live="polite"></div>
 <header class="topbar">
   <div class="nav-menu" id="nav-menu">
     <button class="menu-btn" id="menu-btn" aria-label="Menu" aria-expanded="false" aria-haspopup="true">⋮</button>
@@ -34,19 +25,6 @@
   <section id="tab-dashboard" class="tabview active">
     <div id="dash-blocks" class="dash-blocks"></div>
   </section>
-
-  <!-- ======== SYSTEM HEALTH (static/js/system_health.js, on the
-       `command-center` tabview so the /command-center route keeps working)
-       + SYSTEM MAP (static/js/astra_os.js) ======== -->
-  <section id="tab-command-center" class="tabview"></section>
-  <section id="tab-system-map" class="tabview"></section>
-
-  <!-- ======== TOOL CENTER (static/js/tool_center.js) ========
-       Dedicated tool-browsing page over the ONE /api/tools registry. The
-       System Map keeps its own Tool System node; this is a separate view. -->
-  <section id="tab-tool-center" class="tabview"></section>
-  <!-- ======== SECURITY CENTER (static/js/security_center.js) ======== -->
-  <section id="tab-security-center" class="tabview"></section>
 
   <!-- plugin tabviews are created dynamically by astra.js -->
 
@@ -239,127 +217,47 @@
     </div>
   </section>
 
-  <!-- ======== PROVIDERS HEALTH TEST (core, unified) ========
-       ONE operations surface over the EXISTING AstraRouter provider health
-       + Astra AI Gateway health systems: direct AI providers and Gateway
-       connections are tested side by side, from the same page.
-
-       The page chrome (header, overall health, summary cards, filters,
-       Live Test Activity) lives in static/js/providers_health.js. The two
-       tables are rendered by the EXISTING provider/gateway render layer in
-       static/js/astra.js — same endpoints, same streaming per-model test
-       engine, same running-test persistence. Nothing here invents a value:
-       every number comes from GET /api/providers and GET /api/gateway/health
-       (or events derived from real test results).
-  -->
+  <!-- ======== PROVIDERS (core) ======== -->
   <section id="tab-providers" class="tabview">
-    <div class="ph-page">
-
-      <header class="ph-head">
-        <div class="ph-head-title">
-          <span class="ph-head-ic" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2.5-6 3.5 12 2.5-6h6.5"/></svg>
-          </span>
-          <div>
-            <h2 class="ph-h1">Providers Health Test</h2>
-            <p class="ph-sub">Test provider keys, gateway models, health and fallback readiness from one place.</p>
-          </div>
-        </div>
-        <div class="ph-head-right">
-          <div class="ph-overall" id="ph-overall" role="group" aria-label="Overall health">
-            <div class="ph-ring" aria-hidden="true">
-              <svg viewBox="0 0 44 44" width="52" height="52">
-                <circle class="ph-ring-bg" cx="22" cy="22" r="18"></circle>
-                <circle class="ph-ring-fg" id="ph-ring-fg" cx="22" cy="22" r="18"></circle>
-              </svg>
-              <b id="ph-pct">--</b>
-            </div>
-            <div class="ph-overall-txt">
-              <span class="ph-overall-l">Overall Health</span>
-              <b id="ph-overall-note">no test results yet</b>
-            </div>
-          </div>
-          <button class="btn primary ph-cta" id="btn-providers-test-all" type="button">Test All (Providers + Gateway)</button>
-        </div>
-      </header>
-
-      <div class="ph-metrics" id="ph-metrics" aria-live="polite"></div>
-
-      <div class="ph-toolbar" id="ph-toolbar">
-        <div class="ph-seg" id="ph-view-tabs" role="tablist" aria-label="Scope">
-          <button type="button" role="tab" class="active" data-ph-view="all" aria-selected="true">All <span class="ph-seg-n" data-ph-count="all">0</span></button>
-          <button type="button" role="tab" data-ph-view="providers" aria-selected="false">AI Providers <span class="ph-seg-n" data-ph-count="providers">0</span></button>
-          <button type="button" role="tab" data-ph-view="gateway" aria-selected="false">Astra Gateway <span class="ph-seg-n" data-ph-count="gateway">0</span></button>
-        </div>
-        <div class="ph-seg ph-seg-status" id="ph-status-filters" role="group" aria-label="Status filter">
-          <button type="button" class="ph-st active" data-ph-status="all">All status</button>
-          <button type="button" class="ph-st" data-ph-status="healthy"><span class="status-dot ok"></span>Healthy <span class="ph-seg-n" data-ph-count="healthy">0</span></button>
-          <button type="button" class="ph-st" data-ph-status="failed"><span class="status-dot bad"></span>Failed <span class="ph-seg-n" data-ph-count="failed">0</span></button>
-          <button type="button" class="ph-st" data-ph-status="running"><span class="status-dot warn"></span>Running <span class="ph-seg-n" data-ph-count="running">0</span></button>
-        </div>
-        <label class="ph-search">
-          <span class="ph-search-ic" aria-hidden="true">⌕</span>
-          <input type="search" id="ph-search" placeholder="Search providers, models..." aria-label="Search providers or models">
-        </label>
-        <label class="ph-keysel">
-          <span class="ph-keysel-l">Key filter</span>
-          <select id="ph-key-filter" aria-label="Filter by API key"><option value="">All keys</option></select>
-        </label>
-        <button class="btn" id="btn-health-key-selector" type="button">Test key: Key 1</button>
-        <div class="ph-actions">
-          <button class="btn ph-icon-btn" id="ph-refresh" type="button" aria-label="Refresh health data" title="Refresh">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
-          </button>
-          <button class="btn ph-icon-btn" id="btn-providers-toggle-models" type="button" aria-label="Expand or collapse every model list" title="Expand / collapse models">Expand all</button>
-          <button class="btn primary" id="ph-test-all" type="button">Test All</button>
-        </div>
-        <div id="health-key-selector" class="health-key-selector" hidden></div>
+    <div class="panel">
+      <h3>🔌 AI Providers health</h3>
+      <div class="row" style="margin-bottom:8px;align-items:center">
+        <button class="btn" id="btn-providers-toggle-models">🙈 Hide models</button>
+        <button class="btn" id="btn-health-key-selector" type="button">🔑 Test key: Key 1</button>
+        <button class="btn primary" id="btn-providers-test-all">⚡ Test all (providers + gateway)</button>
       </div>
+      <div id="health-key-selector" class="health-key-selector" hidden></div>
+      <div id="providers-list" class="list"><div class="empty">Loading…</div></div>
 
-      <div class="ph-grid">
-        <div class="ph-main">
-          <section class="ph-section" id="ph-sec-providers" data-ph-section="providers">
-            <div class="ph-sec-head">
-              <div class="ph-sec-title">
-                <span class="ph-sec-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
-                <div><b>AI Providers</b><span class="ph-sec-sub">Direct AI providers and their models</span></div>
-              </div>
-              <div class="ph-badges" id="ph-prov-badges"></div>
-            </div>
-            <div id="providers-list" class="list ph-table"><div class="empty">Loading&hellip;</div></div>
-          </section>
-
-          <section class="ph-section" id="ph-sec-gateway" data-ph-section="gateway">
-            <div class="ph-sec-head">
-              <div class="ph-sec-title">
-                <span class="ph-sec-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 2.5 15 0 18M12 3c-2.5 2.6-2.5 15 0 18"/></svg></span>
-                <div><b>Astra AI Gateway</b><span class="ph-sec-sub">Gateway connections and routed models</span></div>
-              </div>
-              <div class="ph-badges" id="ph-gw-badges"></div>
-            </div>
-            <div id="gateway-card" class="list ph-table"><div class="empty">Loading&hellip;</div></div>
-          </section>
-          <div class="ph-empty" id="ph-empty" hidden>No providers or connections match the current filters.</div>
-        </div>
-
-        <aside class="ph-activity" id="ph-activity" aria-label="Live test activity">
-          <div class="ph-activity-head">
-            <div class="ph-activity-title">
-              <span class="ph-sec-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2.5-6 3.5 12 2.5-6h6.5"/></svg></span>
-              <b>Live Test Activity</b><span class="ph-live" id="ph-live-pill">Live</span>
-            </div>
-            <button class="btn mini" id="ph-activity-clear" type="button">Clear</button>
-          </div>
-          <div class="ph-activity-feed" id="ph-activity-feed" aria-live="polite"></div>
-        </aside>
+      <h3 style="margin-top:16px">🌐 Astra AI Gateway</h3>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn" id="btn-gateway-toggle-models">🙈 Hide models</button>
       </div>
+      <div id="gateway-card" class="list"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
 
+  <!-- ======== ROUTER (core) ======== -->
+  <section id="tab-router" class="tabview">
+    <div class="panel">
+      <h3>🧠 Agent Router</h3>
+      <p class="muted">Routing er brain: je task e kon provider/model best —
+        score + health diye decide hoy. Routing stats + last decision ekhane.</p>
+      <div id="router-list" class="list"><div class="empty">Loading…</div></div>
     </div>
   </section>
 
   <!-- ======== WALLET / WEB3 (core) ======== -->
   <section id="tab-web3" class="tabview">
-    <div id="w3-root"><div class="empty">Loading…</div></div>
+    <div class="panel">
+      <h3>⛓️ Web3 Transaction Safety</h3>
+      <p class="muted">Transaction mode (CONFIRM default), policy limits, ar
+        recent transactions er list. Kono secret ekhane show kora hoy na —
+        private key kokhono server theke bahir hoy na.</p>
+      <div id="web3-policy" class="list"><div class="empty">Loading…</div></div>
+      <h3 style="margin-top:16px">Recent transactions</h3>
+      <div id="web3-txs" class="list table"><div class="empty">Loading…</div></div>
+    </div>
   </section>
 
 </main>
@@ -370,21 +268,11 @@
 <script src="/static/js/chat_status.js"></script>
 <!-- safe chat message formatting (escaping + code blocks); before the core bundle -->
 <script src="/static/js/chat_format.js"></script>
-<script src="/static/js/web3_center.js"></script>
 <script src="/static/js/astra.js"></script>
 <script src="/static/js/vendor/xterm.js"></script>
 <script src="/static/js/vendor/xterm-addon-fit.js"></script>
 <script src="/static/js/terminal.js"></script>
 <script src="/static/js/workflow_model.js"></script>
 <script src="/static/js/workflow.js"></script>
-<script src="/static/js/system_map_model.js"></script>
-<script src="/static/js/astra_os.js"></script>
-<script src="/static/js/tool_center.js"></script>
-<script src="/static/js/system_health.js"></script>
-<script src="/static/js/security_center.js"></script>
-<!-- unified Providers Health Test page chrome: overall health, summary
-     cards, filters/search and the Live Test Activity rail. Reads the real
-     provider/gateway state published by astra.js; never fetches its own. -->
-<script src="/static/js/providers_health.js"></script>
 </body>
 </html>

@@ -22,17 +22,10 @@ TARGETS = [
 ]
 
 
-def understand(final_request="", provider="groq", model="llama-fast",
-               task_type=None):
-    data = {"final_request": final_request, "was_incomplete": False,
-            "provider": provider, "model": model,
-            "targets": [{"provider": provider, "model": model}],
-            "criteria": ["answers"], "reason": "best fit"}
-    if task_type is not None:
-        # An omitted task_type becomes `simple_chat`, a NO VERIFY type;
-        # pass a verified one (e.g. "reasoning") to reach Gateway call #2.
-        data["task_type"] = task_type
-    return json.dumps(data)
+def understand(final_request="", provider="groq", model="llama-fast"):
+    return json.dumps({"final_request": final_request, "was_incomplete": False,
+                       "provider": provider, "model": model,
+                       "criteria": ["answers"], "reason": "best fit"})
 
 
 class Bus:
@@ -141,9 +134,8 @@ class TestChatPipelineTerminalEvents(unittest.TestCase):
         def boom():
             raise RuntimeError("supervisor down")
 
-        pipe = ChatPipeline(
-            GW([understand(task_type="reasoning")], supervise=boom),
-            RT("answer"), events=bus)
+        pipe = ChatPipeline(GW([understand()], supervise=boom), RT("answer"),
+                            events=bus)
         pipe.run("hello")
         term = bus.by("chat.pipeline.verify_error")
         self.assertEqual(len(term), 1)
@@ -258,9 +250,9 @@ class TestRouterGatewayCorrelation(unittest.TestCase):
         gw = AstraAIGateway(connections=[], store=store, events=bus)
         router = AstraRouter(
             providers=[
-                RecordingProvider("gemini", ["m1"],
+                RecordingProvider("groq", ["m1"],
                                   fail_models={"m1": (9, "rate limit exceeded")}),
-                RecordingProvider("groq", ["m2"])],
+                RecordingProvider("gemini", ["m2"])],
             gateway=gw)
         router.attach_events(bus)
         rr = router.route_request(RoutingRequest(

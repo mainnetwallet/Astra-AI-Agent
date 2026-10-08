@@ -39,49 +39,30 @@ class GeminiAdapter(CompatibleAdapter):
 
     @staticmethod
     def _inline_image(data) -> str:
-        return GeminiAdapter._inline_parts(data)[1]
-
-    @staticmethod
-    def _inline_parts(data) -> tuple[str, str]:
-        """Return (caption_text, image_data_uri) from a native
-        `generateContent` response's first candidate. Either may be empty.
-
-        A [TEXT, IMAGE] responseModalities request (2.5-series models) can
-        return BOTH a text part and an inline-image part in the same
-        candidate; earlier this only kept the image and silently dropped
-        any caption the model wrote alongside it. Both are now collected so
-        the caller can show the full "here's your photo" + picture reply
-        instead of the image alone."""
         import base64 as _b64
         if not isinstance(data, dict):
-            return "", ""
+            return ""
         try:
             parts = data["candidates"][0]["content"]["parts"]
         except (KeyError, IndexError, TypeError):
-            return "", ""
-        text_out = ""
-        image_uri = ""
+            return ""
         for part in parts or []:
             if not isinstance(part, dict):
                 continue
             inline = part.get("inlineData") or part.get("inline_data")
-            if inline and not image_uri:
-                payload = inline.get("data")
-                if payload:
-                    mime = (inline.get("mimeType") or inline.get("mime_type")
-                            or "image/png")
-                    try:
-                        raw = _b64.b64decode(payload)
-                    except Exception:
-                        raw = None
-                    if raw:
-                        image_uri = "data:%s;base64,%s" % (
-                            mime, _b64.b64encode(raw).decode("ascii"))
+            if not inline:
                 continue
-            text = part.get("text")
-            if text and not text_out:
-                text_out = text.strip()
-        return text_out, image_uri
+            payload = inline.get("data")
+            if not payload:
+                continue
+            mime = (inline.get("mimeType") or inline.get("mime_type")
+                    or "image/png")
+            try:
+                raw = _b64.b64decode(payload)
+            except Exception:
+                continue
+            return "data:%s;base64,%s" % (mime, _b64.b64encode(raw).decode("ascii"))
+        return ""
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1) -> str:
@@ -111,14 +92,8 @@ class GeminiAdapter(CompatibleAdapter):
             "x-goog-api-key": secret})
         self._done(cred)
         self._last_latency_ms = int((time.perf_counter() - t0) * 1000)
-        caption, uri = self._inline_parts(data)
+        uri = self._inline_image(data)
         if not uri:
             raise ProviderError(
                 "gemini: image generation returned no image data")
-        # Downstream (ChatPipeline._reply / sanitize_final_response) strips
-        # the embedded data URI back out for the visible chat text and
-        # extracts the image itself as a separate artifact card (see
-        # astra/ai/response_boundary.py and astra/ai/artifact_extraction.py)
-        # -- so returning "caption\n\nuri" here surfaces BOTH the model's
-        # own text and the image, instead of the image alone.
-        return f"{caption}\n\n{uri}" if caption else uri
+        return uri

@@ -1,6 +1,6 @@
 """Astra AI Gateway — a separate multi-service AI gateway with automatic fallback.
 
-Replaces the old third-party AI gateway service with a set of eleven
+Replaces the old third-party AI gateway service with a set of ten
 independent AI connections:
 
     Astra AI Gateway
@@ -13,8 +13,7 @@ independent AI connections:
     ├── Cerebras    ← GW_CEREBRAS_* config
     ├── SambaNova   ← GW_SAMBANOVA_* config (GW_SAMBA_* also accepted)
     ├── Cohere      ← GW_COHERE_* config
-    ├── Z.AI (GLM)  ← GW_ZAI_* config
-    └── Hugging Face ← GW_HUGGINGFACE_* config
+    └── Z.AI (GLM)  ← GW_ZAI_* config
 
 Each connection has completely independent credentials, models and
 endpoints/base URLs — separate from the existing Provider system:
@@ -23,7 +22,7 @@ it is never added to ProviderRegistry and is reported separately in
 health/dashboard output, never inside the provider table.
 
 Architecture note: this module is fully self-contained. It does NOT import,
-subclass, or instantiate the existing Provider adapter classes (the eleven
+subclass, or instantiate the existing Provider adapter classes (the ten
 modules in astra/ai/adapters/*) — those remain exclusively the Provider
 system's. Each Gateway connection below implements its own request/response/
 auth plumbing against its own GW_-prefixed configuration. Nothing here reads
@@ -31,7 +30,7 @@ GEMINI_*/GROQ_*/… or touches a Provider adapter instance, client, or config
 object.
 
 Fallback: connections are attempted in `GATEWAY_CONNECTIONS` order — the
-original Gemini → Groq → Cloudflare → Bedrock chain first, then the seven
+original Gemini → Groq → Cloudflare → Bedrock chain first, then the six
 additional connections — with per-model health/cooldown and capability
 scoring applied on top (see astra/ai/gateway_routing.py). A failure at any
 connection (or model) automatically moves to the next healthy target. The
@@ -447,12 +446,7 @@ class _GatewayCompatibleConnection:
         prev = getattr(self._tl_pool, "pool", None)
         self._tl_pool.pool = pool if pool is not None else self.pool
         try:
-            # Enough attempts to walk every key of this connection: a rate
-            # limit / auth failure on key 1 must fall to key 2, key 3, ...
-            # before the Gateway gives up on this model.
-            attempts = 1 if single_attempt else max(
-                self._attempt_count(),
-                int(getattr(self._active_pool(), "count", 0) or 0))
+            attempts = 1 if single_attempt else self._attempt_count()
             last = None
             for attempt in range(attempts):
                 cred = self._pick()
@@ -470,17 +464,7 @@ class _GatewayCompatibleConnection:
                     return fn(cred)
                 except (ProviderError, TimeoutError) as e:
                     last = e
-                    # Key-level failure (429 / 401 / 403): the failing key is
-                    # now cooled down, so if another healthy key remains, use
-                    # it immediately -- no backoff, no wasted latency. This
-                    # may walk every key; it is NOT bounded by GW_MAX_RETRIES.
-                    if (attempt + 1 < attempts
-                            and getattr(e, "key_level", False)
-                            and bool(self._active_pool())):
-                        continue
-                    # Everything else keeps the original GW_MAX_RETRIES bound.
-                    limit = min(attempts, self._attempt_count())
-                    if attempt + 1 >= limit or not getattr(e, "retryable", False):
+                    if attempt + 1 >= attempts or not getattr(e, "retryable", False):
                         raise
                     time.sleep(min(self.retry_backoff * (attempt + 1),
                                    GW_RETRY_MAX_BACKOFF))
@@ -524,11 +508,9 @@ class _GatewayCompatibleConnection:
             err = ProviderError(f"{self.name} rate limit reached")
             err.retryable = True
             err.rate_limited = True
-            err.key_level = True
         elif code in (401, 403):
             err = ProviderError(f"{self.name} authentication failed")
             err.retryable = False
-            err.key_level = True
         else:
             err = ProviderError(f"{self.name} http {code}")
             err.retryable = retryable
@@ -655,43 +637,21 @@ class _GatewayCompatibleConnection:
         return list(self.image_models)
 
     def generate_image(self, prompt: str, model: str | None = None,
-                       size: str = "1024x1024", n: int = 1, *,
-                       source_image: dict | None = None,
-                       mask_image: dict | None = None) -> str:
+                       size: str = "1024x1024", n: int = 1) -> str:
         """Generate an image via the OpenAI-compatible Images API
         (`POST /images/generations` + `response_format=b64_json`), used by
         connections whose documented image protocol this is (Z.AI
-        GLM-Image/CogView, Hugging Face's unified Inference Providers
-        router). Connections with a different documented protocol
+        GLM-Image/CogView). Connections with a different documented protocol
         override this method, so protocol ownership is explicit: OpenRouter
         (``POST /api/v1/images``), Gemini (native ``:generateContent``),
         Cloudflare (Workers AI ``/ai/run/<model>``) and Bedrock
         (``InvokeModel``).
         Returns `data:<mime>;base64,<...>`; a 429/5xx/network error
         propagates so the Gateway fails over to the next image target.
-
-        ``source_image``/``mask_image``: this base protocol has no
-        documented image-editing/inpainting request shape, so both are
-        rejected with a clear, non-retryable error rather than silently
-        ignored or sent as an unsupported field -- ImageRouter (see
-        astra/ai/image_router.py) always passes these two keywords for
-        EVERY call, editing or not, so a connection using this base
-        method unmodified must accept them (previously this signature
-        did not, so ANY image-generation call routed here -- editing or
-        plain text-to-image -- raised an unhandled TypeError instead of
-        a clean ProviderError, e.g. for astra-gw-huggingface).
         """
         model = model or self._default_image_model()
         if not model:
             raise ProviderError(f"{self.name}: no image model configured")
-        if source_image is not None:
-            err = ProviderError(f"{self.name}: image editing is not supported")
-            err.retryable = False
-            raise err
-        if mask_image is not None:
-            err = ProviderError(f"{self.name}: inpainting is not supported")
-            err.retryable = False
-            raise err
         body = {"model": model, "prompt": prompt, "n": max(1, int(n or 1)),
                 "size": size, "response_format": "b64_json"}
 
@@ -779,41 +739,24 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
 
     @staticmethod
     def _inline_image(data) -> str:
-        return AstraGatewayGemini._inline_parts(data)[1]
-
-    @staticmethod
-    def _inline_parts(data) -> tuple[str, str]:
-        """Return (caption_text, image_data_uri) from a native
-        `generateContent` response's first candidate. Either may be empty.
-
-        A [TEXT, IMAGE] responseModalities request (2.5-series models) can
-        return BOTH a text part and an inline-image part in the same
-        candidate; earlier this only kept the image and silently dropped
-        any caption the model wrote alongside it."""
         import base64 as _b64
         try:
             parts = data["candidates"][0]["content"]["parts"]
         except (KeyError, IndexError, TypeError):
-            return "", ""
-        text_out = ""
-        image_uri = ""
+            return ""
         for part in parts or []:
             if not isinstance(part, dict):
                 continue
             inline = part.get("inlineData") or part.get("inline_data")
-            if inline and inline.get("data") and not image_uri:
-                mime = inline.get("mimeType") or inline.get("mime_type") or "image/png"
-                try:
-                    raw = _b64.b64decode(inline["data"])
-                except Exception:
-                    raw = None
-                if raw:
-                    image_uri = f"data:{mime};base64," + _b64.b64encode(raw).decode("ascii")
+            if not inline or not inline.get("data"):
                 continue
-            text = part.get("text")
-            if text and not text_out:
-                text_out = text.strip()
-        return text_out, image_uri
+            mime = inline.get("mimeType") or inline.get("mime_type") or "image/png"
+            try:
+                raw = _b64.b64decode(inline["data"])
+            except Exception:
+                continue
+            return f"data:{mime};base64," + _b64.b64encode(raw).decode("ascii")
+        return ""
 
     def generate_image(self, prompt: str, model: str | None = None,
                        size: str = "1024x1024", n: int = 1,
@@ -861,18 +804,13 @@ class AstraGatewayGemini(_GatewayCompatibleConnection):
             return data
 
         data = self._run(once, pool=self.image_pool, single_attempt=True)
-        caption, uri = self._inline_parts(data)
+        uri = self._inline_image(data)
         if not uri:
             err = ProviderError(
                 f"{self.name}: image generation returned no image data")
             err.retryable = False
             raise err
-        # Downstream (ChatPipeline._reply / sanitize_final_response) strips
-        # the embedded data URI back out for the visible chat text and
-        # extracts the image itself as a separate artifact card, so
-        # returning "caption\n\nuri" surfaces BOTH the model's own text and
-        # the image, instead of the image alone.
-        return f"{caption}\n\n{uri}" if caption else uri
+        return uri
 
 class AstraGatewayGroq(_GatewayCompatibleConnection):
     """Astra AI Gateway / Groq connection (independent of GroqAdapter)."""
@@ -1116,7 +1054,7 @@ class AstraGatewayOpenRouter(_GatewayCompatibleConnection):
                     if not outs or "image" not in outs:
                         continue
                     # OpenRouter marks its free variants with a ":free"
-                    # suffix; anything else is not eligible for the
+                    # suffix; anything else is paid and must not enter the
                     # FREE image pool.
                     if not mid.endswith(":free"):
                         continue
@@ -1241,30 +1179,11 @@ class AstraGatewayCohere(_GatewayCompatibleConnection):
 class AstraGatewayZAI(_GatewayCompatibleConnection):
     """Astra AI Gateway / Z.AI (GLM) connection (independent of ZAIAdapter)."""
     name = "astra-gw-zai"
+    image_models_env = "ZAI_IMAGE_MODELS"
     base_url = "https://api.z.ai/api/paas/v4"
     models_env = "GW_ZAI_MODELS"
     api_keys_env = "GW_ZAI_API_KEYS"
     base_url_env = "GW_ZAI_BASE_URL"
-    capabilities = ["chat", "stream", "tools", "json", "vision"]
-
-
-class AstraGatewayHuggingFace(_GatewayCompatibleConnection):
-    """Astra AI Gateway / Hugging Face connection (independent of
-    HuggingFaceAdapter). Talks to the unified OpenAI-compatible Inference
-    Providers router, which forwards chat/image calls to whichever partner
-    backend actually serves the requested model id.
-
-    Image generation uses the supported Hugging Face image-model pool and
-    the base class's OpenAI-compatible ``generate_image()`` path.
-    """
-    name = "astra-gw-huggingface"
-    image_models_env = "HF_IMAGE_MODELS"
-    base_url = "https://router.huggingface.co/v1"
-    models_env = "GW_HUGGINGFACE_MODELS"
-    api_keys_env = "GW_HUGGINGFACE_API_KEYS"
-    base_url_env = "GW_HUGGINGFACE_BASE_URL"
-    image_api_keys_env = "IMAGE_HUGGINGFACE_API_KEY"
-    image_base_url_env = "IMAGE_HUGGINGFACE_BASE_URL"
     capabilities = ["chat", "stream", "tools", "json", "vision"]
 
 
@@ -1503,8 +1422,8 @@ class AstraGatewayBedrock:
 
 # Canonical fallback order. The original four connections keep their exact
 # relative order (Gemini → Groq → Cloudflare → Bedrock) so existing routing/
-# scoring behaviour is unchanged; the seven additional connections follow in
-# a fixed order and are simply skipped when unconfigured.
+# scoring behaviour is unchanged; the six additional connections follow in a
+# fixed order and are simply skipped when unconfigured.
 GATEWAY_CONNECTIONS = (
     AstraGatewayGemini,
     AstraGatewayGroq,
@@ -1516,13 +1435,7 @@ GATEWAY_CONNECTIONS = (
     AstraGatewaySambaNova,
     AstraGatewayCohere,
     AstraGatewayZAI,
-    AstraGatewayHuggingFace,
 )
-
-
-# Categories whose successes never become the sticky last_success target.
-_NON_STICKY_CATEGORIES = ("control", "image_generation", "image_editing",
-                          "image_inpainting")
 
 
 def _build_connection(cls, config=None):
@@ -1563,6 +1476,65 @@ def _build_connection(cls, config=None):
         return cls(config=config)
     except Exception:
         return None
+
+    # ── image generation (InvokeModel) ────────────────────────────────────
+    image_models_env = "BEDROCK_IMAGE_MODELS"
+
+    def list_image_models(self, *, discover: bool = True) -> list:
+        return list(getattr(self, "image_models", []) or [])
+
+    def generate_image(self, prompt: str, model: str | None = None,
+                       size: str = "1024x1024", n: int = 1) -> str:
+        """Generate an image with a documented Bedrock image model.
+
+        The model is validated against astra.ai.image_models first: a
+        Claude/Nova text model must never be handed a Titan/Stability/
+        Nova-Canvas image request body (the Gateway's Converse path stays
+        strictly separate).
+        """
+        from astra.ai.image_models import is_image_model
+        model = model or (self.image_models[0] if self.image_models else "")
+        if not model:
+            raise ProviderError(f"{self.name}: no image model configured")
+        if not is_image_model("bedrock", model):
+            err = ProviderError(
+                f"{self.name}: {model} is not an image-generation model")
+            err.retryable = False
+            raise err
+        try:
+            w, h = (int(x) for x in str(size).split("x"))
+        except (ValueError, AttributeError):
+            w, h = 1024, 1024
+        low = model.lower()
+        if "nova-canvas" in low:
+            body = {"taskType": "TEXT_IMAGE",
+                    "textToImageParams": {"text": prompt},
+                    "imageGenerationConfig": {"numberOfImages": 1, "width": w,
+                                              "height": h, "quality": "standard",
+                                              "cfgScale": 7.0}}
+        elif "titan-image" in low:
+            body = {"taskType": "TEXT_IMAGE",
+                    "textToImageParams": {"text": prompt},
+                    "imageGenerationConfig": {"numberOfImages": min(n, 1),
+                                              "width": w, "height": h}}
+        else:
+            body = {"text_prompts": [{"text": prompt}], "cfg_scale": 7,
+                    "steps": 30, "width": w, "height": h}
+        url = f"{self.base_url}/model/{model}/invoke"
+
+        def once(cred):
+            data = self._post(url, body, cred)
+            self._done(cred)
+            return data
+
+        data = self._run(once, single_attempt=True)
+        uri = image_result_to_data_uri(data)
+        if not uri:
+            err = ProviderError(
+                f"{self.name}: image generation returned no image data")
+            err.retryable = False
+            raise err
+        return uri
 
 class AstraAIGateway:
     """Multi-provider, multi-model intelligent-routing gateway.
@@ -1631,45 +1603,22 @@ class AstraAIGateway:
                 if conn is not None:
                     self.connections.append(conn)
         from astra.ai.gateway_routing import (GatewayRoutingState,
-                                              OperationRoutingRegistry,
                                               build_gateway_catalog)
         self.routing_state = GatewayRoutingState(store)
-        # Temporary per-user-operation fallback state (failed / attempted
-        # provider+model targets), keyed by operation id. Memory-only and
-        # separate from the persistent global `routing_state` above.
-        self.operation_routing = OperationRoutingRegistry()
-        # Provider whose models are always tried first (best health first,
-        # rotating through its keys) before any other provider is used.
-        _pp = (config.get("GW_PRIMARY_PROVIDER", "gemini")
-               if config is not None and hasattr(config, "get") else "gemini")
-        self.primary_provider = str(_pp or "").strip().lower()
-        # How many of the primary provider's models (best health first) are
-        # tried before falling through to the next-best-health models.
-        try:
-            _pm = int(config.get("GW_PRIMARY_MAX_MODELS", 3)
-                      if config is not None and hasattr(config, "get") else 3)
-        except (TypeError, ValueError):
-            _pm = 3
-        self.primary_max_models = max(0, _pm)
         # Manual-health-check dedup with the Provider system (see
         # astra/ai/shared_health.py). `AstraRouter` adopts THIS instance
         # when it wires a Gateway in (see its __init__), so the two
         # converge on one coordinator when used together; this default
         # keeps a standalone Gateway (no Router attached) working too.
         self.shared_health = SharedHealthCoordinator(store=store)
-        # Installed by AstraRouter when wired together. This read-only callback
-        # lets manual Gateway tests identify models that exist only in Gateway,
-        # without copying the Provider catalog into Gateway state.
-        self.provider_model_lookup = None
         self._catalog = build_gateway_catalog(self.connections)
         # §2-§5, §18: task-level execution recovery for the EXISTING
         # Provider system's own catalog — a completely separate namespace
         # from `self.routing_state` above (which only ever tracks this
         # Gateway's own GW_* connections). See gateway_recovery.py.
         from astra.ai.gateway_recovery import GatewayExecutionRecovery
-        self.execution_recovery = GatewayExecutionRecovery(
-            store=store, events=events,
-            primary_provider=self.primary_provider)
+        self.execution_recovery = GatewayExecutionRecovery(store=store,
+                                                            events=events)
         # §6-§12: Gateway-OWNED result validation + bounded correction loop,
         # distinct from execution_recovery above (which only ever decides
         # WHO to execute against). See gateway_supervision.py.
@@ -1720,8 +1669,7 @@ class AstraAIGateway:
         last_error = ""
         attempts = 0
         self._emit("astra_gateway.request", category="explicit_model",
-                   model=model or "", gateway_only=self._gateway_only_model("", model),
-                   op=op, trace=trace,
+                   model=model or "", op=op, trace=trace,
                    input=_gw_log_input(messages))
         for conn in self.connections:
             attempts += 1
@@ -1747,8 +1695,7 @@ class AstraAIGateway:
                         if getattr(conn, "pool", None) is not None
                         and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=short,
-                           model=used_model, gateway_only=self._gateway_only_model(
-                               conn.name, used_model), reason=last_error, op=op,
+                           model=used_model, reason=last_error, op=op,
                            trace=trace, terminal=False, attempt=attempts,
                            key_id=cred.key_id if cred else "",
                            key_label=cred.label if cred else "")
@@ -1771,8 +1718,7 @@ class AstraAIGateway:
                     if getattr(conn, "pool", None) is not None
                     and hasattr(conn.pool, "last_key") else None)
             self._emit("astra_gateway.success", provider=short,
-                       model=used_model, gateway_only=self._gateway_only_model(
-                           conn.name, used_model), latency_ms=round(latency_ms, 1),
+                       model=used_model, latency_ms=round(latency_ms, 1),
                        op=op, trace=trace, terminal=True,
                        key_id=cred.key_id if cred else "",
                        key_label=cred.label if cred else "",
@@ -1852,25 +1798,10 @@ class AstraAIGateway:
         return fit_messages(messages, context_window=ctx,
                             reserve_tokens=reserve)
 
-    def _operation_context(self, operation_id="", trace=""):
-        """Routing context for the current user operation. `operation_id`
-        wins; otherwise `trace` (the chat pipeline threads its per-message
-        request id as `trace` through every Gateway call it makes). With
-        neither, a fresh throw-away context is returned, i.e. no state is
-        shared between such calls."""
-        return self.operation_routing.get(operation_id or trace)
-
-    def _select_order(self, messages, max_tokens, category=None,
-                      op_ctx=None):
-        """`op_ctx` (optional `OperationRoutingContext`): targets that
-        already failed in the current user operation are excluded, so a
-        later Gateway call in the same operation never falls back to them
-        again. Global state (sticky last_successful, health) still decides
-        the first preference and the order of everything that remains."""
+    def _select_order(self, messages, max_tokens, category=None):
         from astra.ai.gateway_routing import (REQUEST_CATEGORIES,
                                               classify_gateway_request,
                                               eligible_targets, rank_targets,
-                                              rank_by_health,
                                               prefer_last_successful)
         text, context_tokens, vision = self._classification_inputs(messages)
         if category in REQUEST_CATEGORIES:
@@ -1886,8 +1817,6 @@ class AstraAIGateway:
         targets = eligible_targets(self._catalog, self.routing_state,
                                    category=category,
                                    context_tokens=context_tokens)
-        if op_ctx is not None:
-            targets = op_ctx.exclude_failed(targets)
         if not targets and context_tokens:
             # The prompt does not fit any candidate's window AS-IS, but
             # astra.ai.context_budget will fit it to whichever model is
@@ -1896,8 +1825,6 @@ class AstraAIGateway:
             # provider-aware fitting shrink the prompt to the chosen model.
             targets = eligible_targets(self._catalog, self.routing_state,
                                        category=category, context_tokens=0)
-            if op_ctx is not None:
-                targets = op_ctx.exclude_failed(targets)
         if not targets and category == "control":
             # No configured model declares JSON support: control calls must
             # still work, so fall back to the ordinary soft "general" ranking.
@@ -1906,35 +1833,14 @@ class AstraAIGateway:
             targets = eligible_targets(self._catalog, self.routing_state,
                                        category=category,
                                        context_tokens=context_tokens)
-            if op_ctx is not None:
-                targets = op_ctx.exclude_failed(targets)
-        # Sticky last_success: while the last successful target is still
-        # eligible it is the only first choice (Gemini is NOT tried first).
-        # If it fails, record_failure clears it and the remaining targets
-        # follow: primary provider (Gemini) first, then measured health.
-        # Control calls and image categories never use / set the sticky
-        # target (they have their own rankings).
-        if category in ("image_generation", "image_editing", "image_inpainting"):
-            ranked = rank_targets(targets, category=category)
-        elif category == "control":
-            ranked = rank_by_health(targets, category=category,
-                                    primary_provider=self.primary_provider,
-                                    primary_max_models=self.primary_max_models)
-        else:
+        ranked = rank_targets(targets, category=category)
+        if category != "control":
+            # "Stick to the last successful target" would pin a control call
+            # to whatever model last served ANY request (often a slow one);
+            # control calls rank purely on measured latency + health.
             ranked = prefer_last_successful(
-                targets, self.routing_state.last_successful(),
-                category=category, primary_provider=self.primary_provider,
-                primary_max_models=self.primary_max_models)
+                ranked, self.routing_state.last_successful())
         return category, ranked
-
-    def _gateway_only_model(self, conn_name: str, model_id: str) -> bool:
-        lookup = getattr(self, "provider_model_lookup", None)
-        if not callable(lookup) or not model_id:
-            return False
-        try:
-            return not bool(lookup(model_id, conn_name))
-        except Exception:
-            return False
 
     def _emit(self, kind: str, **data) -> None:
         if self.events:
@@ -1944,16 +1850,11 @@ class AstraAIGateway:
                 pass
 
     def chat(self, messages, model=None, max_tokens=None, category=None,
-             trace="", operation_id="") -> str:
+             trace="") -> str:
         """`category` (optional, one of gateway_routing.REQUEST_CATEGORIES)
         overrides the keyword classification of the user-role text; leave it
         unset for ordinary requests. `max_tokens` unset means the provider /
-        model decides (no Astra-imposed cap).
-
-        `operation_id` (optional) names the USER operation this call belongs
-        to (defaults to `trace`). Calls sharing an operation id share one
-        monotonic fallback history: a provider+model that failed earlier in
-        the operation is not chosen again. Calls with neither start clean."""
+        model decides (no Astra-imposed cap)."""
         op = new_op_id()
         if model:
             target = self._catalog_model(model)
@@ -1964,9 +1865,7 @@ class AstraAIGateway:
                 model=model, messages=fitted, max_tokens=max_tokens,
                 op=op, trace=trace)
 
-        op_ctx = self._operation_context(operation_id, trace)
-        category, ranked = self._select_order(messages, max_tokens, category,
-                                              op_ctx=op_ctx)
+        category, ranked = self._select_order(messages, max_tokens, category)
         self._emit("astra_gateway.request", category=category,
                    candidates=len(ranked), op=op, trace=trace,
                    input=_gw_log_input(messages))
@@ -1986,8 +1885,6 @@ class AstraAIGateway:
         for conn, target_model, health in ranked:
             attempts += 1
             self.last_attempts = attempts
-            op_ctx.mark_attempted(target_model.provider,
-                                  target_model.model_id)
             start = time.perf_counter()
             try:
                 result = conn.chat(
@@ -1997,14 +1894,11 @@ class AstraAIGateway:
                 last_error = getattr(e, "message", None) or str(e)
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
-                op_ctx.mark_failed(target_model.provider,
-                                   target_model.model_id)
                 cred = (getattr(conn, "pool", None).last_key()
                         if getattr(conn, "pool", None) is not None
                         and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id, gateway_only=self._gateway_only_model(
-                              conn.name, target_model.model_id), reason=last_error,
+                          model=target_model.model_id, reason=last_error,
                           op=op, trace=trace, terminal=False, attempt=attempts,
                           key_id=cred.key_id if cred else "",
                           key_label=cred.label if cred else "")
@@ -2013,31 +1907,25 @@ class AstraAIGateway:
                 last_error = f"{type(e).__name__}: {e}"
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
-                op_ctx.mark_failed(target_model.provider,
-                                   target_model.model_id)
                 cred = (getattr(conn, "pool", None).last_key()
                         if getattr(conn, "pool", None) is not None
                         and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.error", provider=target_model.provider,
-                          model=target_model.model_id,
-                          gateway_only=self._gateway_only_model(conn.name, target_model.model_id),
-                          reason=last_error,
+                          model=target_model.model_id, reason=last_error,
                           op=op, trace=trace, terminal=False, attempt=attempts,
                           key_id=cred.key_id if cred else "",
                           key_label=cred.label if cred else "")
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
-            self.routing_state.record_success(
-                target_model.provider, target_model.model_id, latency_ms,
-                mark_last=category not in _NON_STICKY_CATEGORIES)
+            self.routing_state.record_success(target_model.provider,
+                                              target_model.model_id, latency_ms)
             self.last_connection = conn.name
             self.last_model = target_model.model_id
             cred = (getattr(conn, "pool", None).last_key()
                     if getattr(conn, "pool", None) is not None
                     and hasattr(conn.pool, "last_key") else None)
             self._emit("astra_gateway.success", provider=target_model.provider,
-                      model=target_model.model_id, gateway_only=self._gateway_only_model(
-                          conn.name, target_model.model_id), latency_ms=round(latency_ms, 1),
+                      model=target_model.model_id, latency_ms=round(latency_ms, 1),
                       op=op, trace=trace, terminal=True,
                       key_id=cred.key_id if cred else "",
                       key_label=cred.label if cred else "",
@@ -2051,8 +1939,7 @@ class AstraAIGateway:
         raise ProviderError(
             f"Astra AI Gateway: all suitable targets failed —— {last_error}")
 
-    def stream(self, messages, model=None, max_tokens=None, trace="",
-               operation_id=""):
+    def stream(self, messages, model=None, max_tokens=None, trace=""):
         op = new_op_id()
         if model:
             # Generator fallback: first connection's stream that starts wins
@@ -2086,7 +1973,6 @@ class AstraAIGateway:
                             and hasattr(conn.pool, "last_key") else None)
                     self._emit("astra_gateway.error", provider=short,
                                model=used_model,
-                               gateway_only=self._gateway_only_model(conn.name, used_model),
                                reason=getattr(e, "message", None) or str(e),
                                op=op, trace=trace, terminal=False,
                                key_id=cred.key_id if cred else "",
@@ -2108,7 +1994,6 @@ class AstraAIGateway:
                         and hasattr(conn.pool, "last_key") else None)
                 self._emit("astra_gateway.success", provider=short,
                            model=used_model,
-                           gateway_only=self._gateway_only_model(conn.name, used_model),
                            latency_ms=round((time.perf_counter() - start) * 1000.0, 1),
                            op=op, trace=trace, terminal=True,
                            key_id=cred.key_id if cred else "",
@@ -2120,9 +2005,7 @@ class AstraAIGateway:
                        op=op, trace=trace, terminal=True)
             return
 
-        op_ctx = self._operation_context(operation_id, trace)
-        category, ranked = self._select_order(messages, max_tokens,
-                                              op_ctx=op_ctx)
+        category, ranked = self._select_order(messages, max_tokens)
         self._emit("astra_gateway.request", category=category,
                    candidates=len(ranked), op=op, trace=trace,
                    input=_gw_log_input(messages))
@@ -2135,8 +2018,6 @@ class AstraAIGateway:
         # interruption ends the call cleanly instead of falling over.
         emitted_any = False
         for conn, target_model, health in ranked:
-            op_ctx.mark_attempted(target_model.provider,
-                                  target_model.model_id)
             start = time.perf_counter()
             full = []
             try:
@@ -2149,8 +2030,6 @@ class AstraAIGateway:
             except (ProviderError, TimeoutError) as e:
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
-                op_ctx.mark_failed(target_model.provider,
-                                   target_model.model_id)
                 reason = getattr(e, "message", None) or str(e)
                 cred = (getattr(conn, "pool", None).last_key()
                         if getattr(conn, "pool", None) is not None
@@ -2171,8 +2050,6 @@ class AstraAIGateway:
             except Exception as e:
                 self.routing_state.record_failure(target_model.provider,
                                                   target_model.model_id)
-                op_ctx.mark_failed(target_model.provider,
-                                   target_model.model_id)
                 reason = f"{type(e).__name__}: {e}"
                 cred = (getattr(conn, "pool", None).last_key()
                         if getattr(conn, "pool", None) is not None
@@ -2191,18 +2068,15 @@ class AstraAIGateway:
                     return
                 continue
             latency_ms = (time.perf_counter() - start) * 1000.0
-            self.routing_state.record_success(
-                target_model.provider, target_model.model_id, latency_ms,
-                mark_last=category not in _NON_STICKY_CATEGORIES)
+            self.routing_state.record_success(target_model.provider,
+                                              target_model.model_id, latency_ms)
             self.last_connection = conn.name
             self.last_model = target_model.model_id
             cred = (getattr(conn, "pool", None).last_key()
                     if getattr(conn, "pool", None) is not None
                     and hasattr(conn.pool, "last_key") else None)
             self._emit("astra_gateway.success", provider=target_model.provider,
-                      model=target_model.model_id,
-                      gateway_only=self._gateway_only_model(conn.name, target_model.model_id),
-                      latency_ms=round(latency_ms, 1),
+                      model=target_model.model_id, latency_ms=round(latency_ms, 1),
                       op=op, trace=trace, terminal=True,
                       key_id=cred.key_id if cred else "",
                       key_label=cred.label if cred else "",
@@ -2373,24 +2247,17 @@ class AstraAIGateway:
         from astra.ai.shared_health import canonical_provider
         routing_provider = canonical_provider(conn.name)
         if ok:
-            self.routing_state.record_success(routing_provider, model_id,
-                                              latency_ms, mark_last=False)
+            self.routing_state.record_success(routing_provider, model_id, latency_ms)
         else:
             self.routing_state.record_failure(routing_provider, model_id)
         # A reused shared-health result means THIS Gateway caller did
         # not make an upstream API request. The real owner already emitted
         # the actual provider/Gateway call event. Do not create a second
         # Activity Log row that falsely looks like another API call.
-        # Gateway-only model = this Gateway exposes the model but the real
-        # Provider catalog does not. Its test is the only upstream API call,
-        # so keep that real call visible in the provider-centric Activity Log.
-        gateway_only = self._gateway_only_model(conn.name, model_id)
         if not reused:
-            self._emit("astra_gateway.test", connection=conn.name,
-                       provider=_short_provider(conn), model=model_id,
+            self._emit("astra_gateway.test", connection=conn.name, model=model_id,
                        ok=ok, latency_ms=round(latency_ms, 1), reason=error,
-                       reused=False, gateway_only=gateway_only,
-                       key_id=cred.key_id if cred else "",
+                       reused=False, key_id=cred.key_id if cred else "",
                        key_label=key_label)
         return {"model": model_id, "ok": ok, "error": error,
                 "latency_ms": round(latency_ms, 1),

@@ -389,7 +389,7 @@ class TestWorkflowManifest(_ApiBase):
                  if t["tab"] == "workflow"][0]
         self.assertIn("Agent Workflow", label)
         # the existing navigation is untouched
-        for tab in ("dashboard", "assistant", "providers", "web3",
+        for tab in ("dashboard", "assistant", "providers", "router", "web3",
                     "backup", "logs"):
             self.assertIn(tab, tabs)
 

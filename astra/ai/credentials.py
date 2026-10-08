@@ -192,11 +192,6 @@ class CredentialPool:
     def pinned_key(self) -> str | None:
         return getattr(self._tl, "pin", None)
 
-    def credential(self, key_id: str) -> Credential | None:
-        """The credential with this key id (None if unknown)."""
-        with self._lock:
-            return next((c for c in self._creds if c.key_id == key_id), None)
-
     def last_key(self) -> Credential | None:
         """The key this thread's most recent pick() returned (None if that
         pick found nothing usable)."""

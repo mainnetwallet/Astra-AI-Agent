@@ -313,13 +313,6 @@ class TransactionManager:
                 "paused": self._paused}
 
     # -- emergency stop ------------------------------------------------------
-    @property
-    def stopped(self) -> bool:
-        """Whether the emergency-stop latch is engaged. /api/metrics and
-        /api/web3/transaction-policy read this; without it they always
-        reported False, even while the pipeline was stopped."""
-        return bool(self._stopped)
-
     def emergency_stop(self) -> dict:
         self._stopped = True
         self.store.exec(

@@ -85,7 +85,7 @@ class TestGatewaySelection(unittest.TestCase):
         _cat, ranked = gw._select_order(
             [{"role": "user", "content": "x"}], None, "control")
         self.assertEqual(ranked[0][1].model_id, "a")
-        # ordinary calls ARE sticky: the last successful model "b" goes first
+        # while an ordinary call still sticks to the last successful target
         _cat, ranked = gw._select_order(
             [{"role": "user", "content": "x"}], None, "general")
         self.assertEqual(ranked[0][1].model_id, "b")

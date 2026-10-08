@@ -95,17 +95,10 @@ class SpecializedConstantsCarryCoreTests(unittest.TestCase):
 
 # ── helpers shared with test_chat_pipeline.py's fake style ─────────────────
 def understand(final_request="", was_incomplete=False, provider="gemini",
-              model="gemini-pro", criteria=("answers the question",),
-              task_type="reasoning"):
-    # `task_type` defaults to a type that still goes through Gateway call #2
-    # (VERIFY): an omitted one becomes `simple_chat`, a NO VERIFY type, and
-    # these tests exercise the verify / correction prompts.
+              model="gemini-pro", criteria=("answers the question",)):
     return json.dumps({"final_request": final_request,
                        "was_incomplete": was_incomplete, "provider": provider,
-                       "model": model,
-                       "targets": [{"provider": provider, "model": model}],
-                       "criteria": list(criteria),
-                       "task_type": task_type,
+                       "model": model, "criteria": list(criteria),
                        "reason": "best fit"})
 
 
@@ -117,10 +110,6 @@ def verdict(v="complete", missing=(), action="fix", instructions=""):
 TARGETS = [
     {"provider": "groq", "model": "llama-fast", "capabilities": ["chat"],
      "quality": "fast", "context_window": 8000},
-    # understand() defaults to gemini/gemini-pro; a targets[] plan is only
-    # trusted when it exists in the router's catalogue.
-    {"provider": "gemini", "model": "gemini-pro", "capabilities": ["chat"],
-     "quality": "high", "context_window": 100000},
 ]
 
 

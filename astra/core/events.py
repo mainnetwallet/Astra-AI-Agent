@@ -49,20 +49,9 @@ EVENT_KINDS = (
     "web3.transaction.prepared", "web3.transaction.submitted",
     "web3.transaction.broadcast", "web3.transaction.rejected",
     "web3.transaction.confirmed", "web3.transaction.failed",
-    # global emergency shutdown (astra/emergency.py)
-    "security.emergency_shutdown", "security.emergency_released",
     # plugins / providers (contract for future modules)
     "plugin.loaded", "plugin.failed", "plugin.disabled",
     "provider.selected", "provider.failed", "provider.health_changed",
-    # ModelDiscovery (astra/ai/discovery.py): the real GET /models probe a
-    # provider adapter makes — on boot (ASTRA_STARTUP_DISCOVERY=1), on a
-    # manual "refresh models" click, and during model validation. This is
-    # an actual upstream API call and must be visible in the Activity Log
-    # exactly like any other provider request (see log_model.js: the
-    # "provider" kind-head already maps to the "ai" category, so these
-    # count toward Total API Calls the same way astra_gateway.*/ai.* do).
-    "provider.discovery.request", "provider.discovery.success",
-    "provider.discovery.error",
     # AstraRouter (internal routing brain) — routing decision visibility
     "router.request", "router.decision", "router.fallback", "router.retry",
     "credential.rotation",
@@ -125,17 +114,6 @@ EVENT_KINDS = (
     "chat.pipeline.understand_failed", "chat.pipeline.verified",
     "chat.pipeline.verify_error", "chat.pipeline.finished",
     "chat.pipeline.failed",
-    # The deterministic final answer / generic text used because the
-    # provider's answer was unusable (astra.ai.execution_answer).
-    "chat.pipeline.final_answer_fallback",
-    # The Gateway's ordered targets[] fallback plan (ChatPipeline._route()
-    # for a normal turn; ProviderToolCaller for a task_type == "tool_use"
-    # turn driven by the agent tool loop -- see astra/ai/agent_tool_loop.py).
-    # `target_plan` is the up-front announcement of the full ordered plan;
-    # `target_failed`/`target_fallback` are emitted per attempt as the plan
-    # is walked on a target's failure.
-    "chat.pipeline.target_plan", "chat.pipeline.target_failed",
-    "chat.pipeline.target_fallback",
     # The Gateway's OWN classification/handoff event for an
     # image_generation/image_editing turn -- emitted once, BEFORE the real
     # provider API call, so it never collapses into (or is confused with)
@@ -156,11 +134,6 @@ EVENT_KINDS = (
     "agent.tool_loop.started", "agent.tool_loop.step",
     "agent.tool_loop.finished", "agent.tool_loop.failed",
     "agent.tool_call", "agent.tool_result",
-    # Bounded final-answer recovery (agent_tool_loop._recover_final): tools
-    # ran but the model's final reply was empty/protocol-only, so ONE extra
-    # call asks it to write the answer. Safe metadata only: attempt, reason,
-    # status — never model output, args or credentials.
-    "agent.final_recovery",
     # Startup reconciliation (EventBus.reconcile_stale_operations): closes an
     # operation that began in a previous run and can therefore never finish,
     # so its start row does not stay "… running" in the Activity Log forever.

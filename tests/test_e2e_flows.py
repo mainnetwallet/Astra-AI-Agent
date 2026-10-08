@@ -34,10 +34,6 @@ class FakeProvider(AIProvider):
         self._text = text
         self._fail = fail
         self.calls = 0
-        # /api/providers only lists providers that can really be routed to
-        # (key + base URL + models), so the fixture carries one dummy key.
-        from astra.ai.credentials import CredentialPool
-        self.pool = CredentialPool(name, ["fake-key"])
 
     def health_check(self) -> bool:
         return True
@@ -96,21 +92,19 @@ class _Base(unittest.TestCase):
 
 
 class TestChatFlow(_Base):
-    # With no GW_* API key configured there is no UNDERSTAND call, so every
-    # turn is a plain `simple_chat` — a NO VERIFY task type
-    # (chat_pipeline.NO_VERIFY_TASK_TYPES). The Provider result is returned
-    # immediately and byte-exact: no Gateway VERIFY, and no "Gateway not
-    # configured" verification caveat appended. (With no provider key either,
-    # the combined notice is still the reply — see test_no_provider_* below.)
+    # With no GW_* API key configured the pipeline deliberately appends a
+    # user-facing notice to a successful provider reply (and answers with the
+    # combined notice when there is no provider key either) — see
+    # astra/ai/chat_pipeline.py. Assert the exact reply including that notice,
+    # so the provider half of the assertion stays byte-exact.
     def test_chat_request_reaches_provider_and_returns_normalized_reply(self):
         st, body = self.post("/api/chat", {"message": "hello there"})
         self.assertEqual(st, 200)
         data = body["data"]
         self.assertTrue(data["ok"])
-        self.assertEqual(data["reply"], "hello from fake")
-        self.assertNotIn(_NO_GATEWAY_CONFIGURED_MESSAGE, data["reply"])
-        self.assertEqual(data["data"]["verification"],
-                         {"status": "not_applicable"})
+        self.assertEqual(data["reply"],
+                         "hello from fake\n\n" +
+                         _NO_GATEWAY_CONFIGURED_MESSAGE)
         self.assertEqual(data["data"]["served_by"], "fake/fake-1")
         self.assertGreaterEqual(self.provider.calls, 1)
         self.assertIn("conversation_id", data)
@@ -124,7 +118,8 @@ class TestChatFlow(_Base):
         self.assertIn("ai", roles)
         texts = [m["text"] for m in body["data"]["messages"]]
         self.assertIn("remember me", texts)
-        self.assertIn("hello from fake", texts)
+        self.assertIn("hello from fake\n\n" + _NO_GATEWAY_CONFIGURED_MESSAGE,
+                      texts)
 
     def test_chat_failover_when_first_provider_fails(self):
         dead = FakeProvider(name="dead", models=("dead-1",), fail=True,
@@ -133,7 +128,9 @@ class TestChatFlow(_Base):
         st, body = self.post("/api/chat", {"message": "still works?"})
         self.assertEqual(st, 200)
         self.assertTrue(body["data"]["ok"])
-        self.assertEqual(body["data"]["reply"], "hello from fake")
+        self.assertEqual(body["data"]["reply"],
+                         "hello from fake\n\n" +
+                         _NO_GATEWAY_CONFIGURED_MESSAGE)
 
     def test_no_provider_is_graceful_not_500(self):
         stack = make_stack()

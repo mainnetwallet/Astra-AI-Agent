@@ -58,33 +58,6 @@ class WebCoreTests(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertTrue(data["request_id"])
 
-    def test_system_map_reports_agents_and_secret_free_security(self):
-        from astra.agents import SPECIALISTS, AgentManager
-        mgr = AgentManager()
-        mgr.register_many(SPECIALISTS)
-        self.stack["agent_manager"] = mgr
-        self.site.operator_token = ""
-        data = self._payload(self._call("GET", "/api/system-map"))["data"]
-        self.assertEqual([a["name"] for a in data["agents"]], [a["name"] for a in mgr.list()])
-        self.assertEqual(data["agent_manager"], {"available": True, "registered": len(mgr)})
-        sec = {r["k"]: r for r in data["security"]}
-        for key in ("Authentication", "Rate limiting", "CORS", "Request ID",
-                    "Secret redaction", "SSRF protection", "Body size limit"):
-            self.assertIn(key, sec)
-        self.assertEqual(sec["Authentication"]["s"], "degraded")  # open by default
-        # A configured token / origin list must never leak into the payload.
-        self.site.operator_token = "s3cret-token-value"
-        self.site._allowed_origins = {"https://evil.example"}
-        raw = self._call("GET", "/api/system-map").body.decode("utf-8")
-        self.assertNotIn("s3cret-token-value", raw)
-        self.assertNotIn("evil.example", raw)
-
-    def test_system_map_without_agent_manager_is_empty_not_fake(self):
-        self.stack.pop("agent_manager", None)
-        data = self._payload(self._call("GET", "/api/system-map"))["data"]
-        self.assertEqual(data["agents"], [])
-        self.assertEqual(data["agent_manager"], {"available": False, "registered": 0})
-
     def test_v1_alias_hits_the_same_route(self):
         a = self._payload(self._call("GET", "/api/tools"))
         b = self._payload(self._call("GET", "/api/v1/tools"))
@@ -257,18 +230,6 @@ class LiveApiTests(unittest.TestCase):
         self.assertTrue(body)
         self.assertEqual(self._get("/static/js/astra.js")[0], 200)
 
-    def test_spa_pages_serve_the_shell_with_hardened_headers(self):
-        # /system-map and /command-center are real addresses of the SPA.
-        _, index_body, _ = self._get("/")
-        for path in ("/system-map", "/command-center"):
-            status, body, headers = self._get(path)
-            self.assertEqual(status, 200, path)
-            self.assertIn("text/html", _hdr(headers, "Content-Type", ""))
-            self.assertEqual(body, index_body)
-            self._assert_hardened(status, body, headers)
-        self.assertEqual(self._get("/static/js/astra_os.js")[0], 200)
-        self.assertEqual(self._get("/static/js/system_map_model.js")[0], 200)
-
     def test_unknown_route(self):
         status, body, headers = self._get("/api/v1/does-not-exist")
         self.assertEqual(status, 404)
@@ -306,8 +267,7 @@ class LiveApiTests(unittest.TestCase):
 
     def test_chat_turn(self):
         class _StubAgent:
-            def handle(self, msg, context="", history=None, attachments=None,
-                       conversation_id=None):
+            def handle(self, msg, context="", history=None, attachments=None):
                 return {"ok": True, "reply": f"echo: {msg}",
                         "action": None, "data": {}}
 

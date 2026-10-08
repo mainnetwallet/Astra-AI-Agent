@@ -27,7 +27,7 @@ from astra.ai.capabilities import (
     filter_candidates_by_capabilities,
 )
 from astra.ai.models import Model, metadata_for
-from astra.ai.router import RoutingRequest
+from astra.ai.router import RoutingRequest, classify
 
 
 class TestAttachments(unittest.TestCase):
@@ -324,6 +324,47 @@ class TestCapabilityRouting(unittest.TestCase):
             required_input_modalities=["image"],
             required_output_modalities=[])
         self.assertEqual(req.required_input_modalities, ["image"])
+
+    def test_classify_image_generation(self):
+        self.assertEqual(classify("generate an image of a sunset"), "image_generation")
+
+    def test_classify_image_generation_banglish(self):
+        self.assertEqual(classify("akta chobi banao"), "image_generation")
+        self.assertEqual(classify("photo create koro"), "image_generation")
+
+    def test_classify_image_generation_bangla_script(self):
+        """Real Bengali-script phrasing (not just Latin-script Banglish
+        transliteration) must classify the same way. Regression guard for
+        the earlier version of this regex, where a noun ending in a Bengali
+        dependent vowel sign (e.g. \u09bf in \u099b\u09ac\u09bf) was
+        followed by a \\b that Python's re engine — which does not count
+        those combining marks as \\w — could never satisfy, silently
+        killing the whole branch for every Bengali-script noun."""
+        self.assertEqual(classify("\u098f\u0995\u099f\u09be \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993"),
+                         "image_generation")
+        self.assertEqual(
+            classify("\u098f\u0995\u099f\u09be futuristic city photo \u09a4\u09c8\u09b0\u09bf \u0995\u09b0\u09cb"),
+            "image_generation")
+
+    def test_classify_plain_bangla_command_is_not_image_generation(self):
+        """A bare Bengali verb like \u0995\u09b0\u09cb ("do") must not, on
+        its own, trigger image_generation — only in combination with an
+        image noun nearby."""
+        self.assertEqual(classify("\u0995\u09be\u099c \u0995\u09b0\u09cb"), "simple_chat")
+        self.assertEqual(classify("\u0986\u09ae\u09be\u0995\u09c7 \u09b8\u09be\u09b9\u09be\u09af\u09cd\u09af \u0995\u09b0\u09cb"),
+                         "simple_chat")
+
+    def test_classify_audio_generation(self):
+        self.assertEqual(classify("generate audio from text"), "audio")
+
+    def test_classify_video_generation(self):
+        self.assertEqual(classify("create a video of a cat"), "video")
+
+    def test_classify_multimodal(self):
+        self.assertEqual(classify("[2 file(s) attached]"), "multimodal")
+
+    def test_classify_existing_unchanged(self):
+        self.assertEqual(classify("hello how are you"), "simple_chat")
 
     def test_explicit_incompatible_model_rejection(self):
         req = RoutingRequest(
@@ -683,6 +724,11 @@ class TestRealImageGeneration(unittest.TestCase):
         adapter = CompatibleAdapter.__new__(CompatibleAdapter)
         self.assertTrue(hasattr(adapter, "generate_image"))
 
+    def test_bedrock_adapter_has_generate_image(self):
+        from astra.ai.adapters.bedrock import BedrockAdapter
+        adapter = BedrockAdapter.__new__(BedrockAdapter)
+        self.assertTrue(hasattr(adapter, "generate_image"))
+
     def test_base_provider_raises_not_supported(self):
         from astra.ai.provider import AIProvider
         p = AIProvider()
@@ -693,6 +739,16 @@ class TestRealImageGeneration(unittest.TestCase):
     def test_no_openai_adapter_so_dall_e_has_no_image_output(self):
         meta = metadata_for("dall-e-3", "openai")
         self.assertNotIn("image", meta.get("output_modalities", ["text"]))
+
+    def test_paid_bedrock_image_model_has_no_image_output(self):
+        # Bedrock Nova Canvas / Titan / Stability are real image models but
+        # paid-only, so they are NOT in Astra's FREE image pool: no image
+        # output modality is advertised for them.
+        for mid in ("stability.stable-diffusion-xl-v1",
+                    "amazon.nova-canvas-v1:0",
+                    "amazon.titan-image-generator-v2:0"):
+            meta = metadata_for(mid, "bedrock")
+            self.assertNotIn("image", meta.get("output_modalities", []), mid)
 
     def test_free_cloudflare_image_model_has_image_output(self):
         meta = metadata_for("@cf/black-forest-labs/flux-1-schnell",
@@ -1007,8 +1063,7 @@ class TestProviderRouterImageRefusal(unittest.TestCase):
             self.chat_calls += 1
             return "ok"
 
-        def generate_image(self, prompt, model=None, size="1024x1024", n=1,
-                           source_image=None, mask_image=None):
+        def generate_image(self, prompt, model=None, size="1024x1024", n=1):
             import base64
             self.generate_calls.append(prompt)
             img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
@@ -1036,16 +1091,14 @@ class TestProviderRouterImageRefusal(unittest.TestCase):
         self.assertEqual(image_adapter.generate_calls, [])
 
     def test_banglish_and_bangla_image_requests_are_refused_too(self):
-        # task_type is what the Gateway's own request-intelligence
-        # classification would assign for these phrases (English, Banglish,
-        # and Bengali-script "generate an image" intent) — router.classify()
-        # no longer exists, so it's supplied directly here.
         for text in ("akta chobi banao - ekta cyberpunk city",
                      "\u098f\u0995\u099f\u09be cyberpunk city-\u098f\u09b0 \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993",
                      "photo create koro of a rainy street"):
+            task_type = classify(text)
+            self.assertEqual(task_type, "image_generation")
             router, text_adapter, image_adapter = self._router()
             rr = router.route_request(RoutingRequest(
-                task_type="image_generation",
+                task_type=task_type,
                 messages=[{"role": "user", "content": text}]))
             self.assertFalse(rr.ok)
             self.assertIn("ImageRouter", rr.error or "")

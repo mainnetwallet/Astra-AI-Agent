@@ -71,17 +71,12 @@ class GatewayExecutionRecovery:
     ever needing to know what "provider-level failure" means beyond that.
     """
 
-    def __init__(self, store=None, events=None, primary_provider: str = "gemini"):
+    def __init__(self, store=None, events=None):
         # A dedicated GatewayRoutingState instance, backed by the same
         # Store (no new database — §18) but writing exclusively under
         # `EXISTING_PROVIDER_NS`-prefixed provider ids.
         self.routing_state = GatewayRoutingState(store)
         self.events = events
-        self.primary_provider = str(primary_provider or "").strip().lower()
-
-    def _is_primary(self, target: ProviderExecutionTarget) -> bool:
-        return bool(self.primary_provider) and \
-            str(target.provider_id).lower() == self.primary_provider
 
     def _emit(self, kind: str, **data) -> None:
         if self.events:
@@ -97,26 +92,6 @@ class GatewayExecutionRecovery:
     def is_eligible(self, target: ProviderExecutionTarget) -> bool:
         return self.target_health(target).healthy
 
-    def _health_sort_key(self, target: ProviderExecutionTarget):
-        """Lower is better. Ranks already-eligible (healthy) targets by their
-        OWN measured Gateway health — never by provider identity/serial
-        position — so the best-tested target is tried first and the next-best
-        second, serially, exactly mirroring how `gateway_routing.score_target`
-        ranks the Gateway's own GW_* connections.
-
-        - success_rate (higher is better) dominates
-        - consecutive_failures (fewer is better) breaks a success-rate tie
-        - measured average latency (lower is better) breaks what's left; a
-          target with no successful call yet (average_latency_ms == 0) gets a
-          neutral placeholder instead of an unearned "fastest" ranking
-        Python's sort is stable, so a true tie preserves the caller's own
-        `candidates` order (its RoutingDecisionPolicy ranking) — unchanged
-        from before for targets whose health is genuinely indistinguishable.
-        """
-        h = self.target_health(target)
-        latency = h.average_latency_ms if h.success_count else 500.0
-        return (-h.success_rate(), h.consecutive_failures, latency)
-
     # -- selection (§2, §4, §10) ----------------------------------------------
     def select_execution_target(
             self, candidates: list[ProviderExecutionTarget], *,
@@ -126,15 +101,12 @@ class GatewayExecutionRecovery:
         """Pick the best eligible candidate, or None if every one of them is
         excluded, missing a required capability, or currently in cooldown.
 
-        Ordering: only candidates that PASSED the health/cooldown check
-        (`is_eligible`) are ever considered — an unhealthy target never
-        reaches selection. Among those eligible candidates, the one with the
-        best measured Gateway health goes first, the next-best second, and so
-        on (`_health_sort_key`) — serial, by health, never by provider name
-        or the caller's original list position. The primary provider
-        (`primary_provider`, default Gemini) is tried first; everything else
-        follows purely by health. The last successful target, while still
-        eligible, is sticky and wins outright; a failure clears it.
+        Ordering: candidates already in `candidates` order (the caller's own
+        priority — e.g. its RoutingDecisionPolicy ranking) is preserved
+        among equally-healthy targets; the *last successful* target for its
+        own (namespaced) provider/model, if present among the candidates,
+        is nudged to the front — a soft preference, never a lock (§12) —
+        unless a healthier-ranked candidate already leads.
         """
         exclude = exclude or set()
         need = set(required_capabilities)
@@ -149,18 +121,14 @@ class GatewayExecutionRecovery:
             eligible.append(t)
         if not eligible:
             return None
-        # Sticky last_success: if the last successful target is still an
-        # eligible candidate it wins outright (Gemini is not tried first).
         last = self.routing_state.last_successful()
-        if last:
-            for t in eligible:
-                if (_ns(t.provider_id) == last["provider"]
-                        and t.model_id == last["model"]):
-                    return t
-        # Otherwise (no/failed last_success): primary provider (Gemini)
-        # first, best health first; then every other target by health only.
-        eligible.sort(key=lambda t: (0 if self._is_primary(t) else 1,
-                                     *self._health_sort_key(t)))
+        if last and last.get("provider", "").startswith(f"{EXISTING_PROVIDER_NS}::"):
+            last_provider = last["provider"][len(EXISTING_PROVIDER_NS) + 2:]
+            for i, t in enumerate(eligible):
+                if t.provider_id == last_provider and t.model_id == last.get("model"):
+                    if i:
+                        eligible.insert(0, eligible.pop(i))
+                    break
         return eligible[0]
 
     # -- reporting (§4, §8, §12) -----------------------------------------------

@@ -173,64 +173,6 @@ class TestGatewayExecutionRecovery(unittest.TestCase):
         self.rec.report_execution_failure(a, RATE_LIMIT)
         self.assertEqual(self.rec.select_execution_target([a, b]).key(), b.key())
 
-    # The actual bug report this test locks down: selection must be ranked
-    # by each target's OWN measured Gateway health — never by provider
-    # identity or the position it happens to sit at in `candidates` — and
-    # the ordering must be fully serial: best health first, next-best
-    # second, and so on down the list as each one is excluded/fails.
-    def test_selection_is_gemini_first_then_ranked_by_own_health_only(self):
-        best = _t("cohere", "model-best")
-        mid = _t("gemini", "model-mid")
-        worst = _t("groq", "model-worst")
-        # worst: 1 success / 3 failures -> low success rate (cooldown_s=0 so
-        # it stays eligible — this test is about ranking among the healthy,
-        # not about cooldown exclusion, which other tests already cover)
-        self.rec.report_execution_success(worst, latency_ms=100)
-        for _ in range(3):
-            self.rec.report_execution_failure(worst, RATE_LIMIT, cooldown_s=0)
-        # mid: 1 success / 1 failure
-        self.rec.report_execution_success(mid, latency_ms=100)
-        self.rec.report_execution_failure(mid, RATE_LIMIT, cooldown_s=0)
-        # best: 3 successes / 0 failures
-        for _ in range(3):
-            self.rec.report_execution_success(best, latency_ms=100)
-
-        # Deliberately listed worst-health-first, to prove list position and
-        # provider name never drive the outcome — only measured health does.
-        candidates = [worst, mid, best]
-        self.rec.routing_state.clear_last_successful()   # pure health order
-        self.assertTrue(self.rec.is_eligible(worst))   # all three eligible
-        self.assertTrue(self.rec.is_eligible(mid))
-        self.assertTrue(self.rec.is_eligible(best))
-
-        # Gemini (primary) goes first even though it is only mid-health.
-        first = self.rec.select_execution_target(candidates)
-        self.assertEqual(first.key(), mid.key(), "primary provider (Gemini) goes first")
-
-        # After that, everything else is ordered by measured health only.
-        second = self.rec.recover_execution_target(
-            candidates, first, RATE_LIMIT, exclude={first.key()})
-        self.assertEqual(second.key(), best.key(), "best health goes next")
-
-        third = self.rec.recover_execution_target(
-            candidates, second, RATE_LIMIT, exclude={first.key(), second.key()})
-        self.assertEqual(third.key(), worst.key(), "worst-but-still-healthy goes last")
-
-    def test_last_successful_is_sticky_until_it_fails(self):
-        gem = _t("gemini", "model-g")
-        a = _t("groq", "model-a")
-        b = _t("cohere", "model-b")
-        self.rec.report_execution_success(a, latency_ms=100)
-        # sticky: `a` wins over Gemini and over a healthier candidate
-        self.assertEqual(self.rec.select_execution_target([gem, b, a]).key(), a.key())
-        # `a` fails -> cleared; Gemini (primary) goes first again
-        nxt = self.rec.recover_execution_target([gem, b, a], a, RATE_LIMIT)
-        self.assertEqual(nxt.key(), gem.key())
-        self.assertIsNone(self.rec.routing_state.last_successful())
-        # a success on any target becomes the new last_success
-        self.rec.report_execution_success(b, latency_ms=100)
-        self.assertEqual(self.rec.select_execution_target([gem, a, b]).key(), b.key())
-
     def test_required_capabilities_filter(self):
         a = _t("gemini", "model-a", caps=["chat"])
         b = _t("gemini", "model-b", caps=["chat", "vision"])

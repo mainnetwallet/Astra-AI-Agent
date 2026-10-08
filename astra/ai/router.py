@@ -18,7 +18,7 @@ and credential-free: the Gateway only ever receives/returns sanitized
 gateway_contract.py) and never an adapter, a credential or ProviderRegistry
 itself. The Gateway is a completely independent system with its
 own AI connections (Gemini, Groq, Cloudflare, Bedrock, OpenRouter,
-Mistral, Cerebras, SambaNova, Cohere, Z.AI, Hugging Face) — each with
+Mistral, Cerebras, SambaNova, Cohere, Z.AI) — each with
 independent credentials/models/endpoints (GW_* config). It is never added to
 `self.providers`, never appears in ProviderRegistry, provider health, or the
 provider dashboard table, and — just as important — AstraRouter NEVER
@@ -209,6 +209,75 @@ class RoutingResult:
                 "completion_status": self.completion_status}
 
 
+def classify(text: str) -> str:
+    """Task-type classification for a user message (deterministic)."""
+    import re
+    low = text.lower()
+    # Image-generation intent, in either word order: English tends to put
+    # the verb first ("create an image"), but Banglish/Bangla phrasing
+    # written in Latin script often puts the noun first ("photo create
+    # koro", "akta chobi banao"). Matching only the first order was
+    # silently falling through to the "vision" branch below, which sets
+    # required_capabilities=["vision"] (image *understanding*) — the wrong
+    # capability axis entirely for an image *generation* request — and
+    # that hard-filters out every text-only model, failing the request
+    # for a reason that has nothing to do with what the user actually
+    # asked for. Bengali written in its own script (not just transliterated
+    # Banglish) uses the same noun-then-verb order — "ছবি বানাও" (chobi
+    # banao), "তৈরি করো" (toiri koro) — so the noun/verb token lists carry
+    # both the Latin-script transliteration AND the Bengali-script word.
+    # NOTE: the noun<->verb connector below does NOT use \b at the join —
+    # Bengali dependent vowel signs ("ি" in ছবি, "ো" in ফোটো, "ৈ" in তৈরি,
+    # Unicode category Mc) are not \w to Python's re engine, so a \b placed
+    # right after a noun ending in one of these never matches and silently
+    # kills the whole branch. The join only needs "nearby", not "exactly
+    # adjacent", so requiring a hard word boundary there was never doing
+    # useful work anyway — see test_multimodal.TestCapabilityRouting for
+    # the exact phrases this must (and, for plain "কাজ করো"/"do work" with
+    # no image noun in range, must not) match.
+    _img_nouns = (r"(?:image|picture|photo|photograph|illustration|diagram|"
+                 r"logo|icon|art|artwork|chobi|chhobi|ছবি|ফটো|ফোটো)")
+    _img_edit_verbs = (r"(?:edit|editing|modify|retouch|inpaint|outpaint|"
+                       r"restyle|এডিট|badle|badol|change)")
+    _img_verbs = (r"(?:generate|create|draw|make|design|render|paint|"
+                  r"banao|banawo|banai|baniye|banate|bana|banan|toiri|"
+                  r"বানাও|বানান|বানাতে|তৈরি|তৈরী|করো)")
+    # Editing an EXISTING image is its own task type, checked before both
+    # generation and "vision": "ei photo ta edit kore dao" must never be
+    # served by a model that only *understands* images.
+    if re.search(_img_edit_verbs + r"\s+(?:this|the|my|ei|এই)?\s*" + _img_nouns, low) or \
+       re.search(_img_nouns + r".{0,24}" + _img_edit_verbs, low):
+        return "image_editing"
+    if re.search(_img_verbs + r"\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,3}" + _img_nouns, low) or \
+       re.search(_img_nouns + r".{0,24}" + _img_verbs, low):
+        return "image_generation"
+    if re.search(r"generate\s+(an?\s+)?audio|create\s+(an?\s+)?audio|text.to.speech|tts\b", low):
+        return "audio"
+    if re.search(r"generate\s+(an?\s+)?video|create\s+(an?\s+)?video", low):
+        return "video"
+    if re.search(r"\[.*file.*attached\]|\[.*attachment", low):
+        return "multimodal"
+    if re.search(r"read|analyse|analyze|research|compare|report|what is|about", low):
+        return "research"
+    if re.search(r"\b(code|fix|test|debug|refactor|github|repo)\b", low):
+        return "coding"
+    if re.search(r"open .*website|navigate|click|browser|visit ", low):
+        return "browser"
+    if re.search(r"wallet|token|stake|send .*eth|contract|transaction|balance", low):
+        return "web3"
+    if re.search(r"image|photo|picture|screenshot|vision", low):
+        return "vision"
+    if re.search(r"\bsummarize\b|tl;dr|short version", low):
+        return "summarization"
+    if re.search(r"\btranslate\b|\banglish\b|\btranslate to\b|\bbangla\b|\bbangali\b", low):
+        return "translation"
+    if re.search(r"plan|workflow|steps to|how do i|schedule", low):
+        return "planning"
+    if re.search(r"json|table|csv|structured", low):
+        return "structured_output"
+    return "simple_chat"
+
+
 class _RouterExecutionPort(ProviderExecutionPort):
     """Concrete `ProviderExecutionPort` (§3): executes a
     `ProviderExecutionTarget` against the Existing Provider system's real
@@ -287,7 +356,6 @@ class AstraRouter:
                               or SharedHealthCoordinator(store=store))
         if self.gateway is not None:
             self.gateway.shared_health = self.shared_health
-            self.gateway.provider_model_lookup = self.provider_model_exists
         self.policy = RoutingDecisionPolicy(stats=self._load_aggregate(),
                                             preference=self.preference)
         self._lock = threading.RLock()
@@ -307,21 +375,6 @@ class AstraRouter:
             store.install(STATS_SCHEMA)
             store.install(KEY_MODEL_SCHEMA)
             self._load_key_model()
-
-    def provider_model_exists(self, model_id: str, gateway_name: str = "") -> bool:
-        """Check whether a Gateway model is also exposed by the Provider catalog.
-
-        This is a local catalog lookup only; it never makes a Provider API call.
-        """
-        from astra.ai.shared_health import canonical_provider
-        gateway_provider = canonical_provider(gateway_name) if gateway_name else ""
-        for provider in self.providers:
-            pname = canonical_provider(getattr(provider, "name", ""))
-            if gateway_provider and pname != gateway_provider:
-                continue
-            if str(model_id) in {str(m) for m in (getattr(provider, "models", None) or [])}:
-                return True
-        return False
 
     # -- plumbing -------------------------------------------------------------
     def _slots(self, provider) -> None:
@@ -484,10 +537,11 @@ class AstraRouter:
             hard = TASK_HARD_CAPABILITIES.get(req.task_type)
             if hard:
                 req.required_capabilities = list(hard)
-        # task_type "image_generation" is set by the caller (Gateway's own
-        # request-intelligence classification, not this module). Execution
-        # for those task types is owned EXCLUSIVELY by the Gateway's
-        # ImageRouter (see `route_request`'s
+        # `classify()` already recognizes image-generation intent in both
+        # English ("create an image") and Bangla/Banglish ("akta chobi
+        # banao", "photo create koro") word orders and returns task_type
+        # "image_generation". Execution for those task types is owned
+        # EXCLUSIVELY by the Gateway's ImageRouter (see `route_request`'s
         # fail-closed guard, which refuses them before any candidate is
         # ranked). The derived `required_output_modalities` is kept so
         # `meets_hard_requirements()` (routing_policy.py) stays honest about
@@ -1057,14 +1111,11 @@ class AstraRouter:
             if pool is not None and hasattr(pool, "keys"):
                 for key_meta in pool.keys():
                     try:
-                        # Pass the credential explicitly: pinned() does not
-                        # change pool.last_key(), so without this every
-                        # iteration would rewrite the same (last picked) key.
-                        self._record_key_model(
-                            adapter, model_id, result["ok"],
-                            result["latency_ms"], result["error"],
-                            req=RoutingRequest(task_type="health_check"),
-                            cred=pool.credential(key_meta["key_id"]))
+                        with pool.pinned(key_meta["key_id"]):
+                            self._record_key_model(
+                                adapter, model_id, result["ok"],
+                                result["latency_ms"], result["error"],
+                                req=RoutingRequest(task_type="health_check"))
                     except Exception:
                         pass
             cred = id_cred or (pool.last_key() if pool is not None and hasattr(pool, "last_key") else None)
@@ -1091,7 +1142,6 @@ class AstraRouter:
                 "error": "" if rr.ok else (rr.error or "test failed"),
                 "key_id": cred.key_id if cred else (key_id or ""),
                 "key": cred.label if cred else "",
-                "key_label": cred.label if cred else "",
             }
 
         # Identity couldn't be resolved (no pool / no usable credential) —
@@ -1105,7 +1155,6 @@ class AstraRouter:
             "error": "" if rr.ok else (rr.error or "test failed"),
             "key_id": cred.key_id if cred else (key_id or ""),
             "key": cred.label if cred else "",
-            "key_label": cred.label if cred else "",
         }
 
     # -- per-(provider, key, model) health ------------------------------------
@@ -1126,13 +1175,12 @@ class AstraRouter:
             pass
 
     def _record_key_model(self, adapter, model_id: str, ok: bool,
-                          latency_ms, error: str, req=None, cred=None) -> None:
+                          latency_ms, error: str, req=None) -> None:
         """Save which key served (or failed) this model. Called for every
         provider attempt — live traffic and manual tests alike. Nothing is
         saved when no key was actually picked (e.g. "no healthy credential")."""
         pool = getattr(adapter, "pool", None)
-        if cred is None:
-            cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
+        cred = pool.last_key() if pool is not None and hasattr(pool, "last_key") else None
         if cred is None:
             return
         name = getattr(adapter, "name", "")
@@ -1276,41 +1324,39 @@ class AstraRouter:
 
     def _attempt(self, adapter, model: Model, req: RoutingRequest) -> RoutingResult | None:
         name = getattr(adapter, "name", "")
+        op = new_op_id()
+        self._emit("ai.started", provider=name, model=model.model_id,
+                   op=op, trace=req.trace)
+        t0 = ms_now()
         last_error = ""
-        # Each retry is a separate upstream API attempt. Keep router/control
-        # events separate from the Activity Log's real API-call lifecycle.
-        # Credential fallback is independent from the router's transient
-        # retry budget. A provider/model target may have multiple API keys;
-        # even when AI_MAX_RETRIES is 0 (or smaller than the number of
-        # configured credentials), every credential gets a chance before the
-        # Gateway target is considered exhausted. The credential pool marks
-        # failed keys unavailable/cools them and therefore naturally selects
-        # the next key on the following adapter call. For a single-key pool,
-        # the existing max_retries value still controls transient retries.
-        pool = getattr(adapter, "pool", None)
-        credential_count = int(getattr(pool, "count", 0) or 0) if pool is not None else 0
-        retries = max(self.max_retries, max(0, credential_count - 1))
+        # per-credential + per-model retries: a failed key rolls to the next
+        # key on the same model, then same provider's next model, then provider.
+        retries = self.max_retries
         for attempt in range(1, retries + 2):
             if attempt > 1:
                 self._emit("credential.rotation", provider=name, model=model.model_id,
-                           attempt=attempt, trace=req.trace)
+                           attempt=attempt, op=op, trace=req.trace)
                 self._emit("router.retry", provider=name, model=model.model_id,
-                           attempt=attempt, trace=req.trace)
-            op = None
-            t0 = None
+                           attempt=attempt, op=op, trace=req.trace)
             try:
-                messages = self._fit_messages(req.messages, model, req.max_tokens)
-                # Everything above this point is routing/preparation. Create
-                # the AI lifecycle only at the adapter call boundary.
-                op = new_op_id()
-                t0 = ms_now()
-                self._emit("ai.started", provider=name, model=model.model_id,
-                           op=op, trace=req.trace, attempt=attempt)
+                messages = self._fit_messages(req.messages, model,
+                                              req.max_tokens)
+                # Multimodal dispatch: use a specialized adapter method for
+                # the non-chat TTS output modality before falling through to
+                # the normal chat path. Image generation is deliberately NOT
+                # dispatched here: it is owned exclusively by the Gateway's
+                # ImageRouter (see route_request's fail-closed guard).
                 out_mods = req.required_output_modalities or []
                 if "audio" in out_mods and hasattr(adapter, "text_to_speech"):
                     prompt = self._extract_prompt(req.messages)
                     text = adapter.text_to_speech(prompt, model=model.model_id)
                 elif req.required_tools or req.structured_output or req.task_contract is not None:
+                    # §JSON mode: ask the provider API to enforce JSON, not
+                    # just the prompt text. No invented token floor: an
+                    # explicit budget is honoured, otherwise the field is
+                    # omitted (or derived from the model for providers whose
+                    # API requires it) so a reasoning model gets its real
+                    # maximum instead of a small Astra cap.
                     text = adapter.chat(
                         messages, model=model.model_id,
                         max_tokens=resolve_output_tokens(
@@ -1330,6 +1376,11 @@ class AstraRouter:
                 self._latency[name].append(ms)
                 self._calls[name] += 1
                 self._cost_est[name] = self._cost_est.get(name, 0.0) + cost
+                # Manual health probes must not mutate aggregate provider
+                # availability. Test-all intentionally probes many models/keys
+                # concurrently; one model's auth/rate-limit result must not
+                # make the whole provider "down" or generate misleading
+                # recovered/down flapping in the Activity Log.
                 if req.task_type != "health_check" and name in self._down:
                     self._down.discard(name)
                 self._last = {"provider": name, "model": model.model_id,
@@ -1338,40 +1389,45 @@ class AstraRouter:
                                    latency_ms=ms, estimated_cost_usd=cost,
                                    attempts=attempt, ok=True,
                                    usage=getattr(adapter, "_last_usage", None) or {},
-                                   _reason=("matched preference" if attempt == 1 else
+                                   _reason=("matched preference" if not attempt else
                                             f"retry #{attempt}"))
                 self._emit("ai.completed", provider=name, model=model.model_id,
                            latency_ms=ms, op=op, trace=req.trace, terminal=True,
                            key_id=test_cred.key_id if test_cred else "",
-                           key_label=key_label, attempt=attempt)
+                           key_label=key_label)
                 self._record_key_model(adapter, model.model_id, True, ms, "", req)
                 return rr
             except (ProviderError, TimeoutError) as e:
                 last_error = e.message or getattr(e, "category", type(e).__name__)
                 self._errors[name] = self._errors.get(name, 0) + 1
+                self._record_key_model(adapter, model.model_id, False,
+                                       duration_ms(t0), last_error, req)
+                # per-key test: one attempt, on that key only -> terminal.
                 retry = (not self._pinned(adapter) and attempt <= retries
                          and getattr(e, "retryable", True))
                 test_cred = (adapter.pool.last_key()
                               if getattr(adapter, "pool", None) is not None
                               and hasattr(adapter.pool, "last_key") else None)
                 key_label = test_cred.label if test_cred else ""
-                if op is not None:
-                    self._emit("ai.failed", provider=name, model=model.model_id,
-                               error=last_error, attempt=attempt, op=op,
-                               trace=req.trace, terminal=not retry, retrying=retry,
-                               key_id=test_cred.key_id if test_cred else "",
-                               key_label=key_label)
-                self._record_key_model(adapter, model.model_id, False,
-                                       duration_ms(t0) if t0 is not None else 0,
-                                       last_error, req)
-                if self._pinned(adapter) or not retry:
+                self._emit("ai.failed", provider=name, model=model.model_id,
+                           error=last_error, attempt=attempt, op=op,
+                           trace=req.trace, terminal=not retry, retrying=retry,
+                           key_id=test_cred.key_id if test_cred else "",
+                           key_label=key_label)
+                if self._pinned(adapter):
                     break
-                # A fresh, never-tried credential needs no backoff -- only
-                # sleep once we would be repeating a key (or there is no
-                # pool at all), i.e. a genuine transient retry.
-                if credential_count == 0 or attempt >= credential_count:
-                    time.sleep(min(self.backoff_s * attempt, 8))
-            except Exception as e:
+                # A NON-retryable error (e.g. "no healthy credential
+                # configured": no key to try, and cooldowns outlast our 1-2s
+                # backoff) or the last allowed attempt ends this candidate
+                # now — falling through would re-call it for nothing and let
+                # the router move on to the next provider immediately.
+                if not retry:
+                    break
+                # the adapter's credential pool has already cooled the bad key;
+                # a fresh key on the same model may succeed, so keep retrying up
+                # to max_retries, respecting backoff only for transient errors.
+                time.sleep(min(self.backoff_s * attempt, 8))
+            except Exception as e:           # never let a provider kill routing
                 last_error = f"{type(e).__name__}: {e}"
                 self._errors[name] = self._errors.get(name, 0) + 1
                 retry = (not self._pinned(adapter) and attempt <= retries)
@@ -1379,16 +1435,19 @@ class AstraRouter:
                               if getattr(adapter, "pool", None) is not None
                               and hasattr(adapter.pool, "last_key") else None)
                 key_label = test_cred.label if test_cred else ""
-                if op is not None:
-                    self._emit("ai.failed", provider=name, model=model.model_id,
-                               error=last_error, attempt=attempt, op=op,
-                               trace=req.trace, terminal=not retry, retrying=retry,
-                               key_id=test_cred.key_id if test_cred else "",
-                               key_label=key_label)
-                if self._pinned(adapter) or not retry:
+                self._emit("ai.failed", provider=name, model=model.model_id,
+                           error=last_error, attempt=attempt, op=op,
+                           trace=req.trace, terminal=not retry, retrying=retry,
+                           key_id=test_cred.key_id if test_cred else "",
+                           key_label=key_label)
+                if self._pinned(adapter):
                     break
-                if credential_count == 0 or attempt >= credential_count:
+                if retry:
                     time.sleep(min(self.backoff_s * attempt, 8))
+        # A manual health probe records its per-key/model result but must
+        # not change aggregate provider availability. The probe is only a
+        # diagnostic observation; normal routing failures are still allowed
+        # to mark the provider down and trigger recovery/cooldown behavior.
         if req.task_type != "health_check":
             self._mark_down(name, last_error)
         return RoutingResult(ok=False, error=f"{name}: {last_error}",

@@ -1,11 +1,11 @@
 """Astra AI Gateway provider coverage.
 
-The Gateway has eleven connections: the original Gemini / Groq / Cloudflare /
+The Gateway has ten connections: the original Gemini / Groq / Cloudflare /
 Bedrock services plus OpenRouter / Mistral / Cerebras / SambaNova / Cohere /
-Z.AI (GLM) / Hugging Face. Every connection is independently configured
-through its own GW_* env vars, and all eleven share ONE execution contract
-(request → normalized response → usage → classification → retry → failover),
-which is what these tests pin.
+Z.AI (GLM). Every connection is independently configured through its own
+GW_* env vars, and all ten share ONE execution contract (request →
+normalized response → usage → classification → retry → failover), which is
+what these tests pin.
 
 Only the *upstream* is faked (a mock `urlopen` / a fake connection object):
 the Gateway's own request construction, auth headers, normalization, retry,
@@ -29,15 +29,14 @@ from astra.ai.gateway import (GATEWAY_CONNECTIONS, AstraAIGateway,
                               AstraGatewayBedrock, AstraGatewayCerebras,
                               AstraGatewayCloudflare, AstraGatewayCohere,
                               AstraGatewayGemini, AstraGatewayGroq,
-                              AstraGatewayHuggingFace, AstraGatewayMistral,
-                              AstraGatewayOpenRouter, AstraGatewaySambaNova,
-                              AstraGatewayZAI)
+                              AstraGatewayMistral, AstraGatewayOpenRouter,
+                              AstraGatewaySambaNova, AstraGatewayZAI)
 from astra.ai.gateway_routing import (GATEWAY_PROVIDER_SHORT,
                                       build_gateway_catalog,
                                       classify_gateway_request,
                                       eligible_targets, rank_targets)
 
-# ── the eleven connections, with the official endpoint each must use ───────
+# ── the ten connections, with the official endpoint each must use ──────────
 
 EXISTING_PROVIDERS = (
     # class, env prefix, official base URL, a model id it must default to
@@ -64,9 +63,6 @@ NEW_PROVIDERS = (
     (AstraGatewayCohere, "GW_COHERE", "https://api.cohere.ai/compatibility/v1",
      "command-a-03-2025"),
     (AstraGatewayZAI, "GW_ZAI", "https://api.z.ai/api/paas/v4", "glm-4.7-flash"),
-    (AstraGatewayHuggingFace, "GW_HUGGINGFACE",
-     "https://router.huggingface.co/v1",
-     "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
 )
 
 ALL_PROVIDERS = EXISTING_PROVIDERS + NEW_PROVIDERS
@@ -160,24 +156,21 @@ def _default_model(cls):
 # Registration / configuration
 # ═══════════════════════════════════════════════════════════════════════════
 class GatewayProviderRegistrationTests(unittest.TestCase):
-    def test_eleven_connections_declared_in_order(self):
+    def test_ten_connections_declared_in_order(self):
         names = [c.name for c in GATEWAY_CONNECTIONS]
-        self.assertEqual(len(names), 11)
+        self.assertEqual(len(names), 10)
         self.assertEqual(names[:4], ["astra-gw-gemini", "astra-gw-groq",
                                      "astra-gw-cloudflare", "astra-gw-bedrock"])
         self.assertEqual(names[4:], ["astra-gw-openrouter", "astra-gw-mistral",
                                      "astra-gw-cerebras", "astra-gw-sambanova",
-                                     "astra-gw-cohere", "astra-gw-zai",
-                                     "astra-gw-huggingface"])
+                                     "astra-gw-cohere", "astra-gw-zai"])
 
-    def test_all_eleven_have_a_short_provider_name(self):
+    def test_all_ten_have_a_short_provider_name(self):
         for cls in GATEWAY_CONNECTIONS:
             self.assertIn(cls.name, GATEWAY_PROVIDER_SHORT)
         # short names are the familiar provider names, used for model metadata
         self.assertEqual(GATEWAY_PROVIDER_SHORT["astra-gw-zai"], "zai")
         self.assertEqual(GATEWAY_PROVIDER_SHORT["astra-gw-sambanova"], "sambanova")
-        self.assertEqual(GATEWAY_PROVIDER_SHORT["astra-gw-huggingface"],
-                          "huggingface")
 
     def test_official_endpoints_and_gw_env_names(self):
         for cls, prefix, base_url, _model in ALL_PROVIDERS:
@@ -199,7 +192,7 @@ class GatewayProviderRegistrationTests(unittest.TestCase):
         env["GW_CLOUDFLARE_ACCOUNT_IDS"] = "acct-1"
         gw = AstraAIGateway(config=_cfg(**env))
         self.assertEqual([c.name for c in gw.connections], expected)
-        self.assertEqual(len(gw.connections), 11)
+        self.assertEqual(len(gw.connections), 10)
         self.assertTrue(gw.is_usable())
 
     def test_unconfigured_connections_are_absent_not_fatal(self):
@@ -458,32 +451,15 @@ class GatewayProviderErrorTests(unittest.TestCase):
         self.assertIn("503", str(ctx.exception))
         self.assertEqual(len(seen), 2)
 
-    def test_auth_failure_is_never_retried_on_the_same_key(self):
+    def test_auth_failure_is_never_retried(self):
         conn = _conn(AstraGatewayOpenRouter, _cfg(),
-                     env={"GW_OPENROUTER_API_KEYS": "k1", "GW_RETRY_BACKOFF": "0"})
+                     env={"GW_OPENROUTER_API_KEYS": "k1,k2", "GW_RETRY_BACKOFF": "0"})
         side, seen = _capture([_http_error(401)])
         with mock.patch("astra.ai.gateway.urllib.request.urlopen", side):
             with self.assertRaises(ProviderError) as ctx:
                 conn.chat([{"role": "user", "content": "x"}])
         self.assertIn("authentication failed", str(ctx.exception))
         self.assertEqual(len(seen), 1, "a bad key cannot be fixed by retrying")
-
-    def test_auth_failure_rotates_to_the_next_key(self):
-        conn = _conn(AstraGatewayOpenRouter, _cfg(),
-                     env={"GW_OPENROUTER_API_KEYS": "k1,k2", "GW_RETRY_BACKOFF": "0"})
-        side, seen = _capture([_http_error(401)])
-        with mock.patch("astra.ai.gateway.urllib.request.urlopen", side):
-            conn.chat([{"role": "user", "content": "x"}])
-        self.assertEqual(len(seen), 2, "key 1 rejected -> key 2 is tried")
-
-    def test_rate_limit_walks_every_key_beyond_max_retries(self):
-        conn = _conn(AstraGatewayOpenRouter, _cfg(),
-                     env={"GW_OPENROUTER_API_KEYS": "k1,k2,k3",
-                          "GW_RETRY_BACKOFF": "0", "GW_MAX_RETRIES": "0"})
-        side, seen = _capture([_http_error(429), _http_error(429)])
-        with mock.patch("astra.ai.gateway.urllib.request.urlopen", side):
-            conn.chat([{"role": "user", "content": "x"}])
-        self.assertEqual(len(seen), 3, "k1 429 -> k2 429 -> k3 succeeds")
 
     def test_model_level_404_keeps_the_key_usable_and_is_not_retried(self):
         conn = _conn(AstraGatewaySambaNova, _cfg(), env={"GW_RETRY_BACKOFF": "0"})
@@ -680,14 +656,12 @@ class GatewayFailoverTests(unittest.TestCase):
         return AstraAIGateway(connections=conns, config=_cfg(**env))
 
     def test_new_provider_fails_over_to_an_existing_one(self):
-        # Gemini is the primary provider, so it is tried first; when it
-        # fails the Gateway falls over to the next-best-health provider.
-        bad = _StubConn("astra-gw-gemini", ["gemini-3.5-flash"], fail=True)
-        good = _StubConn("astra-gw-mistral", ["mistral-small-2603"], fail=False)
+        bad = _StubConn("astra-gw-mistral", ["mistral-small-2603"], fail=True)
+        good = _StubConn("astra-gw-gemini", ["gemini-3.5-flash"], fail=False)
         gw = self._gw([bad, good])
         self.assertEqual(gw.chat([{"role": "user", "content": "hi"}]),
-                         "reply-from-astra-gw-mistral")
-        self.assertEqual(gw.last_connection, "astra-gw-mistral")
+                         "reply-from-astra-gw-gemini")
+        self.assertEqual(gw.last_connection, "astra-gw-gemini")
         self.assertEqual(gw.last_attempts, 2)
 
     def test_existing_provider_fails_over_to_a_new_one(self):

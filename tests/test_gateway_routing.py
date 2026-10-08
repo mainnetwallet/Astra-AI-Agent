@@ -79,15 +79,16 @@ class TestMultiModelSelection(unittest.TestCase):
         model_ids = {m.model_id for _, m in gw._catalog}
         self.assertEqual(model_ids, {"gemini-2.0-flash", "gemini-2.0-pro"})
 
-    def test_equal_health_keeps_configured_order_no_category_score(self):
+    def test_fastest_suitable_model_is_preferred_for_a_simple_request(self):
         from astra.ai.gateway import AstraAIGateway
-        # Identical health: no quality/category score any more, so the
-        # configured (first) model wins.
+        # "pro" -> quality_class high; "flash" -> quality_class fast. Both
+        # are otherwise identical/healthy, so the fast one should win a
+        # plain simple/general request.
         conn = _FakeMultiModelConn("astra-gw-gemini",
                                    ["gemini-2.0-pro", "gemini-2.0-flash"])
         gw = AstraAIGateway(connections=[conn])
         gw.chat(_msg("hi"))
-        self.assertEqual(gw.last_model, "gemini-2.0-pro")
+        self.assertEqual(gw.last_model, "gemini-2.0-flash")
 
     def test_capability_filtering_excludes_non_vision_model(self):
         from astra.ai.gateway import AstraAIGateway
@@ -143,7 +144,7 @@ class TestFailureRecovery(unittest.TestCase):
         self.assertEqual(result, "reply-from-astra-gw-groq-model-y")
         self.assertEqual(dead.calls, [])   # never even attempted
 
-    def test_health_only_ranking_ignores_category_fit(self):
+    def test_capability_aware_fallback_never_prefers_incapable_fast_model(self):
         from astra.ai.gateway import AstraAIGateway
         # "qwen2.5-coder-32b" -> family qwen: has "coding"; mid/high quality.
         # "llama-3.1-8b-flash-lite" -> family llama: NO "coding"; fast.
@@ -151,10 +152,8 @@ class TestFailureRecovery(unittest.TestCase):
             "astra-gw-groq", ["llama-3.1-8b-flash-lite", "qwen2.5-coder-32b"])
         gw = AstraAIGateway(connections=[conn])
         result = gw.chat([{"role": "user", "content": "fix this python bug"}])
-        # Coding is a soft category now (no score bonus): equal health keeps
-        # the configured order.
-        self.assertEqual(gw.last_model, "llama-3.1-8b-flash-lite")
-        self.assertEqual(result, "reply-from-astra-gw-groq-llama-3.1-8b-flash-lite")
+        self.assertEqual(gw.last_model, "qwen2.5-coder-32b")
+        self.assertEqual(result, "reply-from-astra-gw-groq-qwen2.5-coder-32b")
 
 
 # ── persistent last-successful target (§4/§5/§14) ───────────────────────────

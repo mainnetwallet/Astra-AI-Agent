@@ -17,7 +17,6 @@ the `Agent.handle` exception fallback (see agent.py).
 """
 from __future__ import annotations
 
-import json
 import re
 
 from astra.security import redact_text
@@ -45,50 +44,7 @@ _DATA_URI_MEDIA_RE = re.compile(
 
 def _looks_like_protocol_json(fragment: str) -> bool:
     hits = sum(1 for k in _PROTOCOL_KEYS if f'"{k}"' in fragment)
-    if hits >= 2:
-        return True
-    # A bare `{"action": "final", "answer": ...}` / `{"action": "tool", ...}`
-    # carries only ONE of the keys above, yet it is unmistakably Astra's
-    # protocol wrapper (agent_tool_loop.TOOL_PROTOCOL) and must not reach the
-    # user either.
-    return bool(_ACTION_RE.search(fragment))
-
-
-_ACTION_RE = re.compile(r'"action"\s*:\s*"(?:tool|final)"')
-_FINAL_RE = re.compile(r'"action"\s*:\s*"final"')
-# The `answer` string of a (possibly truncated) final wrapper.
-_ANSWER_RE = re.compile(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)', re.S)
-
-
-def salvage_final_answer(fragment: str) -> str:
-    """Human-readable answer carried by ONE protocol fragment, else "".
-
-    Only a `{"action": "final", "answer": ...}` wrapper carries user-facing
-    text; a `tool` call carries none. Handles a well-formed wrapper and one
-    truncated mid-string (e.g. cut off by a max_tokens limit) — in both the
-    wrapper itself is dropped and only the answer text survives."""
-    if not _FINAL_RE.search(fragment):
-        return ""
-    try:
-        data = json.loads(fragment)
-        if isinstance(data, dict) and data.get("action") == "final":
-            ans = data.get("answer")
-            return ans.strip() if isinstance(ans, str) else ""
-    except Exception:
-        pass
-    m = _ANSWER_RE.search(fragment)
-    if not m:
-        return ""
-    raw = m.group(1)
-    try:
-        return json.loads('"' + raw + '"').strip()
-    except Exception:
-        # truncated escape sequence at the very end: drop the dangling `\`
-        raw = raw.rstrip("\\")
-        try:
-            return json.loads('"' + raw + '"').strip()
-        except Exception:
-            return raw.replace("\\n", "\n").replace('\\"', '"').strip()
+    return hits >= 2
 
 
 def _scan_top_level_objects(text: str):
@@ -140,8 +96,7 @@ def _scan_top_level_objects(text: str):
 def _strip_protocol_fragments(text: str) -> tuple[str, bool]:
     """Remove every top-level JSON object (balanced, or run-on to the end
     of the string if truncated) that looks like internal tool protocol.
-    A `final` wrapper is replaced by its `answer` text (the human-readable
-    part), never left as JSON. Returns (cleaned_text, removed_any)."""
+    Returns (cleaned_text, removed_any)."""
     removed = False
     out = []
     last = 0
@@ -149,47 +104,10 @@ def _strip_protocol_fragments(text: str) -> tuple[str, bool]:
         frag = text[start:end]
         if _looks_like_protocol_json(frag):
             out.append(text[last:start])
-            answer = salvage_final_answer(frag)
-            if answer:
-                out.append(answer)
             removed = True
             last = end
     out.append(text[last:])
     return "".join(out), removed
-
-
-# The literal text every provider adapter returns when the model produced NO
-# content at all (see astra/ai/adapters/base.py, gateway.py, provider.py).
-# It is an adapter placeholder, never an answer: treating it as real text is
-# exactly how an empty provider reply reached the user as "(no reply)".
-NO_REPLY_SENTINEL = "(no reply)"
-
-
-def is_no_reply(text) -> bool:
-    """True when `text` is nothing but the adapters' empty-reply placeholder."""
-    return str(text or "").strip().strip("()[]").strip().lower() == "no reply"
-
-
-def is_unusable_answer(text) -> bool:
-    """True when `text` cannot be shown to a user as an answer: empty, the
-    adapters' `(no reply)` placeholder, or nothing left once every internal
-    protocol fragment / media data URI is stripped."""
-    if not text or not str(text).strip():
-        return True
-    if is_no_reply(text):
-        return True
-    cleaned = strip_internal_protocol(str(text))
-    return not cleaned or is_no_reply(cleaned)
-
-
-def strip_internal_protocol(text: str) -> str:
-    """Public helper: `text` with all internal protocol removed (a `final`
-    wrapper unwrapped to its answer), redacted and trimmed. May be empty."""
-    if not text:
-        return ""
-    cleaned, _ = _strip_protocol_fragments(text)
-    cleaned, _ = _strip_embedded_media(cleaned)
-    return redact_text(cleaned).strip()
 
 FALLBACK_TEXT = (
     "Sorry — I ran into an internal formatting issue producing that reply. "
@@ -210,7 +128,7 @@ def _strip_embedded_media(text: str) -> tuple[str, bool]:
     return cleaned, n > 0
 
 
-def sanitize_final_response(text: str, fallback: str | None = None) -> str:
+def sanitize_final_response(text: str) -> str:
     """The response-boundary guard. Call this on every piece of text that is
     about to be handed back as the `reply` field of a chat turn, regardless
     of which path produced it (tool loop, single-call provider path, error
@@ -219,37 +137,21 @@ def sanitize_final_response(text: str, fallback: str | None = None) -> str:
     1. Strip any embedded internal tool-call/agent-protocol JSON
        (action/tool/args/session_id/thought) that slipped through — a
        normalization guard against accidental protocol leakage, not a
-       prompt instruction. A `{"action": "final", "answer": ...}` wrapper is
-       unwrapped to its answer rather than dropped.
+       prompt instruction.
     2. Redact anything that looks like a credential/token/secret (reuses
        `astra.security.redact_text`, which already recognizes GitHub PATs,
        OpenAI-shaped keys, bearer tokens, etc.) so a token echoed back in a
        tool result, error message or terminal transcript never reaches the
        API response.
-
-    `fallback` is an optional, already-computed recovery text derived from
-    REAL tool results (see `agent_tool_loop.summarize_tool_steps`). When the
-    reply is empty or was nothing but protocol, that recovery text is used
-    instead of the generic FALLBACK_TEXT: a successful tool execution must
-    never surface as an "internal formatting issue". The recovery text goes
-    through the very same protection (protocol strip + redaction).
     """
-    def _recovered() -> str | None:
-        if not fallback:
-            return None
-        cleaned = strip_internal_protocol(fallback)
-        return cleaned or None
-
-    if not text or not text.strip() or is_no_reply(text):
-        rec = _recovered()
-        return rec if rec is not None else text
+    if not text:
+        return text
     cleaned, removed_protocol = _strip_protocol_fragments(text)
     cleaned, removed_media = _strip_embedded_media(cleaned)
     cleaned = redact_text(cleaned)
     cleaned = cleaned.strip()
     if removed_protocol and not cleaned:
-        rec = _recovered()
-        return rec if rec is not None else FALLBACK_TEXT
+        return FALLBACK_TEXT
     if removed_media and not cleaned:
         return MEDIA_FALLBACK_TEXT
     return cleaned if cleaned else text

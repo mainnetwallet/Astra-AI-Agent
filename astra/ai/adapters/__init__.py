@@ -5,7 +5,7 @@ list_models/supports) and keeps provider-specific HTTP inside its own file.
 The AstraRouter never touches provider HTTP — it scores the adapters here.
 
 The Astra AI Gateway (astra/ai/gateway.py) is NOT among these either: it is
-a completely separate, isolated system with its own eleven AI connections
+a completely separate, isolated system with its own ten AI connections
 (GW_* config) and its own execution path — never a provider adapter, never
 in this table, and never invoked as a fallback for these providers.
 
@@ -22,7 +22,6 @@ from .cerebras import CerebrasAdapter
 from .cohere import CohereAdapter
 from .gemini import GeminiAdapter
 from .groq import GroqAdapter
-from .huggingface import HuggingFaceAdapter
 from .mistral import MistralAdapter
 from .openrouter import OpenRouterAdapter
 from .sambanova import SambaNovaAdapter
@@ -32,8 +31,8 @@ __all__ = [
     "CompatibleAdapter",
     "BedrockAdapter", "BedrockCredentialPool", "sign_v4",
     "CloudflareAdapter", "CerebrasAdapter", "CohereAdapter", "GeminiAdapter",
-    "GroqAdapter", "HuggingFaceAdapter", "MistralAdapter", "OpenRouterAdapter",
-    "SambaNovaAdapter", "ZAIAdapter",
+    "GroqAdapter", "MistralAdapter", "OpenRouterAdapter", "SambaNovaAdapter",
+    "ZAIAdapter",
 ]
 
 # provider name -> adapter class. The Astra AI Gateway is intentionally absent —
@@ -41,7 +40,6 @@ __all__ = [
 ADAPTERS: dict[str, type] = {
     "gemini": GeminiAdapter,
     "groq": GroqAdapter,
-    "huggingface": HuggingFaceAdapter,
     "mistral": MistralAdapter,
     "openrouter": OpenRouterAdapter,
     "cerebras": CerebrasAdapter,

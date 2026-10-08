@@ -60,71 +60,9 @@
 
   function isMeaningful(event) {
     var e = event || {};
-    var d = e.data && typeof e.data === "object" ? e.data : {};
     var kind = String(e.kind == null ? "" : e.kind);
-    // Event task metadata can live either on the normalized event itself or
-    // inside data. Resolve both shapes so health-control-plane filtering does
-    // not depend on which endpoint produced the event.
-    var task = d.task != null ? String(d.task) :
-               (e.task != null ? String(e.task) :
-               (e.task_type != null ? String(e.task_type) : ""));
     if (!kind) return false;
     if (NOISE_KINDS[kind]) return false;
-
-    // Router events are control-plane bookkeeping, not upstream API calls.
-    // The Activity Log should show the actual Provider/Gateway operation
-    // instead of a misleading generic "Agent Router" row.
-    if (kind.indexOf("router.") === 0) return false;
-    // Gateway recovery is an internal post-call bookkeeping event, not a
-    // separate upstream API call. Keep the Activity Log provider-centric.
-    if (kind === "gateway.execution_recovery" || kind.indexOf("gateway.") === 0) return false;
-
-    // A Gateway health-check probe (astra_gateway.test, from the AI
-    // Provider health page) can reuse a Provider-side shared-health result
-    // via SharedHealthCoordinator (astra/ai/shared_health.py). reused:true
-    // means THIS caller made no upstream request at all -- the original
-    // owner already produced the real call/result event, so a second
-    // synthetic health-test row for the same shared result would be noise.
-    // This is the ONLY astra_gateway.* dedup case: it exists purely for the
-    // health page's shared-probe bookkeeping, not for ordinary chat.
-    //
-    // Every other astra_gateway.* kind (request/success/error) is a genuine
-    // per-turn upstream call the Gateway itself makes -- during ordinary
-    // chat processing (understand/verify/tool-brain calls) as well as an
-    // explicit model call -- and it is the ONLY record of that call
-    // anywhere in the log, so it must always stay visible. (Previously this
-    // was hidden whenever the model also existed in the plain Provider
-    // catalog, which silently swallowed every real Gateway call made with
-    // an overlapping model -- e.g. understand()/verify() picking a Cohere
-    // model that Cohere's own provider adapter also lists. The
-    // per-connection ai.started/ai.completed duplicate of that SAME call is
-    // dropped separately below via `e.agent === "gateway"`, so nothing is
-    // double-counted by showing the wrapper event unconditionally.)
-    if (kind === "astra_gateway.test" && d.reused === true) return false;
-
-    // Health probes emit router-level retry/fallback lifecycle events as
-    // bookkeeping around the actual provider call. The provider result row
-    // is the real API activity, so do not render the router control-plane
-    // duplicate for health_check operations.
-    if (task === "health_check" &&
-        (kind === "router.retry" || kind === "router.fallback")) return false;
-
-    // A health probe can also emit an aggregate ai.failed before the
-    // key-specific provider failure. When no key/attempt identity is present,
-    // that row is only the router summary; the keyed ai.failed below is the
-    // actual provider call/result and should be the single visible failure.
-    if (kind === "ai.failed" && task === "health_check" &&
-        (d.provider || d.model || e.provider || e.model) &&
-        !d.key_label && !d.key && !d.key_id && !e.key_label && !e.key && !e.key_id) return false;
-
-    // A routing health check can fail before selecting any provider/model.
-    // Attempts: 0 + this exact "no eligible" result means there was no
-    // upstream API call to report, so keeping it in Activity Log is noise.
-    if (kind === "ai.failed" &&
-        Number(d.attempts || d.attempt || 0) === 0 &&
-        /no eligible provider\/model available/i.test(String(d.error || ""))) {
-      return false;
-    }
     // The Gateway's own connections also emit ai.* while streaming, but every
     // Gateway call is already reported (with provider+model) by the
     // astra_gateway.* wrapper — showing both would double-count one call.
@@ -203,7 +141,7 @@
     "astra_gateway.success": ["🧭", "Gateway call"],
     "astra_gateway.error":   ["🧭", "Gateway error"],
     "astra_gateway.stream_interrupted": ["🧭", "Gateway stream interrupted"],
-    "astra_gateway.test":    ["🧭", "Gateway API test"],
+    "astra_gateway.test":    ["🧭", "Gateway test"],
     "router.request":  ["🧠", "Agent Router"],
     "router.decision": ["🧠", "Agent Router"],
     "router.fallback": ["🧠", "Agent Router"],
@@ -213,9 +151,6 @@
     "provider.health_changed": ["🩺", "Provider health"],
     "provider.selected": ["🩺", "Provider selected"],
     "provider.failed": ["🩺", "Provider failed"],
-    "provider.discovery.request": ["🔎", "Model discovery"],
-    "provider.discovery.success": ["🔎", "Models discovered"],
-    "provider.discovery.error":   ["🔎", "Model discovery failed"],
     "credential.rotation": ["🔑", "Credential rotation"],
     "chat.pipeline.started":  ["🚀", "Request received"],
     "chat.pipeline.assigned": ["🧭", "Agent assigned"],
@@ -478,7 +413,6 @@
       fields: fieldsOf(e, d),
       input: input,
       output: output,
-      gatewayOnly: d.gateway_only === true,
     };
     out.search = [out.kind, out.agent, out.title, out.subject, out.detail,
                   out.category].join(" ").toLowerCase();
@@ -557,7 +491,7 @@
    * higher-level request/run that owns it, so a request that ends can resolve
    * any child it left running. */
   var START_SUFFIX = /\.(started|request)$/;
-  var TERMINAL_SUFFIX = /\.(completed|succeeded|success|recovered|failed|error|timeout|cancelled|rejected|confirmed|done|finished|exhausted)$/;
+  var TERMINAL_SUFFIX = /\.(completed|succeeded|failed|error|timeout|cancelled|rejected|confirmed|done|finished|exhausted)$/;
   var WEB3_TERMINAL = /^web3\.transaction\.(confirmed|failed|rejected)$/;
   var UPDATE_KINDS = /^(router\.(retry|fallback|gateway_task_completion|gateway_supervision)|credential\.rotation|gateway\.(target_cooldown|execution_completed|execution_recovered|execution_failed))$/;
 
@@ -645,50 +579,14 @@
     return state;
   }
 
-  // A model is countable once, at the moment its operation resolves: an ai
-  // row only at its real API-call terminal (isApiCallTerminal -- a "started"
-  // placeholder is never counted), and every other category (tools,
-  // browser, web3, agents) once it leaves "running". This is the single
-  // predicate both count() (new row) and recount() (lifecycle merge:
-  // started -> completed/failed) key off of, so a row is counted exactly
-  // once no matter which path it took.
-  function isCountable(model) {
-    if (!model) return false;
-    if (model.category === "ai") return isApiCallTerminal(model);
-    return model.status !== "running";
-  }
-
-  // The {total, ai/tools/browser/web3/agents, errors} deltas ONE instance of
-  // a countable model contributes. `ai` only counts a success (matching the
-  // pre-existing behavior); every other category counts on resolution
-  // regardless of ok/err (a failed tool run is still one tool operation);
-  // `errors` counts an "err" status in ANY category, not just ai.
-  function countDelta(model) {
-    const out = {};
-    const cat = model.category;
-    if (cat === "ai") {
-      // "total" is the "Total API Calls" stat: only real provider/gateway
-      // API calls (this category) count toward it, on either outcome.
-      out.total = 1;
-      if (model.status === "ok") out.ai = 1;
-    } else if (cat === "tools" || cat === "browser" || cat === "web3" ||
-               cat === "agents") {
-      out[cat] = 1;
-    }
-    if (model.status === "err") out.errors = 1;
-    return out;
-  }
-
-  function applyDelta(counts, delta, sign) {
-    Object.keys(delta).forEach(function (k) {
-      counts[k] = (counts[k] || 0) + sign * delta[k];
-    });
-  }
-
   // Adjust category/error counters when a row changes status (running -> ok/err).
   function recount(state, oldModel, newModel) {
-    if (isCountable(oldModel)) applyDelta(state.counts, countDelta(oldModel), -1);
-    if (isCountable(newModel)) applyDelta(state.counts, countDelta(newModel), 1);
+    if (oldModel) {
+      if (state.counts[oldModel.category] != null) state.counts[oldModel.category]--;
+      if (oldModel.status === "err") state.counts.errors--;
+    }
+    if (state.counts[newModel.category] != null) state.counts[newModel.category]++;
+    if (newModel.status === "err") state.counts.errors++;
     return state.counts;
   }
 
@@ -878,19 +776,10 @@
     return state.pending.length;
   }
 
-  // Activity counters represent completed real operations, not lifecycle
-  // START rows. For AI, one provider API attempt is counted exactly once when
-  // its terminal success/failure arrives. Gateway-only manual tests are also
-  // real API calls and are terminal standalone events.
-  function isApiCallTerminal(model) {
-    if (!model) return false;
-    if (model.kind === "astra_gateway.test" && model.gatewayOnly === true)
-      return true;
-    return model.category === "ai" && !!model.endTs;
-  }
-
   function count(state, model) {
-    if (isCountable(model)) applyDelta(state.counts, countDelta(model), 1);
+    state.counts.total++;
+    if (state.counts[model.category] != null) state.counts[model.category]++;
+    if (model.status === "err") state.counts.errors++;
     return state.counts;
   }
 

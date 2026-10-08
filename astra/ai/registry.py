@@ -8,9 +8,9 @@ provider, and gets no adapter, no models list, no credentials.
 
 Two provider families are registered here:
 
-* the eleven **modern adapters** in `astra/ai/adapters/` (gemini, groq,
-  mistral, openrouter, cerebras, cloudflare, sambanova, cohere, zai, bedrock,
-  huggingface), built from `<PROVIDER>_API_KEYS`; and
+* the ten **modern adapters** in `astra/ai/adapters/` (gemini, groq, mistral,
+  openrouter, cerebras, cloudflare, sambanova, cohere, zai, bedrock), built
+  from `<PROVIDER>_API_KEYS`; and
 * the two **backward-compatible** providers in `astra/ai/provider.py` —
   `ClaudeProvider` (name `anthropic`, via `ANTHROPIC_API_KEY`) and
   `OpenAICompatibleProvider` (via `AI_BASE_URL`/`AI_API_KEY`).
@@ -31,7 +31,6 @@ KEYS_ENV = {
     "cerebras": "CEREBRAS_API_KEYS", "cloudflare": "CLOUDFLARE_API_KEYS",
     "sambanova": "SAMBA_API_KEYS", "cohere": "COHERE_API_KEYS",
     "zai": "ZAI_API_KEYS", "bedrock": "BEDROCK_CREDENTIALS",
-    "huggingface": "HF_API_KEYS",
 }
 
 

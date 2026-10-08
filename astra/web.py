@@ -53,12 +53,6 @@ System endpoints:
 
   GET  /api/health          database/providers/tools/scheduler diagnostics
   GET  /api/config          public (non-secret) config snapshot
-  GET  /api/security/status                 Security Center aggregate (real data only)
-  POST /api/security/emergency-shutdown     {confirm:true} latch + stop all agent execution
-  POST /api/security/emergency-release      {confirm:true} lift the latch
-  POST /api/security/backup/create          -> astra_backup_*.zip (secret-free, versioned)
-  POST /api/security/backup/inspect         multipart file -> validation + restore preview
-  POST /api/security/backup/restore         multipart file + strategy/categories/confirm
   GET  /api/events          recent live events; ?after_id= for tailing
   GET  /api/events/stream   Server-Sent Events feed (Live tab)
   GET  /api/tools           universal tool registry listing
@@ -113,16 +107,7 @@ New /api/v1 endpoints:
   POST /api/v1/web3/transaction-policy/mode   (operator token required)
   POST /api/v1/web3/transactions/{tx_id}/authorize  (CONFIRM-mode approve; operator token required)
   POST /api/v1/web3/transactions/{tx_id}/reject     (CONFIRM-mode reject; operator token required)
-  GET  /api/v1/web3/wallets                   (wallet registry: wallets + groups + active)
-  POST /api/v1/web3/wallets/import            ({text, group_id?, group_name?, dry_run?} one wallet per line;
-                                                group_name creates ONE group only if 2+ wallets import)
-  POST /api/v1/web3/wallets/create            ({name?, group_id?}; one-time key reveal)
-  POST /api/v1/web3/wallets/{id}/select | move
-  DELETE /api/v1/web3/wallets/{id}            (also POST .../{id}/delete; removes the wallet, its group
-                                                memberships and its encrypted key record; returns the registry)
-  POST /api/v1/web3/wallet-groups             ({name});  /{gid}/rename | delete | members
   GET  /api/metrics              server + subsystem metrics
-  GET  /api/system-resources     live host telemetry only (CPU/mem/disk/net), no-store
 """
 from __future__ import annotations
 
@@ -136,9 +121,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from .agent import Agent
 from .chat_log import ChatLog
-from .host_metrics import resources_snapshot
-
-LIVE_RESOURCES_PATH = ["api", "system-resources"]
+from .ai.router import classify
 from .ai.conversation_context import ConversationContextBuilder
 from .security import (REDACTED, ApiError, RateLimiter, make_request_id,
                      redact)
@@ -198,7 +181,8 @@ CORE_TABS = [
     # SchedulerManager (astra/workflows/) and the ONE ToolRegistry. It is a
     # core tab, not a plugin — the plugin system was removed.
     {"tab": "workflow", "label": "\U0001f500 Agent Workflow", "core": True},
-    {"tab": "providers", "label": "\U0001f50c Providers Health Test", "core": True},
+    {"tab": "providers", "label": "\U0001f50c AI Providers health", "core": True},
+    {"tab": "router", "label": "\U0001f9e0 Router", "core": True},
     {"tab": "web3", "label": "\u26d3\ufe0f Wallet", "core": True},
     {"tab": "backup", "label": "\U0001f4be Backup", "core": True},
 ]
@@ -684,9 +668,6 @@ class AstraSite:
         except Exception:
             rl = 300
         self.rate_limiter = RateLimiter(rl, 60.0)
-        # live host telemetry is polled ~2x/s by the System Health panel; it gets its
-        # own bucket so it can neither starve nor be starved by normal API traffic
-        self.live_rate_limiter = RateLimiter(max(rl * 4, 1200), 60.0)
         self._allowed_origins = set(
             (cfg.getlist("ASTRA_CORS_ORIGINS") if cfg else None) or [])
         # -- observability: tiny in-memory request counters --------------------
@@ -725,9 +706,6 @@ class AstraSite:
 
     def orchestrator(self):
         return self._get("orchestrator")
-
-    def agent_manager(self):
-        return self._get("agent_manager")
 
     def cfg(self):
         return self._get("config")
@@ -787,8 +765,6 @@ class AstraSite:
                            "stopped": bool(getattr(tx, "stopped", False))}
         if self.scheduler():
             out["scheduler"] = self.scheduler().stats()
-        # real host telemetry (psutil) — additive; never breaks the payload
-        out["resources"] = resources_snapshot()
         return out
 
     def health(self) -> dict:
@@ -913,8 +889,8 @@ class WebApp:
                          or req.query.get("token", ""))
         return bool(candidate) and hmac.compare_digest(candidate, token)
 
-    def _rate_limited(self, req: Request, live: bool = False) -> bool:
-        limiter = self.site.live_rate_limiter if live else self.site.rate_limiter
+    def _rate_limited(self, req: Request) -> bool:
+        limiter = self.site.rate_limiter
         if not limiter:
             return False
         return not limiter.allow(req.remote_ip)
@@ -927,7 +903,7 @@ class WebApp:
         if not self._authorized(req):
             return error_response("authentication required", 401,
                                   "authentication", req.rid)
-        if self._rate_limited(req, live=(path == LIVE_RESOURCES_PATH)):
+        if self._rate_limited(req):
             return error_response("rate limit exceeded", 429,
                                   "rate_limit", req.rid)
         return None
@@ -943,8 +919,6 @@ class WebApp:
         gated = self._gate(req, path)
         if gated is not None:
             return gated
-        if path == LIVE_RESOURCES_PATH:
-            return self._live_resources(req)      # cheap path: no counters, no routing
         site.note_request(req.method, path)
         try:
             return self._route(req, path)
@@ -956,13 +930,6 @@ class WebApp:
             detail = str(e) if site.env != "production" else ""
             msg = f"internal error{': ' + detail if detail else ''}"
             return error_response(msg, 500, "internal", req.rid)
-
-    def _live_resources(self, req: Request) -> Response:
-        """GET /api/system-resources — host telemetry ONLY (psutil), no
-        provider/model/router/gateway work. Non-blocking sampling; no-store."""
-        if req.method != "GET":
-            return error_response("method not allowed", 405, "bad_request", req.rid)
-        return json_response({"ok": True, "data": resources_snapshot()}, rid=req.rid)
 
     # -- static / stored files ----------------------------------------------
     def _static(self, rel: str, req: Request) -> Response:
@@ -1258,90 +1225,6 @@ class WebApp:
                                         503, "runtime_unavailable", req.rid)
         return manager.default(), None
 
-    # -- Security Center ------------------------------------------------------
-    def _security(self, req: Request, path: list) -> Response:
-        """/api/security/* — status, emergency shutdown, total backup/import.
-
-        Every route sits behind the normal operator-token gate + rate
-        limiter (`_gate`). Destructive actions need an explicit
-        `confirm: true`; nothing here is reachable from the LLM tool surface.
-        """
-        from . import backup as _backup
-        from .security_center import build_status
-        site, method, body = self.site, req.method, req.body
-        sub = path[2:]
-        if sub == ["status"] and method == "GET":
-            return json_response({"ok": True, "data": build_status(site)},
-                                 rid=req.rid)
-        em = site._get("emergency")
-        if sub in (["emergency-shutdown"], ["emergency-release"]) and method == "POST":
-            if em is None:
-                return error_response("emergency shutdown is unavailable", 400,
-                                      "emergency_unavailable", req.rid)
-            if body.get("confirm") is not True:
-                return error_response("confirm must be true", 400,
-                                      "validation", req.rid)
-            if sub == ["emergency-shutdown"]:
-                return json_response({"ok": True, "data": em.engage("operator")},
-                                     rid=req.rid)
-            return json_response({"ok": True, "data": em.release("operator")},
-                                 rid=req.rid)
-        if sub[:1] == ["backup"] and len(sub) == 2 and method == "POST":
-            stack = site._stack
-            try:
-                if sub[1] == "create":
-                    blob, manifest = _backup.create_backup(site.store, stack)
-                    name = _backup.backup_filename()
-                    meta = json.dumps({"filename": name, "manifest": manifest},
-                                      ensure_ascii=True, separators=(",", ":"))
-                    return Response(
-                        200, blob, "application/zip", cache="no-store",
-                        headers=[("Content-Disposition",
-                                  'attachment; filename="%s"' % name),
-                                 ("X-Astra-Backup", meta)])
-                if sub[1] in ("inspect", "restore"):
-                    files = req.files or []
-                    if not files:
-                        return error_response("attach a backup file", 400,
-                                              "validation", req.rid)
-                    blob = files[0].get("data") or b""
-                    if sub[1] == "inspect":
-                        return json_response(
-                            {"ok": True,
-                             "data": _backup.inspect_backup(site.store, blob)},
-                            rid=req.rid)
-                    fields = req.fields or {}
-                    if str(fields.get("confirm", "")).lower() != "true":
-                        return error_response("confirm must be true", 400,
-                                              "validation", req.rid)
-                    cats = [c for c in str(fields.get("categories", "")).split(",")
-                            if c] or None
-                    result = _backup.restore_backup(
-                        site.store, blob, fields.get("strategy") or "keep_existing",
-                        cats, stack)
-                    return json_response({"ok": True, "data": result},
-                                         rid=req.rid)
-            except _backup.BackupError as e:
-                status = 409 if e.code == "backup_incompatible" else 400
-                return error_response(str(e), status, e.code, req.rid)
-        return error_response("not found", 404, "not_found", req.rid)
-
-    def _system_map(self, req) -> Response:
-        """Read-only aggregate for the System Map UI: the AgentManager's
-        registered specialists and the live security posture. Secret-free by
-        construction — it reports whether a control is on, never a token,
-        key, origin list or credential."""
-        site = self.site
-        mgr = site.agent_manager()
-        agents = mgr.list() if mgr is not None else []
-        from .security_center import system_map_security
-        security = system_map_security(site)
-        return json_response({"ok": True, "data": {
-            "agents": agents,
-            "agent_manager": {"available": mgr is not None, "registered": len(agents)},
-            "security": security,
-        }}, rid=req.rid)
-
     def _runtime_status(self, req) -> Response:
         runtime, err = self._runtime(req)
         if err is not None:
@@ -1609,18 +1492,6 @@ class WebApp:
         return json_response({"ok": True, "data": {"uploads": results}},
                              rid=req.rid)
 
-    def _image_operation(self, msg, attachments) -> str:
-        """Gateway-owned image-operation classification for /api/chat. An
-        agent without a Gateway pipeline (or a stub agent) simply has no
-        image operation; that must never turn into a 500 before the agent
-        even runs."""
-        gateway = getattr(getattr(self.site.agent, "pipeline", None),
-                          "gateway", None)
-        fn = getattr(gateway, "classify_image_operation", None)
-        if not callable(fn):
-            return ""
-        return fn(msg, attachments)
-
     # -- main route table ----------------------------------------------------
     def _route(self, req: Request, path: list) -> Response:
         site, q, body = self.site, req.query, req.body
@@ -1630,10 +1501,6 @@ class WebApp:
             return self._static("index.html", req)
         if path[0] == "static":
             return self._static("/".join(path[1:]), req)
-        # SPA pages with their own address: serve the same shell; astra_os.js
-        # reads location.pathname and opens the matching view.
-        if path in (["system-map"], ["command-center"]) and method == "GET":
-            return self._static("index.html", req)
         if path[0] == "favicon.ico":
             return Response(204, cache=None, hardened=False)
 
@@ -1680,12 +1547,12 @@ class WebApp:
                     has_current_image = any(
                         isinstance(a, dict) and a.get("family") == "image"
                         for a in agent_attachments)
-                    operation = self._image_operation(msg, agent_attachments)
+                    operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
                     if not has_current_image and operation in ("image_editing", "image_inpainting"):
                         previous_image = log.latest_image_attachment(cid)
                         if previous_image:
                             agent_attachments.append(previous_image)
-                            operation = self._image_operation(msg, agent_attachments)
+                            operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
                     cid = log.add_user(msg, files=names,
                                        attachments=agent_attachments,
                                        conversation_id=cid)
@@ -1706,12 +1573,12 @@ class WebApp:
                             "data": {"duplicate_of_pending": True}}
                 else:
                     agent_attachments = []
-                    operation = self._image_operation(msg, agent_attachments)
+                    operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
                     if operation in ("image_editing", "image_inpainting"):
                         previous_image = log.latest_image_attachment(cid)
                         if previous_image:
                             agent_attachments.append(previous_image)
-                            operation = self._image_operation(msg, agent_attachments)
+                            operation = site.agent.pipeline.gateway.classify_image_operation(msg, agent_attachments)
                     cid = log.add_user(msg, attachments=agent_attachments,
                                        conversation_id=cid)
                     token = log.begin(cid)
@@ -1802,8 +1669,6 @@ class WebApp:
         if path == ["api", "import"] and method == "POST":
             result = site.agent.import_all(body.get("data", body))
             return json_response({"ok": True, "data": result}, rid=req.rid)
-        if path[:2] == ["api", "security"] and len(path) >= 3:
-            return self._security(req, path)
         if path == ["api", "health"] and method == "GET":
             return json_response({"ok": True, "data": site.health()}, rid=req.rid)
         if path == ["api", "config"] and method == "GET":
@@ -1853,8 +1718,6 @@ class WebApp:
         # sessions streamed over SSE, raw keyboard input, resize, and the
         # runtime-scoped file manager. Everything targets the isolated
         # runtime — no endpoint can address a host path.
-        if path == ["api", "system-map"] and method == "GET":
-            return self._system_map(req)
         if path == ["api", "runtime", "status"] and method == "GET":
             return self._runtime_status(req)
         if path == ["api", "runtime", "lifecycle"] and method == "POST":
@@ -2004,18 +1867,10 @@ class WebApp:
             # module docstring: without all three nothing can be
             # called), so a partially-configured provider is dropped
             # here rather than shown as a confusing "0 models" row.
-            #
-            # "configured" here means at least one key was ever SET, via
-            # `len(keys)` — NOT `p.get("credentials")`, which reflects
-            # only CURRENTLY-healthy keys. A provider whose one key just
-            # failed a manual test (e.g. a gated-model 401/403) would
-            # otherwise vanish from this health panel entirely instead of
-            # showing up unhealthy/red, which is what a health panel is
-            # for — and it would stay invisible until a process restart.
             provs = data.get("providers") or {}
             data["providers"] = {
                 n: p for n, p in provs.items()
-                if len(p.get("keys") or []) and p.get("base_url") and p.get("models")
+                if p.get("credentials") and p.get("base_url") and p.get("models")
             }
             return json_response({"ok": True, "data": data}, rid=req.rid)
 
@@ -2402,9 +2257,6 @@ class WebApp:
         if (len(path) == 5 and path[:3] == ["api", "web3", "transactions"]
                 and method == "POST" and path[4] in ("authorize", "reject")):
             return self._web3_tx_action(req, path[3], path[4], body)
-        if path[:2] == ["api", "web3"] and len(path) >= 3 \
-                and path[2] in ("wallets", "wallet-groups"):
-            return self._web3_wallets(req, path, body)
         return None
 
     def _models(self, req: Request) -> Response:
@@ -2518,22 +2370,12 @@ class WebApp:
             rid=req.rid)
 
     def _gateway_test(self, req: Request) -> Response:
-        """Test only the Astra AI Gateway's own connections.
-
-        Clears the shared manual-test/health cache first (mirroring
-        AstraRouter.reset_all_health for the Provider "test all" button):
-        without this, a credential that failed once (e.g. a stale/invalid
-        key) stays cached as a failure for up to shared_health's TTL, so
-        fixing the key and re-running this exact endpoint would silently
-        keep replaying the old cached failure instead of making a fresh
-        upstream call."""
+        """Test only the Astra AI Gateway's own connections."""
         router = self.site.router()
         gw = getattr(router, "gateway", None) if router else None
         if gw is None:
             return error_response("Astra AI Gateway not configured", 400,
                                   "gateway_unavailable", req.rid)
-        if gw.shared_health is not None:
-            gw.shared_health.invalidate()
         return json_response({"ok": True,
                               "data": {"connections": gw.test_all_connections()}},
                              rid=req.rid)
@@ -2551,18 +2393,12 @@ class WebApp:
 
     def _gateway_test_one(self, req: Request, name) -> Response:
         """Test one Astra AI Gateway connection (e.g. 'astra-gw-gemini') —
-        every model it exposes, not just one.
-
-        Resets this connection's shared-health cache first, same reasoning
-        as `_gateway_test`: a manual "test this connection" call must always
-        make a real upstream attempt, never silently replay a stale cached
-        failure from before the user fixed a credential."""
+        every model it exposes, not just one."""
         router = self.site.router()
         gw = getattr(router, "gateway", None) if router else None
         if gw is None:
             return error_response("Astra AI Gateway not configured", 400,
                                   "gateway_unavailable", req.rid)
-        gw.reset_connection_health(name)
         return json_response({"ok": True,
                               "data": gw.test_connection_by_name(name)},
                              rid=req.rid)
@@ -2579,83 +2415,6 @@ class WebApp:
                                   "gateway_unavailable", req.rid)
         result = gw.test_connection_model_by_name(name, model_id)
         return json_response({"ok": True, "data": result}, rid=req.rid)
-
-    # -- wallet registry (Web3 Center: import / create / groups) ------------
-    def _web3_wallets(self, req: Request, path, body) -> Response:
-        """Wallet registry API. Secrets only ever ENTER here (import text)
-        and leave ONCE (create). No request body is logged or evented, no
-        error message echoes input, and none of this is reachable by the
-        model: these are HTTP endpoints, not tools."""
-        from .web3.wallets import WalletError
-        reg = self.site._get("wallet_registry")
-        if reg is None:
-            return error_response("wallet registry unavailable", 400,
-                                  "web3_unavailable", req.rid)
-        method = req.method
-        body = body if isinstance(body, dict) else {}
-
-        def ok(data, status=200):
-            return json_response({"ok": True, "data": data}, status,
-                                 rid=req.rid)
-        try:
-            if path[2] == "wallets":
-                if len(path) == 3 and method == "GET":
-                    return ok(reg.describe())
-                if len(path) == 4 and path[3] == "import" and method == "POST":
-                    res = reg.import_wallets(
-                        body.get("text"), group_id=body.get("group_id") or None,
-                        dry_run=bool(body.get("dry_run")),
-                        group_name=body.get("group_name") or None)
-                    res.update(reg.describe() if not res["dry_run"] else {})
-                    return ok(res)
-                if len(path) == 4 and path[3] == "create" and method == "POST":
-                    wallet, secret = reg.create_wallet(
-                        str(body.get("name") or ""),
-                        group_id=body.get("group_id") or None)
-                    # DELIBERATE, NARROW EXCEPTION to json_response()'s
-                    # redact(): the operator must see a brand-new wallet's
-                    # private key exactly once to back it up. This response
-                    # is built by hand (redact would mask it), is no-store,
-                    # and no other endpoint can return a key.
-                    payload = {"ok": True, "request_id": req.rid,
-                               "data": {"wallet": wallet,
-                                        "reveal": {"private_key": secret,
-                                                   "shown_once": True},
-                                        **reg.describe()}}
-                    return Response(
-                        201, json.dumps(payload, ensure_ascii=False).encode(
-                            "utf-8"),
-                        "application/json; charset=utf-8", cors=True)
-                if len(path) == 5 and method == "POST" and path[4] == "select":
-                    return ok({"wallet": reg.set_active(path[3]),
-                               **reg.describe()})
-                if len(path) == 5 and method == "POST" and path[4] == "move":
-                    reg.move_wallet(path[3], body.get("from_group") or None,
-                                    body.get("to_group") or "")
-                    return ok(reg.describe())
-                if len(path) == 4 and method == "DELETE":
-                    return ok(reg.delete_wallet(path[3]))
-                if len(path) == 5 and method == "POST" and path[4] == "delete":
-                    return ok(reg.delete_wallet(path[3]))
-            elif path[2] == "wallet-groups":
-                if len(path) == 3 and method == "POST":
-                    return ok({"group": reg.create_group(body.get("name")),
-                               **reg.describe()}, 201)
-                if len(path) == 5 and method == "POST":
-                    gid, action = path[3], path[4]
-                    if action == "rename":
-                        reg.rename_group(gid, body.get("name"))
-                        return ok(reg.describe())
-                    if action == "delete":
-                        reg.delete_group(gid)
-                        return ok(reg.describe())
-                    if action == "members":
-                        reg.set_members(gid, add=body.get("add") or [],
-                                        remove=body.get("remove") or [])
-                        return ok(reg.describe())
-        except WalletError as exc:
-            return error_response(exc.message, 400, "wallet_error", req.rid)
-        return error_response("not found", 404, "not_found", req.rid)
 
     def _web3_tx_list(self, req: Request, path):
         s = self.site

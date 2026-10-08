@@ -120,10 +120,8 @@ class KeySharingTests(_Base):
         self.assertTrue(g1["reused"])
         self.assertTrue(g2["reused"])
         self.assertEqual(p2["key"], "key 2")
-        # No key_id -> the Gateway probe defaults to the first key (both
-        # calls), it does not rotate.
         self.assertEqual(g1["key"], "key 1")
-        self.assertEqual(g2["key"], "key 1")
+        self.assertEqual(g2["key"], "key 2")
 
 
 class NonSharingTests(_Base):

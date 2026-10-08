@@ -334,17 +334,21 @@
   /* ---------------------------------------------------- live event stream - */
   /* The SAME /api/events/stream the Activity Log tails — filtered to the run
    * on screen. Reusing the existing bus is deliberate: there is no second
-   * event system to keep in sync, and no second persistent connection
-   * competing with it for the browser's per-origin connection limit.
-   * astra.js owns the one shared EventSource (ensureEventStream()) and fans
-   * every message out as an "astra:event" DOM event (see emitAstraEvent()) —
-   * System Map / Command Center already listen the same way. We do too,
-   * instead of opening our own EventSource("/api/events/stream"). */
+   * event system to keep in sync. */
   function openStream() {
-    if (WF.sse) return;
-    if (typeof ensureEventStream === "function") ensureEventStream();
-    WF.sse = onEvent;   // marker: listener attached, guards against a second boot() call
-    document.addEventListener("astra:event", (e) => onEvent(e.detail));
+    if (WF.sse || !window.EventSource) return;
+    try {
+      WF.sse = new EventSource("/api/events/stream");
+    } catch (_) {
+      WF.sse = null;
+      return;
+    }
+    WF.sse.onmessage = (msg) => {
+      let ev = null;
+      try { ev = JSON.parse(msg.data); } catch (_) { return; }
+      onEvent(ev);
+    };
+    WF.sse.onerror = () => { /* EventSource reconnects on its own */ };
   }
 
   function onEvent(ev) {

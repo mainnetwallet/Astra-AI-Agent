@@ -9,6 +9,7 @@ from __future__ import annotations
 import unittest
 
 from astra.agents import SPECIALISTS, AgentManager
+from astra.ai.router import classify
 
 
 class TestAgentManager(unittest.TestCase):
@@ -57,6 +58,13 @@ class SpecialistFlatten:
 
     def __len__(self):
         return len(self.am)
+
+
+class TestTaskClassify(unittest.TestCase):
+    def test_task_types(self):
+        self.assertEqual(classify("hello"), "simple_chat")
+        self.assertEqual(classify("research the top airdrops and write a report"),
+                         "research")
 
 
 if __name__ == "__main__":

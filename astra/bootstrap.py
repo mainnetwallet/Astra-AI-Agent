@@ -197,19 +197,7 @@ def build(store: Store | None = None, config=None,
     tx_manager = TransactionManager(store, keystore=keystore,
                                     policy=policy_engine, events=events,
                                     config=config)
-    # Canonical wallet registry (metadata + groups in SQLite; secrets only in
-    # the encrypted keystore). When no master secret exists yet, the keystore
-    # is provisioned lazily on the first wallet import/create and handed to
-    # the transaction manager so it can sign for registered wallets.
-    from astra.web3.wallets import WalletRegistry
-
-    def _adopt_keystore(ks):
-        tx_manager.keystore = ks
-    wallet_registry = WalletRegistry(
-        store, keystore=keystore,
-        master_key_path=_ks.DEFAULT_MASTER_KEY_FILE,
-        on_keystore=_adopt_keystore)
-    register_web3_tools(registry, manager=tx_manager, wallets=wallet_registry)
+    register_web3_tools(registry, manager=tx_manager)
 
     # AI providers + router
     # Provider adapters (Gemini/Groq/Mistral/…/Bedrock) are built by the
@@ -254,8 +242,7 @@ def build(store: Store | None = None, config=None,
     # astra/ai/gateway.py module docstring for the isolation contract.
     gateway_intelligence = build_gateway_request_intelligence(gateway)
     discovery = ModelDiscovery(model_registry,
-                               adapter_by_name={p.name: p for p in providers},
-                               events=events)
+                               adapter_by_name={p.name: p for p in providers})
     env_models = getattr(config, "get", lambda _k, d="": d)("ASTRA_STARTUP_DISCOVERY", "")
     if env_models == "1":
         discovery.refresh(force=False)   # best-effort, never blocks boot
@@ -347,7 +334,7 @@ def build(store: Store | None = None, config=None,
     # through the chat pipeline (never a fresh user turn).
     approval_manager.set_resumer(chat_pipeline.resume_host_fallback)
 
-    stack = {
+    return {
         "config": config, "store": store,
         "events": events, "policy": policy, "memory": memory,
         "experiences": experiences, "tasks": tasks, "registry": registry,
@@ -365,17 +352,6 @@ def build(store: Store | None = None, config=None,
         "approvals": approval_manager,
         "fallback": host_fallback,
         "tx_manager": tx_manager, "keystore": keystore,
-        "wallet_registry": wallet_registry,
         "web3_policy": policy_engine,
         "gateway_intelligence": gateway_intelligence,
     }
-    # Global emergency shutdown latch (astra/emergency.py). It stops running
-    # work through the same managers held in `stack` and is consulted by the
-    # tool registry, the chat agent and the workflow engine before they run.
-    from .emergency import EmergencyShutdown
-    emergency = EmergencyShutdown(store, stack, events=events)
-    stack["emergency"] = emergency
-    registry.emergency = emergency
-    agent.emergency = emergency
-    workflows.emergency = emergency
-    return stack

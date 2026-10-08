@@ -28,39 +28,11 @@ TARGETS = [
 
 def understand(final_request="", was_incomplete=False, provider="gemini",
                model="gemini-pro", criteria=("answers the question",),
-               task_type=None, targets=None):
-    if targets is None:
-        targets = [(provider, model)]
+               task_type=None):
     data = {"final_request": final_request,
             "was_incomplete": was_incomplete, "provider": provider,
-            "model": model, "targets": [{"provider": p, "model": m}
-                                        for p, m in targets],
-            "criteria": list(criteria), "reason": "best fit"}
-    if task_type is not None:
-        data["task_type"] = task_type
-    return json.dumps(data)
-
-
-# `understand()` with no task_type yields `simple_chat`, which is a NO VERIFY
-# type (see chat_pipeline.NO_VERIFY_TASK_TYPES): the Provider result is
-# returned as-is and Gateway call #2 never runs. Tests that exercise the
-# verify -> correct -> re-verify loop must therefore ask for a task type that
-# still verifies; `understand_v` is `understand` defaulting to one.
-VERIFIED_TASK_TYPE = "reasoning"
-
-
-def understand_v(*args, **kw):
-    kw.setdefault("task_type", VERIFIED_TASK_TYPE)
-    return understand(*args, **kw)
-
-
-def understand_targets(targets, final_request="", was_incomplete=False,
-                       criteria=("answers the question",), task_type=None):
-    """Like `understand()` but scripts the NEW `targets[]` ordered-plan
-    reply shape instead of a single provider/model pick."""
-    data = {"final_request": final_request, "was_incomplete": was_incomplete,
-            "targets": [{"provider": p, "model": m} for p, m in targets],
-            "criteria": list(criteria), "reason": "ordered plan"}
+            "model": model, "criteria": list(criteria),
+            "reason": "best fit"}
     if task_type is not None:
         data["task_type"] = task_type
     return json.dumps(data)
@@ -69,20 +41,6 @@ def understand_targets(targets, final_request="", was_incomplete=False,
 def verdict(v="complete", missing=(), action="fix", instructions=""):
     return json.dumps({"verdict": v, "missing": list(missing),
                        "action": action, "instructions": instructions})
-
-
-# Catalogue with explicit health values, used by the ordered-targets[]
-# fallback-plan tests below (TestGatewayOrderedTargetsPlan).
-TARGETS_HEALTH = [
-    {"provider": "gemini", "model": "gemini-pro", "capabilities": ["chat"],
-     "quality": "high", "context_window": 100000, "health": "unknown"},
-    {"provider": "groq", "model": "llama-fast", "capabilities": ["chat"],
-     "quality": "fast", "context_window": 8000, "health": "ok"},
-    {"provider": "zai", "model": "glm-a", "capabilities": ["chat"],
-     "quality": "mid", "context_window": 32000, "health": "failed"},
-    {"provider": "openrouter", "model": "model-x", "capabilities": ["chat"],
-     "quality": "mid", "context_window": 32000, "health": "ok"},
-]
 
 
 class FakeGateway:
@@ -149,13 +107,10 @@ class FakeImageRouter:
         self.calls = []                # every generate() call's arguments
 
     def generate(self, prompt, model=None, size="1024x1024", n=1, *,
-                 editing=False, source_image=None, mask_image=None,
-                 operation=None, trace="", discover=True):
-        # Mirrors astra.ai.image_router.ImageRouter.generate()'s signature.
+                 editing=False, source_images=None, trace="", discover=True):
         self.calls.append({"prompt": prompt, "model": model, "size": size,
                            "n": n, "editing": editing,
-                           "source_image": source_image,
-                           "mask_image": mask_image, "operation": operation,
+                           "source_images": source_images or [],
                            "trace": trace, "discover": discover})
         if isinstance(self.result, Exception):
             raise self.result
@@ -170,7 +125,7 @@ def _png_data_uri():
 
 def make(gateway_replies, outputs, **kw):
     gw = FakeGateway(gateway_replies, usable=kw.pop("usable", True))
-    rt = FakeRouter(outputs, targets=kw.pop("targets", None))
+    rt = FakeRouter(outputs)
     # ChatPipeline's image path goes through gateway.image_router (the real
     # ImageRouter in production); the fake records the calls so the wiring can
     # be asserted directly.
@@ -190,7 +145,7 @@ def user_text(req):
 class TestHappyPath(unittest.TestCase):
     def test_complete_message_passes_unchanged_and_verified_output_returned(self):
         pipe, gw, rt = make(
-            [understand_v(was_incomplete=False), verdict("complete")],
+            [understand(was_incomplete=False), verdict("complete")],
             ["Paris is the capital of France."])
         out = pipe.run("What is the capital of France?")
         self.assertTrue(out["ok"])
@@ -203,7 +158,7 @@ class TestHappyPath(unittest.TestCase):
 
     def test_incomplete_message_is_completed_before_reaching_provider(self):
         pipe, gw, rt = make(
-            [understand_v("Explain what Bitcoin halving is.", was_incomplete=True),
+            [understand("Explain what Bitcoin halving is.", was_incomplete=True),
              verdict("complete")],
             ["Halving cuts the block reward in half."])
         out = pipe.run("bitcoin halving?")
@@ -212,7 +167,7 @@ class TestHappyPath(unittest.TestCase):
         self.assertEqual(out["data"]["understood"], "Explain what Bitcoin halving is.")
 
     def test_gateway_assigns_provider_and_model(self):
-        pipe, gw, rt = make([understand_v(provider="gemini", model="gemini-pro"),
+        pipe, gw, rt = make([understand(provider="gemini", model="gemini-pro"),
                              verdict("complete")], ["ok answer"])
         out = pipe.run("write a python function")
         self.assertEqual(rt.requests[0].preferred_provider, "gemini")
@@ -223,22 +178,17 @@ class TestHappyPath(unittest.TestCase):
         self.assertIn("provider=gemini model=gemini-pro", gw.calls[0][1]["content"])
 
     def test_invented_target_is_dropped_not_trusted(self):
-        pipe, gw, rt = make(
-            [understand_v(provider="gemini", model="gemini-pro",
-                        targets=[("gemini", "gemini-pro"),
-                                 ("nope", "ghost-9")]),
-             verdict("complete")],
-            ["answer"])
+        pipe, gw, rt = make([understand(provider="nope", model="ghost-9"),
+                             verdict("complete")], ["answer"])
         out = pipe.run("hello there")
+        self.assertIsNone(rt.requests[0].preferred_provider)
+        self.assertIsNone(rt.requests[0].preferred_model)
         self.assertTrue(out["ok"])
-        self.assertEqual(len(rt.requests), 1)
-        self.assertEqual(rt.requests[0].preferred_provider, "gemini")
-        self.assertEqual(rt.requests[0].preferred_model, "gemini-pro")
 
 
 class TestGatewayCategoryOverride(unittest.TestCase):
     def test_pipeline_states_its_own_category_for_both_gateway_calls(self):
-        pipe, gw, rt = make([understand_v(), verdict("complete")], ["ok"])
+        pipe, gw, rt = make([understand(), verdict("complete")], ["ok"])
         pipe.run("hello")
         self.assertEqual(gw.categories, ["control", "control"])
 
@@ -261,7 +211,7 @@ class TestGatewayCategoryOverride(unittest.TestCase):
 class TestVerificationKnowsCallOne(unittest.TestCase):
     def test_verifier_is_handed_request_criteria_assignment_and_output(self):
         pipe, gw, rt = make(
-            [understand_v("Do X fully.", True, "gemini", "gemini-pro",
+            [understand("Do X fully.", True, "gemini", "gemini-pro",
                         ["mentions X", "is in Bengali"]), verdict("complete")],
             ["the provider output"])
         pipe.run("x?")
@@ -277,7 +227,7 @@ class TestVerificationKnowsCallOne(unittest.TestCase):
 class TestFixAndRedoLoop(unittest.TestCase):
     def test_incomplete_output_is_fixed_and_only_fixed_output_reaches_user(self):
         pipe, gw, rt = make(
-            [understand_v(), verdict("incomplete", ["no example"], "fix",
+            [understand(), verdict("incomplete", ["no example"], "fix",
                                    "Add a concrete example."), verdict("complete")],
             ["draft without example", "answer WITH example"])
         out = pipe.run("explain recursion")
@@ -297,7 +247,7 @@ class TestFixAndRedoLoop(unittest.TestCase):
 
     def test_redo_action_tells_provider_to_start_from_scratch(self):
         pipe, gw, rt = make(
-            [understand_v(), verdict("incomplete", ["off topic"], "redo",
+            [understand(), verdict("incomplete", ["off topic"], "redo",
                                    "Answer the actual question about taxes."),
              verdict("complete")],
             ["totally off topic", "correct tax answer"])
@@ -310,7 +260,7 @@ class TestFixAndRedoLoop(unittest.TestCase):
     def test_loop_is_bounded_and_user_is_told_what_is_missing(self):
         never = [verdict("incomplete", ["the numbers"], "fix", "Add the numbers.")
                  for _ in range(MAX_CORRECTION_ATTEMPTS + 1)]
-        pipe, gw, rt = make([understand_v()] + never,
+        pipe, gw, rt = make([understand()] + never,
                             ["a1"] + ["still bad"] * MAX_CORRECTION_ATTEMPTS)
         out = pipe.run("give me the numbers")
         # provider ran once + one per allowed correction, then it stops
@@ -327,36 +277,31 @@ class TestFixAndRedoLoop(unittest.TestCase):
 
 
 class TestFailOpen(unittest.TestCase):
-    def test_gateway_unavailable_returns_provider_result_as_is(self):
-        # With no usable Gateway there is no UNDERSTAND call, so the turn is a
-        # plain `simple_chat` — a NO VERIFY task type. The Provider result is
-        # returned immediately and untouched (no verification caveat appended),
-        # and verification is recorded as not_applicable rather than skipped.
+    def test_gateway_unavailable_passes_straight_to_provider_unverified(self):
         pipe, gw, rt = make([], ["plain answer"], usable=False)
         out = pipe.run("hi")
         self.assertTrue(out["ok"])
-        self.assertEqual(out["reply"], "plain answer")
-        self.assertNotIn(_NO_GATEWAY_CONFIGURED_MESSAGE, out["reply"])
+        # Pass-through as before, but the reply now carries the plain-text
+        # notice that Gateway verification was skipped because no GW_* API
+        # key is configured (deliberate, see chat_pipeline
+        # ._NO_GATEWAY_CONFIGURED_MESSAGE: the user is told instead of the
+        # skip being silent forever).
+        self.assertEqual(out["reply"],
+                         "plain answer\n\n" + _NO_GATEWAY_CONFIGURED_MESSAGE)
         self.assertEqual(gw.calls, [])
         self.assertEqual(out["data"]["gateway"], "unavailable")
-        self.assertEqual(out["data"]["verification"],
-                         {"status": "not_applicable"})
+        self.assertEqual(out["data"]["verification"]["status"], "skipped")
 
-    def test_understand_failure_uses_raw_message_and_skips_verify(self):
-        # A failed UNDERSTAND call falls back to `simple_chat` (the pipeline
-        # has no local classifier), which is a NO VERIFY type: the raw message
-        # still reaches the Provider, but there is no call #2.
-        pipe, gw, rt = make([RuntimeError("gw down")], ["answer"])
+    def test_understand_failure_uses_raw_message_and_still_verifies(self):
+        pipe, gw, rt = make([RuntimeError("gw down"), verdict("complete")],
+                            ["answer"])
         out = pipe.run("tell me a joke")
         self.assertIn("tell me a joke", user_text(rt.requests[0]))
         self.assertIsNone(rt.requests[0].preferred_provider)
-        self.assertEqual(out["reply"], "answer")
-        self.assertEqual(len(gw.calls), 1)      # the failed understand only
-        self.assertEqual(out["data"]["verification"],
-                         {"status": "not_applicable"})
+        self.assertEqual(out["data"]["verification"]["status"], "COMPLETE")
 
     def test_verifier_unavailable_returns_answer_flagged_and_does_not_retry(self):
-        pipe, gw, rt = make([understand_v(), RuntimeError("gw down")], ["answer"])
+        pipe, gw, rt = make([understand(), RuntimeError("gw down")], ["answer"])
         out = pipe.run("hello")
         self.assertTrue(out["ok"])
         self.assertEqual(out["reply"], "answer")   # no internal caveat appended
@@ -365,7 +310,7 @@ class TestFailOpen(unittest.TestCase):
         self.assertEqual(len(rt.requests), 1)   # no wasted correction round-trips
 
     def test_unparsable_verifier_reply_is_treated_as_unavailable(self):
-        pipe, gw, rt = make([understand_v(), "I think it looks fine!"], ["answer"])
+        pipe, gw, rt = make([understand(), "I think it looks fine!"], ["answer"])
         out = pipe.run("hello")
         self.assertEqual(out["reply"], "answer")
         self.assertNotIn("verify korte parenni", out["reply"])
@@ -373,7 +318,7 @@ class TestFailOpen(unittest.TestCase):
         self.assertEqual(len(rt.requests), 1)
 
     def test_provider_failure_is_reported_honestly(self):
-        pipe, gw, rt = make([understand_v()], [None])
+        pipe, gw, rt = make([understand()], [None])
         out = pipe.run("hello")
         self.assertFalse(out["ok"])
         self.assertIn("all providers failed", out["reply"])
@@ -411,7 +356,7 @@ class TestNoInternalDebugLeak(unittest.TestCase):
     def test_bounded_correction_loop_reply_is_clean(self):
         never = [verdict("incomplete", ["the numbers"], "fix", "Add the numbers.")
                  for _ in range(MAX_CORRECTION_ATTEMPTS + 1)]
-        pipe, gw, rt = make([understand_v()] + never,
+        pipe, gw, rt = make([understand()] + never,
                             ["a1"] + ["still bad"] * MAX_CORRECTION_ATTEMPTS)
         out = pipe.run("give me the numbers")
         self._assert_clean(out)
@@ -421,14 +366,14 @@ class TestNoInternalDebugLeak(unittest.TestCase):
         self.assertEqual(out["data"]["verification"]["missing"], ["the numbers"])
 
     def test_verifier_crash_reply_is_clean(self):
-        pipe, gw, rt = make([understand_v(), RuntimeError("gw down")], ["answer"])
+        pipe, gw, rt = make([understand(), RuntimeError("gw down")], ["answer"])
         out = pipe.run("hello")
         self._assert_clean(out)
         self.assertEqual(out["reply"], "answer")
         self.assertIn("verify korte parenni", out["data"]["internal_note"])
 
     def test_unparsable_verdict_reply_is_clean(self):
-        pipe, gw, rt = make([understand_v(), "I think it looks fine!"], ["answer"])
+        pipe, gw, rt = make([understand(), "I think it looks fine!"], ["answer"])
         out = pipe.run("hello")
         self._assert_clean(out)
         self.assertEqual(out["reply"], "answer")
@@ -442,7 +387,7 @@ class TestNoInternalDebugLeak(unittest.TestCase):
                 return True
 
             def chat(self, *a, **k):
-                return understand_v()
+                return understand()
 
             def supervise_task(self, *a, **k):
                 raise RuntimeError("supervisor exploded")
@@ -456,7 +401,7 @@ class TestNoInternalDebugLeak(unittest.TestCase):
 
     def test_complete_happy_path_reply_is_clean(self):
         pipe, gw, rt = make(
-            [understand_v(was_incomplete=False), verdict("complete")],
+            [understand(was_incomplete=False), verdict("complete")],
             ["Paris is the capital of France."])
         out = pipe.run("What is the capital of France?")
         self._assert_clean(out)
@@ -471,7 +416,7 @@ class TestNoInternalDebugLeak(unittest.TestCase):
         Runs on the Gateway-available path: the ONE deliberate exception to
         the no-concatenation rule is the missing-Gateway-key notice asserted
         in TestFailOpen above (a user-facing message, not internal debug)."""
-        pipe, gw, rt = make([understand_v()], ["clean answer"], usable=True)
+        pipe, gw, rt = make([understand()], ["clean answer"], usable=True)
         out = pipe.run("hi")
         self.assertEqual(out["reply"], "clean answer")
         self.assertNotIn("\n\n⚠️", out["reply"])
@@ -479,7 +424,7 @@ class TestNoInternalDebugLeak(unittest.TestCase):
 
 class TestAgentHandle(unittest.TestCase):
     def test_handle_delegates_to_pipeline_and_forwards_context(self):
-        pipe, gw, rt = make([understand_v(), verdict("complete")], ["hi there"])
+        pipe, gw, rt = make([understand(), verdict("complete")], ["hi there"])
         agent = Agent(pipeline=pipe)
         out = agent.handle("hello", context="earlier: we talked about cats")
         self.assertEqual(out["reply"], "hi there")
@@ -568,7 +513,7 @@ class TestRealRouterAndGatewayWiring(unittest.TestCase):
 
     def test_full_flow_with_fix_uses_assigned_provider_only(self):
         pipe, conn, groq, gemini = self._build(
-            [understand_v("Explain DNS.", True, "gemini", "gemini-pro"),
+            [understand("Explain DNS.", True, "gemini", "gemini-pro"),
              verdict("incomplete", ["no records"], "fix", "Explain DNS records."),
              verdict("complete")],
             ["DNS maps names.", "DNS maps names via A/MX records."])
@@ -590,7 +535,7 @@ class TestChatEndpoint(unittest.TestCase):
         from tests.helpers import LiveServer, make_stack
 
         stack = make_stack()
-        pipe, gw, rt = make([understand_v(), verdict("complete")], ["verified hello"])
+        pipe, gw, rt = make([understand(), verdict("complete")], ["verified hello"])
         stack["agent"] = Agent(pipeline=pipe)
         srv = LiveServer(stack=stack)
         self.addCleanup(srv.stop)
@@ -639,12 +584,12 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
 
     def test_english_image_request_sets_output_modality(self):
         # was_incomplete=False (the understand() default) means the Gateway's
-        # final_request is NOT what reaches task_type resolution — the
-        # ORIGINAL message is (see ChatPipeline._understand: `"final_request":
-        # ... if rewrote else message`) — so it's the literal text below that
-        # the Gateway's own task_type classification must recognize, not
-        # anything scripted into understand().
-        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
+        # final_request is NOT what reaches _task_type() — the ORIGINAL
+        # message is (see ChatPipeline._understand: `"final_request":
+        # ... if rewrote else message`) — so it's the literal text below
+        # that classify() must recognize, not anything scripted into
+        # understand().
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
                                   [self._PNG_DATA_URI])
         pipe.run("generate an image of a sunset over the mountains")
         self.assertEqual(len(gw.image_router.calls), 1)
@@ -653,7 +598,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         self.assertEqual(rt.requests, [])          # old path never used
 
     def test_bangla_image_request_sets_output_modality(self):
-        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
                                   [self._PNG_DATA_URI])
         pipe.run("akta chobi banao")
         self.assertEqual([c["prompt"] for c in gw.image_router.calls],
@@ -662,14 +607,14 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
 
     def test_bangla_script_image_request_sets_output_modality(self):
         """Real Bengali script, not just Latin-script Banglish."""
-        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
                                   [self._PNG_DATA_URI])
         pipe.run("\u098f\u0995\u099f\u09be \u099b\u09ac\u09bf \u09ac\u09be\u09a8\u09be\u0993")
         self.assertEqual(len(gw.image_router.calls), 1)
         self.assertEqual(rt.requests, [])
 
     def test_banglish_photo_create_koro_sets_output_modality(self):
-        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")],
+        pipe, gw, rt = self._make([understand(), verdict("complete")],
                                   [self._PNG_DATA_URI])
         pipe.run("photo create koro")
         self.assertEqual(len(gw.image_router.calls), 1)
@@ -684,18 +629,6 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
             [self._PNG_DATA_URI])
         pipe.run("make something for me")
         self.assertEqual(len(gw.image_router.calls), 1)
-        self.assertEqual(rt.requests, [])
-
-    def test_image_task_ignores_gateway_targets(self):
-        pipe, gw, rt = self._make(
-            [understand_targets([("gemini", "gemini-pro")],
-                                task_type="image_generation"),
-             verdict("complete")],
-            [self._PNG_DATA_URI])
-        out = pipe.run("generate an image of a sunset")
-        self.assertTrue(out["ok"])
-        self.assertEqual(len(gw.image_router.calls), 1)
-        self.assertIsNone(gw.image_router.calls[0]["model"])
         self.assertEqual(rt.requests, [])
 
     def test_gateway_task_type_coding_is_authoritative(self):
@@ -721,7 +654,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         """Hard architectural guard: even when ImageRouter fails, ChatPipeline
         must NOT fall back to the Provider router's image dispatch -- the
         duplicate execution path this architecture forbids."""
-        pipe, gw, rt = self._make([understand(task_type="image_generation"), verdict("complete")], [],
+        pipe, gw, rt = self._make([understand(), verdict("complete")], [],
                                   image_router_result=RuntimeError("boom"))
         out = pipe.run("generate an image of a sunset")
         self.assertFalse(out["ok"])
@@ -759,7 +692,7 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         from astra.store import Store
 
         bus = EventBus(Store(":memory:"))
-        gw = FakeGateway([understand(task_type="image_generation"), verdict("complete")])
+        gw = FakeGateway([understand(), verdict("complete")])
         rt = FakeRouter([])
         gw.image_router = FakeImageRouter(self._PNG_DATA_URI)
         pipe = ChatPipeline(gw, rt, events=bus, max_tokens=800,
@@ -804,362 +737,5 @@ class TestImageGenerationPipelineWiring(unittest.TestCase):
         self.assertTrue((out["reply"] or "").strip())  # some human-readable line remains
 
 
-class TestGatewayOrderedTargetsPlan(unittest.TestCase):
-    """The Gateway's `targets[]` ordered plan (ASTRA AI GATEWAY — FIX MODEL
-    LIST OUTPUT + STRICT FALLBACK PLAN): every target must exist in the real
-    supplied catalogue, health must affect order, a failed target is never
-    in the plan, and the plan IS the authoritative fallback order for
-    execution — target #1 fails -> target #2 is tried, never a fresh
-    unrestricted search, and never a model outside the plan."""
-
-    # TEST 1 / TEST 9 / TEST 10: multiple eligible models -> ordered list,
-    # same-provider-multiple-models and different-providers both fall back
-    # correctly in plan order.
-    def test_multiple_eligible_models_produce_an_ordered_list(self):
-        pipe, gw, rt = make(
-            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro")]),
-             verdict("complete")],
-            ["first target answered"])
-        out = pipe.run("hello there")
-        self.assertTrue(out["ok"])
-        self.assertEqual(len(rt.requests), 1)
-        self.assertEqual(rt.requests[0].preferred_provider, "groq")
-        self.assertEqual(rt.requests[0].preferred_model, "llama-fast")
-        self.assertTrue(rt.requests[0].no_fallback)
-
-    # TEST 6: target #1 fails -> target #2 executes.
-    def test_target_1_fails_target_2_executes(self):
-        pipe, gw, rt = make(
-            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro")]),
-             verdict("complete")],
-            [None, "second target answered"])
-        out = pipe.run("hello there")
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["reply"], "second target answered")
-        self.assertEqual(len(rt.requests), 2)
-        self.assertEqual((rt.requests[0].preferred_provider,
-                          rt.requests[0].preferred_model),
-                         ("groq", "llama-fast"))
-        self.assertEqual((rt.requests[1].preferred_provider,
-                          rt.requests[1].preferred_model),
-                         ("gemini", "gemini-pro"))
-        # every attempt is pinned -- no silent substitution outside the plan
-        self.assertTrue(rt.requests[0].no_fallback)
-        self.assertTrue(rt.requests[1].no_fallback)
-
-    # TEST 7: targets #1 and #2 fail -> target #3 executes.
-    def test_targets_1_and_2_fail_target_3_executes(self):
-        # TARGETS_HEALTH marks groq/openrouter health=ok and gemini
-        # health=unknown, so the validated plan orders health=ok first:
-        # groq, openrouter, then gemini last.
-        pipe, gw, rt = make(
-            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro"),
-                                 ("openrouter", "model-x")]),
-             verdict("complete")],
-            [None, None, "third target answered"],
-            targets=TARGETS_HEALTH)
-        out = pipe.run("hello there")
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["reply"], "third target answered")
-        self.assertEqual(len(rt.requests), 3)
-        self.assertEqual(rt.requests[0].preferred_provider, "groq")
-        self.assertEqual(rt.requests[1].preferred_provider, "openrouter")
-        self.assertEqual(rt.requests[2].preferred_provider, "gemini")
-
-    # TEST 8: every Gateway target fails -> honest final failure, no fresh
-    # unrestricted search and nothing outside the plan is ever tried.
-    def test_all_targets_failing_is_an_honest_final_failure(self):
-        pipe, gw, rt = make(
-            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro")]),
-             verdict("complete")],
-            [None, None])
-        out = pipe.run("hello there")
-        self.assertFalse(out["ok"])
-        # exactly two attempts -- the two plan targets, nothing more
-        self.assertEqual(len(rt.requests), 2)
-
-    # TEST 5 / TEST 13: health affects ordering -- a healthy target is
-    # attempted before an equally-fit unknown-health one, regardless of the
-    # order the Gateway happened to list them in.
-    def test_healthy_target_is_tried_before_unknown_health_target(self):
-        pipe, gw, rt = make(
-            [understand_targets([("gemini", "gemini-pro"), ("groq", "llama-fast")]),
-             verdict("complete")],
-            ["answered"], targets=TARGETS_HEALTH)
-        pipe.run("hello there")
-        # gemini-pro is health=unknown, groq/llama-fast is health=ok in
-        # TARGETS_HEALTH -- the plan must reorder health=ok first even
-        # though the Gateway listed gemini-pro first.
-        self.assertEqual(rt.requests[0].preferred_provider, "groq")
-        self.assertEqual(rt.requests[0].preferred_model, "llama-fast")
-
-    # TEST 3: an explicitly failed model is excluded from the normal plan
-    # even if the Gateway lists it.
-    def test_failed_health_target_is_excluded_from_the_plan(self):
-        pipe, gw, rt = make(
-            [understand_targets([("zai", "glm-a"), ("gemini", "gemini-pro")]),
-             verdict("complete")],
-            ["answered"], targets=TARGETS_HEALTH)
-        pipe.run("hello there")
-        # zai/glm-a is health=failed in TARGETS_HEALTH -- must never be
-        # attempted; gemini-pro is the only real target left in the plan.
-        self.assertEqual(len(rt.requests), 1)
-        self.assertEqual(rt.requests[0].preferred_provider, "gemini")
-        self.assertEqual(rt.requests[0].preferred_model, "gemini-pro")
-
-    # TEST 4 / TEST 11: the Gateway cannot invent a provider/model, and an
-    # exact duplicate pair is removed while valid ordering is preserved.
-    def test_invented_target_is_dropped_and_duplicates_are_removed(self):
-        pipe, gw, rt = make(
-            [understand_targets([("gemini", "gemini-pro"), ("fake-provider", "fake-model"),
-                                 ("gemini", "gemini-pro")]),
-             verdict("complete")],
-            ["answered"])
-        pipe.run("hello there")
-        self.assertEqual(len(rt.requests), 1)
-        self.assertEqual(rt.requests[0].preferred_provider, "gemini")
-        self.assertEqual(rt.requests[0].preferred_model, "gemini-pro")
-
-    # Empty Gateway target plans are terminal for normal requests.
-    # Automatic provider/model discovery must not silently take over.
-    def test_empty_targets_plan_fails_closed(self):
-        pipe, gw, rt = make(
-            [understand_targets([]), verdict("complete")],
-            ["automatic answer"])
-        out = pipe.run("hello there")
-        self.assertFalse(out["ok"])
-        self.assertEqual(rt.requests, [])
-        self.assertIn("no usable targets", out["data"]["error"].lower())
-
-    def test_gateway_sees_models_beyond_position_60(self):
-        catalogue = [
-            {"provider": "provider-%03d" % i, "model": "model-%03d" % i,
-             "capabilities": ["chat"], "quality": "mid",
-             "context_window": 32000, "health": "ok"}
-            for i in range(1, 101)
-        ]
-        pipe, gw, rt = make(
-            [understand_targets([("provider-100", "model-100")]),
-             verdict("complete")],
-            ["answered"],
-            targets=catalogue)
-        out = pipe.run("hello there")
-        self.assertTrue(out["ok"])
-        self.assertEqual(len(rt.requests), 1)
-        self.assertEqual(rt.requests[0].preferred_provider, "provider-100")
-        self.assertEqual(rt.requests[0].preferred_model, "model-100")
-        self.assertIn("provider=provider-100 model=model-100",
-                          gw.calls[0][1]["content"])
-
-    # TEST 12: the Router's own lower-level credential/key-pool retries
-    # inside a single pinned target are untouched -- FakeRouter models that
-    # layer as already resolved within one route_request() call, and the
-    # plan only advances to the NEXT target when that whole call reports
-    # failure (never mid-attempt).
-    def test_single_target_still_goes_through_one_pinned_route_call(self):
-        pipe, gw, rt = make(
-            [understand_targets([("gemini", "gemini-pro")]), verdict("complete")],
-            ["answered after internal retries"])
-        pipe.run("hello there")
-        self.assertEqual(len(rt.requests), 1)
-        self.assertTrue(rt.requests[0].no_fallback)
-
-    # TEST 14: Gateway verification/fix flow still runs unchanged on top of
-    # an ordered-targets[] execution.
-    def test_verification_fix_loop_still_works_with_ordered_targets(self):
-        pipe, gw, rt = make(
-            [understand_targets([("groq", "llama-fast"), ("gemini", "gemini-pro")],
-                                task_type=VERIFIED_TASK_TYPE),
-             verdict("incomplete", ["no example"], "fix", "Add an example."),
-             verdict("complete")],
-            ["draft", "answer with example"])
-        out = pipe.run("explain recursion")
-        self.assertEqual(out["reply"], "answer with example")
-        # first attempt used target #1; the correction call is pinned to
-        # whichever (provider, model) actually served the first attempt
-        fix_req = rt.requests[1]
-        self.assertTrue(fix_req.no_fallback)
-
-
 if __name__ == "__main__":
     unittest.main()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Gateway call #2 (VERIFY) applicability by task type
-# ═══════════════════════════════════════════════════════════════════════════
-NO_VERIFY_TYPES = ("simple_chat", "general", "translation", "summarization",
-                   "image_generation", "image_editing")
-TEXT_NO_VERIFY_TYPES = tuple(t for t in NO_VERIFY_TYPES
-                             if not t.startswith("image_"))
-IMAGE_NO_VERIFY_TYPES = ("image_generation", "image_editing")
-STILL_VERIFIED_TYPES = ("reasoning", "coding", "long_context",
-                        "structured_output", "tool_use", "research",
-                        "planning", "vision")
-
-
-class _RecordingEvents:
-    """Minimal event bus: records (kind, data) for every emit()."""
-
-    def __init__(self):
-        self.items = []
-
-    def emit(self, kind, **data):
-        self.items.append((kind, data))
-
-    def finished(self):
-        return [d for k, d in self.items if k == "chat.pipeline.finished"]
-
-
-class _NoSuperviseGateway(FakeGateway):
-    """A FakeGateway whose `supervise_task` (the verify -> correct ->
-    re-verify loop) fails the test if it is ever entered."""
-
-    def supervise_task(self, *a, **k):
-        raise AssertionError("supervise_task must not run for a NO VERIFY "
-                             "task type")
-
-
-class TestNoVerifyTaskTypes(unittest.TestCase):
-    """simple_chat / general / translation / summarization /
-    image_generation / image_editing: the Provider result is returned
-    immediately — no Gateway #2 VERIFY, no verify -> correct -> re-verify
-    loop — and verification is {"status": "not_applicable"}."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        # A real (tiny) PNG on disk: image_editing needs a reusable source.
-        self.source_png = os.path.join(self._tmp.name, "source.png")
-        with open(self.source_png, "wb") as fh:
-            fh.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
-
-    def _run(self, task_type, *, provider_out="provider answer",
-             gateway_cls=_NoSuperviseGateway, extra_replies=()):
-        # The scripted verdict after understand() is a trap: if VERIFY ran it
-        # would be consumed (and would mark the answer incomplete).
-        trap = verdict("incomplete", ["should never be read"], "redo",
-                       "verify must not run")
-        gw = gateway_cls([understand(task_type=task_type), trap,
-                          *extra_replies])
-        rt = FakeRouter([provider_out])
-        gw.image_router = FakeImageRouter()
-        events = _RecordingEvents()
-        pipe = ChatPipeline(gw, rt, events, max_tokens=800,
-                            artifact_dir=self._tmp.name)
-        attachments = None
-        if task_type == "image_editing":
-            attachments = [{"family": "image", "name": "source.png",
-                            "storage_path": self.source_png}]
-        out = pipe.run("do the thing", attachments=attachments)
-        return out, gw, rt, events, trap
-
-    def test_text_types_return_provider_result_without_verify(self):
-        for task_type in TEXT_NO_VERIFY_TYPES:
-            with self.subTest(task_type=task_type):
-                out, gw, rt, events, trap = self._run(task_type)
-                self.assertTrue(out["ok"])
-                # the Provider result, exactly, with no caveat appended
-                self.assertEqual(out["reply"], "provider answer")
-                self.assertEqual(out["data"]["verification"],
-                                 {"status": "not_applicable"})
-                # Gateway #1 UNDERSTAND ran; Gateway #2 VERIFY did not
-                self.assertEqual(len(gw.calls), 1)
-                self.assertEqual(gw.replies, [trap])      # verifier never read
-                # exactly one Provider execution: no correction round-trip
-                self.assertEqual(len(rt.requests), 1)
-                self.assertEqual(rt.requests[0].task_type, task_type)
-                self.assertNotIn("internal_note", out["data"])
-
-    def test_image_types_return_result_without_verify(self):
-        for task_type in IMAGE_NO_VERIFY_TYPES:
-            with self.subTest(task_type=task_type):
-                out, gw, rt, events, trap = self._run(task_type)
-                self.assertTrue(out["ok"])
-                self.assertEqual(out["data"]["verification"],
-                                 {"status": "not_applicable"})
-                self.assertEqual(len(gw.calls), 1)
-                self.assertEqual(gw.replies, [trap])
-                # image routing is unchanged: ImageRouter only, the text
-                # Provider router is never involved
-                self.assertEqual(len(gw.image_router.calls), 1)
-                self.assertEqual(rt.requests, [])
-
-    def test_terminal_event_is_emitted_for_every_no_verify_type(self):
-        expected = {t: "not_applicable" for t in TEXT_NO_VERIFY_TYPES}
-        expected.update({t: "image_ready" for t in IMAGE_NO_VERIFY_TYPES})
-        for task_type in NO_VERIFY_TYPES:
-            with self.subTest(task_type=task_type):
-                out, gw, rt, events, trap = self._run(task_type)
-                done = events.finished()
-                self.assertEqual(len(done), 1)
-                self.assertTrue(done[0]["terminal"])
-                self.assertEqual(done[0]["status"], expected[task_type])
-                self.assertFalse([k for k, _ in events.items
-                                  if k.startswith("chat.pipeline.verif")])
-
-    def test_semantic_verifier_and_correction_loop_are_never_entered(self):
-        # `_NoSuperviseGateway.supervise_task` raises if reached, and the
-        # pipeline would turn that into verification.status == "error".
-        for task_type in NO_VERIFY_TYPES:
-            with self.subTest(task_type=task_type):
-                out, *_ = self._run(task_type)
-                self.assertNotEqual(out["data"]["verification"]["status"],
-                                    "error")
-                self.assertEqual(out["data"]["verification"]["status"],
-                                 "not_applicable")
-
-    def test_unrecognised_task_type_falls_back_to_simple_chat_no_verify(self):
-        out, gw, rt, events, trap = self._run("something_new")
-        self.assertEqual(out["data"]["verification"],
-                         {"status": "not_applicable"})
-        self.assertEqual(len(gw.calls), 1)
-        self.assertEqual(len(rt.requests), 1)
-
-    def test_no_verify_holds_even_when_the_answer_looks_wrong(self):
-        # No semantic check means no semantic rejection: an empty-ish or
-        # dubious answer is simply returned for these types.
-        out, gw, rt, events, trap = self._run("translation",
-                                              provider_out="???")
-        self.assertEqual(out["reply"], "???")
-        self.assertEqual(len(rt.requests), 1)
-
-
-class TestOtherTaskTypesStillVerify(unittest.TestCase):
-    """The existing VERIFY behaviour is unchanged for every other task type."""
-
-    def test_verify_runs_for_each_remaining_task_type(self):
-        for task_type in STILL_VERIFIED_TYPES:
-            with self.subTest(task_type=task_type):
-                pipe, gw, rt = make(
-                    [understand(task_type=task_type), verdict("complete")],
-                    ["provider answer"])
-                out = pipe.run("do the thing")
-                self.assertTrue(out["ok"])
-                self.assertEqual(out["reply"], "provider answer")
-                self.assertEqual(out["data"]["verification"]["status"],
-                                 "COMPLETE")
-                self.assertEqual(len(gw.calls), 2)   # understand + verify
-                self.assertEqual(len(rt.requests), 1)
-
-    def test_verify_correct_reverify_loop_still_runs_for_each(self):
-        for task_type in STILL_VERIFIED_TYPES:
-            with self.subTest(task_type=task_type):
-                pipe, gw, rt = make(
-                    [understand(task_type=task_type),
-                     verdict("incomplete", ["no example"], "fix",
-                             "Add a concrete example."),
-                     verdict("complete")],
-                    ["draft", "fixed answer"])
-                out = pipe.run("do the thing")
-                self.assertEqual(out["reply"], "fixed answer")
-                self.assertEqual(out["data"]["verification"]["status"],
-                                 "COMPLETE")
-                self.assertEqual(out["data"]["verification"]["attempts"], 1)
-                self.assertEqual(len(gw.calls), 3)  # understand + 2 verifies
-                self.assertEqual(len(rt.requests), 2)   # answer + 1 correction
-
-    def test_verify_partition_is_exactly_the_documented_six(self):
-        from astra.ai.chat_pipeline import NO_VERIFY_TASK_TYPES
-        self.assertEqual(NO_VERIFY_TASK_TYPES, frozenset(NO_VERIFY_TYPES))
-        self.assertFalse(NO_VERIFY_TASK_TYPES & set(STILL_VERIFIED_TYPES))

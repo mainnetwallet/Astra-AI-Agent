@@ -46,40 +46,14 @@ FAKE_TOKEN = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
 
 def understand(final_request="", *, required=False, capability="", intent="",
                criteria=("the request was satisfied",), provider="groq",
-               model="llama-fast", was_incomplete=False, extra=None,
-               task_type=None):
+               model="llama-fast", was_incomplete=False, extra=None):
     data = {"final_request": final_request, "was_incomplete": was_incomplete,
             "provider": provider, "model": model, "criteria": list(criteria),
-            "targets": [{"provider": provider, "model": model}],
             "reason": "best fit",
             "execution": {"required": required, "capability": capability,
                           "intent": intent}}
     if extra is not None:
         data["execution"] = extra
-    # An omitted task_type becomes `simple_chat`, a NO VERIFY type (Gateway
-    # call #2 never runs for it). A request the Gateway scripted as
-    # execution-required is what the real Gateway classifies as `tool_use`,
-    # which keeps the verify / execution-evidence gate these tests exercise.
-    if task_type is None and required:
-        task_type = "tool_use"
-    if task_type is not None:
-        data["task_type"] = task_type
-    return json.dumps(data)
-
-
-def understand_targets(targets, final_request="", *, required=False,
-                       capability="", intent="",
-                       criteria=("the request was satisfied",),
-                       was_incomplete=False):
-    """Like `understand()` but scripts the ordered `targets[]` plan reply
-    shape (see `ChatPipeline._parse_gateway_targets`) instead of a single
-    provider/model pick — for the tool-loop targets[]-fallback tests
-    below (`ToolLoopOrderedTargetsFallbackTests`)."""
-    data = {"final_request": final_request, "was_incomplete": was_incomplete,
-            "targets": [{"provider": p, "model": m} for p, m in targets],
-            "criteria": list(criteria), "reason": "ordered plan",
-            "execution": {"required": required, "capability": capability,
-                         "intent": intent}}
     return json.dumps(data)
 
 
@@ -117,15 +91,6 @@ class Harness:
         self.pipeline.agent_brain = brain
         self.registry = self.stack["registry"]
         self.router = self.stack["router"]
-        # Deterministic catalogue: the Gateway's targets[] plan is validated
-        # against AstraRouter.available_targets(), so without this the tests
-        # depend on which provider keys the ambient environment has set.
-        self.router.available_targets = lambda: [
-            {"provider": "groq", "model": "llama-fast",
-             "capabilities": ["chat", "coding"], "health": "ok"},
-            {"provider": "gemini", "model": "gemini-pro",
-             "capabilities": ["chat", "coding"], "health": "ok"},
-        ]
         self.gateway = self.pipeline.gateway
         self.rows = []
         events = self.stack["events"]
@@ -625,140 +590,6 @@ class ConversationHistoryTests(unittest.TestCase):
         provider_messages = h.route_requests[0].messages
         self.assertIn({"role": "user", "content": "amar nam Rahim"},
                       provider_messages)
-
-
-class ToolLoopOrderedTargetsFallbackTests(unittest.TestCase):
-    """The Gateway's ordered `targets[]` plan must be the authoritative
-    fallback order for the `task_type == 'tool_use'` path too — mirroring
-    `TestGatewayOrderedTargetsPlan` in `test_chat_pipeline.py`, which covers
-    the equivalent non-tool-loop path. This is item 1 of the "remaining
-    work" ticket: `ChatPipeline._run_tool_loop()` / `_make_tool_caller()`
-    previously only ever read `brief["provider"]`/`brief["model"]`
-    (targets[0]), so a mid-loop failure of the first target had no
-    fallback. `ProviderToolCaller` now walks the plan itself."""
-
-    #: a small, deterministic two-provider catalogue the real
-    #: `AstraRouter.available_targets()` is stubbed to return, so the
-    #: Gateway's `targets[]` reply validates against it regardless of which
-    #: real provider adapters the ambient environment has configured.
-    CATALOGUE = [
-        {"provider": "groq", "model": "llama-fast",
-         "capabilities": ["chat"], "health": "ok"},
-        {"provider": "gemini", "model": "gemini-pro",
-         "capabilities": ["chat"], "health": "ok"},
-    ]
-
-    def _harness(self, gateway_replies):
-        h = Harness(gateway_replies, [], brain="provider")
-        h.router.available_targets = lambda: list(self.CATALOGUE)
-        return h
-
-    def test_target_1_fails_target_2_drives_the_tool_loop(self):
-        h = self._harness(
-            [understand_targets([("groq", "llama-fast"),
-                                 ("gemini", "gemini-pro")],
-                                "Run it."),
-             verdict("complete")])
-
-        calls = []
-
-        def route_request(req):
-            calls.append(req)
-            if req.preferred_provider == "groq":
-                return RoutingResult(ok=False, error="rate limited")
-            return RoutingResult(
-                ok=True, text=final("ran via target 2"),
-                provider=req.preferred_provider, model=req.preferred_model)
-
-        h.router.route_request = route_request
-        out = h.run("run it")
-        self.assertEqual(out["reply"], "ran via target 2")
-        # exactly two attempts: target #1 (failed), target #2 (succeeded) —
-        # each pinned with no_fallback=True, same as ChatPipeline._route().
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0].preferred_provider, "groq")
-        self.assertEqual(calls[0].preferred_model, "llama-fast")
-        self.assertTrue(calls[0].no_fallback)
-        self.assertEqual(calls[1].preferred_provider, "gemini")
-        self.assertEqual(calls[1].preferred_model, "gemini-pro")
-        self.assertTrue(calls[1].no_fallback)
-
-    def test_all_targets_failing_is_an_honest_final_failure_in_tool_loop(self):
-        h = self._harness(
-            [understand_targets([("groq", "llama-fast"),
-                                 ("gemini", "gemini-pro")],
-                                "Run it.")])
-
-        calls = []
-
-        def route_request(req):
-            calls.append(req)
-            return RoutingResult(ok=False, error="rate limited")
-
-        h.router.route_request = route_request
-        out = h.run("run it")
-        self.assertFalse(out["ok"])
-        # exactly the two plan targets, nothing more — no fresh/unrestricted
-        # search once the plan is exhausted.
-        self.assertEqual(len(calls), 2)
-
-    def test_no_target_outside_the_plan_is_ever_called(self):
-        h = self._harness(
-            [understand_targets([("groq", "llama-fast"),
-                                 ("gemini", "gemini-pro")],
-                                "Run it."),
-             verdict("complete")])
-
-        calls = []
-
-        def route_request(req):
-            calls.append(req)
-            if req.preferred_provider == "groq":
-                return RoutingResult(ok=False, error="rate limited")
-            return RoutingResult(
-                ok=True, text=final("ran via target 2"),
-                provider=req.preferred_provider, model=req.preferred_model)
-
-        h.router.route_request = route_request
-        h.run("run it")
-        seen = {(c.preferred_provider, c.preferred_model) for c in calls}
-        self.assertEqual(seen, {("groq", "llama-fast"),
-                                ("gemini", "gemini-pro")})
-
-    def test_target_stays_pinned_across_later_loop_steps(self):
-        """Target #1 fails once, #2 answers with a tool call (so the loop
-        takes a second step); the SECOND model call of that same turn must
-        go straight to target #2 — it must not re-try target #1, which is
-        already known bad this turn (the sticky `_target_index`)."""
-        h = self._harness(
-            [understand_targets([("groq", "llama-fast"),
-                                 ("gemini", "gemini-pro")],
-                                "Run it."),
-             verdict("complete")])
-
-        # step 1: groq fails, gemini answers with a tool call.
-        # step 2: whichever provider is asked answers "final" (used to
-        # detect whether groq was re-tried).
-        outcomes = [None, tool_call("echo step-two"), final("done via target 2")]
-
-        def route_request(req):
-            out = outcomes.pop(0) if outcomes else None
-            route_request.calls.append(req)
-            if out is None:
-                return RoutingResult(ok=False, error="rate limited")
-            return RoutingResult(
-                ok=True, text=out,
-                provider=req.preferred_provider, model=req.preferred_model)
-
-        route_request.calls = []
-        h.router.route_request = route_request
-        out = h.run("run it")
-        self.assertEqual(out["reply"], "done via target 2")
-        self.assertEqual(len(route_request.calls), 3)
-        self.assertEqual(route_request.calls[0].preferred_provider, "groq")
-        # both subsequent calls go straight to target #2, never back to #1.
-        self.assertEqual(route_request.calls[1].preferred_provider, "gemini")
-        self.assertEqual(route_request.calls[2].preferred_provider, "gemini")
 
 
 if __name__ == "__main__":

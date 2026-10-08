@@ -1053,6 +1053,7 @@ $("#chat-form").addEventListener("submit", async (e) => {
   input.style.height = "auto";
   $("#chat-send").disabled = true;
   chatTyping();
+  showUploadIndicator(hasAttachments);
   try {
     let r;
     if (hasAttachments) {
@@ -1065,6 +1066,7 @@ $("#chat-form").addEventListener("submit", async (e) => {
     } else {
       r = await post("/api/chat", { message: msg });
     }
+    hideUploadIndicator();
     if (sentGen !== CHAT.viewGen) return;   // moved to a different chat — leave it be
     if (!r.ok || !r.data) {
       chatStatusFail(r.error || "the server returned no reply");
@@ -1075,6 +1077,7 @@ $("#chat-form").addEventListener("submit", async (e) => {
     if (r.data.action === "dashboard") loaders.dashboard();
     chatBubble("ai", r.data.reply, r.data.action, null, r.data.artifacts, r.data.data);
   } catch (err) {
+    hideUploadIndicator();
     if (sentGen !== CHAT.viewGen) return;   // moved to a different chat — leave it be
     chatStatusFail(String(err));
     chatBubble("ai", "Server e problem — `" + err + "`");
@@ -1160,10 +1163,11 @@ const LOGS_MAX_BUFFER = 300;   // bounded DOM: oldest rows drop off the top
 
 // Compact breakdown shown above the timeline (matches the filter chips).
 const LOG_STAT_DEFS = [
-  { key: "total", label: "Total API Calls" },
-  { key: "ai", label: "API Call Success" },
-  { key: "errors", label: "API Errors" },
+  { key: "total", label: "Total" },
+  { key: "agents", label: "Agents" },
+  { key: "ai", label: "AI" },
   { key: "tools", label: "Tools" },
+  { key: "errors", label: "Errors" },
 ];
 
 function renderLogStats() {
@@ -1172,7 +1176,7 @@ function renderLogStats() {
     `<div class="card"><div class="card-v">${LOGS.counts[d.key] || 0}</div>` +
     `<div class="card-k">${esc(d.label)}</div></div>`).join("");
   const count = $("#logs-count");
-  if (count) count.textContent = `${LOGS.counts.total} API calls`;
+  if (count) count.textContent = `${LOGS.counts.total} events`;
 }
 
 // header live state: ● LIVE | ○ RECONNECTING | Ⅱ PAUSED
@@ -1721,7 +1725,6 @@ const RESTORED_PROVIDER_PENDING = new Set(); // tests restored after a refresh, 
 const RESTORED_GATEWAY_PENDING = new Set();
 const LAST_PROVIDER_DATA = {};               // provider name -> last /api/providers entry
 const LAST_GATEWAY_DATA = {};                // connection key -> last gateway connection entry
-let LAST_GATEWAY_CORE = null;                 // last GET /api/providers astra_ai_gateway block
 let _runningPollTimer = null;
 // A refresh cancels every request the browser had queued but not yet sent
 // (Chrome allows only ~6 parallel connections per host), so those never reach
@@ -2046,258 +2049,46 @@ if ($("#btn-health-key-selector")) {
   });
 }
 
-/* ---- Providers Health Test: presentation helpers -------------------------
- * Everything here only PRESENTS data astra.js already fetched from the real
- * endpoints (GET /api/providers -> provider health + keys + saved per-key
- * results; GET /api/gateway/health -> Gateway connections + saved model
- * health) or that a live per-model test just returned. Nothing is invented:
- * a value the backend does not report renders as "--".
- */
-
-/* Per-row model-list expand state. The legacy "Hide models" toggle is kept
- * (same localStorage key, same meaning: true = model lists hidden) but is now
- * applied per row: a row carries .force-show when its model list is open, and
- * the caret flips just that row. The toolbar button still flips every row. */
-const PH_ROW_EXPAND = { providers: new Map(), gateway: new Map() };
-function _phGlobalCollapsed(kind) { return !!_loadModelsHiddenState()[kind]; }
-function _phRowOpen(kind, name) {
-  const v = PH_ROW_EXPAND[kind].get(name);
-  return v === undefined ? !_phGlobalCollapsed(kind) : !!v;
-}
-function _phForceShow(kind, name) { return _phRowOpen(kind, name) ? " force-show" : ""; }
-function _phCaretGlyph(open) { return open ? "\u25be" : "\u25b8"; }
-function _phCardSel(kind, name) {
-  return kind === "gateway" ? `[data-gw-conn="${CSS.escape(name)}"]`
-                            : `[data-provider-row="${CSS.escape(name)}"]`;
-}
-function _phSetRowOpen(kind, name, open) {
-  PH_ROW_EXPAND[kind].set(name, !!open);
-  const card = $(_phCardSel(kind, name));
-  if (card) {
-    card.classList.toggle("force-show", !!open);
-    const caret = $('[data-role="row-toggle"]', card);
-    if (caret) { caret.setAttribute("aria-expanded", open ? "true" : "false"); caret.textContent = _phCaretGlyph(!!open); }
+function modelHealthRowsHtml(results) {
+  if (!results || !results.length) {
+    return "";
   }
-  _phSyncExpandBtn();
-  return !!open;
-}
-/* Collapse-all / expand-all: writes the SAME persisted flag the old global
- * toggle used, so a refresh restores exactly what the operator chose. */
-function _phSetAllOpen(open) {
-  ["providers", "gateway"].forEach((kind) => {
-    PH_ROW_EXPAND[kind].clear();
-    const st = _loadModelsHiddenState();
-    st[kind] = !open;
-    _saveModelsHiddenState(st);
-    const root = kind === "gateway" ? $("#gateway-card") : $("#providers-list");
-    if (!root || !root.querySelectorAll) return;
-    root.querySelectorAll(".provider-card").forEach((el) => el.classList.toggle("force-show", !!open));
-    root.querySelectorAll('[data-role="row-toggle"]').forEach((el) => {
-      el.setAttribute("aria-expanded", open ? "true" : "false");
-      el.textContent = _phCaretGlyph(!!open);
-    });
-  });
-  _phSyncExpandBtn();
-}
-function _phAllOpen() {
-  const st = _loadModelsHiddenState();
-  return !st.providers && !st.gateway;
-}
-function _phSyncExpandBtn() {
-  const btn = $("#btn-providers-toggle-models");
-  if (!btn) return;
-  btn.textContent = _phAllOpen() ? "Collapse all" : "Expand all";
-  btn.setAttribute("aria-pressed", _phAllOpen() ? "true" : "false");
-}
-
-/* ---- value formatting (no invented values) ---- */
-function _phParseTs(ts) {
-  if (ts === null || ts === undefined || ts === "") return null;
-  if (typeof ts === "number") return new Date(ts < 1e12 ? ts * 1000 : ts);
-  const d = new Date(ts);
-  return isNaN(d.getTime()) ? null : d;
-}
-function _phNewest(list) {
-  let best = null;
-  (list || []).forEach((ts) => { const d = _phParseTs(ts); if (d && (!best || d > best)) best = d; });
-  return best;
-}
-function _phClock(ts) {
-  const d = _phParseTs(ts);
-  return d ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "--";
-}
-function _phStamp(ts) {
-  const d = _phParseTs(ts);
-  return d ? d.toLocaleString() : "";
-}
-function _phMs(ms) {
-  const v = Number(ms);
-  if (!isFinite(v) || v <= 0) return "--";
-  if (v < 1000) return Math.round(v) + "ms";
-  if (v < 60000) return (v / 1000).toFixed(1) + "s";
-  return Math.round(v / 60000) + "m";
-}
-/* Newest saved test time we actually have for one provider / connection. */
-function _phProviderLastTest(p) {
-  const stamps = [];
-  Object.values((p && p.key_results) || {}).forEach((byKey) =>
-    Object.values(byKey || {}).forEach((r) => { if (r) stamps.push(r.tested_at); }));
-  return _phNewest(stamps);
-}
-function _phGatewayLastTest(c) {
-  const stamps = [];
-  Object.values((c && c.model_health) || {}).forEach((h) => {
-    if (h) stamps.push(h.last_success, h.last_failure);
-  });
-  return _phNewest(stamps);
-}
-/* Success / error totals from the SAVED per-model results the server keeps. */
-function _phProviderTotals(p) {
-  let ok = 0, bad = 0;
-  Object.values((p && p.key_results) || {}).forEach((byKey) =>
-    Object.values(byKey || {}).forEach((r) => { if (!r) return; if (r.ok) ok += 1; else bad += 1; }));
-  return { ok, bad };
-}
-function _phGatewayTotals(c) {
-  let ok = 0, bad = 0;
-  Object.values((c && c.model_health) || {}).forEach((h) => {
-    if (!h) return;
-    ok += Number(h.success_count || 0);
-    bad += Number(h.failure_count || 0);
-  });
-  return { ok, bad };
-}
-/* The ONE health vocabulary shared by rows and filters. It only renames the
- * backend's own states (healthy / unhealthy / degraded / not_configured) — it
- * never invents a new meaning or a new threshold. */
-function _phBucket(state, healthy) {
-  if (state === "healthy" || state === "up" || healthy === true) return "healthy";
-  if (state === "unhealthy" || state === "down") return "failed";
-  if (state === "degraded" || state === "rate_limited") return "degraded";
-  if (state === "not_configured") return "unconfigured";
-  return "unknown";
-}
-const PH_BUCKET_LABEL = {
-  healthy: "Healthy", failed: "Failed", degraded: "Degraded",
-  unconfigured: "Not configured", unknown: "Untested",
-};
-function _phBucketDot(b) { return b === "healthy" ? "ok" : b === "failed" ? "bad" : "warn"; }
-function _phStatusCell(bucket, running) {
-  if (running) {
-    return `<span class="ph-badge run"><span class="ph-spin" aria-hidden="true"></span>Testing...</span>`;
-  }
-  return `<span class="ph-badge ${esc(bucket)}"><span class="status-dot ${_phBucketDot(bucket)}"></span>` +
-    `${esc(PH_BUCKET_LABEL[bucket] || "Untested")}</span>`;
-}
-function _phSxeCell(ok, bad) {
-  const total = ok + bad;
-  const pct = total ? Math.round((ok / total) * 100) : 0;
-  return `<span class="ph-sxe"><span class="ph-bar" role="img" aria-label="${ok} succeeded, ${bad} failed">` +
-    `<i class="ph-bar-ok" style="width:${pct}%"></i>` +
-    `<i class="ph-bar-bad" style="width:${total ? 100 - pct : 0}%"></i></span>` +
-    `<span class="ph-sxe-txt">${ok} / ${bad}</span></span>`;
-}
-function _phHeadCell(c) {
-  return `<span class="ph-th ${c.cls || ""}" role="columnheader">${esc(c.label)}</span>`;
-}
-function _phTableHead(cols) {
-  return `<div class="ph-thead" role="row">${cols.map(_phHeadCell).join("")}</div>`;
-}
-function _phCols(first) {
-  return [
-    { label: "", cls: "ph-c-caret" },
-    { label: "#", cls: "ph-c-idx" },
-    { label: first, cls: "ph-c-name" },
-    { label: "Status", cls: "ph-c-status" },
-    { label: "Models", cls: "ph-c-num" },
-    { label: "Keys", cls: "ph-c-num" },
-    { label: "Success / Error", cls: "ph-c-sxe" },
-    { label: "Avg Latency", cls: "ph-c-lat" },
-    { label: "Last Test", cls: "ph-c-when" },
-    { label: "Action", cls: "ph-c-act" },
-  ];
-}
-const PH_MODEL_COLS = [
-  { label: "Model", cls: "ph-c-name" },
-  { label: "Status", cls: "ph-c-status" },
-  { label: "Key", cls: "ph-c-key" },
-  { label: "Result", cls: "ph-c-result" },
-  { label: "Latency", cls: "ph-c-lat" },
-  { label: "Last Test", cls: "ph-c-when" },
-  { label: "Action", cls: "ph-c-act" },
-];
-
-/* Per-model Test button -> the EXISTING single-(provider,model) endpoint
- * (POST /api/v1/providers/<name>/test/<model>) or its Gateway twin. */
-function _phModelTestBtn(kind, owner, model, disabled) {
-  if (!kind || !owner) return `<span class="ph-cell-na">--</span>`;
-  return `<button class="ph-mtest" type="button" data-role="model-test"` +
-    ` data-model-kind="${esc(kind)}" data-model-owner="${esc(owner)}" data-model="${esc(model)}"` +
-    `${disabled ? " disabled" : ""} aria-label="Test model ${esc(model)}" title="Test this model">Test</button>`;
-}
-function _phTableCtx(tableEl) {
-  const ds = (tableEl && tableEl.dataset) || {};
-  return { kind: ds.ctxKind || "", name: ds.ctxName || "" };
-}
-
-function modelHealthRowsHtml(results, ctx) {
-  if (!results || !results.length) return "";
-  ctx = ctx || {};
-  const kind = ctx.kind || "", owner = ctx.name || "";
-  const attrs = (m) => `data-model-row="${esc(m.model)}" data-ph-model="${esc(m.model)}"`;
-  const nameCell = (m, dot) =>
-    `<span class="ph-cell ph-c-name"><span class="status-dot ${dot}"></span>` +
-    `<span class="model-name">${esc(m.model)}</span></span>`;
-  const naCell = (cls) => `<span class="ph-cell ${cls} ph-cell-na">--</span>`;
-
   return results.map((m) => {
     if (m.untested) {
-      return `<div class="model-health-row" ${attrs(m)} data-ph-status="unknown">` +
-        nameCell(m, "") +
-        `<span class="ph-cell ph-c-status">${_phStatusCell("unknown", false)}</span>` +
-        naCell("ph-c-key") +
-        `<span class="ph-cell ph-c-result ph-cell-na">not tested yet</span>` +
-        naCell("ph-c-lat") + naCell("ph-c-when") +
-        `<span class="ph-cell ph-c-act">${_phModelTestBtn(kind, owner, m.model, false)}</span></div>`;
+      return `<div class="model-health-row" data-model-row="${esc(m.model)}">` +
+        `<span class="status-dot"></span>` +
+        `<span class="model-name">${esc(m.model)}</span>` +
+        `<span class="model-latency muted">not tested yet</span></div>`;
     }
     if (m.keys) {
-      const anyPending = m.keys.some((k) => k.pending || k.waiting);
+      const anyPending = m.keys.some((k) => k.pending);
       const anyOk = m.keys.some((k) => k.ok === true);
       const anyTested = m.keys.some((k) => k.ok === true || k.ok === false);
-      const bucket = anyPending ? "unknown" : (anyOk ? "healthy" : (anyTested ? "failed" : "unknown"));
-      const lat = m.keys.filter((k) => k.ok === true && k.latency_ms != null).map((k) => k.latency_ms);
-      const last = _phNewest(m.keys.map((k) => k.tested_at));
-      const result = anyOk ? "Success" : (anyTested ? "Failed" : "not tested yet");
       const cls = anyPending ? "pending" : (anyOk ? "ok" : (anyTested ? "bad" : "none"));
-      const dot = anyPending ? "warn" : _phBucketDot(bucket);
-      return `<div class="model-health-row keyed ${cls}" ${attrs(m)} data-ph-status="${bucket}">` +
-        nameCell(m, dot) +
-        `<span class="ph-cell ph-c-status">${_phStatusCell(bucket, anyPending)}</span>` +
-        `<span class="ph-cell ph-c-key"><span class="key-results">${m.keys.map(keyChipHtml).join("")}</span></span>` +
-        `<span class="ph-cell ph-c-result">${esc(result)}</span>` +
-        `<span class="ph-cell ph-c-lat">${lat.length ? _phMs(lat.reduce((a, b) => a + b, 0) / lat.length) : "--"}</span>` +
-        `<span class="ph-cell ph-c-when"${last ? ` title="${esc(_phStamp(last))}"` : ""}>${esc(_phClock(last))}</span>` +
-        `<span class="ph-cell ph-c-act">${_phModelTestBtn(kind, owner, m.model, anyPending)}</span></div>`;
+      const dot = anyPending ? "warn" : (anyOk ? "ok" : (anyTested ? "bad" : "warn"));
+      return `<div class="model-health-row keyed ${cls}" data-model-row="${esc(m.model)}">` +
+        `<span class="status-dot ${dot}"></span>` +
+        `<span class="model-name">${esc(m.model)}</span>` +
+        `<div class="key-results">${m.keys.map(keyChipHtml).join("")}</div></div>`;
     }
-    if (m.waiting || m.pending) {
-      const label = m.waiting ? "Waiting for provider result..." : "Testing...";
-      return `<div class="model-health-row pending" ${attrs(m)} data-ph-status="unknown">` +
-        nameCell(m, "warn") +
-        `<span class="ph-cell ph-c-status">${_phStatusCell("unknown", true)}</span>` +
-        naCell("ph-c-key") +
-        `<span class="ph-cell ph-c-result">${esc(label)}</span>` +
-        naCell("ph-c-lat") + naCell("ph-c-when") +
-        `<span class="ph-cell ph-c-act">${_phModelTestBtn(kind, owner, m.model, true)}</span></div>`;
+    if (m.waiting) {
+      return `<div class="model-health-row pending" data-model-row="${esc(m.model)}">` +
+        `<span class="status-dot warn"></span>` +
+        `<span class="model-name">${esc(m.model)}</span>` +
+        `<span class="model-latency">⏳ waiting for Provider result…</span></div>`;
     }
-    const ok = !!m.ok;
-    return `<div class="model-health-row ${ok ? "ok" : "bad"}" ${attrs(m)} data-ph-status="${ok ? "healthy" : "failed"}">` +
-      nameCell(m, ok ? "ok" : "bad") +
-      `<span class="ph-cell ph-c-status">${_phStatusCell(ok ? "healthy" : "failed", false)}</span>` +
-      naCell("ph-c-key") +
-      `<span class="ph-cell ph-c-result">${ok ? "Success" : esc(m.error || "Failed")}</span>` +
-      `<span class="ph-cell ph-c-lat">${ok ? _phMs(m.latency_ms) : "--"}</span>` +
-      `<span class="ph-cell ph-c-when"${m.tested_at ? ` title="${esc(_phStamp(m.tested_at))}"` : ""}>${esc(_phClock(m.tested_at))}</span>` +
-      `<span class="ph-cell ph-c-act">${_phModelTestBtn(kind, owner, m.model, false)}</span></div>`;
+    if (m.pending) {
+      return `<div class="model-health-row pending" data-model-row="${esc(m.model)}">` +
+        `<span class="status-dot warn"></span>` +
+        `<span class="model-name">${esc(m.model)}</span>` +
+        `<span class="model-latency">⏳ testing…</span></div>`;
+    }
+    const cls = m.ok ? "ok" : "bad";
+    const right = m.ok ? `${m.latency_ms}ms` : `❌ ${esc(m.error || "error")}`;
+    return `<div class="model-health-row ${cls}" data-model-row="${esc(m.model)}">` +
+      `<span class="status-dot ${m.ok ? "ok" : "bad"}"></span>` +
+      `<span class="model-name">${esc(m.model)}</span>` +
+      `<span class="model-latency">${right}</span></div>`;
   }).join("");
 }
 
@@ -2322,14 +2113,14 @@ function streamModelTests(models, tableEl, resultsArray, testOneFn, onResult, ke
     resultsArray.length = 0;
     models.forEach((m) => resultsArray.push({ model: m, pending: true }));
   }
-  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(resultsArray, _phTableCtx(tableEl));
+  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(resultsArray);
 
   const updateRow = (result) => {
     const idx = resultsArray.findIndex((r) => r.model === result.model);
     if (idx >= 0) resultsArray[idx] = result; else resultsArray.push(result);
     if (!tableEl) return;
     const rowEl = $(`[data-model-row="${CSS.escape(result.model)}"]`, tableEl);
-    const html = modelHealthRowsHtml([result], _phTableCtx(tableEl));
+    const html = modelHealthRowsHtml([result]);
     if (rowEl) rowEl.outerHTML = html; else tableEl.insertAdjacentHTML("beforeend", html);
   };
 
@@ -2348,8 +2139,7 @@ function streamModelTests(models, tableEl, resultsArray, testOneFn, onResult, ke
   return Promise.allSettled(probes);
 }
 
-// Hide/show toggle state (Providers Health Test: AI Providers + Astra AI
-// Gateway model
+// Hide/show toggle state (AI Providers health + Astra AI Gateway model
 // tables), persisted so it survives a real browser refresh — a plain
 // DOM class survives re-renders within the page's lifetime but resets on
 // reload since the whole document/JS is torn down and rebuilt.
@@ -2371,6 +2161,7 @@ loaders.providers = async function () {
   // survives re-renders within one page session (innerHTML only replaces
   // children), but a real browser refresh tears down the whole DOM/JS, so
   // without this the class (and thus the hidden tables) reset to shown.
+  if (_loadModelsHiddenState().providers) list.classList.add("models-hidden");
   if (!r.ok) {
     // A transient failure (a burst of parallel "Test all" requests is
     // exactly when the backend is most likely to hiccup) must never wipe
@@ -2385,7 +2176,7 @@ loaders.providers = async function () {
   }
   const provs = (r.data && r.data.providers) ? r.data.providers : r.data;
   RESTORED_PROVIDER_PENDING.clear();
-  const rows = Object.entries(provs || {}).map(([n, p], phIdx) => {
+  const rows = Object.entries(provs || {}).map(([n, p]) => {
     const dot = p.healthy ? "ok" : (p.state === "down" ? "bad" : "warn");
     const modelCount = p.models ? p.models.length : 0;
     PROVIDER_MODELS[n] = p.models || [];
@@ -2416,51 +2207,52 @@ loaders.providers = async function () {
     }
     const busy = LIVE_PROVIDER_TESTS.has(n) || RESTORED_PROVIDER_PENDING.has(n);
     const keyCount = (p.keys || []).length;
-    const bucket = _phBucket(p.state, p.healthy);
-    const tot = _phProviderTotals(p);
-    const lastTest = _phProviderLastTest(p);
-    const open = _phRowOpen("providers", n);
-    const testLabel = busy ? "Testing..." : "Test";
-    return `<div class="provider-card${open ? " force-show" : ""}" data-provider-row="${esc(n)}"` +
-      ` data-ph-kind="provider" data-ph-name="${esc(n)}"` +
-      ` data-ph-status="${busy ? "unknown" : bucket}" data-ph-running="${busy ? "1" : "0"}"` +
-      ` data-ph-count="${modelCount}" data-ph-models="${esc((p.models || []).join(" "))}"` +
-      ` data-ph-keys="${keyCount}" data-ph-keylabels="${esc((p.keys || []).map((k) => k.label).join("|"))}">` +
-      `<div class="ph-tr">` +
-      `<button class="ph-caret" type="button" data-role="row-toggle" aria-expanded="${open ? "true" : "false"}"` +
-      ` aria-label="Show or hide models for ${esc(n)}">${_phCaretGlyph(open)}</button>` +
-      `<span class="ph-cell ph-c-idx">${phIdx + 1}</span>` +
-      `<span class="ph-cell ph-c-name"><span class="status-dot ${dot}"></span><b class="ph-name">${esc(n)}</b></span>` +
-      `<span class="ph-cell ph-c-status">${_phStatusCell(bucket, busy)}</span>` +
-      `<span class="ph-cell ph-c-num">${modelCount}</span>` +
-      `<span class="ph-cell ph-c-num">${keyCount}</span>` +
-      `<span class="ph-cell ph-c-sxe" data-role="provider-counts" ` +
+    const forceShow = FORCE_SHOWN_PROVIDERS.has(n) ? " force-show" : "";
+    return `<div class="provider-card${forceShow}" data-provider-row="${esc(n)}">` +
+      `<div class="provider-card-head">` +
+      `<span class="status-dot ${dot}"></span><b>${esc(n)}</b>` +
+      `<span class="grow muted" data-role="provider-counts" ` +
       `data-calls="${p.calls || 0}" data-errors="${p.errors || 0}" ` +
       `data-label="${esc(p.state || (p.healthy ? "healthy" : "?"))}" data-modelcount="${modelCount}" ` +
-      `data-keycount="${keyCount}">${_phSxeCell(tot.ok, tot.bad)}</span>` +
-      `<span class="ph-cell ph-c-lat">${_phMs(p.latency_avg_ms)}</span>` +
-      `<span class="ph-cell ph-c-when"${lastTest ? ` title="${esc(_phStamp(lastTest))}"` : ""}>${esc(_phClock(lastTest))}</span>` +
-      `<span class="ph-cell ph-c-act">` +
-      `<button class="btn mini ph-test" data-role="provider-test" data-provider="${esc(n)}"${busy ? " disabled" : ""}>` +
-      `${esc(testLabel)}</button>` +
-      `<button class="ph-more" type="button" data-role="row-more" data-owner-kind="provider" data-owner="${esc(n)}"` +
-      ` aria-label="More actions for ${esc(n)}">\u22ee</button>` +
-      `</span>` +
+      `data-keycount="${keyCount}">` +
+      `${esc(p.state || (p.healthy ? "healthy" : "?"))} · ` +
+      `${modelCount} model(s) · ${keyCount} key(s) · ${p.calls || 0} calls · ${p.errors || 0} err</span>` +
+      `<button class="btn mini" data-role="provider-test" data-provider="${esc(n)}"${busy ? " disabled" : ""}>` +
+      (busy ? "⏳ Testing…"
+            : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"} · ${keyCount ? _healthKeyLabel("provider", n) : "direct"})`) +
+      `</button>` +
       `</div>` +
-      `<div class="ph-detail model-health-table" data-role="model-table" data-ctx-kind="provider" data-ctx-name="${esc(n)}">` +
-      ((PROVIDER_MODEL_RESULTS[n] || []).length ? _phTableHead(PH_MODEL_COLS) : "") +
-      modelHealthRowsHtml(PROVIDER_MODEL_RESULTS[n], { kind: "provider", name: n }) +
+      `<div class="model-health-table" data-role="model-table">` +
+      modelHealthRowsHtml(PROVIDER_MODEL_RESULTS[n]) +
       `</div></div>`;
   }).join("");
-  list.innerHTML = rows
-    ? _phTableHead(_phCols("Provider")) + rows
-    : `<div class="empty">kono provider e creds nai (offline mode)</div>`;
-  // Collapse-all / expand-all for every provider's model list. The state
-  // is the SAME persisted flag the old global hide/show used (per row it is
-  // applied through .force-show — see _phRowOpen / _phSetAllOpen).
+  list.innerHTML = rows || `<div class="empty">kono provider e creds nai (offline mode)</div>`;
+  // Hide/show toggle for every provider's per-model rows (gemini-3.7-flash,
+  // key chips, etc.) — one button, same click alternates hide <-> show.
+  // The state lives as a class on #providers-list itself (not on the rows
+  // just rebuilt above), so it survives every re-render: list.innerHTML
+  // replaces the children each time, never this element's own classList.
   const toggleBtn = $("#btn-providers-toggle-models");
-  if (toggleBtn) toggleBtn.onclick = () => _phSetAllOpen(!_phAllOpen());
-  _phSyncExpandBtn();
+  if (toggleBtn) {
+    // Rebind on every render so a previous render can never leave this
+    // control with a stale/missing click handler.
+    toggleBtn.onclick = () => {
+      const hidden = list.classList.toggle("models-hidden");
+      toggleBtn.textContent = hidden ? "👁 Show models" : "🙈 Hide models";
+      const st = _loadModelsHiddenState();
+      st.providers = hidden;
+      _saveModelsHiddenState(st);
+      // Flipping the main toggle either way makes any per-provider
+      // "revealed by testing it" override moot — clear it so it doesn't
+      // linger and confuse the next hide.
+      FORCE_SHOWN_PROVIDERS.clear();
+      list.querySelectorAll(".provider-card.force-show").forEach((el) => el.classList.remove("force-show"));
+    };
+  }
+  if (toggleBtn) {
+    toggleBtn.textContent = list.classList.contains("models-hidden")
+      ? "👁 Show models" : "🙈 Hide models";
+  }
   // per-provider manual test: click fires ONE request PER MODEL, all in
   // parallel — each model's row flips from "testing…" to its result (and
   // is saved server-side, see test_provider_model) the instant that one
@@ -2469,20 +2261,6 @@ loaders.providers = async function () {
   if (!list.dataset.hooked) {
     list.dataset.hooked = "1";
     list.addEventListener("click", async (ev) => {
-      const more = ev.target.closest('[data-role="row-more"]');
-      if (more) { _phMoreMenu(more); return; }
-      const caret = ev.target.closest('[data-role="row-toggle"]');
-      if (caret) {
-        const card = caret.closest(".provider-card");
-        const owner = card && card.dataset.providerRow;
-        if (owner) _phSetRowOpen("providers", owner, !(card.classList.contains("force-show")));
-        return;
-      }
-      const mt = ev.target.closest('[data-role="model-test"]');
-      if (mt) {
-        await _phTestOneModel(mt.dataset.modelKind, mt.dataset.modelOwner, mt.dataset.model, mt);
-        return;
-      }
       const b = ev.target.closest('[data-role="provider-test"]');
       if (!b) return;
       const name = b.dataset.provider;
@@ -2523,10 +2301,6 @@ loaders.providers = async function () {
       // nothing here waits for the whole run to finish.
       const providerNames = Object.keys(PROVIDER_MODELS);
       const connectionKeys = Object.keys(GATEWAY_MODELS);
-      // A bulk run streams per-model results into the tables, so open every
-      // row first — otherwise the live updates would be painted into rows
-      // the operator cannot see.
-      _phSetAllOpen(true);
       const total = providerNames.length + connectionKeys.length;
       let done = 0;
       testAllBtn.textContent = `⏳ Testing all (0/${total})…`;
@@ -2569,8 +2343,6 @@ loaders.providers = async function () {
   renderHealthKeySelector();
   _maybeResumeRuns();
   _syncRunningUi();
-  _phSyncExpandBtn();
-  _phPublish();
 };
 
 // Streams a single provider's every model test, live — the same routine
@@ -2615,13 +2387,12 @@ async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
   // not the old save with new numbers piled on top. Scoped to just this
   // one provider; every other provider's saved health is left untouched.
   const countsEl = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="provider-counts"]`);
-  // The Success / Error cell is a bar plus an "ok / failed" pair (see
-  // _phSxeCell) - only its own numbers move, never the whole row.
   const renderCounts = (calls, errors) => {
     if (!countsEl) return;
     countsEl.dataset.calls = String(calls);
     countsEl.dataset.errors = String(errors);
-    countsEl.innerHTML = _phSxeCell(calls, errors);
+    countsEl.textContent = `${countsEl.dataset.label} · ${countsEl.dataset.modelcount} model(s) · ` +
+      `${countsEl.dataset.keycount || 0} key(s) · ${calls} calls · ${errors} err`;
   };
   if (!resume && !bulk) {
     try {
@@ -2659,7 +2430,6 @@ async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
   const toRun = resume
     ? PROVIDER_MODEL_RESULTS[name].filter((r) => r.pending).map((r) => r.model)
     : models;
-  toRun.forEach((m) => _phEmitTest({ phase: "start", kind: "provider", owner: name, model: m }));
   await streamModelTests(toRun, tableEl, PROVIDER_MODEL_RESULTS[name],
     (modelId) => post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}`)
       .then((res) => (res.ok && res.data) ? res.data :
@@ -2667,8 +2437,6 @@ async function _testProviderStreamingInner(name, btn, resume, bulk = false) {
     (result) => {
       bumpCounts(result.ok);
       _runningNoteLocal(name, result);
-      _phEmitTest({ phase: "done", kind: "provider", owner: name, model: result.model,
-                    ok: !!result.ok, latency_ms: result.latency_ms, error: result.error });
       if (BULK_HEALTH_RUN.active) {
         const token = _bulkModelToken(name, result.model);
         BULK_HEALTH_RUN.providerModels.add(token);
@@ -2690,16 +2458,15 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
     })),
   }));
   PROVIDER_MODEL_RESULTS[name] = rows;
-  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(rows, _phTableCtx(tableEl));
+  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(rows);
   const repaint = (row) => {
     if (!tableEl) return;
     const el = `[data-model-row="${CSS.escape(row.model)}"]`;
     const node = $(el, tableEl);
-    if (node) node.outerHTML = modelHealthRowsHtml([row], _phTableCtx(tableEl));
+    if (node) node.outerHTML = modelHealthRowsHtml([row]);
   };
   const pendingModels = rows.filter((row) =>
     row.keys.some((slot) => slot.pending)).map((row) => row.model);
-  pendingModels.forEach((m) => _phEmitTest({ phase: "start", kind: "provider", owner: name, model: m }));
   const probes = pendingModels.map((modelId) =>
     post(`/api/v1/providers/${encodeURIComponent(name)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
       .then((res) => (res.ok && res.data) ? res.data
@@ -2718,8 +2485,6 @@ async function testProviderSelectedKeyStreaming(name, models, keys, selectedKey,
           selected: slot.key_id === chosen,
           shared: slot.key_id !== chosen
         }));
-        _phEmitTest({ phase: "done", kind: "provider", owner: name, model: modelId,
-                      ok: !!result.ok, latency_ms: result.latency_ms, error: result.error });
         repaint(row);
         if (BULK_HEALTH_RUN.active) {
           const token = _bulkModelToken(name, modelId);
@@ -2745,7 +2510,6 @@ const GATEWAY_LABELS = {
   "astra-gw-sambanova": "SambaNova",
   "astra-gw-cohere": "Cohere",
   "astra-gw-zai": "Z.AI",
-  "astra-gw-huggingface": "Hugging Face",
 };
 // Model-level Gateway test results, kept client-side for the same reason
 // as PROVIDER_MODEL_RESULTS above.
@@ -2812,7 +2576,7 @@ function _applyGatewayBulkResult(key, modelId, result) {
   const tableEl = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-model-table"]`);
   if (tableEl) {
     const node = $(`[data-model-row="${CSS.escape(modelId)}"]`, tableEl);
-    if (node) node.outerHTML = modelHealthRowsHtml([row], _phTableCtx(tableEl));
+    if (node) node.outerHTML = modelHealthRowsHtml([row]);
   }
 }
 function _flushBulkGatewayResult(provider, modelId, result) {
@@ -2904,12 +2668,10 @@ async function _testGatewayConnectionStreamingInner(key, btn, resume, bulk = fal
     });
     GATEWAY_MODEL_RESULTS[key].length = 0;
     rows.forEach((r) => GATEWAY_MODEL_RESULTS[key].push(r));
-    if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(GATEWAY_MODEL_RESULTS[key], { kind: "gateway", name: key });
+    if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(GATEWAY_MODEL_RESULTS[key]);
 
     // Only models without a matching Provider are real Gateway probes.
     const probeModels = rows.filter((r) => !r.waiting).map((r) => r.model);
-    if (!bulk) probeModels.forEach((m) =>
-      _phEmitTest({ phase: "start", kind: "gateway", owner: key, model: m }));
     await Promise.allSettled(probeModels.map((modelId) =>
       post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}`)
         .then((res) => (res.ok && res.data) ? res.data :
@@ -2918,13 +2680,11 @@ async function _testGatewayConnectionStreamingInner(key, btn, resume, bulk = fal
         .then((result) => {
           const row = GATEWAY_MODEL_RESULTS[key].find((r) => r.model === modelId);
           if (!row) return;
-          if (!bulk) _phEmitTest({ phase: "done", kind: "gateway", owner: key, model: modelId,
-                                  ok: !!result.ok, latency_ms: result.latency_ms, error: result.error });
           Object.assign(row, { waiting: false, ok: !!result.ok,
             latency_ms: result.latency_ms, error: result.error });
           if (tableEl) {
             const node = $(`[data-model-row="${CSS.escape(modelId)}"]`, tableEl);
-            if (node) node.outerHTML = modelHealthRowsHtml([row], _phTableCtx(tableEl));
+            if (node) node.outerHTML = modelHealthRowsHtml([row]);
           }
         })
     ));
@@ -2971,17 +2731,15 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
   });
   resultsArray.length = 0;
   rows.forEach((r) => resultsArray.push(r));
-  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(resultsArray, _phTableCtx(tableEl));
+  if (tableEl) tableEl.innerHTML = modelHealthRowsHtml(resultsArray);
   const repaint = (row) => {
     if (!tableEl) return;
     const node = $(`[data-model-row="${CSS.escape(row.model)}"]`, tableEl);
-    if (node) node.outerHTML = modelHealthRowsHtml([row], _phTableCtx(tableEl));
+    if (node) node.outerHTML = modelHealthRowsHtml([row]);
   };
   const probeModels = rows.filter((r) =>
     r.keys.some((k) => k.pending))
     .map((r) => r.model);
-  if (!bulk) probeModels.forEach((m) =>
-    _phEmitTest({ phase: "start", kind: "gateway", owner: key, model: m }));
   const probes = probeModels.map((modelId) =>
     post(`/api/v1/gateway/${encodeURIComponent(key)}/test/${encodeURIComponent(modelId)}?key=${encodeURIComponent(chosen)}`)
       .then((res) => (res.ok && res.data) ? res.data :
@@ -3000,8 +2758,6 @@ async function testGatewaySelectedKeyStreaming(key, models, keys, selectedKey, t
           selected: slot.key_id === chosen,
           shared: slot.key_id !== chosen
         }));
-        if (!bulk) _phEmitTest({ phase: "done", kind: "gateway", owner: key, model: modelId,
-                                ok: !!result.ok, latency_ms: result.latency_ms, error: result.error });
         repaint(row);
       })
   );
@@ -3030,10 +2786,10 @@ async function runGatewayConnectionTest(key, btn, card) {
 function renderGatewayCard(core) {
   const card = $("#gateway-card");
   if (!card) return;
-  LAST_GATEWAY_CORE = core || null;
   // Same persisted hide/show restore as loaders.providers — must happen
   // before the early "not configured" return too, so the state is already
   // applied by the time the connection rows exist on a later render.
+  if (_loadModelsHiddenState().gateway) card.classList.add("models-hidden");
   const conns = Object.entries((core && core.connections) || {});
   RESTORED_GATEWAY_PENDING.clear();
   if (!core || core.state === "not_configured" || conns.length === 0) {
@@ -3056,7 +2812,7 @@ function renderGatewayCard(core) {
     if (bl == null) return -1;
     return al - bl;
   });
-  const rows = ranked.map(([key, c], gwIdx) => {
+  const rows = ranked.map(([key, c]) => {
     const label = GATEWAY_LABELS[key] || key;
     const dot = dots[c.state] || "warn";
     const modelCount = (c.models || []).length;
@@ -3093,261 +2849,107 @@ function renderGatewayCard(core) {
       }
     }
     const busy = LIVE_GATEWAY_TESTS.has(key) || RESTORED_GATEWAY_PENDING.has(key);
-    const gbucket = _phBucket(c.state, c.state === "healthy" ? true : (c.state === "unhealthy" ? false : undefined));
-    const gtot = _phGatewayTotals(c);
-    const gLast = _phGatewayLastTest(c);
-    const gOpen = _phRowOpen("gateway", key);
-    return `<div class="provider-card${gOpen ? " force-show" : ""}" data-gw-conn="${esc(key)}"` +
-      ` data-ph-kind="gateway" data-ph-name="${esc(label)}"` +
-      ` data-ph-status="${busy ? "unknown" : gbucket}" data-ph-running="${busy ? "1" : "0"}"` +
-      ` data-ph-count="${modelCount}" data-ph-models="${esc((c.models || []).join(" "))}"` +
-      ` data-ph-keys="${(c.keys || []).length}" data-ph-keylabels="${esc((c.keys || []).map((k) => k.label).join("|"))}">` +
-      `<div class="ph-tr">` +
-      `<button class="ph-caret" type="button" data-role="row-toggle" aria-expanded="${gOpen ? "true" : "false"}"` +
-      ` aria-label="Show or hide models for ${esc(label)}">${_phCaretGlyph(gOpen)}</button>` +
-      `<span class="ph-cell ph-c-idx">${gwIdx + 1}</span>` +
-      `<span class="ph-cell ph-c-name"><span class="status-dot ${dot}"></span><b class="ph-name">${esc(label)}</b></span>` +
-      `<span class="ph-cell ph-c-status">${_phStatusCell(gbucket, busy)}</span>` +
-      `<span class="ph-cell ph-c-num">${modelCount}</span>` +
-      `<span class="ph-cell ph-c-num">${(c.keys || []).length}</span>` +
-      `<span class="ph-cell ph-c-sxe">${_phSxeCell(gtot.ok, gtot.bad)}</span>` +
-      `<span class="ph-cell ph-c-lat">${_phMs(_connAvgLatency(c))}</span>` +
-      `<span class="ph-cell ph-c-when"${gLast ? ` title="${esc(_phStamp(gLast))}"` : ""}>${esc(_phClock(gLast))}</span>` +
-      `<span class="ph-cell ph-c-act">` +
-      `<button class="btn mini ph-test" data-role="gw-test" data-conn="${esc(key)}"${busy ? " disabled" : ""}>` +
-      `${busy ? "Testing..." : "Test"}</button>` +
-      `<button class="ph-more" type="button" data-role="row-more" data-owner-kind="gateway" data-owner="${esc(key)}"` +
-      ` aria-label="More actions for ${esc(label)}">\u22ee</button>` +
-      `</span>` +
+    const forceShow = FORCE_SHOWN_GATEWAY.has(key) ? " force-show" : "";
+    return `<div class="provider-card${forceShow}" data-gw-conn="${esc(key)}">` +
+      `<div class="provider-card-head">` +
+      `<span class="status-dot ${dot}"></span><b>${esc(label)}</b>` +
+      `<span class="grow muted">${esc(c.state)} · ${models}</span>` +
+      `<button class="btn mini" data-role="gw-test" data-conn="${esc(key)}"${busy ? " disabled" : ""}>` +
+      (busy ? "⏳ Testing…" : `🧪 Test (${modelCount || 0} model${modelCount === 1 ? "" : "s"} · ${(c.keys || []).length ? _healthKeyLabel("gateway", key) : "direct"})`) +
+      `</button>` +
       `</div>` +
-      `<div class="ph-detail model-health-table" data-role="gw-model-table" data-ctx-kind="gateway" data-ctx-name="${esc(key)}">` +
-      ((GATEWAY_MODEL_RESULTS[key] || []).length ? _phTableHead(PH_MODEL_COLS) : "") +
-      modelHealthRowsHtml(GATEWAY_MODEL_RESULTS[key], { kind: "gateway", name: key }) +
+      `<div class="model-health-table" data-role="gw-model-table">` +
+      modelHealthRowsHtml(GATEWAY_MODEL_RESULTS[key]) +
       `</div></div>`;
   }).join("");
-  card.innerHTML = _phTableHead(_phCols("Connection")) + rows;
+  card.innerHTML = `<div class="list" style="margin-top:8px">${rows}</div>`;
 
   // per-connection Test button — tests every model of just that ONE
   // connection (e.g. only Gemini's models), not the whole gateway.
   if (!card.dataset.hooked) {
     card.dataset.hooked = "1";
     card.addEventListener("click", (ev) => {
-      const more = ev.target.closest('[data-role="row-more"]');
-      if (more) { _phMoreMenu(more); return; }
-      const caret = ev.target.closest('[data-role="row-toggle"]');
-      if (caret) {
-        const rowEl = caret.closest(".provider-card");
-        const owner = rowEl && rowEl.dataset.gwConn;
-        if (owner) _phSetRowOpen("gateway", owner, !(rowEl.classList.contains("force-show")));
-        return;
-      }
-      const mt = ev.target.closest('[data-role="model-test"]');
-      if (mt) { _phTestOneModel(mt.dataset.modelKind, mt.dataset.modelOwner, mt.dataset.model, mt); return; }
       const b = ev.target.closest('[data-role="gw-test"]');
       if (!b) return;
       runGatewayConnectionTest(b.dataset.conn, b, card);
     });
   }
 
-
-}
-
-/* ---- single-model test (shared by Providers and Gateway rows) -------------
- * Reuses the EXISTING per-model endpoints — POST
- * /api/v1/providers/<name>/test/<model> and
- * /api/v1/gateway/<connection>/test/<model>, both already used by the
- * provider/connection "Test" buttons and by Test All. Only the affected row
- * is repainted; the page is never rebuilt for one result.
- */
-function _phApplyModelResult(kind, owner, model, result) {
-  const store = kind === "gateway" ? GATEWAY_MODEL_RESULTS : PROVIDER_MODEL_RESULTS;
-  const rows = store[owner] || (store[owner] = []);
-  let row = rows.find((r) => r.model === model);
-  const stamp = new Date().toLocaleString();
-  if (row && Array.isArray(row.keys)) {
-    // The backend saves ONE shared (provider, model) result against every key
-    // slot (see test_providers_http_keys), so every chip shows it.
-    row.keys.forEach((slot) => Object.assign(slot, {
-      pending: false, waiting: false,
-      ok: !!result.ok, latency_ms: result.latency_ms, error: result.error,
-      tested_at: stamp,
-    }));
-    return row;
+  // Hide/show toggle for every connection's per-model rows — same pattern
+  // as #btn-providers-toggle-models: state lives as a class on #gateway-card
+  // itself, so it survives this function's own re-renders.
+  const gwToggleBtn = $("#btn-gateway-toggle-models");
+  if (gwToggleBtn) {
+    // Rebind on every render so a previous render can never leave this
+    // control with a stale/missing click handler.
+    gwToggleBtn.onclick = () => {
+      const hidden = card.classList.toggle("models-hidden");
+      gwToggleBtn.textContent = hidden ? "👁 Show models" : "🙈 Hide models";
+      const st = _loadModelsHiddenState();
+      st.gateway = hidden;
+      _saveModelsHiddenState(st);
+      FORCE_SHOWN_GATEWAY.clear();
+      card.querySelectorAll(".provider-card.force-show").forEach((el) => el.classList.remove("force-show"));
+    };
   }
-  const fresh = { model, ok: !!result.ok, latency_ms: result.latency_ms,
-                  error: result.error, tested_at: stamp };
-  if (row) Object.assign(row, fresh);
-  else rows.push(fresh);
-  return row || fresh;
-}
-function _phRepaintModelRow(kind, owner, model, tableEl) {
-  if (!tableEl) return;
-  const store = kind === "gateway" ? GATEWAY_MODEL_RESULTS : PROVIDER_MODEL_RESULTS;
-  const row = (store[owner] || []).find((r) => r.model === model);
-  if (!row) return;
-  const ctx = { kind, name: owner };
-  const html = modelHealthRowsHtml([row], ctx);
-  const node = $(`[data-model-row="${CSS.escape(model)}"]`, tableEl);
-  if (node) node.outerHTML = html; else tableEl.insertAdjacentHTML("beforeend", html);
-}
-function _phModelTableEl(kind, owner) {
-  return kind === "gateway"
-    ? $(`[data-gw-conn="${CSS.escape(owner)}"] [data-role="gw-model-table"]`)
-    : $(`[data-provider-row="${CSS.escape(owner)}"] [data-role="model-table"]`);
-}
-async function _phTestOneModel(kind, owner, model, btn) {
-  const isGw = kind === "gateway";
-  const keyId = _selectedHealthKey(isGw ? "gateway" : "provider", owner);
-  let url = isGw
-    ? `/api/v1/gateway/${encodeURIComponent(owner)}/test/${encodeURIComponent(model)}`
-    : `/api/v1/providers/${encodeURIComponent(owner)}/test/${encodeURIComponent(model)}`;
-  if (keyId) url += `?key=${encodeURIComponent(keyId)}`;
-  if (btn) { btn.disabled = true; btn.textContent = "\u2026"; }
-  _phEmitTest({ phase: "start", kind, owner, model });
-  let result;
-  try {
-    const res = await post(url);
-    result = (res.ok && res.data) ? res.data
-      : { model, ok: false, latency_ms: 0, error: res.error || "test failed" };
-  } catch (e) {
-    result = { model, ok: false, latency_ms: 0, error: String(e) };
-  }
-  if (!result.model) result.model = model;
-  _phApplyModelResult(kind, owner, model, result);
-  _phEmitTest({ phase: "done", kind, owner, model, ok: !!result.ok,
-                latency_ms: result.latency_ms, error: result.error });
-  _phRepaintModelRow(kind, owner, model, _phModelTableEl(kind, owner));
-  if (btn) { btn.disabled = false; btn.textContent = "Test"; }
-  _phPublish();
-  return result;
-}
-
-/* Row "more" menu — a compact popover offering the same actions the row
- * already exposes elsewhere. It never starts a test that is already running:
- * it forwards to the row's own Test button, which is disabled while busy. */
-function _phMoreMenu(btn) {
-  if (!btn || typeof document === "undefined" || !document.createElement) return;
-  const prev = document.getElementById && document.getElementById("ph-more-menu");
-  if (prev && prev.parentElement) prev.parentElement.removeChild(prev);
-  const kind = btn.dataset.ownerKind === "gateway" ? "gateway" : "provider";
-  const owner = btn.dataset.owner || "";
-  const storeKind = kind === "gateway" ? "gateway" : "providers";
-  const open = _phRowOpen(storeKind, owner);
-  const menu = document.createElement("div");
-  menu.id = "ph-more-menu";
-  menu.className = "ph-more-menu";
-  menu.setAttribute("role", "menu");
-  menu.innerHTML =
-    `<button type="button" role="menuitem" data-more="test">Test all models</button>` +
-    `<button type="button" role="menuitem" data-more="toggle">${open ? "Collapse models" : "Expand models"}</button>` +
-    `<button type="button" role="menuitem" data-more="refresh">Refresh health</button>`;
-  if (btn.parentElement) btn.parentElement.appendChild(menu);
-  const close = () => {
-    if (menu.parentElement) menu.parentElement.removeChild(menu);
-    if (document.removeEventListener) document.removeEventListener("click", onDoc, true);
-  };
-  function onDoc(e) { if (!menu.contains(e.target)) close(); }
-  setTimeout(() => { if (document.addEventListener) document.addEventListener("click", onDoc, true); }, 0);
-  menu.addEventListener("click", (e) => {
-    const item = e.target && e.target.closest && e.target.closest("[data-more]");
-    if (!item) return;
-    const action = item.dataset.more;
-    close();
-    if (action === "test") {
-      const sel = kind === "gateway"
-        ? `[data-gw-conn="${CSS.escape(owner)}"] [data-role="gw-test"]`
-        : `[data-provider-row="${CSS.escape(owner)}"] [data-role="provider-test"]`;
-      const b = $(sel);
-      if (b && !b.disabled) b.click();
-    } else if (action === "toggle") {
-      _phSetRowOpen(storeKind, owner, !open);
-    } else {
-      loaders.providers();
-    }
-  });
-}
-
-/* ---- Live Test Activity stream ------------------------------------------- */
-// The backend's manual-test endpoints deliberately do not emit SSE (they are
-// health probes, not chat traffic), so the activity rail is fed by the ONE
-// front-end event bus every test path already goes through. It is a signal on
-// the existing document event plumbing (the same mechanism as `astra:event`),
-// not a second event system, and the shared SSE feed is NOT re-subscribed.
-function _phEmitTest(detail) {
-  if (typeof document === "undefined" || typeof document.dispatchEvent !== "function") return;
-  try { document.dispatchEvent(new CustomEvent("astra:provider-test", { detail })); }
-  catch (_e) { /* very old browsers: tests still work, the rail stays empty */ }
-}
-
-/* ---- publish the real state the page chrome renders from ----------------- */
-function _phPublish() {
-  const api = (window.AstraProviders = window.AstraProviders || {});
-  api.providers = LAST_PROVIDER_DATA;
-  api.gateway = LAST_GATEWAY_DATA;
-  api.gatewayCore = LAST_GATEWAY_CORE;
-  api.providerModels = PROVIDER_MODELS;
-  api.gatewayModels = GATEWAY_MODELS;
-  api.providerKeys = PROVIDER_KEYS;
-  api.gatewayKeys = GATEWAY_KEYS;
-  api.ready = true;
-  if (typeof document !== "undefined" && typeof document.dispatchEvent === "function") {
-    try { document.dispatchEvent(new CustomEvent("astra:providers-updated")); } catch (_e) {}
+  if (gwToggleBtn) {
+    gwToggleBtn.textContent = card.classList.contains("models-hidden")
+      ? "👁 Show models" : "🙈 Hide models";
   }
 }
-window.AstraProviders = {
-  providers: {}, gateway: {}, gatewayCore: null,
-  providerModels: PROVIDER_MODELS, gatewayModels: GATEWAY_MODELS,
-  providerKeys: PROVIDER_KEYS, gatewayKeys: GATEWAY_KEYS,
-  ready: false,
-  expanded: (kind, name) => _phRowOpen(kind, name),
-  refresh: () => loaders.providers(),
-  testAll: () => {
-    const b = $("#btn-providers-test-all");
-    if (b && !b.disabled) b.click();
-    return b;
-  },
-  testProvider: (name) => {
-    const b = $(`[data-provider-row="${CSS.escape(name)}"] [data-role="provider-test"]`);
-    if (b && !b.disabled) b.click();
-    return b;
-  },
-  testGateway: (key) => {
-    const b = $(`[data-gw-conn="${CSS.escape(key)}"] [data-role="gw-test"]`);
-    if (b && !b.disabled) b.click();
-    return b;
-  },
-  testModel: (kind, owner, model) => _phTestOneModel(kind, owner, model, null),
-  bucket: _phBucket,
-  formatMs: _phMs,
-  lastTestOf: (kind, name) => (kind === "gateway"
-    ? _phGatewayLastTest(LAST_GATEWAY_DATA[name])
-    : _phProviderLastTest(LAST_PROVIDER_DATA[name])),
-  totalsOf: (kind, name) => (kind === "gateway"
-    ? _phGatewayTotals(LAST_GATEWAY_DATA[name])
-    : _phProviderTotals(LAST_PROVIDER_DATA[name])),
-  setAllOpen: _phSetAllOpen,
-  loaders,
+
+/* -------------------------------- router (core) ---------------------------- */
+loaders.router = async function () {
+  const [m, sr] = await Promise.all([api("/api/v1/models"), api("/api/v1/router/stats")]);
+  const list = $("#router-list");
+  const blocks = [];
+  if (m.ok) {
+    const models = m.data.models || [];
+    blocks.push(`<div class="panel"><div class="panel-head"><h3>Model registry</h3></div><div class="table">` +
+      (models.length ? models.map((md) =>
+        `<div class="row"><b>${esc(md.display_name || md.model_id)}</b>` +
+        `<span>${esc(md.provider)}</span>` +
+        `<span>${esc((md.capabilities || []).slice(0, 5).join("・"))}</span>` +
+        `<span>${md.preferred ? "★" : ""}</span></div>`).join("")
+        : `<span class="muted">no models — provider API key add korle ekhane asbe</span>`) +
+      `</div></div>`);
+  }
+  if (sr.ok) {
+    const task = sr.data.task || {};
+    const rows = Object.entries(task).map(([k, v]) =>
+      `<div class="row"><b>${esc(k)}</b><span>${esc(String(v))}</span></div>`).join("");
+    blocks.push(`<div class="panel"><div class="panel-head"><h3>Task routing stats</h3></div>` +
+      `<div class="table">${rows || `<span class="muted">routing kora ekhono bondho — kotha bolo age</span>`}</div></div>`);
+  }
+  list.innerHTML = blocks.join("");
 };
-
 
 /* ------------------------------ wallet / web3 (core) ----------------------- */
 loaders.web3 = async function () {
-  // The three existing endpoints plus the wallet registry (the single source
-  // of wallet state); rendering lives in web3_center.js.
-  const [pol, txs, tools, wal] = await Promise.all([
-    api("/api/v1/web3/transaction-policy"), api("/api/v1/web3/transactions"), api("/api/tools"),
-    api("/api/v1/web3/wallets")]);
-  const model = Web3Center.buildModel(pol, txs, tools, new Date(), wal);
-  Web3Center.render($("#w3-root"), model, {
-    // Wallet import/create/select and group edits go through the backend registry.
-    call: (method, path, body) => api(path, { method, body }),
-    // Agent actions only PREFILL the chat box; the user must press send.
-    toChat(text) {
-      showTab("assistant");
-      const i = $("#chat-input"); if (!i) return;
-      i.value = text; i.dispatchEvent(new Event("input", { bubbles: true })); i.focus();
-    },
-  });
+  const [pol, txs] = await Promise.all([
+    api("/api/v1/web3/transaction-policy"), api("/api/v1/web3/transactions")]);
+  const lim = (n) => n == null ? "—" : (Number(n) / 1e18).toFixed(4) + " ETH";
+  if (pol.ok) {
+    const d = pol.data, p = d.policy || {};
+    const stopped = d.stopped ? "🚨 EMERGENCY STOP" : "running";
+    $("#web3-policy").innerHTML =
+      `<div class="table">` +
+      `<div class="row"><b>Mode</b><span>${esc(d.mode)} (CONFIRM = review, AUTO = policy-approved)</span></div>` +
+      `<div class="row"><b>Status</b><span>${esc(stopped)}</span></div>` +
+      `<div class="row"><b>Max per tx</b><span>${esc(lim(p.tx_limit_wei))}</span></div>` +
+      `<div class="row"><b>Max daily</b><span>${esc(lim(p.daily_limit_wei))}</span></div>` +
+      `<div class="row"><b>Allowlist</b><span>${p.recipients_allowed?.length || 0} recipients · ${p.contracts_allowed?.length || 0} contracts · ${p.wallets_allowed?.length || 0} wallets</span></div>` +
+      `</div>`;
+  } else {
+    $("#web3-policy").innerHTML = `<span class="muted">Web3 unavailable</span>`;
+  }
+  if (txs.ok) {
+    const rows = (txs.data.transactions || []).map((t) =>
+      `<div class="row"><b>${esc(String(t.tx_id || t.tx_hash || "").slice(0, 12))}…</b>` +
+      `<span>${esc(t.status || "?")}</span>` +
+      `<span>${esc(lim(t.value_wei))}</span></div>`).join("");
+    $("#web3-txs").innerHTML = rows || `<span class="muted">kono transaction nei</span>`;
+  }
 };
 
 async function eventsPoll() {
@@ -3358,7 +2960,6 @@ async function eventsPoll() {
   AstraLog.orderHistory(r.data || []).forEach((e) => {
     receiveEvent(e);
     chatStatusTrack(e);
-    emitAstraEvent(e);
   });
 }
 
@@ -3374,16 +2975,6 @@ let SSE_STATE = "reconnecting";
 // AstraChatStatus.apply() keeps a replay harmless.
 let EVENT_SOURCE = null;
 
-// Fan the shared feed out to other views (System Map / Command Center) as a DOM
-// event. Guarded: an observer failing must never break the Activity Log feed.
-function emitAstraEvent(e) {
-  try {
-    if (typeof CustomEvent === "function" && document.dispatchEvent) {
-      document.dispatchEvent(new CustomEvent("astra:event", { detail: e }));
-    }
-  } catch (_) { /* observers are best-effort */ }
-}
-
 function ensureEventStream(afterId) {
   if (!window.EventSource) return false;
   if (EVENT_SOURCE) return true;
@@ -3397,7 +2988,6 @@ function ensureEventStream(afterId) {
     try { e = JSON.parse(ev.data); } catch (_) { return; }
     receiveEvent(e);
     chatStatusTrack(e);        // the same event, as a human-readable line
-    emitAstraEvent(e);         // System Map / Command Center observe the same feed
   };
   es.onerror = () => {
     // EventSource auto-reconnects, resuming via Last-Event-ID — reflect that
@@ -3548,6 +3138,23 @@ function renderArtifact(a) {
   return el;
 }
 
+/* ------------------------------ upload indicator ----------------------------- */
+function showUploadIndicator(hasFiles) {
+  if (!hasFiles) return;
+  let el = $("#upload-indicator");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "upload-indicator";
+    el.className = "upload-indicator";
+    el.innerHTML = `<span class="upload-spinner"></span> Uploading & processing…`;
+    $(".chat-shell")?.insertBefore(el, $("#chat-form")?.nextSibling || null);
+  }
+  el.hidden = false;
+}
+function hideUploadIndicator() {
+  const el = $("#upload-indicator");
+  if (el) el.hidden = true;
+}
 
 /* ---------------------------------- boot ------------------------------------ */
 /* Resolves once every <script> in index.html has executed. terminal.js and
@@ -3587,10 +3194,7 @@ async function boot() {
   MANIFEST.tabs.forEach((t) => { TAB_LABELS[t.tab] = t.label; });
 
   // tab bar
-  // "assistant" is reachable from the sidebar's 💬 Chat entry (astra_os.js), so
-  // it is not repeated in this menu. The tab itself is unchanged.
-  const NAV_HIDDEN = new Set(["assistant"]);
-  $("#nav").innerHTML = MANIFEST.tabs.filter((t) => !NAV_HIDDEN.has(t.tab)).map((t) =>
+  $("#nav").innerHTML = MANIFEST.tabs.map((t) =>
     `<button data-tab="${esc(t.tab)}" class="tab${t.tab === "dashboard" ? " active" : ""}">${t.label}</button>`).join("");
   $$("#nav .tab").forEach((t) =>
     t.addEventListener("click", () => showTab(t.dataset.tab)));

@@ -20,26 +20,6 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-class _Transaction:
-    def __init__(self, store):
-        self._store = store
-
-    def __enter__(self):
-        self._store._lock.acquire()
-        self._store._conn.commit()          # start from a clean slate
-        return self._store._conn
-
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            if exc_type is None:
-                self._store._conn.commit()
-            else:
-                self._store._conn.rollback()
-        finally:
-            self._store._lock.release()
-        return False
-
-
 class Store:
     """Thin, generic SQLite wrapper. `Store(":memory:")` for tests."""
 
@@ -72,15 +52,6 @@ class Store:
             except Exception:
                 self._conn.rollback()
                 raise
-
-    def transaction(self):
-        """Context manager: run several statements atomically.
-
-        Yields the raw connection; use `conn.execute(...)` inside (NOT
-        `exec`/`insert`, which commit per statement). Commits when the block
-        ends cleanly, rolls everything back if it raises. The store lock is
-        held throughout so no other writer interleaves."""
-        return _Transaction(self)
 
     def fetch(self, sql: str, args: tuple = ()) -> list[dict]:
         """Run a query returning zero or more rows."""

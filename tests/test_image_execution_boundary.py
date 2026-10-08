@@ -31,8 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astra.ai.chat_pipeline import ChatPipeline
 from astra.ai.gateway import AstraAIGateway
-from astra.ai.gateway_routing import classify_gateway_request
 from astra.ai.image_router import ImageRouter
+from astra.ai.router import classify
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 400
 DATA_URI = "data:image/png;base64," + base64.b64encode(PNG).decode()
@@ -60,8 +60,7 @@ class _FakeConn:
     def live_image_models(self, *, discover=True):
         return []
 
-    def generate_image(self, prompt, model=None, size="1024x1024", n=1,
-                       source_image=None, mask_image=None):
+    def generate_image(self, prompt, model=None, size="1024x1024", n=1):
         self.image_calls.append((model, prompt))
         return DATA_URI
 
@@ -138,7 +137,7 @@ class TestImageGenerationBoundaryHops(unittest.TestCase):
     def test_image_generation_is_detected_then_the_gateway_is_entered(self):
         # Hop 1: the request really classifies as image_generation.
         text = "generate an image of a sunset"
-        self.assertEqual(classify_gateway_request(text), "image_generation")
+        self.assertEqual(classify(text), "image_generation")
         # Hop 2/3: the Gateway is entered and hands off to ImageRouter,
         # which must reach the provider adapter for the request to succeed.
         gw, conn = self._gw()

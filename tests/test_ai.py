@@ -376,7 +376,7 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         self.assertIn("candidates_considered", rr.route_reason)
 
     # 9/10. registry shape
-    def test_all_eleven_real_providers_registered_and_astrarouter_absent(self):
+    def test_all_ten_real_providers_registered_and_astrarouter_absent(self):
         from astra.ai.registry import build_providers
         keys = {
             "GEMINI_API_KEYS": "k", "GROQ_API_KEYS": "k", "MISTRAL_API_KEYS": "k",
@@ -385,13 +385,11 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
             "CLOUDFLARE_API_KEYS": "k", "CLOUDFLARE_ACCOUNT_IDS": "acct",
             "SAMBA_API_KEYS": "k",
             "COHERE_API_KEYS": "k", "ZAI_API_KEYS": "k", "BEDROCK_CREDENTIALS": "k",
-            "HF_API_KEYS": "k",
         }
         cfg = self._config(**keys)
         reg = build_providers(config=cfg)
         expected = {"gemini", "groq", "mistral", "openrouter", "cerebras",
-                    "cloudflare", "sambanova", "cohere", "zai", "bedrock",
-                    "huggingface"}
+                    "cloudflare", "sambanova", "cohere", "zai", "bedrock"}
         self.assertEqual(expected, set(reg.names()) & expected)
         for name in expected:
             self.assertIsNotNone(reg.get(name))
@@ -447,20 +445,19 @@ class TestDynamicProviderModelRouting(unittest.TestCase):
         self.assertNotIn("astra_ai_gateway", r.health())
         self.assertEqual(r.gateway_health()["state"], "healthy")
 
-    # 12b. the eleven-connection automatic fallback order
+    # 12b. the ten-connection automatic fallback order
     def test_gateway_automatic_fallback_over_four_connections(self):
         from astra.ai.gateway import AstraAIGateway, GATEWAY_CONNECTIONS
         # canonical fallback order: the original Gemini → Groq → Cloudflare →
-        # Bedrock chain keeps its exact relative order, then the seven added
+        # Bedrock chain keeps its exact relative order, then the six added
         # OpenAI-compatible connections.
         names = [c.name for c in GATEWAY_CONNECTIONS]
         self.assertEqual(names, [
             "astra-gw-gemini", "astra-gw-groq", "astra-gw-cloudflare",
             "astra-gw-bedrock",
             "astra-gw-openrouter", "astra-gw-mistral", "astra-gw-cerebras",
-            "astra-gw-sambanova", "astra-gw-cohere", "astra-gw-zai",
-            "astra-gw-huggingface"])
-        self.assertEqual(len(names), 11)
+            "astra-gw-sambanova", "astra-gw-cohere", "astra-gw-zai"])
+        self.assertEqual(len(names), 10)
         # first three connections fail; the fourth serves the request
         conns = [_FakeGatewayConn(name="astra-gw-gemini", models=["m"], fail_times=1),
                  _FakeGatewayConn(name="astra-gw-groq", models=["m"], fail_times=1),

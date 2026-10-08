@@ -113,7 +113,7 @@ class ImageRouter:
                 if spec is None and mid in live:
                     # Live-discovered ids are only ever accepted when the
                     # provider's own API reported them as FREE image models
-                    # (OpenRouter's ":free" variants); otherwise an unsupported model
+                    # (OpenRouter's ":free" variants); otherwise a paid model
                     # could sneak into the free pool.
                     spec = make_image_spec(
                         short, mid, PROTOCOL_OPENROUTER_IMAGES,
@@ -155,7 +155,7 @@ class ImageRouter:
         catalog = self._catalog(discover=discover)
         category = operation or ("image_editing" if editing else "image_generation")
         targets = eligible_image_generation_targets(
-            catalog, gw.routing_state, editing=editing, operation=operation)
+            catalog, gw.routing_state, category=category)
         preferred = []
         if gw.config is not None:
             try:
@@ -181,7 +181,7 @@ class ImageRouter:
 
         Returns a `data:` URI on the first success and stops immediately,
         or raises `ProviderError(IMAGE_EXHAUSTED_MESSAGE)` when every
-        eligible FREE model failed. It NEVER falls back outside the image
+        eligible FREE model failed. It NEVER falls back to a paid image
         model, a text model, a vision-only model or simple_chat.
         """
         from astra.ai.gateway import _gw_log_cap

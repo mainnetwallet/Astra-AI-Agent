@@ -20,10 +20,7 @@
              SAME live ToolRegistry instead of describing how the user could
              do it themselves — and a fallback provider sees the identical
              requirement and tools.
-      -> Gateway call #2  VERIFY   (skipped for NO_VERIFY_TASK_TYPES:
-           simple_chat, general, translation, summarization,
-           image_generation, image_editing — the Provider result is returned
-           immediately with verification {"status": "not_applicable"})
+      -> Gateway call #2  VERIFY
            - the Gateway is handed everything call #1 decided (the request it
              assigned, the completion criteria, which provider/model got it)
              plus the provider's output, and judges: complete or not?
@@ -58,7 +55,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-import time
 
 from astra.ai.artifact_extraction import detect_output_type, extract_artifacts
 from astra.ai.capability_context import (RuntimeCapabilities,
@@ -76,27 +72,34 @@ from astra.ai.image_models import IMAGE_EXHAUSTED_MESSAGE
 from astra.ai.json_extract import loads_lenient
 from astra.ai.multimodal_messages import build_multimodal_content
 from astra.ai.execution_history import AgentExecutionHistory
-from astra.ai.execution_answer import (NO_EVIDENCE_TEXT, evidence_snapshot,
-                                       has_sufficient_evidence,
-                                       summarize_execution)
-from astra.ai.response_boundary import (is_unusable_answer,
-                                        sanitize_final_response)
-from astra.ai.router import RoutingRequest, RoutingResult
+from astra.ai.response_boundary import sanitize_final_response
+from astra.ai.router import RoutingRequest, RoutingResult, classify
 from astra.ai.system_prompt import build_system_prompt
 from astra.core.exceptions import ProviderError
 from astra.core.events import new_op_id
 from astra.terminal.manager import default_session_id_for
 
-# Task types whose Provider result is returned as-is: they NEVER go through
-# Gateway call #2 (semantic VERIFY) and never enter the verify -> correct ->
-# re-verify loop. Their trace records {"status": "not_applicable"}. Every
-# other task type (reasoning, coding, long_context, structured_output,
-# tool_use, research, planning, vision) keeps the full verify behaviour.
-NO_VERIFY_TASK_TYPES = frozenset({
-    "simple_chat", "general", "translation", "summarization",
-    "image_generation", "image_editing",
-})
-
+# Task types that are safe to hand the router for a plain chat turn.
+# Everything else `classify()` can return (audio/video generation,
+# structured_output -> forced JSON mode, browser/web3 -> tool territory)
+# is served as ordinary chat here.
+#
+# "image_generation" is deliberately included (unlike audio/video
+# generation, which stay out of scope here): classify() already detects it
+# correctly, in English and Bangla/Banglish alike ("akta chobi banao",
+# "photo create koro"), and _route() hands those task types straight to the
+# Gateway's ImageRouter — the sole image execution owner. They must never
+# reach AstraRouter, which now refuses image task types outright (there is
+# no second image execution path). Previously this exact line coerced
+# task_type down to "simple_chat" before _route() ever saw it, so every
+# image request was quietly handed to a plain text model that just described
+# an image in words instead of generating one. See tests.test_chat_pipeline
+# .TestImageGenerationPipelineWiring,
+# tests.test_image_execution_boundary and
+# tests.test_multimodal.TestProviderRouterImageRefusal for the coverage.
+_CHAT_TASK_TYPES = frozenset({"simple_chat", "coding", "translation",
+                              "summarization", "research", "planning",
+                              "image_generation", "image_editing", "image_inpainting"})
 
 # Plain-text replies for missing AI configuration. Shown as-is (no
 # markdown rendering in the chat UI — see the note on _run_turn's fail
@@ -120,16 +123,6 @@ _NO_IMAGE_MODEL_MESSAGE = (
     "Kono eligible free image model configured ba available nei. "
     "Required image-provider credentials/configuration check kore abar chesta korun."
 )
-_NO_SOURCE_IMAGE_MESSAGE = (
-    "✕ Edit korar jonno ekta chobi attach korte hobe.\n\n"
-    "Kono reusable image attachment paoa jayni is message-e. Ekta chobi "
-    "attach kore abar try korun."
-)
-_NO_MASK_IMAGE_MESSAGE = (
-    "✕ Inpainting korar jonno ekta mask image attach korte hobe.\n\n"
-    "Kono reusable mask image paoa jayni is message-e. Mask image attach "
-    "kore abar try korun."
-)
 _NO_GATEWAY_CONFIGURED_MESSAGE = (
     "⚠️ Kono AI gateway-er API key set kora nei."
 )
@@ -152,7 +145,7 @@ APPROVAL_DENIED_TEXT = (
     "Astra Agent Runtime if that is possible."
 )
 
-# No artificial model-count cap: the Gateway receives the complete eligible catalogue.
+MAX_TARGETS_IN_PROMPT = 60
 # NOTE: there is deliberately no Astra-imposed output-token cap for the
 # Gateway UNDERSTAND/VERIFY calls or the Provider call. The Gateway picks its
 # OWN model by keyword-classifying user-role text; those control prompts embed
@@ -230,24 +223,6 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "\"execution\": {\"required\": true, \"capability\": \"<category "
     "id>\", \"environment\": \"agent_runtime\", \"intent\": \"<one "
     "short line of what must be done>\"}.\n"
-    "   - LIVE / CURRENT EXTERNAL STATE (general rule, applies to any "
-    "topic): when the user asks Astra to CHECK, VERIFY, TEST, QUERY, "
-    "MONITOR or LOOK UP the current state of something outside this "
-    "conversation — a blockchain network or RPC endpoint, an account or "
-    "wallet balance, whether a transaction confirmed, the latest block, "
-    "whether a service is reachable — the answer exists only by really "
-    "running a tool, never from memory. If the live catalog lists a "
-    "capability that can reach it, set required true with that "
-    "capability: `web3` for chain / wallet / RPC / transaction state, "
-    "`terminal` for generic network or shell probing. Such a request is "
-    "NEVER ordinary text-only chat. Examples: 'check RPC health of a "
-    "chain', 'what is the current ETH balance', 'check this wallet's "
-    "token balance', 'has this transaction confirmed', 'what is the "
-    "latest block', 'test these RPC endpoints'. By contrast, EXPLAINING "
-    "how something works ('explain how RPC works', 'what is a nonce') "
-    "stays required false. Do not choose or name a specific tool: the "
-    "Provider picks the right one for what was actually asked (an RPC "
-    "check is not a wallet-balance request).\n"
     "   - `capability` MUST be one of the exact category IDs the live "
     "catalog lists (e.g. \"terminal\", \"files\", \"browser\"). If the "
     "task needs a capability the catalog does NOT list, set required false, "
@@ -279,10 +254,7 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "downstream ChatPipeline must not re-guess the task when this field is "
     "present. Use exactly ONE of: simple_chat, general, reasoning, coding, "
     "long_context, structured_output, tool_use, research, planning, "
-    "translation, summarization, vision, image_generation, image_editing, "
-    "web3. Use web3 for blockchain / wallet / RPC / on-chain requests, both "
-    "explanations and live checks (`execution.required` below, not the task "
-    "type, says which). "
+    "translation, summarization, vision, image_generation, image_editing. "
     "Use image_generation when the user asks Astra to CREATE/GENERATE/DRAW "
     "an image and there is no source image being edited. Use image_editing "
     "when the user asks to change/retouch/modify an uploaded, previous, or "
@@ -293,26 +265,18 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
     "If a request combines capabilities, choose the primary execution "
     "capability that actually produces the requested result. \n\n"
 
-    "4) ASSIGN. For IMAGE GENERATION and IMAGE EDITING requests, do NOT "
-    "select normal Gateway targets at all. Return an empty \"targets\" list "
-    "and leave provider/model empty because ImageRouter owns image provider/model "
-    "selection and fallback independently. For every other request, from the "
-    "provider/model list you are given, choose EVERY provider+model that can "
-    "actually do this job (coding -> coding-capable "
-    "models, hard reasoning -> high-quality models, simple chat -> fast "
-    "ones, image generation -> image-generation models, image editing -> "
-    "image-editing models, vision -> vision models), then put them in "
-    "`targets` as an ORDERED list — this order IS the fallback order: if "
-    "the first one fails, the second is used, and so on. Order by fit "
-    "first, then by health: each entry shows a `health` value ('ok' or "
-    "'unknown' — already-failing models are never listed here), and a "
-    "health=ok model must be placed before an otherwise-equally-fit "
-    "health=unknown model. Copy provider and model EXACTLY from the list "
-    "for every target — never invent a provider or a model, and never "
-    "list a pair that is not in the supplied list. If NOTHING in the "
-    "list is a clear fit for a NORMAL request's required capability, return "
-    "an empty `targets` list; the pipeline will fail closed rather than "
-    "silently selecting a model outside this plan.\n\n"
+    "4) ASSIGN. From the provider/model list you are given, pick the single "
+    "best provider+model for this job (coding -> a coding-capable model, "
+    "hard reasoning -> a high-quality model, simple chat -> a fast one, "
+    "image generation -> an image-generation model, image editing -> an "
+    "image-editing model, vision -> a vision model). Each entry shows a "
+    "`health` value "
+    "('ok' or 'unknown' — already-failing models are never listed here); "
+    "prefer health=ok over health=unknown when both otherwise fit equally. "
+    "Copy provider and model EXACTLY from the list. If nothing in the "
+    "list is a clear fit for this request's required capability, use "
+    "\"\" for both — automatic routing will handle it, including trying "
+    "a currently-unhealthy model as a last resort if it must.\n\n"
 
     "5) DEFINE DONE. List 1-5 short, checkable criteria a 100%-complete "
     "answer must satisfy (for an execution task, the criteria must require "
@@ -320,8 +284,7 @@ _UNDERSTAND_SPECIALIZED_PROMPT = (
 
     "Reply with exactly this JSON shape:\n"
     "{\"final_request\": \"...\", \"was_incomplete\": true|false, "
-    "\"task_type\": \"<category>\", "
-    "\"targets\": [{\"provider\": \"...\", \"model\": \"...\"}, ...], "
+    "\"task_type\": \"<category>\", \"provider\": \"...\", \"model\": \"...\", "
     "\"criteria\": [\"...\"], \"reason\": \"<one short line>\", "
     "\"execution\": {\"required\": true|false, \"capability\": \"\", "
     "\"environment\": \"agent_runtime\"|\"host_fallback\", "
@@ -497,42 +460,6 @@ def _has_image(attachments) -> bool:
     return False
 
 
-# Default wall-clock allowance for the verify/correct/re-execute loop of ONE
-# turn. A correction that would START after this is refused, so an
-# empty-provider + verifier-incomplete cycle can never run unbounded (a real
-# run took ~262s); the deterministic summary of the real evidence is used.
-DEFAULT_TURN_DEADLINE_SECONDS = 150.0
-
-
-class _TurnExecution:
-    """Everything the tools ACTUALLY did this turn, across the first tool loop
-    AND every correction loop, plus the turn's execution budget.
-
-    Corrections re-enter the tool loop, so their steps must not vanish: the
-    final answer is derived from ALL of them. Invariant that guarantees
-    termination:  first loop (<= max_tool_steps + 1 recovery call)
-                + <= MAX_CORRECTION_ATTEMPTS corrections, together limited by
-                  `step_budget` tool steps and `deadline_s` seconds.
-    """
-
-    def __init__(self, step_budget: int, deadline_s: float):
-        self.steps: list = []
-        self.step_budget = max(1, int(step_budget))
-        self.deadline_s = float(deadline_s or 0)
-        self.started = time.monotonic()
-
-    def add(self, steps) -> None:
-        self.steps.extend(s for s in (steps or [])
-                          if getattr(s, "action", "") == "tool")
-
-    def remaining_steps(self) -> int:
-        return max(0, self.step_budget - len(self.steps))
-
-    def expired(self) -> bool:
-        return bool(self.deadline_s) and (
-            time.monotonic() - self.started) >= self.deadline_s
-
-
 class _ChatPort(ProviderExecutionPort):
     """Sends a correction back to the SAME provider/model that produced the
     output being corrected (never a different one — switching providers is
@@ -604,9 +531,8 @@ class _ToolLoopPort(ProviderExecutionPort):
 
     def __init__(self, pipeline, execution, *, hist_turns, task_type, vision,
                  scope, session_id, req="", system_prompt="",
-                 terminal_context="", exec_context="", turn=None):
+                 terminal_context="", exec_context=""):
         self._pipeline = pipeline
-        self.turn = turn
         self.execution = execution
         self.hist_turns = hist_turns or []
         self.task_type = task_type
@@ -622,24 +548,6 @@ class _ToolLoopPort(ProviderExecutionPort):
     def execute(self, target, messages: list, max_tokens: int | None = None,
                 **kwargs) -> str:
         from astra.ai.agent_tool_loop import AgentToolLoop
-        turn = self.turn
-        max_steps = self._pipeline.max_tool_steps
-        if turn is not None:
-            # The previous answer was empty/protocol-only/"(no reply)" but the
-            # tools ALREADY produced enough real evidence: another tool loop
-            # would only burn time. The answer is the deterministic summary
-            # of that evidence (no model call, no tool call).
-            if (is_unusable_answer(self.last_text)
-                    and has_sufficient_evidence(turn.steps, self.execution)):
-                summary = summarize_execution(turn.steps, self.execution)
-                if summary:
-                    self.last_text = summary
-                    return summary
-            if turn.expired():
-                raise ProviderError("turn time budget exhausted")
-            if turn.remaining_steps() <= 0:
-                raise ProviderError("tool-step budget exhausted")
-            max_steps = min(max_steps, turn.remaining_steps())
         # The correction instruction the supervisor appended as the last
         # user turn (see gateway_task_completion.build_task_completion_messages).
         task = (_last_user_text(messages) or self.execution.intent
@@ -652,7 +560,7 @@ class _ToolLoopPort(ProviderExecutionPort):
                              terminal=self._pipeline.terminal,
                              runtime=self._pipeline.runtime,
                              events=self._pipeline.events,
-                             max_steps=max_steps,
+                             max_steps=self._pipeline.max_tool_steps,
                              execution_history=self._pipeline.execution_history)
         blocks = []
         decision_block = self.execution.context_block()
@@ -666,8 +574,6 @@ class _ToolLoopPort(ProviderExecutionPort):
                           history=self.hist_turns, context_blocks=blocks,
                           session_id=self.session_id, scope=self.scope,
                           max_tokens=max_tokens, trace=self.req)
-        if turn is not None:
-            turn.add(result.steps)      # correction steps are real evidence
         if not result.ok:
             raise ProviderError(result.error or "tool loop correction failed")
         self.last_text = result.text
@@ -681,8 +587,7 @@ class ChatPipeline:
                  runtime=None, execution_history=None, max_tool_steps: int = 8,
                  approvals=None, fallback=None,
                  agent_brain: str = "provider",
-                 artifact_dir: str | None = None,
-                 turn_deadline_s: float | None = None):
+                 artifact_dir: str | None = None):
         self.gateway = gateway
         self.router = router
         self.events = events
@@ -710,12 +615,6 @@ class ChatPipeline:
         self.approvals = approvals
         self.fallback = fallback
         self.max_tool_steps = max(1, int(max_tool_steps or 8))
-        try:
-            env_deadline = float(os.environ.get("CHAT_TURN_DEADLINE_SECONDS") or 0)
-        except ValueError:
-            env_deadline = 0
-        self.turn_deadline_s = float(turn_deadline_s if turn_deadline_s is not None
-                                     else (env_deadline or DEFAULT_TURN_DEADLINE_SECONDS))
         self.execution_history = execution_history or AgentExecutionHistory()
         # Which AI drives the agent tool loop: the Provider system (default)
         # or the Gateway's own connections ("gateway"). Both reach the same
@@ -766,52 +665,34 @@ class ChatPipeline:
             return False
 
     def _make_tool_caller(self, task_type, vision, *, provider=None,
-                          model=None, req="", targets=None):
+                          model=None, req=""):
         """Build the brain that drives the shared `AgentToolLoop` for this
         pipeline's configured mode. `CHAT_AGENT_BRAIN` selects WHICH AI
         decides the next tool call — never which tools exist: both callers
         reach the same `ToolRegistry` and therefore the same tools and
-        Terminal (requirement 9).
-
-        `targets`, when given, is the Gateway's ordered targets[] plan (see
-        `ChatPipeline._parse_gateway_targets`) — the authoritative
-        provider/model fallback order for this turn's tool-loop calls. Only
-        meaningful for the `ProviderToolCaller` brain: the Gateway brain
-        already IS the Gateway's own connections, so it has no targets[]
-        plan to walk."""
+        Terminal (requirement 9)."""
         from astra.ai.agent_tool_loop import (GatewayToolCaller,
                                               ProviderToolCaller)
         if self.agent_brain == "gateway" and self._gateway_usable():
             return GatewayToolCaller(self.gateway, category="tool_use")
         return ProviderToolCaller(self.router, task_type=task_type,
                                   vision=vision, provider=provider,
-                                  model=model, trace=req, targets=targets,
-                                  events=self.events)
+                                  model=model, trace=req)
 
-    def _execution_evidence(self, scope, turn=None, execution=None) -> dict:
+    def _execution_evidence(self, scope) -> dict:
         """LIVE execution evidence for the Gateway's completion gate: exactly
-        the tool actions the agent actually performed this turn. Never a
+        the tool actions the agent actually performed this turn, read from
+        the SAME `AgentExecutionHistory` the tool loop records into. Never a
         claim or a summary of prose — only observed tool executions.
 
-        Runtime lifecycle tools (`runtime_status` / `runtime_start` / ...) are
-        NOT evidence of anything but the runtime itself, and a live Web3/RPC
-        request needs an actual RPC/network query
-        (`astra.ai.execution_answer.has_sufficient_evidence`).
-
-        Returns `{}` when there is no sufficient evidence, which makes the
-        deterministic evidence gate fail a "requires tool execution" task
-        instead of rubber-stamping it from a nicely worded answer.
+        Returns `{}` when no tool ran, which makes the deterministic evidence
+        gate fail a "requires tool execution" task instead of rubber-stamping
+        it from a nicely worded answer.
         """
-        if turn is not None and turn.steps:
-            return evidence_snapshot(turn.steps, execution)
         try:
             rows = self.execution_history.entries(scope) if scope else []
         except Exception:
             rows = []
-        from astra.ai.agent_tool_loop import LIFECYCLE_TOOLS
-        if execution is None or (getattr(execution, "capability", "") or
-                                 "").lower() not in ("runtime", "system"):
-            rows = [r for r in rows if r.get("tool") not in LIFECYCLE_TOOLS]
         if not rows:
             return {}
         tools = []
@@ -845,7 +726,6 @@ class ChatPipeline:
                 else collect_runtime_capabilities(self.registry))
         fallback = {"final_request": message, "was_incomplete": False,
                     "task_type": "", "provider": "", "model": "", "criteria": [],
-                    "targets": [],
                     "reason": "", "execution": ProviderExecutionDecision(),
                     "ok": False}
         targets = []
@@ -856,15 +736,13 @@ class ChatPipeline:
         # Only surface non-failed models to the Gateway — no need to teach
         # it "avoid health=failed" when a failed model is simply never in
         # the list it's choosing from. Router.route_request()'s own
-        # fallback logic remains available only when the Gateway itself is
-        # unavailable. A successful Gateway turn with no usable targets
-        # fails closed below rather than silently discovering another model.
+        # fallback logic (unchanged) still tries a failed model as a last
+        # resort if nothing else fits, so hiding it here costs nothing:
+        # the Gateway just leaves provider/model empty when that happens
+        # and automatic routing takes over.
         usable = [t for t in targets if t.get("health") != "failed"]
         hidden = len(targets) - len(usable)
-        # Give Gateway the complete non-failed catalogue. Do not truncate
-        # after an arbitrary number of models: a valid model beyond position
-        # 60 must remain selectable.
-        shown = usable
+        shown = usable[:MAX_TARGETS_IN_PROMPT]
         catalogue = "\n".join(
             f"- provider={t['provider']} model={t['model']} "
             f"caps={','.join(t.get('capabilities') or []) or 'chat'} "
@@ -916,53 +794,22 @@ class ChatPipeline:
                        error="unparsable Gateway reply", request=req, trace=req)
             return fallback
 
+        provider, model = _clean(data.get("provider")), _clean(data.get("model"))
         allowed_task_types = {
             "simple_chat", "general", "reasoning", "coding", "long_context",
             "structured_output", "tool_use", "research", "planning",
             "translation", "summarization", "vision", "image_generation",
-            "image_editing", "web3",
+            "image_editing",
         }
         task_type = _clean(data.get("task_type"))
         if task_type not in allowed_task_types:
-            # No local keyword fallback: the Gateway's own classification is
-            # the sole authority. An unrecognized/empty task_type from the
-            # Gateway just becomes a normal chat turn rather than being
-            # re-guessed from keywords.
-            task_type = "simple_chat"
+            task_type = self._task_type(message, attachments)
         valid = {(t["provider"], t["model"]) for t in targets}
-        # Health MUST come from the real supplied catalogue, never invented
-        # or guessed by the Gateway reply — and an explicitly failed target
-        # is never part of the normal ordered plan (§13, §3).
-        usable_by_key = {(t["provider"], t["model"]): t for t in usable}
-
-        ordered_targets = self._parse_gateway_targets(
-            data.get("targets"), usable_by_key)
-
-        # ImageRouter owns image provider/model selection. Never carry the
-        # normal Gateway target plan into an image turn.
-        if task_type in ("image_generation", "image_editing"):
-            ordered_targets = []
-
-        provider, model = "", ""
-        if ordered_targets:
-            # NEW format: the Gateway returned an explicit ordered plan.
-            # `targets` is the sole authority for this request's fallback
-            # order (see ChatPipeline._route).
-            provider = ordered_targets[0]["provider"]
-            model = ordered_targets[0]["model"]
-        else:
-            # OLD/legacy format (or the Gateway deliberately returned an
-            # empty plan): fall back to a single soft-preference pick, byte
-            # -for-byte the pre-existing behavior, so an older Gateway reply
-            # (or a genuinely-empty "nothing fits" plan) still lets the
-            # Router's own automatic ranking/fallback take over unchanged.
-            legacy_provider = _clean(data.get("provider"))
-            legacy_model = _clean(data.get("model"))
-            if (legacy_provider, legacy_model) in valid:
-                provider, model = legacy_provider, legacy_model
-            elif any(p == legacy_provider for p, _ in valid):
-                # Never trust an invented model paired with a real provider.
-                provider = legacy_provider
+        if (provider, model) not in valid:
+            # Never trust an invented target. Keep a provider-only pick when
+            # the provider itself is real; otherwise leave routing automatic.
+            provider = provider if any(p == provider for p, _ in valid) else ""
+            model = ""
         criteria = [_clean(c) for c in (data.get("criteria") or [])
                     if _clean(c)][:5]
         # The Gateway's structured execution decision. `normalized()` drops
@@ -978,52 +825,8 @@ class ChatPipeline:
                 "was_incomplete": rewrote,
                 "task_type": task_type,
                 "provider": provider, "model": model, "criteria": criteria,
-                "targets": ordered_targets,
                 "reason": _clean(data.get("reason")), "execution": execution,
                 "ok": True}
-
-    @staticmethod
-    def _parse_gateway_targets(raw_targets, usable_by_key: dict) -> list[dict]:
-        """Validate + order the Gateway's `targets[]` plan (§4, §11, §12).
-
-        `usable_by_key` maps every (provider, model) pair the Router
-        actually supplied — MINUS anything explicitly health=failed — to
-        its real catalogue entry. Every item Claude proposes MUST already
-        exist in that map (`selected_targets ⊆ supplied_targets`); anything
-        else (an invented pair, a failed pair, a malformed entry, or an
-        exact duplicate) is silently dropped rather than trusted. Health on
-        the returned entries always comes from the real catalogue entry,
-        never from the Gateway's own claim. A final stable sort by health
-        (ok before unknown) guarantees §5's ordering rule even if the
-        Gateway itself mis-ordered two otherwise-equal candidates — stable
-        sort means it never reorders within the same health tier, so the
-        Gateway's own relative preference is preserved there.
-        """
-        if not isinstance(raw_targets, list):
-            return []
-        seen = set()
-        out = []
-        for item in raw_targets:
-            if isinstance(item, dict):
-                p, m = _clean(item.get("provider")), _clean(item.get("model"))
-            elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                p, m = _clean(item[0]), _clean(item[1])
-            else:
-                continue
-            key = (p, m)
-            if not p or not m or key in seen:
-                continue
-            entry = usable_by_key.get(key)
-            if entry is None:
-                # Not in the supplied catalogue at all, or explicitly
-                # health=failed — never trusted into the normal plan.
-                continue
-            seen.add(key)
-            out.append({"provider": p, "model": m,
-                        "health": entry.get("health") or "unknown"})
-        _HEALTH_RANK = {"ok": 0, "unknown": 1}
-        out.sort(key=lambda t: _HEALTH_RANK.get(t["health"], 2))
-        return out
 
     # -- step 3: Gateway call #2 (verify) -------------------------------------
     def _make_verifier(self, brief: dict, state: dict, req: str = "",
@@ -1269,11 +1072,7 @@ class ChatPipeline:
         summary = self._approval_summary(request, result, allowed)
         if not self._tools_available():
             return self._reply(summary, True, trace)
-        # No local classify() call: this resume path's execution capability
-        # is already fixed to "terminal" above via ProviderExecutionDecision,
-        # so task_type here only nudges agent/model selection — a fixed
-        # default is enough, no keyword classification needed.
-        task_type = "simple_chat"
+        task_type = self._task_type(message or "continue", None)
         base = message or "Continue the task you were working on."
         # The host execution result (or the denial) is authoritative ground
         # truth for the continuation — the model may not re-run it.
@@ -1391,26 +1190,16 @@ class ChatPipeline:
 
     def _run_tool_loop(self, brief, hist_turns, ctx_text, task_type, vision,
                        scope, session_id, terminal_context, exec_context,
-                       req, trace, base_messages=None, task_content=None,
-                       turn=None):
+                       req, trace, base_messages=None, task_content=None):
         """Run the shared `AgentToolLoop` with the Provider system as the
         brain. Returns a `RoutingResult` (so the verify stage is unchanged)
         or None on failure. The loop's final message list is attached so
         Gateway corrections carry the tool exchanges too."""
         from astra.ai.agent_tool_loop import AgentToolLoop
         use_gateway = (self.agent_brain == "gateway" and self._gateway_usable())
-        targets = brief.get("targets") or None
-        if targets and not use_gateway:
-            # Same up-front plan announcement `_route()` emits for the
-            # non-tool-loop path, so the Activity Log shows the fallback
-            # order this turn's tool-loop calls will walk on failure.
-            self._emit("chat.pipeline.target_plan", task=task_type,
-                       targets=[f"{t['provider']}/{t['model']}"
-                                for t in targets],
-                       count=len(targets), request=req, trace=req)
         caller = self._make_tool_caller(
             task_type, vision, provider=brief["provider"] or None,
-            model=brief["model"] or None, req=req, targets=targets)
+            model=brief["model"] or None, req=req)
         loop = AgentToolLoop(self.registry, terminal=self.terminal,
                              runtime=self.runtime,
                              events=self.events,
@@ -1459,15 +1248,8 @@ class ChatPipeline:
             self._emit("chat.pipeline.tool_loop_error", error=trace["error"],
                        op=f"chat:{req}", request=req, trace=req)
             return None
-        if turn is not None:
-            turn.add(result.steps)
         trace["tool_loop"] = {"tool_calls": result.tool_calls,
                               "stopped_reason": result.stopped_reason,
-                              "final_source": result.final_source,
-                              # Deterministic, redacted summary of the REAL tool
-                              # results: `_reply` falls back to it if the final
-                              # text is ever stripped to nothing.
-                              "recovery_summary": result.summary,
                               "steps": [s.to_dict() for s in result.steps]}
         if not result.ok:
             trace["error"] = (result.error or getattr(caller, "last_error", "")
@@ -1496,66 +1278,44 @@ class ChatPipeline:
         return rr
 
     # -- helpers -----------------------------------------------------------------
+    @staticmethod
+    def _task_type(text: str, attachments) -> str:
+        t = classify(text)
+        if _has_image(attachments):
+            # An attached image plus an edit instruction ("ei photo ta edit
+            # kore dao") is image EDITING, not plain vision -- a vision-only
+            # model cannot edit the image and must not be selected for it.
+            return "image_editing" if t == "image_editing" else "vision"
+        return t if t in _CHAT_TASK_TYPES else "simple_chat"
 
     def _route(self, task_type, messages, provider, model, vision,
-               req="", source_image=None, mask_image=None, targets=None):
+               req="", source_image=None, mask_image=None):
         # image_generation / image_editing are owned EXCLUSIVELY by the
         # Gateway's ImageRouter (see `_route_image`): it is the only image
         # execution path, so these tasks never reach the Provider router's
         # own image dispatch below.
-        # ImageRouter is the sole owner of image execution. Keep this
-        # boundary before normal target-plan/automatic-routing logic.
-        if task_type in ("image_generation", "image_editing", "image_inpainting"):
+        is_image = task_type in ("image_generation", "image_editing", "image_inpainting")
+        if is_image:
             rr = self._route_image(task_type, messages, model, req,
                                    source_image=source_image,
                                    mask_image=mask_image)
             if rr is not None:
+                # Either the real image was produced, or ImageRouter
+                # attempted every eligible FREE model and the whole pool
+                # failed. Both are terminal for this turn.
                 return rr
+            # No ImageRouter execution path is available (unusable Gateway,
+            # no image_router, or an empty prompt). Image generation is
+            # owned EXCLUSIVELY by ImageRouter, so the request must NOT fall
+            # back to the Provider router's own image dispatch -- that is the
+            # duplicate execution path this architecture forbids. Report the
+            # honest "no image model" failure instead.
             failed = RoutingResult(ok=False, error=(
                 "No image-generation execution path is configured "
                 "(ImageRouter unavailable)."))
             failed.attempts = 0
             failed._port_kind = "gateway"
             return failed
-
-        if targets:
-            # NEW: the Gateway returned an explicit ORDERED targets[] plan
-            # (see ChatPipeline._understand / _parse_gateway_targets). That
-            # order IS the authoritative fallback order for this request —
-            # each target is pinned with no_fallback=True so the Router
-            # only ever executes that exact (provider, model) pair (never
-            # silently substituting one outside the plan), while the
-            # Router's OWN lower-level credential/key-pool retries inside
-            # that single pair still run exactly as before (§14 — two
-            # independent fallback layers). No fresh/unrestricted model
-            # discovery happens between targets, and if every target in the
-            # plan fails this returns that honest final failure rather than
-            # falling through to automatic routing.
-            self._emit("chat.pipeline.target_plan", task=task_type,
-                       targets=[f"{t['provider']}/{t['model']}"
-                                for t in targets],
-                       count=len(targets), request=req, trace=req)
-            rr = None
-            for idx, t in enumerate(targets):
-                rr = self.router.route_request(RoutingRequest(
-                    task_type=task_type, messages=messages,
-                    preferred_provider=t["provider"],
-                    preferred_model=t["model"], no_fallback=True,
-                    vision=vision, max_tokens=self.max_tokens, trace=req))
-                if rr is not None and rr.ok:
-                    if idx > 0:
-                        self._emit("chat.pipeline.target_fallback",
-                                   task=task_type, index=idx,
-                                   provider=t["provider"], model=t["model"],
-                                   request=req, trace=req)
-                    return rr
-                self._emit("chat.pipeline.target_failed", task=task_type,
-                           index=idx, provider=t["provider"],
-                           model=t["model"],
-                           error=getattr(rr, "error", "") if rr else "",
-                           request=req, trace=req)
-            return rr
-
         rr = self.router.route_request(RoutingRequest(
             task_type=task_type, messages=messages,
             preferred_provider=provider or None,
@@ -1667,10 +1427,7 @@ class ChatPipeline:
         guard belongs: strip any internal tool-call protocol JSON that
         slipped through, and redact anything credential-shaped. See
         astra/ai/response_boundary.py."""
-        loop_trace = (data or {}).get("tool_loop") if isinstance(data, dict) else None
-        recovery = (loop_trace.get("recovery_summary")
-                    if isinstance(loop_trace, dict) else "") or None
-        text = sanitize_final_response(text, fallback=recovery)
+        text = sanitize_final_response(text)
         out = {"reply": text, "action": "none", "ok": ok, "data": data}
         if note:
             data["internal_note"] = note.strip()
@@ -1767,36 +1524,6 @@ class ChatPipeline:
         except Exception:
             pass
 
-    def _final_execution_text(self, text, execution, turn, trace, req) -> str:
-        """The FINAL invariant for an execution task, applied at every exit of
-        the turn just before the response boundary.
-
-        verifier/correction exhausted -> real execution evidence ->
-        deterministic final answer -> response boundary -> user.
-
-        If the provider's answer is empty / "(no reply)" / protocol-only and
-        the tools produced sufficient evidence, the answer is the
-        deterministic summary of that evidence. The generic text is used only
-        when there is genuinely neither a valid answer nor usable evidence.
-        The verifier's state never becomes the user-visible answer."""
-        steps = turn.steps if turn is not None else []
-        summary = (summarize_execution(steps, execution)
-                   if execution.required else "")
-        loop_trace = trace.get("tool_loop")
-        if isinstance(loop_trace, dict):
-            # `_reply` falls back to this if the reply is stripped to nothing.
-            loop_trace["recovery_summary"] = summary
-        source = "model"
-        if execution.required and is_unusable_answer(text):
-            if summary:
-                text, source = summary, "deterministic_summary"
-            else:
-                text, source = NO_EVIDENCE_TEXT, "no_evidence"
-            self._emit("chat.pipeline.final_answer_fallback", source=source,
-                       evidence_steps=len(steps), request=req, trace=req)
-        trace["final_answer_source"] = source
-        return text
-
     def _run_turn(self, raw, context, hist_turns, attachments, req,
                   gateway_ok, trace, conversation_id=None,
                   session_id_override=None) -> dict:
@@ -1844,7 +1571,6 @@ class ChatPipeline:
         else:
             brief = {"final_request": raw, "was_incomplete": False,
                      "provider": "", "model": "", "criteria": [],
-                     "targets": [],
                      "reason": "", "ok": False,
                      "execution": ProviderExecutionDecision()}
         assigned = (f"{brief['provider']}/{brief['model']}" if brief["model"]
@@ -1902,24 +1628,9 @@ class ChatPipeline:
                 "Recent conversation (for reference):\n" + ctx_text +
                 "\n\nCurrent request:\n" + brief["final_request"], attachments)
         messages.append({"role": "user", "content": content})
-        # The Gateway's UNDERSTAND call is the sole authority for task_type.
-        # If the understand call itself failed entirely (brief["ok"] is
-        # False), there is no local keyword classifier fallback anymore —
-        # the turn is simply treated as a normal chat request.
-        task_type = brief.get("task_type") or "simple_chat"
-
-        # ImageRouter is a separate routing domain. Image requests never
-        # require or consume the normal Gateway targets[] plan.
-        is_image_task = task_type in ("image_generation", "image_editing")
-        if (gateway_ok and brief.get("ok") and not is_image_task
-                and not brief.get("targets")):
-            err = "Gateway returned no usable targets for this request."
-            trace["error"] = err
-            self._emit("chat.pipeline.failed", error=err,
-                       op=f"chat:{req}", request=req, trace=req, terminal=True)
-            return self._reply(
-                "Gateway kono usable provider/model target dite pareni, "
-                "tai ei request execute kora hoyni.", False, trace)
+        # The Gateway's UNDERSTAND call is the authoritative classifier.
+        # Only the legacy/failure path above uses the local classifier.
+        task_type = brief.get("task_type") or self._task_type(brief["final_request"], attachments)
 
         # The Provider is the AI that does the work. With the shared
         # Terminal/tool surface wired, that work is a real multi-step agent
@@ -1931,6 +1642,7 @@ class ChatPipeline:
         # brain is a chat caller, so it would either ask a model to describe
         # the picture or hand the tool protocol an image data URI. Image
         # turns go straight to the image execution path instead.
+        is_image_task = task_type in ("image_generation", "image_editing")
         if is_image_task:
             # The Gateway's OWN event: classification/handoff only. The
             # actual provider HTTP call (Gemini/Cloudflare/OpenRouter) is a
@@ -1952,40 +1664,22 @@ class ChatPipeline:
         use_loop = (not is_image_task and
                     (self._tool_loop_usable() or (execution.required and
                                                   tools_available)))
-        # Every tool step of this turn (first loop + all correction loops)
-        # is recorded here; the final answer is derived from it.
-        turn = _TurnExecution(self.max_tool_steps * 2, self.turn_deadline_s)
         if use_loop:
             rr = self._run_tool_loop(
                 brief, hist_turns, ctx_text, task_type, vision, scope,
                 session_id, terminal_context, exec_context, req, trace,
-                messages, content, turn=turn)
+                messages, content)
         else:
-            def _path_of(a):
-                # Public attachment dicts (astra.core.attachments.Attachment
-                # .to_dict()) deliberately omit filesystem paths and carry
-                # only the internal `_storage_path` (see web.py
-                # ._process_uploads); a re-attached prior image from
-                # ChatLog.latest_image_attachment() carries the public
-                # `storage_path` instead. Accept either so a freshly
-                # uploaded edit/inpaint source image is not mistaken for
-                # "no image attached".
-                return str(a.get("storage_path") or a.get("_storage_path") or "")
             source_image = next(
                 (a for a in (attachments or [])
                  if isinstance(a, dict) and a.get("family") == "image"
-                 and a.get("role") != "mask" and _path_of(a)), None)
+                 and a.get("role") != "mask" and a.get("storage_path")), None)
             mask_image = next((a for a in (attachments or [])
                                if isinstance(a, dict) and a.get("family") == "image"
-                               and a.get("role") == "mask" and _path_of(a)), None)
-            if source_image is not None and not source_image.get("storage_path"):
-                source_image = dict(source_image, storage_path=_path_of(source_image))
-            if mask_image is not None and not mask_image.get("storage_path"):
-                mask_image = dict(mask_image, storage_path=_path_of(mask_image))
+                               and a.get("role") == "mask" and a.get("storage_path")), None)
             rr = self._route(task_type, messages, brief["provider"],
                              brief["model"], vision, req=req,
-                             source_image=source_image, mask_image=mask_image,
-                             targets=brief.get("targets") or None)
+                             source_image=source_image, mask_image=mask_image)
         if rr is None or not rr.ok:
             err = (trace.get("error") or getattr(rr, "error", "") or
                    "unknown error")
@@ -1996,21 +1690,13 @@ class ChatPipeline:
                 # from "every eligible FREE model was attempted and failed".
                 exhausted = (IMAGE_EXHAUSTED_MESSAGE in (err or "")
                              or bool(getattr(rr, "attempts", 0)))
-                needs_source = "reusable source image" in (err or "")
-                needs_mask = "reusable mask image" in (err or "")
-                if needs_source:
-                    message = _NO_SOURCE_IMAGE_MESSAGE
-                elif needs_mask:
-                    message = _NO_MASK_IMAGE_MESSAGE
-                elif exhausted:
-                    message = _ALL_IMAGE_MODELS_FAILED_MESSAGE
-                else:
-                    message = _NO_IMAGE_MODEL_MESSAGE
+                message = (_ALL_IMAGE_MODELS_FAILED_MESSAGE if exhausted
+                           else _NO_IMAGE_MODEL_MESSAGE)
                 self._emit("chat.pipeline.finished", status="no_image_model",
                            op=f"chat:{req}", request=req, trace=req,
                            terminal=True)
-                trace["stage"] = "image_generation"
-                return self._reply(message, False, trace)
+                return self._reply(message, False, trace,
+                                   {"stage": "image_generation", "error": err})
             if "no eligible" in err:
                 # No Provider key is configured (empty/missing plain
                 # *_API_KEYS in .env). This isn't a real runtime failure to
@@ -2035,23 +1721,13 @@ class ChatPipeline:
                 "Provider theke kono uttor pawa jayni. Kichukkhon pore abar "
                 f"try korun. (`{err}`)", False, trace)
         trace["served_by"] = f"{rr.provider}/{rr.model}"
-        if task_type in NO_VERIFY_TASK_TYPES:
-            # These task types skip Gateway call #2 (VERIFY) entirely: the
-            # Provider result is returned immediately, with no semantic
-            # verifier call and no verify -> correct -> re-verify loop.
-            #
-            # An image turn is done the moment the real image API returned
-            # image bytes; the base64 payload must never be shipped to a
-            # verifier model, and the artifact card IS the answer (the reply
-            # text is sanitized downstream — the data URI is stripped).
-            # This early return sits BEFORE the `gateway_ok` pass-through
-            # below on purpose: nothing is being verified, so there is no
-            # "Gateway not configured" verification caveat to append.
-            self._emit("chat.pipeline.finished",
-                       status=("image_ready"
-                               if task_type in ("image_generation",
-                                                "image_editing")
-                               else "not_applicable"),
+        if task_type in ("image_generation", "image_editing"):
+            # An image turn is done the moment the real image API
+            # returned image bytes. There is nothing to semantically
+            # verify, and the base64 payload must never be shipped to a
+            # verifier model; the artifact card IS the answer. The reply
+            # text is sanitized downstream (the data URI is stripped).
+            self._emit("chat.pipeline.finished", status="image_ready",
                        op=f"chat:{req}", request=req, trace=req,
                        terminal=True)
             trace["verification"] = {"status": "not_applicable"}
@@ -2071,11 +1747,9 @@ class ChatPipeline:
             # Provider answered fine here (we're past the failure branch
             # above), so Gateway is the ONLY thing missing — flag it
             # plainly rather than silently skipping verification forever.
-            answer = self._final_execution_text(rr.text, execution, turn,
-                                                trace, req)
-            reply_text = answer + "\n\n" + _NO_GATEWAY_CONFIGURED_MESSAGE
+            reply_text = rr.text + "\n\n" + _NO_GATEWAY_CONFIGURED_MESSAGE
             return self._reply(reply_text, True, trace,
-                               self._artifacts(answer, raw))
+                               self._artifacts(rr.text, raw))
 
         # 3) Gateway verifies; fix/redo loop until complete or bound reached
         state = {"verifications": 0, "unavailable": "", "last_missing": []}
@@ -2094,7 +1768,7 @@ class ChatPipeline:
             completion_criteria=brief["criteria"], require_semantic=True,
             evidence_required=(("tool_execution",)
                                if execution.required else ()))
-        evidence = ((lambda: self._execution_evidence(scope, turn, execution))
+        evidence = ((lambda: self._execution_evidence(scope))
                     if execution.required else None)
         if execution.required and tools_available:
             # A correction to an execution task must be able to actually
@@ -2105,8 +1779,7 @@ class ChatPipeline:
                 self, execution, hist_turns=hist_turns, task_type=task_type,
                 vision=vision, scope=scope, session_id=session_id, req=req,
                 system_prompt=provider_system_prompt,
-                terminal_context=terminal_context, exec_context=exec_context,
-                turn=turn)
+                terminal_context=terminal_context, exec_context=exec_context)
         elif getattr(rr, "_port_kind", "") == "gateway":
             port = _GatewayPort(self.gateway, trace=req)
         else:
@@ -2126,18 +1799,13 @@ class ChatPipeline:
             self._emit("chat.pipeline.verify_error", error=str(e),
                        op=f"chat:{req}", request=req, trace=req, terminal=True)
             trace["verification"] = {"status": "error", "reason": str(e)}
-            answer = self._final_execution_text(rr.text, execution, turn,
-                                                trace, req)
             return self._reply(
-                answer, True, trace, self._artifacts(answer, raw),
+                rr.text, True, trace, self._artifacts(rr.text, raw),
                 note="\n\n⚠️ Gateway verification kaj korenni — uttor ta "
                      "verify kora hoyni.")
 
         text = (final.text if final.ok and (final.text or "").strip()
                 else port.last_text) or rr.text
-        # FINAL invariant: whatever the verifier/correction loop ended in,
-        # an execution task with real evidence never leaves empty.
-        text = self._final_execution_text(text, execution, turn, trace, req)
         trace["verification"] = {"status": outcome.status, "attempts": attempts,
                                  "checks": state["verifications"],
                                  "reason": outcome.reason,

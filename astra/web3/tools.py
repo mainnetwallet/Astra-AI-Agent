@@ -23,33 +23,14 @@ from . import rpc as rpcmod
 from astra.tools.schemas import Tool, Level
 
 
-def _resolve_manager(ctx, fallback=None):
+def _resolve_manager(ctx):
     mgr = getattr(ctx, "web3_manager", None) or getattr(ctx, "tx_manager", None)
-    return mgr or fallback
+    return mgr
 
 
-def _resolve_wallets(ctx, fallback=None):
-    """The canonical WalletRegistry (ctx override, else the one bound at
-    registration). Tools only ever receive SAFE wallet metadata from it."""
-    return getattr(ctx, "wallet_registry", None) or fallback
-
-
-def _safe_wallet(w: dict) -> dict:
-    return {"id": w["id"], "name": w["name"], "address": w["address"],
-            "source": w["source"]}
-
-
-def tool_token_balance(args: dict, ctx, _wallets=None) -> dict:
-    """ERC-20 balance for an address/token on a supported chain. When no
-    address is given, the wallet selected in the Web3 Center is used."""
+def tool_token_balance(args: dict, ctx) -> dict:
+    """ERC-20 balance for an address/token on a supported chain."""
     address = (args.get("address") or "").strip()
-    if not address:
-        reg = _resolve_wallets(ctx, _wallets)
-        if reg is not None:
-            try:
-                address = reg.resolve("")["address"]
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)[:160]}
     token = (args.get("token") or "").strip()
     network = (args.get("network") or "ethereum").lower()
     if not address or not token:
@@ -109,7 +90,7 @@ def tool_rpc_status(args: dict, ctx) -> dict:
     return {"ok": True, "chain": cid, "rpcs": out}
 
 
-def tool_tx_prepare(args: dict, ctx, _manager=None, _wallets=None) -> dict:
+def tool_tx_prepare(args: dict, ctx) -> dict:
     """PREPARE a transaction. Gated end-to-end by the deterministic web3 policy.
 
     CONFIRM mode: the returned tx needs operator approval before broadcast;
@@ -119,7 +100,7 @@ def tool_tx_prepare(args: dict, ctx, _manager=None, _wallets=None) -> dict:
     confirmation is asked for. A policy-blocked send is still never signed
     in either mode. Returns a control record with the decision verdict.
     """
-    mgr = _resolve_manager(ctx, _manager)
+    mgr = _resolve_manager(ctx)
     if mgr is None:
         # no manager → offer static read-only guidance, never signing
         pol = getattr(ctx, "policy", None)
@@ -136,32 +117,14 @@ def tool_tx_prepare(args: dict, ctx, _manager=None, _wallets=None) -> dict:
         chain_id = int(args.get("chain_id") or 1)
         if not (to.lower().startswith("0x") and len(to) == 42):
             return {"ok": False, "error": "invalid recipient address"}
-        # Resolve the sending wallet from the canonical Wallet Registry
-        # (explicit id/address, else the wallet selected in the Web3 Center).
-        # The registry only yields SAFE metadata; the key stays in the
-        # encrypted keystore and is decrypted transiently by the manager
-        # AFTER the deterministic policy has evaluated this exact send.
-        from_arg = (args.get("from") or "").strip()
-        wallets = _resolve_wallets(ctx, _wallets)
-        from_address, wallet = from_arg or "default", None
-        if wallets is not None and not (
-                from_arg.lower() in ("", "default") and wallets.count() == 0):
-            from astra.web3.wallets import WalletError
-            try:
-                wallet = _safe_wallet(wallets.resolve(from_arg, need_signer=True))
-            except WalletError as exc:
-                return {"ok": False, "error": str(exc), "signed": False}
-            from_address = wallet["address"]
         req = TxRequest(
-            from_address=from_address,
+            from_address=(args.get("from") or "default").strip() or "default",
             to_address=to, value_wei=value, chain_id=chain_id,
             data_hex=args.get("data_hex") or "",
             gas_limit=int(args.get("gas_limit") or 0))
         rec = mgr.create(req)
         rec["ok"] = True
         rec["signed"] = False
-        if wallet:
-            rec["wallet"] = wallet
         # AUTO mode, within policy: `requires_approval` is False, meaning the
         # deterministic policy already authorized this exact send — complete
         # the pipeline (sign + broadcast) here rather than leaving it parked
@@ -187,9 +150,9 @@ def tool_tx_prepare(args: dict, ctx, _manager=None, _wallets=None) -> dict:
         return {"ok": False, "error": str(exc)[:200], "signed": False}
 
 
-def tool_tx_status(args: dict, ctx, _manager=None) -> dict:
+def tool_tx_status(args: dict, ctx) -> dict:
     """Query the lifecycle status of a prepared transaction."""
-    mgr = _resolve_manager(ctx, _manager)
+    mgr = _resolve_manager(ctx)
     if mgr is None:
         return {"ok": False, "error": "transaction manager not configured"}
     tx_id = (args.get("tx_id") or "").strip()
@@ -203,27 +166,9 @@ def tool_tx_status(args: dict, ctx, _manager=None) -> dict:
         return {"ok": False, "error": str(exc)[:160]}
 
 
-def _bind(fn, manager, wallets):
-    """Bind the registration-time manager/wallet registry as fallbacks for
-    contexts (e.g. the agent tool loop's) that carry neither."""
-    import inspect
-    params = inspect.signature(fn).parameters
-
-    def bound(args, ctx):
-        kw = {}
-        if "_manager" in params:
-            kw["_manager"] = manager
-        if "_wallets" in params:
-            kw["_wallets"] = wallets
-        return fn(args, ctx, **kw)
-    bound.__name__ = fn.__name__
-    bound.__doc__ = fn.__doc__
-    return bound
-
-
-def register_web3_tools(reg, manager=None, wallets=None) -> int:
-    """Register web3 tools. `manager` (TransactionManager) and `wallets`
-    (WalletRegistry) are used when the ToolContext does not carry them."""
+def register_web3_tools(reg, manager=None) -> int:
+    """Register web3 tools. `manager` (TransactionManager) is wired through
+    the ToolContext at execution time via ctx.web3_manager."""
     specs = [
         ("token_balance", tool_token_balance,
          "ERC-20 / token balance for an address on a supported network.",
@@ -255,7 +200,7 @@ def register_web3_tools(reg, manager=None, wallets=None) -> int:
         # FINANCIAL_ACTION tool anywhere else) keeps the plain ask-gate.
         delegate = "web3_tx" if name == "tx_prepare" else ""
         reg.register(Tool(
-            name=name, fn=_bind(fn, manager, wallets), description=desc, category="web3",
+            name=name, fn=fn, description=desc, category="web3",
             risk=risk, requires_confirmation=conf,
             confirmation_delegate=delegate,
             input={
@@ -265,8 +210,7 @@ def register_web3_tools(reg, manager=None, wallets=None) -> int:
                     "token": {"type": "string"},
                     "network": {"type": "string"},
                     "to": {"type": "string"},
-                    "from": {"type": "string",
-                             "description": "wallet id or address; omit to use the selected wallet"},
+                    "from": {"type": "string"},
                     "value": {"type": "integer"},
                     "value_wei": {"type": "integer"},
                     "chain_id": {"type": "integer"},

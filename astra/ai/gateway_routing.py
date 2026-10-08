@@ -15,24 +15,14 @@ Pieces:
                                      using the existing `astra.ai.models`
                                      metadata heuristics (never invented)
     - `GatewayModelHealth`        — per (provider, model) runtime health
-    - `GatewayRoutingState`       — per-target health plus a record of the
-                                     last successful target (reporting
-                                     only, never used for ordering), backed by the
+    - `GatewayRoutingState`       — persistent last-successful target +
+                                     per-target health, backed by the
                                      project's existing Store (SQLite) when
                                      one is supplied, in-memory otherwise
-    - `OperationRoutingContext`   — TEMPORARY, per-user-operation fallback
-                                     state (attempted / failed provider+model
-                                     targets). Never persisted; isolated per
-                                     operation. See its docstring.
-    - `OperationRoutingRegistry`  — bounded per-Gateway lookup of contexts by
-                                     operation id
     - `eligible_targets`          — capability/context/health filtering
-    - `rank_by_health`            — text/chat order: primary provider (Gemini)
-                                     first, then health only
-    - `prefer_last_successful`    — sticky: while the last successful target
-                                     is still eligible it is the ONLY first
-                                     choice; once it fails it is cleared
-    - `rank_targets`              — image categories only
+    - `rank_targets`              — capability + health + latency + priority
+                                     scoring
+    - `prefer_last_successful`    — soft "stick to what last worked" nudge
 
 `astra/ai/gateway.py` (AstraAIGateway) is the only caller; it owns the actual
 HTTP execution and per-attempt fallback loop.
@@ -62,7 +52,6 @@ GATEWAY_PROVIDER_SHORT = {
     "astra-gw-sambanova": "sambanova",
     "astra-gw-cohere": "cohere",
     "astra-gw-zai": "zai",
-    "astra-gw-huggingface": "huggingface",
 }
 
 REQUEST_CATEGORIES = (
@@ -189,7 +178,7 @@ def classify_gateway_request(text: str, *, vision: bool = False,
                        (image_input and _IMAGE_EDIT_ACTION_RE.search(text)))
     if mask_input and image_input and edit_intent:
         return "image_inpainting"
-    if edit_intent:
+    if edit_intent and (image_input or re.search(r"\b(?:upload|uploaded|generated|যেটা|ওই)\b", text, re.I)):
         return "image_editing"
     if _IMAGE_GEN_RE.search(text):
         return "image_generation"
@@ -454,28 +443,15 @@ class GatewayRoutingState:
                     "latency_ms": self._last_latency_ms}
 
     # -- record -------------------------------------------------------------
-    def record_success(self, provider: str, model: str, latency_ms: float, *,
-                       mark_last: bool = True) -> None:
-        """Record a successful call. `mark_last=True` (default) also makes
-        this target the sticky `last_success`; pass False for probes /
-        control calls that must not steer the next real request."""
+    def record_success(self, provider: str, model: str, latency_ms: float) -> None:
         with self._lock:
             h = self.get_health(provider, model)
             h.note_success(latency_ms)
+            self._last_provider = provider
+            self._last_model = model
+            self._last_timestamp = _now_iso()
+            self._last_latency_ms = int(latency_ms)
             self._persist_health(h)
-            if mark_last:
-                self._last_provider = provider
-                self._last_model = model
-                self._last_timestamp = _now_iso()
-                self._last_latency_ms = int(latency_ms)
-                self._persist_last()
-
-    def clear_last_successful(self) -> None:
-        with self._lock:
-            self._last_provider = ""
-            self._last_model = ""
-            self._last_timestamp = ""
-            self._last_latency_ms = 0
             self._persist_last()
 
     def record_failure(self, provider: str, model: str,
@@ -484,11 +460,6 @@ class GatewayRoutingState:
             h = self.get_health(provider, model)
             h.note_failure(cooldown_s=cooldown_s)
             self._persist_health(h)
-            # The sticky last_success target just failed: forget it, so the
-            # rest of this call (and the next one) falls back to the normal
-            # primary(Gemini)-first, then health-ordered ranking.
-            if (self._last_provider == provider and self._last_model == model):
-                self.clear_last_successful()
 
     # -- persistence (best-effort; never raises into the caller) --------------
     def _persist_last(self) -> None:
@@ -542,126 +513,6 @@ class GatewayRoutingState:
                 "model_health": {f"{p}:{m}": h.to_dict()
                                  for (p, m), h in self._health.items()},
             }
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Operation-scoped routing state
-# ═══════════════════════════════════════════════════════════════════════════
-class OperationRoutingContext:
-    """Temporary routing context for ONE user operation.
-
-    Two scopes exist and must not be confused:
-
-    * GLOBAL  (`GatewayRoutingState`) -- persistent across operations: the
-      sticky last-successful target, per-target health, latency, cooldowns.
-      It decides where a NEW operation starts.
-    * OPERATION (this class) -- lives only for one user operation (one chat
-      message, however many Gateway calls it makes: understand, generate,
-      verify, correct, tool-loop steps ...). It records which provider+model
-      targets were attempted / failed so fallback is MONOTONIC: once a target
-      failed in this operation it is never the next fallback candidate again,
-      even if global state was cleared or the target's health recovered in
-      the meantime (e.g. another concurrent operation succeeded on it).
-
-    Target identity is `(provider, model)` only. Individual credential keys
-    are NOT targets: key rotation stays inside the connection's
-    CredentialPool, and a target is recorded as failed only after the
-    connection has exhausted its keys and raised.
-
-    Instances are independent of one another and thread-safe; nothing here is
-    persisted, and nothing here touches `GatewayRoutingState`.
-    """
-
-    def __init__(self, operation_id: str = ""):
-        self.operation_id = operation_id or ""
-        self._lock = threading.Lock()
-        self._attempted: list[tuple[str, str]] = []
-        self._failed: set[tuple[str, str]] = set()
-        self.last_used = time.monotonic()
-
-    def mark_attempted(self, provider: str, model: str) -> None:
-        key = (provider, model)
-        with self._lock:
-            self.last_used = time.monotonic()
-            if key not in self._attempted:
-                self._attempted.append(key)
-
-    def mark_failed(self, provider: str, model: str) -> None:
-        """A complete provider+model attempt failed in this operation."""
-        key = (provider, model)
-        with self._lock:
-            self.last_used = time.monotonic()
-            if key not in self._attempted:
-                self._attempted.append(key)
-            self._failed.add(key)
-
-    def has_failed(self, provider: str, model: str) -> bool:
-        with self._lock:
-            return (provider, model) in self._failed
-
-    @property
-    def failed_targets(self) -> frozenset:
-        with self._lock:
-            return frozenset(self._failed)
-
-    @property
-    def attempted_targets(self) -> tuple:
-        with self._lock:
-            return tuple(self._attempted)
-
-    def exclude_failed(self, targets: list) -> list:
-        """Drop every (conn, model, health) whose provider+model already
-        failed in this operation. Order of the rest is preserved."""
-        with self._lock:
-            self.last_used = time.monotonic()
-            if not self._failed:
-                return list(targets)
-            failed = set(self._failed)
-        return [t for t in targets
-                if (t[1].provider, t[1].model_id) not in failed]
-
-
-class OperationRoutingRegistry:
-    """Per-Gateway lookup of `OperationRoutingContext` by operation id.
-
-    An empty operation id never shares state: every call gets a brand-new
-    throw-away context (the pre-existing per-call behavior). Contexts are
-    memory-only and pruned by age / count so an operation that never
-    announces its end cannot leak."""
-
-    TTL_S = 1800.0
-    MAX_CONTEXTS = 1024
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._contexts: dict[str, OperationRoutingContext] = {}
-
-    def get(self, operation_id: str) -> OperationRoutingContext:
-        operation_id = (operation_id or "").strip()
-        if not operation_id:
-            return OperationRoutingContext("")
-        with self._lock:
-            ctx = self._contexts.get(operation_id)
-            if ctx is None:
-                self._prune_locked()
-                ctx = OperationRoutingContext(operation_id)
-                self._contexts[operation_id] = ctx
-            return ctx
-
-    def _prune_locked(self) -> None:
-        now = time.monotonic()
-        for key in [k for k, c in self._contexts.items()
-                    if now - c.last_used > self.TTL_S]:
-            del self._contexts[key]
-        overflow = len(self._contexts) - self.MAX_CONTEXTS + 1
-        if overflow > 0:
-            for key, _c in sorted(self._contexts.items(),
-                                  key=lambda kv: kv[1].last_used)[:overflow]:
-                del self._contexts[key]
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._contexts)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -892,80 +743,20 @@ def rank_targets(targets: list[tuple[object, Model, GatewayModelHealth]], *,
     return [(c, m, h) for _, c, m, h in scored]
 
 
-DEFAULT_PRIMARY_PROVIDER = "gemini"
-DEFAULT_PRIMARY_MAX_MODELS = 3
-
-
-def health_sort_key(model: Model, health: GatewayModelHealth):
-    """Lower is better: pure measured health, never provider/list position.
-
-    success_rate (higher better) -> consecutive_failures (fewer better) ->
-    measured average latency (lower better). A target with no successful call
-    yet gets a neutral placeholder so it never ranks as an unearned "fastest".
-    """
-    latency = health.average_latency_ms if health.success_count else 500.0
-    return (-health.success_rate(), health.consecutive_failures, latency)
-
-
-def rank_by_health(targets: list[tuple[object, Model, GatewayModelHealth]], *,
-                   category: str,
-                   primary_provider: str | None = DEFAULT_PRIMARY_PROVIDER,
-                   primary_max_models: int = DEFAULT_PRIMARY_MAX_MODELS
-                   ) -> list[tuple[object, Model, GatewayModelHealth]]:
-    """Health-first serial order for the Gateway's OWN calls.
-
-    Tier 1: the primary provider's (Gemini's) `primary_max_models` (default
-            3) best-health models, best first. Key rotation across that
-            provider's keys happens inside the connection (`_run`) before
-            the next model is tried. If all of them fail, the Gateway moves
-            on to tier 2; the primary provider's remaining models join
-            tier 2 and compete on health alone.
-    Tier 2: every OTHER provider's models, ordered ONLY by measured health --
-            the best-health model first, then the next best, regardless of
-            which provider it belongs to or where it sits in the configured
-            list. Even a provider that is not "serial-next" is used if its
-            model is healthier.
-
-    No category score, quality class, configured priority or last-successful
-    nudge is used. Exact ties keep the input order (stable sort).
-    Unhealthy/cooldown targets were already removed by `eligible_targets`.
-    `category` is accepted for call compatibility and is not used for ranking.
-    """
-    keyed = [[health_sort_key(model, health), (conn, model, health)]
-             for conn, model, health in targets]
-    # Primary provider: only its `primary_max_models` best-health models get
-    # tier 0; the rest fall into tier 1 and compete on health with everyone.
-    primary = sorted((k for k in keyed
-                      if primary_provider and k[1][1].provider == primary_provider),
-                     key=lambda k: k[0])
-    top = {id(k) for k in primary[:max(0, int(primary_max_models))]}
-    for k in keyed:
-        k[0] = ((0 if id(k) in top else 1),) + k[0]
-    keyed.sort(key=lambda k: k[0])
-    return [k[1] for k in keyed]
-
-
 def prefer_last_successful(
-        targets: list[tuple[object, Model, GatewayModelHealth]],
-        last: dict | None, *, category: str,
-        primary_provider: str | None = DEFAULT_PRIMARY_PROVIDER,
-        primary_max_models: int = DEFAULT_PRIMARY_MAX_MODELS
+        ranked: list[tuple[object, Model, GatewayModelHealth]],
+        last: dict | None
         ) -> list[tuple[object, Model, GatewayModelHealth]]:
-    """Sticky routing. If `last` (the last successful target) is among the
-    eligible `targets`, it is tried FIRST -- alone at the front, so the next
-    call does not go to Gemini. The remaining targets follow as the normal
-    fallback order (primary provider first, then health), used only if the
-    sticky target fails on this call. If `last` is missing/ineligible the
-    plain `rank_by_health` order is returned."""
-    if last:
-        for i, item in enumerate(targets):
-            _c, m, _h = item
-            if m.provider == last.get("provider") and \
-                    m.model_id == last.get("model"):
-                rest = targets[:i] + targets[i + 1:]
-                return [item] + rank_by_health(
-                    rest, category=category, primary_provider=primary_provider,
-                    primary_max_models=primary_max_models)
-    return rank_by_health(targets, category=category,
-                          primary_provider=primary_provider,
-                          primary_max_models=primary_max_models)
+    """§5: prefer the last successful target IF it's still eligible+healthy
+    (i.e. still present in `ranked`, since `eligible_targets` already
+    dropped anything unhealthy/unsuitable) — never a permanent lock."""
+    if not last:
+        return ranked
+    for i, (conn, model, health) in enumerate(ranked):
+        if model.provider == last.get("provider") and \
+                model.model_id == last.get("model"):
+            if i == 0:
+                return ranked
+            item = ranked[i]
+            return [item] + ranked[:i] + ranked[i + 1:]
+    return ranked

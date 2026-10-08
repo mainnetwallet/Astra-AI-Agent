@@ -29,11 +29,11 @@ from astra.ai.gateway_routing import (
     meets_gateway_requirements, rank_image_targets, rank_targets)
 from astra.ai.image_models import (
     FREE_FALSE, FREE_IMAGE_PROVIDERS, FREE_TRUE, FREE_UNKNOWN, IMAGE_EDITING,
-    IMAGE_GENERATION, documented_image_models, image_pool, image_spec,
-    is_free_image_model, is_image_editing_model, is_image_model,
-    provider_supports_image_generation, rejected_image_reason)
+    IMAGE_GENERATION, REJECTED_IMAGE_MODELS, documented_image_models,
+    image_pool, image_spec, is_free_image_model, is_image_editing_model,
+    is_image_model, provider_supports_image_generation, rejected_image_reason)
 from astra.ai.models import Model, ModelRegistry, metadata_for
-from astra.ai.router import AstraRouter, RoutingRequest
+from astra.ai.router import AstraRouter, RoutingRequest, classify
 from astra.core.config import Config
 from astra.core.exceptions import ProviderError, TimeoutError
 
@@ -55,15 +55,6 @@ LLAMA = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 # Gemini's dedicated image model.
 GEMINI_IMG = "gemini-2.5-flash-image"
 
-# The supported Hugging Face image candidates.
-HF_POOL = (
-    "black-forest-labs/FLUX.1-schnell",
-    "black-forest-labs/FLUX.1-dev",
-    "black-forest-labs/FLUX.1-Kontext-dev",
-    "Qwen/Qwen-Image",
-    "stabilityai/stable-diffusion-3.5-large",
-)
-
 # OpenRouter's live image catalog contains ZERO `:free` image-output models
 # (verified 2026-09-26 against GET https://openrouter.ai/api/v1/images/models),
 # so its static FREE pool is EMPTY. OR_SYNTH is a synthetic FREE-shaped id used
@@ -71,7 +62,8 @@ HF_POOL = (
 # mechanically -- it is NOT a real catalog id and must never be treated as one.
 OR_SYNTH = "example/synthetic-free-image:free"
 
-# Historical OpenRouter ids that are intentionally not part of the static pool.
+# Ids removed from the active pool on 2026-09-26: live verification proved none
+# of them exists as a free image model (see REJECTED_IMAGE_MODELS).
 OR_DEAD_FREE_IDS = (
     "google/gemini-2.5-flash-image-preview:free",
     "black-forest-labs/flux-1-schnell:free",
@@ -191,17 +183,13 @@ def _assert_readable_png_artifact(test, art, artifact_dir):
 class TestFreeImagePool(unittest.TestCase):
     def test_pool_is_the_verified_free_providers(self):
         # Cloudflare (documented free Neurons) plus the single user-requested
-        # force-added Gemini candidate, plus the five user-requested
-        # force-added Hugging Face candidates (2026-09-27 -- explicitly NOT
-        # verified free per-call, a deliberate override; see
-        # `_HF_FORCE_EVIDENCE` in astra/ai/image_models.py). OpenRouter
-        # remains a KNOWN free-image provider (its live-discovery path is
-        # retained) but contributes no static model: its catalog has zero
-        # `:free` image models.
+        # force-added Gemini candidate. OpenRouter remains a KNOWN free-image
+        # provider (its live-discovery path is retained) but contributes no
+        # static model: its catalog has zero `:free` image models.
         self.assertEqual(set(FREE_IMAGE_PROVIDERS),
-                         {"cloudflare", "gemini", "openrouter", "huggingface"})
+                         {"cloudflare", "gemini", "openrouter"})
         self.assertEqual({p for p, _m in image_pool()},
-                         {"cloudflare", "gemini", "huggingface"})
+                         {"cloudflare", "gemini"})
 
     def test_every_pool_model_is_free_with_quotable_evidence(self):
         for provider, mid in image_pool():
@@ -224,17 +212,9 @@ class TestFreeImagePool(unittest.TestCase):
                           metadata_for(mid, provider)["output_modalities"], mid)
 
     def test_only_capable_models_advertise_image_editing(self):
-        edit_capable = {
-            ("gemini", GEMINI_IMG),
-            ("cloudflare", "@cf/stabilityai/stable-diffusion-xl-base-1.0"),
-            ("cloudflare", "@cf/bytedance/stable-diffusion-xl-lightning"),
-            ("cloudflare", "@cf/lykon/dreamshaper-8-lcm"),
-            ("cloudflare", "@cf/runwayml/stable-diffusion-v1-5-inpainting"),
-            ("huggingface", "black-forest-labs/FLUX.1-Kontext-dev"),
-        }
         for provider, mid in image_pool():
             spec = image_spec(provider, mid)
-            if (provider, mid) in edit_capable:
+            if provider == "gemini" and mid == GEMINI_IMG:
                 self.assertTrue(is_image_editing_model(provider, mid), mid)
                 self.assertIn(IMAGE_EDITING, spec.capabilities, mid)
             else:
@@ -248,10 +228,51 @@ class TestFreeImagePool(unittest.TestCase):
             self.assertTrue(is_image_model("cloudflare", mid), mid)
         self.assertFalse(is_image_model("cloudflare", LLAMA))
 
+    def test_gemini_image_models_are_paid_only_and_rejected(self):
+        for mid in ("gemini-3.1-flash-image", "gemini-3.1-flash-lite-image",
+                    "gemini-3-pro-image"):
+            self.assertFalse(is_image_model("gemini", mid), mid)
+            self.assertNotIn("image",
+                             metadata_for(mid, "gemini")["output_modalities"])
+            self.assertIn("paid-only", rejected_image_reason("gemini", mid))
+
+    def test_gemini_2_5_flash_image_is_force_added_to_the_free_pool(self):
+        mid = "gemini-2.5-flash-image"
+        self.assertTrue(is_image_model("gemini", mid))
+        self.assertTrue(is_free_image_model("gemini", mid))
+        spec = image_spec("gemini", mid)
+        self.assertEqual(spec.free_tier, FREE_TRUE)
+        self.assertEqual(spec.model, mid)                 # exact id kept
+        self.assertIn(IMAGE_GENERATION, spec.capabilities)
+        self.assertIn("image", spec.output_modalities)
+        self.assertNotIn(("gemini", mid), REJECTED_IMAGE_MODELS)
+
     def test_gemini_vision_and_preview_ids_do_not_leak_into_the_pool(self):
         for mid in ("gemini-2.5-flash-image-preview", "gemini-2.5-flash",
                     "gemini-3-pro-image-preview", "gemini-3.7-flash"):
             self.assertFalse(is_image_model("gemini", mid), mid)
+
+    def test_bedrock_image_models_are_paid_only_and_rejected(self):
+        for mid in ("amazon.nova-canvas-v1:0",
+                    "amazon.titan-image-generator-v2:0",
+                    "stability.stable-diffusion-xl-v1",
+                    "stability.stable-image-core-v1:1"):
+            self.assertFalse(is_image_model("bedrock", mid), mid)
+            self.assertIn("paid-only", rejected_image_reason("bedrock", mid))
+
+    def test_zai_image_models_are_paid_only_and_rejected(self):
+        for mid in ("glm-image", "cogview-4", "cogview-4-250304"):
+            self.assertFalse(is_image_model("zai", mid), mid)
+            self.assertIn("paid-only", rejected_image_reason("zai", mid))
+
+    def test_openrouter_dead_free_ids_are_rejected_not_force_added(self):
+        # Live-verified 2026-09-26: none of these is a free image model in
+        # OpenRouter's catalog, so every one is rejected (never selectable).
+        for mid in OR_DEAD_FREE_IDS:
+            self.assertFalse(is_image_model("openrouter", mid), mid)
+            self.assertFalse(is_free_image_model("openrouter", mid), mid)
+            self.assertIn(("openrouter", mid), REJECTED_IMAGE_MODELS, mid)
+            self.assertTrue(rejected_image_reason("openrouter", mid), mid)
 
     def test_openrouter_paid_image_models_are_rejected(self):
         for mid in ("google/gemini-2.5-flash-image", "openai/gpt-5-image"):
@@ -270,6 +291,15 @@ class TestFreeImagePool(unittest.TestCase):
             self.assertFalse(is_image_model("cloudflare", mid), mid)
             self.assertIn("multipart",
                           rejected_image_reason("cloudflare", mid))
+
+    def test_vision_models_are_not_image_generators(self):
+        for provider, mid in (("bedrock", "us.anthropic.claude-opus-4-5"),
+                              ("cohere", "command-a-vision-07-2025"),
+                              ("gemini", "gemini-3.7-flash")):
+            self.assertFalse(is_image_model(provider, mid), mid)
+            meta = metadata_for(mid, provider)
+            self.assertNotIn(IMAGE_GENERATION, meta["capabilities"], mid)
+            self.assertNotIn("image", meta["output_modalities"], mid)
 
     def test_omni_or_multimodal_names_do_not_grant_image_generation(self):
         for provider, mid in (
@@ -291,6 +321,21 @@ class TestFreeImagePool(unittest.TestCase):
             self.assertFalse(is_image_model(provider, mid), provider)
             self.assertFalse(provider_supports_image_generation(provider),
                              provider)
+
+    def test_provider_supports_image_generation_only_with_a_kept_model(self):
+        for provider in ("cloudflare", "gemini"):
+            self.assertTrue(provider_supports_image_generation(provider),
+                            provider)
+        # openrouter keeps its adapter + live-discovery path but has no kept
+        # model right now, so it is not (yet) an image-capable provider.
+        for provider in ("openrouter", "bedrock", "zai", "groq", "cerebras"):
+            self.assertFalse(provider_supports_image_generation(provider),
+                             provider)
+
+    def test_rejection_audit_has_no_entry_that_is_also_in_the_pool(self):
+        for provider, mid in REJECTED_IMAGE_MODELS:
+            self.assertFalse(is_image_model(provider, mid),
+                             "%s/%s is both rejected and kept" % (provider, mid))
 
     def test_free_tier_tristate_treats_unknown_as_not_free(self):
         self.assertNotEqual(FREE_TRUE, FREE_UNKNOWN)
@@ -326,11 +371,95 @@ class TestReauditedProviderCandidates(unittest.TestCase):
     FREE bar; each rejection must be recorded with real evidence rather than
     silently absent from the registry."""
 
+    def test_together_ai_flux_schnell_free_is_not_yet_live(self):
+        self.assertFalse(is_image_model(
+            "together", "black-forest-labs/FLUX.1-schnell-Free"))
+        reason = rejected_image_reason(
+            "together", "black-forest-labs/FLUX.1-schnell-Free")
+        self.assertIn("not currently free", reason)
+        self.assertIn("Launching soon", reason)
+
+    def test_together_ai_paid_image_models_are_rejected(self):
+        for mid in ("black-forest-labs/FLUX.1-schnell",
+                    "black-forest-labs/FLUX.1.1-pro",
+                    "stabilityai/stable-diffusion-xl-base-1.0"):
+            self.assertFalse(is_image_model("together", mid), mid)
+            self.assertIn("paid",
+                          rejected_image_reason("together", mid).lower())
+
+    def test_huggingface_inference_providers_rejected_for_negligible_credit(self):
+        for mid in ("black-forest-labs/FLUX.1-schnell",
+                    "black-forest-labs/FLUX.1-dev", "Qwen/Qwen-Image"):
+            self.assertFalse(is_image_model("huggingface", mid), mid)
+            reason = rejected_image_reason("huggingface", mid)
+            self.assertIn("not a genuine free tier", reason)
+            self.assertIn("$0.10/month", reason)
+
+    def test_fal_ai_is_paid_only_no_standing_free_tier(self):
+        for mid in ("fal-ai/flux/schnell", "fal-ai/flux/dev"):
+            self.assertFalse(is_image_model("fal", mid), mid)
+            self.assertIn("no standing free tier",
+                          rejected_image_reason("fal", mid))
+
+    def test_replicate_is_paid_only(self):
+        for mid in ("black-forest-labs/flux-schnell", "stability-ai/sdxl"):
+            self.assertFalse(is_image_model("replicate", mid), mid)
+            self.assertIn("paid-only",
+                          rejected_image_reason("replicate", mid))
+
+    def test_fireworks_ai_is_billed_per_step_not_free(self):
+        for mid in ("accounts/fireworks/models/flux-1-schnell-fp8",
+                    "accounts/fireworks/models/flux-1-dev-fp8"):
+            self.assertFalse(is_image_model("fireworks", mid), mid)
+            reason = rejected_image_reason("fireworks", mid)
+            self.assertIn("per diffusion step", reason)
+
     def test_nscale_has_no_documented_free_allocation(self):
         self.assertFalse(is_image_model(
             "nscale", "black-forest-labs/FLUX.1-schnell"))
         self.assertIn("no documented free allocation", rejected_image_reason(
             "nscale", "black-forest-labs/FLUX.1-schnell"))
+
+    def test_novita_one_time_trial_allowance_is_not_a_recurring_free_tier(self):
+        self.assertFalse(is_image_model("novita", "flux-1-schnell"))
+        reason = rejected_image_reason("novita", "flux-1-schnell")
+        self.assertIn("not a recurring free tier", reason)
+
+    def test_wavespeed_is_paid_only(self):
+        self.assertFalse(is_image_model("wavespeed", "wavespeed-ai/flux-schnell"))
+        self.assertIn("paid-only", rejected_image_reason(
+            "wavespeed", "wavespeed-ai/flux-schnell"))
+
+    def test_none_of_the_reaudited_providers_entered_the_free_pool(self):
+        # The strict audit found no additional genuinely-free provider, so
+        # the pool must remain exactly what it was before this re-audit.
+        investigated = {"together", "huggingface", "fal", "replicate",
+                        "fireworks", "nscale", "novita", "wavespeed"}
+        pool_providers = {p for p, _m in image_pool()}
+        self.assertEqual(pool_providers & investigated, set())
+        # The re-audit added no provider; the pool is Cloudflare plus the
+        # separately force-added Gemini / OpenRouter candidates.
+        self.assertEqual(FREE_IMAGE_PROVIDERS,
+                         frozenset({"cloudflare", "gemini", "openrouter"}))
+
+    def test_reaudit_evidence_never_invents_a_free_claim(self):
+        # Every rejected (provider, model) pair investigated in the
+        # re-audit must have a non-empty, specific reason -- never a blank
+        # "unknown" rejection, which would defeat the audit-trail purpose.
+        investigated_pairs = [
+            ("together", "black-forest-labs/FLUX.1-schnell-Free"),
+            ("huggingface", "black-forest-labs/FLUX.1-schnell"),
+            ("fal", "fal-ai/flux/schnell"),
+            ("replicate", "black-forest-labs/flux-schnell"),
+            ("fireworks", "accounts/fireworks/models/flux-1-schnell-fp8"),
+            ("nscale", "black-forest-labs/FLUX.1-schnell"),
+            ("novita", "flux-1-schnell"),
+            ("wavespeed", "wavespeed-ai/flux-schnell"),
+        ]
+        for provider, mid in investigated_pairs:
+            reason = rejected_image_reason(provider, mid)
+            self.assertTrue(reason, f"{provider}/{mid} has no recorded reason")
+            self.assertGreater(len(reason), 20, f"{provider}/{mid} reason too thin")
 
     def test_cloudflare_free_evidence_reflects_the_current_per_task_table(self):
         # Re-audit 2026-09-26: Cloudflare's pricing docs now express the
@@ -370,19 +499,23 @@ class TestImageRequestClassification(unittest.TestCase):
         "analyze this photo",
     ]
 
-    def test_classify_image_generation(self):
+    def test_classify_image_generation_both_paths(self):
         for text in self.GEN:
+            self.assertEqual(classify(text), "image_generation", text)
             self.assertEqual(classify_gateway_request(text),
                              "image_generation", text)
 
-    def test_classify_image_editing(self):
+    def test_classify_image_editing_both_paths(self):
         for text in self.EDIT:
+            self.assertEqual(classify(text), "image_editing", text)
             self.assertEqual(classify_gateway_request(text), "image_editing",
                              text)
 
     def test_vision_requests_stay_vision(self):
         for text in self.VISION:
             self.assertEqual(classify_gateway_request(text), "vision", text)
+            self.assertNotIn(classify(text),
+                             ("image_generation", "image_editing"), text)
 
     def test_gateway_classifies_edit_and_inpaint_from_modalities(self):
         self.assertEqual(classify_gateway_request(
@@ -393,6 +526,7 @@ class TestImageRequestClassification(unittest.TestCase):
 
     def test_image_production_never_becomes_simple_chat(self):
         for text in self.GEN + self.EDIT:
+            self.assertNotEqual(classify(text), "simple_chat", text)
             self.assertNotIn(classify_gateway_request(text),
                              ("simple", "general"), text)
 
@@ -400,6 +534,8 @@ class TestImageRequestClassification(unittest.TestCase):
         for text in ("python code likhe dao - ekta reverse string function",
                      "what is the weather today",
                      "explain bitcoin halving"):
+            self.assertNotIn(classify(text),
+                             ("image_generation", "image_editing"))
             self.assertNotIn(classify_gateway_request(text),
                              ("image_generation", "image_editing"))
 
@@ -447,6 +583,18 @@ class TestEligibleImageTargets(unittest.TestCase):
         for m in (vision, text):
             self.assertFalse(meets_gateway_requirements(
                 m, category="image_generation"), m.model_id)
+
+    def test_paid_image_capable_model_is_rejected_by_the_free_gate(self):
+        paid = Model("gemini", "gemini-3.1-flash-image",
+                     capabilities=["chat", "image_generation"],
+                     output_modalities=["text", "image"])
+        self.assertFalse(meets_gateway_requirements(
+            paid, category="image_generation"))
+        free = Model("cloudflare", FLUX,
+                     capabilities=["chat", "image_generation"],
+                     output_modalities=["text", "image"])
+        self.assertTrue(meets_gateway_requirements(
+            free, category="image_generation"))
 
     def test_image_capability_without_image_output_modality_is_rejected(self):
         m = Model("cloudflare", FLUX,
@@ -560,25 +708,13 @@ class TestEligibleImageTargets(unittest.TestCase):
 
     def test_editing_targets_require_an_edit_capable_model(self):
         state = GatewayRoutingState(None)
-        # Cloudflare's pool itself now has real edit-capable models (SDXL,
-        # LIGHTNING, DREAM, INPAINT) -- only the non-edit-capable ones
-        # (FLUX, LUCID, PHOENIX) are excluded from an editing request.
         cf_only = self._catalog()
-        targets = eligible_image_generation_targets(
-            cf_only, state, editing=True)
-        self.assertEqual({m.model_id for _c, m, _h in targets},
-                         {SDXL, LIGHTNING, DREAM, INPAINT})
-
-        text_only = self._catalog(models=(FLUX, LUCID, PHOENIX))
         self.assertEqual(
-            eligible_image_generation_targets(text_only, state, editing=True),
-            [])
-
+            eligible_image_generation_targets(cf_only, state, editing=True), [])
         gem = _FakeConn("astra-gw-gemini", "gemini",
                         image_models=[GEMINI_IMG])
         targets = eligible_image_generation_targets(
-            self._catalog(gem, models=(FLUX, LUCID, PHOENIX)),
-            state, editing=True)
+            self._catalog(gem), state, editing=True)
         self.assertEqual([m.model_id for _c, m, _h in targets], [GEMINI_IMG])
 
 
@@ -684,12 +820,26 @@ class TestEmptyImageModelEnvSemantics(unittest.TestCase):
         self.assertTrue(ids)
         self.assertEqual(set(ids), set(documented_image_models("gemini")))
 
+    def test_explicitly_empty_openrouter_env_stays_empty_not_paid(self):
+        from astra.ai.gateway import AstraGatewayOpenRouter
+        conn = AstraGatewayOpenRouter(config=_cfg(
+            GW_OPENROUTER_API_KEYS="k", OPENROUTER_IMAGE_MODELS="",
+            IMAGE_OPENROUTER_API_KEY="image-key"))
+        self.assertEqual(conn.image_models, [])
+        # OpenRouter's own documented default is intentionally empty (its
+        # FREE image pool is live-discovery-only) -- an explicitly-empty
+        # env var must stay empty, never fall back to any paid model.
+        self.assertEqual(documented_image_models("openrouter"), ())
+        gw = self._gw(conn)
+        self.assertEqual(gw.image_targets(discover=False), [])
+
+
 class TestOpenRouterStaticPoolIsEmpty(unittest.TestCase):
     """LIVE-VERIFIED 2026-09-26: OpenRouter's image catalog
     (GET https://openrouter.ai/api/v1/images/models) contains ZERO `:free`
     image-output models, so its static FREE pool must be EMPTY and every
-    previously force-included `:free` id must be recorded as rejected.
-    """
+    previously force-included `:free` id must be recorded as rejected. A
+    paid model must never be substituted in."""
 
     def _gw(self, *conns, config=None, events=None):
         from astra.ai.gateway import AstraAIGateway
@@ -700,10 +850,32 @@ class TestOpenRouterStaticPoolIsEmpty(unittest.TestCase):
         self.assertEqual(documented_image_models("openrouter"), ())
         self.assertEqual([m for p, m in image_pool() if p == "openrouter"], [])
 
+    def test_removed_ids_are_rejected_with_an_evidence_reason(self):
+        for mid in OR_DEAD_FREE_IDS:
+            self.assertFalse(is_image_model("openrouter", mid), mid)
+            self.assertFalse(is_free_image_model("openrouter", mid), mid)
+            self.assertIn(("openrouter", mid), REJECTED_IMAGE_MODELS, mid)
+            reason = rejected_image_reason("openrouter", mid)
+            self.assertTrue(reason, mid)
+            self.assertIn("2026-09-26", reason, mid)
+
     def test_removed_ids_never_appear_in_image_priority(self):
         from astra.ai.image_models import IMAGE_PRIORITY
         for mid in OR_DEAD_FREE_IDS:
             self.assertNotIn(mid, IMAGE_PRIORITY, mid)
+
+    def test_configured_dead_openrouter_ids_never_enter_the_pool(self):
+        # Even if an operator still has the old ids in env, the registry's
+        # eligibility filter must keep them out of the target list, and no
+        # chat/text/paid call may be attempted instead.
+        orc = _FakeConn("astra-gw-openrouter", "openrouter",
+                        image_models=list(OR_DEAD_FREE_IDS))
+        gw = self._gw(orc)
+        self.assertEqual(gw.image_targets(discover=False), [])
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False)
+        self.assertEqual(orc.image_calls, [])
+        self.assertEqual(orc.chat_calls, 0)
 
     def test_gateway_image_targets_use_only_the_real_free_pool(self):
         from astra.ai.image_models import IMAGE_PRIORITY
@@ -713,9 +885,7 @@ class TestOpenRouterStaticPoolIsEmpty(unittest.TestCase):
                        image_models=list(CF_POOL))
         orc = _FakeConn("astra-gw-openrouter", "openrouter",
                         image_models=list(OR_DEAD_FREE_IDS))
-        hf = _FakeConn("astra-gw-huggingface", "huggingface",
-                       image_models=list(HF_POOL))
-        gw = self._gw(gem, cf, orc, hf)
+        gw = self._gw(gem, cf, orc)
         ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
         self.assertEqual(ids, list(IMAGE_PRIORITY))
         for mid in OR_DEAD_FREE_IDS:
@@ -809,6 +979,24 @@ class TestSerialFallbackAndGlobalOrdering(unittest.TestCase):
                       str(ctx.exception))
         self.assertEqual(gw.last_attempts, len(CF_POOL) + 1)
 
+    def test_never_falls_back_to_a_text_paid_or_vision_model(self):
+        gem = self._gemini(outcomes=[ProviderError("boom")])
+        cf = self._cf(outcomes=[ProviderError("boom")] * len(CF_POOL))
+        text = _FakeConn("astra-gw-groq", "groq", models=["llama-70b"])
+        vision = _FakeConn("astra-gw-cohere", "cohere",
+                           models=["command-a-vision-07-2025"])
+        paid = _FakeConn("astra-gw-zai", "zai", image_models=["glm-image"])
+        paid_gemini = _FakeConn("astra-gw-gemini", "gemini",
+                                image_models=["gemini-3.1-flash-image"])
+        dead_or = _FakeConn("astra-gw-openrouter", "openrouter",
+                            image_models=list(OR_DEAD_FREE_IDS))
+        gw = self._gw(gem, cf, text, vision, paid, paid_gemini, dead_or)
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False)
+        for conn in (text, vision, paid, paid_gemini, dead_or):
+            self.assertEqual(conn.chat_calls, 0, conn.name)
+            self.assertEqual(conn.image_calls, [], conn.name)
+
     def test_configured_priority_can_reorder_without_code_edits(self):
         gem = self._gemini()
         cf = self._cf(models=[LUCID])
@@ -858,15 +1046,13 @@ class TestSerialFallbackAndGlobalOrdering(unittest.TestCase):
             LIGHTNING,
             DREAM,
             INPAINT,
-        ] + list(HF_POOL))
+        ])
 
     def test_full_pool_priority_is_exactly_image_priority(self):
         from astra.ai.image_models import IMAGE_PRIORITY
         cf = _FakeConn("astra-gw-cloudflare", "cloudflare",
                        image_models=list(CF_POOL))
-        hf = _FakeConn("astra-gw-huggingface", "huggingface",
-                       image_models=list(HF_POOL))
-        gw = self._gw(cf, self._gemini(), hf)
+        gw = self._gw(cf, self._gemini())
         ids = [m.model_id for _c, m, _h in gw.image_targets(discover=False)]
         self.assertEqual(ids, list(IMAGE_PRIORITY))
 
@@ -881,12 +1067,8 @@ class TestSerialFallbackAndGlobalOrdering(unittest.TestCase):
         a = ordered(
             _FakeConn("astra-gw-cloudflare", "cloudflare",
                       image_models=list(CF_POOL)),
-            self._gemini(),
-            _FakeConn("astra-gw-huggingface", "huggingface",
-                      image_models=list(HF_POOL)))
+            self._gemini())
         b = ordered(
-            _FakeConn("astra-gw-huggingface", "huggingface",
-                      image_models=list(HF_POOL)),
             self._gemini(),
             _FakeConn("astra-gw-cloudflare", "cloudflare",
                       image_models=list(CF_POOL)))
@@ -928,15 +1110,11 @@ class TestSerialFallbackAndGlobalOrdering(unittest.TestCase):
         from astra.ai.image_models import IMAGE_PRIORITY
         gem = self._gemini(outcomes=[ProviderError("boom")])
         cf = self._cf(outcomes=[ProviderError("boom")] * len(CF_POOL))
-        hf = _FakeConn("astra-gw-huggingface", "huggingface",
-                       image_models=list(HF_POOL),
-                       outcomes=[ProviderError("boom")] * len(HF_POOL))
-        gw = self._gw(gem, cf, hf)
+        gw = self._gw(gem, cf)
         with self.assertRaises(ProviderError):
             gw.generate_image("a cat", discover=False)
         seen = ([m for m, _p in gem.image_calls]
-                + [m for m, _p in cf.image_calls]
-                + [m for m, _p in hf.image_calls])
+                + [m for m, _p in cf.image_calls])
         self.assertEqual(seen, list(IMAGE_PRIORITY))
         self.assertEqual(len(seen), len(set(seen)))   # never retried
 
@@ -971,10 +1149,6 @@ class TestGatewayImageFailover(unittest.TestCase):
     def _cf(self, models=(FLUX,), outcomes=None, name="astra-gw-cloudflare"):
         return _FakeConn(name, "cloudflare", image_models=list(models),
                          outcomes=outcomes)
-
-    def _gemini(self, outcomes=None):
-        return _FakeConn("astra-gw-gemini", "gemini",
-                         image_models=[GEMINI_IMG], outcomes=outcomes)
 
     def _text(self):
         return _FakeConn("astra-gw-groq", "groq", models=["llama-70b"])
@@ -1107,6 +1281,17 @@ class TestGatewayImageFailover(unittest.TestCase):
         self.assertEqual(vision.chat_calls, 0)
         self.assertEqual(vision.image_calls, [])
 
+    def test_paid_image_model_is_never_a_fallback(self):
+        paid = _FakeConn("astra-gw-gemini", "gemini",
+                         image_models=["gemini-3.1-flash-image"])
+        cf = self._cf(outcomes=[ProviderError("boom")])
+        gw = self._gw(paid, cf)
+        with self.assertRaises(ProviderError):
+            gw.generate_image("a cat", discover=False)
+        self.assertEqual(paid.image_calls, [])
+        self.assertEqual(paid.chat_calls, 0)
+
+    # H. two credentials, same target: a 429 is NOT retried on the same model
     def test_h_rate_limited_model_is_not_retried_with_another_credential(self):
         # Image generation makes exactly ONE provider attempt per model, so a
         # 429 must never spend a second key on the same model. Recovery comes
@@ -1115,9 +1300,7 @@ class TestGatewayImageFailover(unittest.TestCase):
         # ::TestImageGenerationNeverRetriesTheSameModel).
         from astra.ai.gateway import AstraGatewayCloudflare
         cfg = _cfg(GW_CLOUDFLARE_API_KEYS="key-one,key-two",
-                   GW_CLOUDFLARE_ACCOUNT_IDS="acct1",
-                   IMAGE_CLOUDFLARE_API_KEY="key-one,key-two",
-                   IMAGE_CLOUDFLARE_ACCOUNT_ID="acct1")
+                   GW_CLOUDFLARE_ACCOUNT_IDS="acct1")
         conn = AstraGatewayCloudflare(config=cfg)
         calls = {"n": 0}
 
@@ -1319,8 +1502,7 @@ class TestProviderImageAdapterMechanics(unittest.TestCase):
 
     def test_gemini_native_generate_content_mechanics(self):
         from astra.ai.gateway import AstraGatewayGemini
-        conn = AstraGatewayGemini(
-            config=_cfg(GW_GEMINI_API_KEYS="k", IMAGE_GEMINI_API_KEY="k"))
+        conn = AstraGatewayGemini(config=_cfg(GW_GEMINI_API_KEYS="k"))
         seen = {}
 
         def side(req, timeout=None):
@@ -1392,6 +1574,40 @@ class TestProviderImageAdapterMechanics(unittest.TestCase):
                 try: os.unlink(p)
                 except OSError: pass
 
+    def test_openai_images_protocol_mechanics(self):
+        from astra.ai.gateway import AstraGatewayZAI
+        conn = AstraGatewayZAI(config=_cfg(GW_ZAI_API_KEYS="k",
+                                           ZAI_IMAGE_MODELS="glm-image"))
+        seen = {}
+
+        def side(req, timeout=None):
+            seen["url"] = req.full_url
+            seen["body"] = json.loads(req.data.decode())
+            return _resp(_openai_images_ok())
+
+        with mock.patch("urllib.request.urlopen", side):
+            out = conn.generate_image("a cat", model="glm-image")
+        self.assertTrue(out.startswith("data:image/png;base64,"))
+        self.assertTrue(seen["url"].endswith("/images/generations"))
+        self.assertEqual(seen["body"]["model"], "glm-image")
+
+    def test_bedrock_refuses_a_model_that_is_not_in_the_image_pool(self):
+        from astra.ai.adapters.bedrock import BedrockAdapter
+        conn = BedrockAdapter(config=_cfg(BEDROCK_API_KEYS="k"))
+        # A Claude text model must never get a Titan/Stability image body.
+        with self.assertRaises(ProviderError) as ctx:
+            conn.generate_image("a cat",
+                                model="us.anthropic.claude-opus-4-5")
+        self.assertIn("not an image-generation model", str(ctx.exception))
+        # Nova Canvas is a real image model but paid-only -> not in the free
+        # pool, so it is refused too (Astra only offers the free pool).
+        with self.assertRaises(ProviderError):
+            conn.generate_image("a cat", model="amazon.nova-canvas-v1:0")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6. Provider router: image requests are REFUSED (ImageRouter owns execution)
+# ═══════════════════════════════════════════════════════════════════════════
 class TestProviderRouterRefusesImageExecution(unittest.TestCase):
     """AstraRouter must NOT be a second image execution owner.
 
@@ -1522,9 +1738,7 @@ class TestOpenRouterImagesApi(unittest.TestCase):
 
     def _gw(self):
         from astra.ai.gateway import AstraGatewayOpenRouter
-        return AstraGatewayOpenRouter(
-            config=_cfg(GW_OPENROUTER_API_KEYS="k",
-                        IMAGE_OPENROUTER_API_KEY="k"))
+        return AstraGatewayOpenRouter(config=_cfg(GW_OPENROUTER_API_KEYS="k"))
 
     def _adapter(self):
         from astra.ai.adapters.openrouter import OpenRouterAdapter
@@ -1760,28 +1974,11 @@ class TestPipelineImageWiring(_TempArtifactDirMixin, unittest.TestCase):
         def chat(self, messages, max_tokens=None, category=None, trace=""):
             self.calls.append(messages)
             self.categories.append(category)
-            # Mirror what a real LLM UNDERSTAND call would produce: derive
-            # task_type from the user's message text via the same
-            # deterministic classifier the local fallback uses, instead of
-            # hardcoding "image_generation" for every request.
-            from astra.ai.gateway_routing import classify_gateway_request
-            joined = "\n\n".join(
-                m.get("content", "") for m in messages
-                if isinstance(m, dict))
-            # Classify only the actual user request, not the surrounding
-            # system-prompt/catalogue scaffolding (which mentions JSON keys
-            # like "task_type" and would otherwise misfire the
-            # structured_output heuristic).
-            user_text = joined.rsplit("User message:\n", 1)[-1]
-            task_type = classify_gateway_request(user_text)
-            if task_type not in ("image_generation", "image_editing",
-                                 "image_inpainting"):
-                task_type = "image_generation"
             return ('{"final_request": "x", "was_incomplete": false, '
-                    '"task_type": "%s", "provider": "", "model": "", "criteria": [], "reason": "", '
+                    '"task_type": "image_generation", "provider": "", "model": "", "criteria": [], "reason": "", '
                     '"execution": {"required": false, "capability": "", '
                     '"environment": "agent_runtime", "approval_required": '
-                    'false, "intent": ""}}' % task_type)
+                    'false, "intent": ""}}')
 
         def supervise_task(self, *a, **kw):  # pragma: no cover
             raise AssertionError("image turns must not be semantically verified")
@@ -1907,13 +2104,11 @@ class TestEndToEndImageTurn(_TempArtifactDirMixin, unittest.TestCase):
             dispatch / serial-fallback code, not a re-implementation."""
 
             def generate(self, prompt, model=None, size="1024x1024", n=1, *,
-                         editing=False, source_image=None, mask_image=None,
-                         operation=None, trace="", discover=True):
+                         editing=False, source_images=None, trace="", discover=True):
                 gw.image_calls.append((prompt, model, editing))
                 uri = real.image_router.generate(
                     prompt, model=model, size=size, n=n, editing=editing,
-                    source_image=source_image, mask_image=mask_image,
-                    operation=operation, trace=trace, discover=False)
+                    trace=trace, discover=False)
                 gw.last_model = real.last_model
                 return uri
 

@@ -99,7 +99,6 @@ PROVIDER_VAR = {
     "cohere": "COHERE_MODELS",
     "zai": "ZAI_MODELS",
     "bedrock": "BEDROCK_MODELS",
-    "huggingface": "HF_MODELS",
 }
 
 class Model:

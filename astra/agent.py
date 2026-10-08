@@ -37,8 +37,6 @@ class Agent:
         # Present so the Assistant Chat's Allow/Deny can resolve a pending
         # request; a host command runs only through it.
         self.approvals = approvals
-        # Set by bootstrap (astra/emergency.py); None = no shutdown latch.
-        self.emergency = None
 
     def handle(self, message: str, context: str = "", history=None,
                attachments: list | None = None,
@@ -52,12 +50,6 @@ class Agent:
         belongs to. Forwarded as-is to the pipeline, which hands it to both
         the Gateway and the Provider call. `context` (a plain string) is
         kept for backward compatibility."""
-        if self.emergency is not None and self.emergency.active:
-            return {"reply": "Emergency shutdown is active — agent execution "
-                             "is disabled. Release it from the Security "
-                             "Center to continue.",
-                    "action": "none", "ok": False,
-                    "data": {"emergency_shutdown": True}}
         if self.pipeline is None:
             return {"reply": "Chat pipeline configure kora nei — Gateway/"
                              "Provider setup check korun.",

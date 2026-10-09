@@ -361,15 +361,15 @@ set-executionpolicy -executionpolicy RemoteSigned -scope CurrentUser
 1. Navigate to repository root
 2. Fetch latest changes:
 ```powershell
-git fetch origin
+$ git fetch origin
 ```
 3. Checkout main branch:
 ```powershell
-git checkout main
+$ git checkout main
 ```
 4. Pull updates:
 ```powershell
-git pull origin main
+$ git pull origin main
 ```
 
 ### 9.3 Restore Configuration

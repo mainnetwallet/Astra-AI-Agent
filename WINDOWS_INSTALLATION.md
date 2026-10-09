@@ -370,7 +370,12 @@ These are two separate things, and it is worth being precise about the differenc
 | What it does | Serves the UI, chat, tools, Web3 | Executes every agent-issued shell command, file operation, and package install |
 | Requires WSL2 | No | **Yes** |
 
-The runtime exists because an agent running `npm install` or a project's test suite should not do it on your Windows host. It gets its own filesystem, its own shell (`bash`, inside Ubuntu), its own package managers, and its own processes.
+The runtime exists because an agent running `npm install` or a project's test suite should not do it on your Windows host. Instead, agent operations execute inside WSL2 Ubuntu in a structured isolation model:
+- **Per-runtime isolated directories:** The `/workspace` (project root), `/root` (user home directory), and `/tmp` (scratch space) directories are separate for each runtime, so different runtimes do not share project state or temporary files.
+- **User-scope package privacy:** Package managers are pointed at the runtime's private home `/root` (`PYTHONUSERBASE=/root/.local`, `NPM_CONFIG_PREFIX=/root/.npm-global`, `CARGO_HOME`, `GOPATH`, `GEM_HOME`, and the XDG directories), so a **user-scope** install lands in that runtime's own writable state and is invisible to other runtimes. Note that Astra does not force `--user` on every pip call (that would break `python3 -m venv`); Astra's own package installer passes `--user` explicitly, and `PYTHONUSERBASE` decides where it lands. A bare `pip install <pkg>` you type yourself is an ordinary system install and is **not** private.
+- **Shared system rootfs:** System-level package installations (like `sudo apt install`) write to the underlying Ubuntu root filesystem, which is shared among all runtimes by default (`RUNTIME_ROOTFS_MODE=shared`). On Windows this is fixed: the WSL2 backend always reports `shared` and does not read `RUNTIME_ROOTFS_MODE`, so system packages installed by one runtime are visible to others using the same distribution. (The `copy` mode that clones a rootfs per runtime is a proot/Termux feature only.)
+- **Per-session process state:** Terminal/PTY sessions, active processes, shell history, and current working directories are isolated and managed strictly per-session.
+- **Host-filesystem isolation:** Outward access to Windows filesystems is blocked entirely. All host drives (like `C:\` at `/mnt/c`) and WSL system mounts are unmounted inside the session's private mount namespace.
 
 ### 7.2 How Astra reaches the runtime
 
@@ -378,7 +383,7 @@ The runtime exists because an agent running `npm install` or a project's test su
 Astra Agent Terminal  ->  Astra Runtime  ->  wsl.exe  ->  WSL2  ->  Ubuntu  ->  bash
 ```
 
-`wsl.exe` is **transport only** — it carries the command into Ubuntu. Every command the agent runs is executed by Ubuntu's own `bash`, inside Ubuntu's own filesystem, and the agent only ever sees a `/workspace` prompt.
+`wsl.exe` is **transport only** — it carries the command into Ubuntu. Every command the agent runs is executed by Ubuntu's own `bash`, inside the distribution, and the agent only ever sees a `/workspace` prompt.
 
 **PowerShell and `cmd.exe` are not runtime backends.** Nothing in the agent execution path invokes them, and they are not on the guest `PATH`.
 
@@ -387,7 +392,7 @@ Astra Agent Terminal  ->  Astra Runtime  ->  wsl.exe  ->  WSL2  ->  Ubuntu  ->  
 Each session runs in a **private mount namespace** (`unshare -m --propagation private`). Inside it:
 
 - Every host-provided mount (`/mnt/c`, `/mnt/wsl`, `/mnt/wslg`, Windows drives — anything of type `9p`, `drvfs`, `virtiofs`, `v9fs`) is unmounted, so `C:\` and your Windows profile are unreachable.
-- The runtime's own directories are bind-mounted onto `/workspace`, `/root`, and `/tmp`, so two runtimes never share state.
+- The runtime's own directories are bind-mounted onto `/workspace`, `/root`, and `/tmp`. That is what isolates your workspace files, scratch files, and user-scope package state per runtime — but it is not a private copy of Ubuntu: system-level packages installed with `apt` land in the distribution itself and are shared by every runtime using it.
 - `PATH` is set to the Linux-only guest path; `powershell.exe` and `cmd.exe` are not on it.
 - The environment is rebuilt from scratch with `env -i`, so no Windows environment variable (and no host secret) leaks in.
 
@@ -420,18 +425,13 @@ Invoke-RestMethod http://localhost:8787/api/runtime/status | ConvertTo-Json -Dep
 
 A healthy result has `"available": true`, `"backend": "wsl2"`, `"distro": "Ubuntu"`, and `"shell": "bash"`.
 
-**End-to-end acceptance run** — the repository ships a real, unmocked acceptance script that drives the actual runtime and exits non-zero if any check fails. It accepts either backend, so it runs against WSL2 Ubuntu on Windows:
+**End-to-end acceptance run** — the repository ships a real, unmocked acceptance script that drives the actual runtime and exits non-zero if any check fails. It is designed to be run manually when you want a full end-to-end verification:
 
 ```powershell
 python scripts/runtime_acceptance.py
 ```
 
-Pin the backend explicitly while diagnosing:
-
-```powershell
-$env:RUNTIME_BACKEND="wsl2"
-python scripts/runtime_acceptance.py
-```
+On Windows, this script automatically uses the WSL2 backend: `astra/runtime/backends/__init__.py` selects the WSL2 backend whenever the platform is detected as Windows and `RUNTIME_BACKEND` is either set to `auto` (the default) or left unset. Because the script uses its own configuration object (`_Cfg`) and does not read the `RUNTIME_BACKEND` environment variable, pinning the backend with `$env:RUNTIME_BACKEND="wsl2"` has no effect on this script.
 
 It verifies the guest toolchain, a live PTY with resize, a verified package install, persistence across restart, per-runtime private state, host isolation (`/mnt/c` and `C:\` unreachable, `powershell.exe` and `cmd.exe` absent from the guest `PATH`), and Chat ↔ Terminal sharing one session.
 
@@ -583,7 +583,7 @@ wsl --set-version Ubuntu 2
 
 ### 8.10 "could not be isolated from the Windows filesystem"
 
-Host mounts are still visible inside the session, so Astra refuses to run rather than accept a weaker boundary. In Ubuntu, install the tools the runtime needs — `util-linux` for `unshare`/`mount`, `bash` for the shell, `python3` for the PTY bridge:
+Host mounts are still visible inside the session, so Astra refuses to run rather than accept a weaker boundary. This is almost always caused by `unshare` or `mount` being missing inside the distribution. Both are provided by the `util-linux` package on Ubuntu:
 
 ```powershell
 wsl
@@ -592,23 +592,41 @@ wsl
 then inside Ubuntu:
 
 ```bash
+# Check which tools are actually missing first
+command -v unshare mount bash python3
+
+# Install util-linux (provides unshare and mount)
 sudo apt update && sudo apt install -y util-linux
 ```
 
-Restart Astra. Setting `RUNTIME_WSL_ISOLATE=0` would suppress the error by disabling the isolation itself — do not do that.
+Restart Astra and check the runtime status again. Setting `RUNTIME_WSL_ISOLATE=0` would suppress the error by disabling the isolation itself — do not do that.
 
 ### 8.11 A required tool is missing inside the distribution
 
-Reported as *"bash/unshare/mount/python3 is not installed inside Ubuntu (required for …)"*. Install the named packages in Ubuntu with `sudo apt install -y <package>` and restart Astra. The runtime's own package bootstrap can also do this for `pip`, but the tools above come from the base distribution.
+Reported as *"bash/unshare/mount/python3 is not installed inside Ubuntu (required for …)"*. The message names the specific tool that is missing. On Ubuntu:
+
+| Missing tool | Provided by | Install with |
+| --- | --- | --- |
+| `unshare`, `mount` | `util-linux` | `sudo apt install -y util-linux` |
+| `bash` | `bash` | `sudo apt install -y bash` |
+| `python3` | `python3` | `sudo apt install -y python3` |
+
+Install only the packages for tools that are actually missing, then restart Astra:
+
+```bash
+sudo apt update
+sudo apt install -y <package-name>
+```
+
+A runtime's own package bootstrap handles a missing `pip`, but `bash`, `unshare`, `mount`, and `python3` come from the base distribution.
 
 ### 8.12 Runtime is unavailable for another reason
 
 Open the Astra Agent Terminal tab and use **⋮ → Runtime status** — it reports the specific reason. `GET /api/runtime/status` returns the same data as JSON.
 
-For an end-to-end check against the real runtime:
+For an end-to-end check against the real runtime, run the acceptance script directly (it will use the WSL2 backend automatically on Windows):
 
 ```powershell
-$env:RUNTIME_BACKEND="wsl2"
 python scripts/runtime_acceptance.py
 ```
 
@@ -628,12 +646,42 @@ Expected when `NO_BROWSER=1` is set. Open `http://localhost:8787/` manually.
 
 ### 9.1 Before you update
 
-`.env` and `config.json` are git-ignored, so `git pull` will not touch them — but back them up anyway, along with the `data/` directory, which holds the local database:
+`.env` and `config.json` are git-ignored, so `git pull` will not touch them — but back them up anyway, along with the `data/` directory, which holds the local database. Run these from the repository root:
 
 ```powershell
-Copy-Item .env .env.backup
-Copy-Item config.json config.json.backup -ErrorAction SilentlyContinue
+# Create a backup folder (timestamped so it never overwrites an older backup)
+$stamp = Get-Date -Format "yyyyMMdd-HHmm"
+$backupDir = "astra-backup-$stamp"
+New-Item -ItemType Directory -Path $backupDir | Out-Null
+
+# Back up .env if it exists
+if (Test-Path .env) {
+    Copy-Item .env $backupDir
+    Write-Host "Backed up .env"
+} else {
+    Write-Host "No .env found - skipping"
+}
+
+# Back up config.json if it exists
+if (Test-Path config.json) {
+    Copy-Item config.json $backupDir
+    Write-Host "Backed up config.json"
+} else {
+    Write-Host "No config.json found - skipping"
+}
+
+# Back up the data/ directory if it exists
+if (Test-Path data) {
+    Copy-Item data $backupDir -Recurse
+    Write-Host "Backed up data\"
+} else {
+    Write-Host "No data\ directory found - skipping"
+}
+
+Write-Host "Backup saved to: $backupDir"
 ```
+
+The backup folder is created **inside the repository root** as `astra-backup-<timestamp>/`, and it is a plain copy — the `.gitignore` rules that protect `.env` and `config.json` do not cover a folder like this, because the copies sit at new paths. So **do not commit it**. Move the folder somewhere outside the repository (or delete it once you have confirmed the update worked) before you run any `git add -A`.
 
 If you use the Agent Runtime, its user data lives outside the repository (under `RUNTIME_DIR`, and inside Ubuntu under `RUNTIME_WSL_ROOT`) and is not touched by an update either.
 
